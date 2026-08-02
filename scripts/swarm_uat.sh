@@ -101,24 +101,46 @@ mkdir -p "$LOG_DIR/mailboxes"
 cp .pi/swarm/mailboxes/*.jsonl "$LOG_DIR/mailboxes/" 2>/dev/null || true
 
 LOG_DIR="$LOG_DIR" python3 - <<'PY' >"$LOG_DIR/summary.txt"
-import json, os, pathlib
+import json, os, pathlib, sys
 root=pathlib.Path('.')
 log_dir=pathlib.Path(os.environ['LOG_DIR'])
 roles=json.loads((log_dir/'roles.json').read_text())
 state_p=root/'.pi/swarm/swarm-state.json'
+failures=[]
 print('roles:', json.dumps(roles, indent=2))
+st={}
 if state_p.exists():
     st=json.loads(state_p.read_text())
     print('swarmId:', st.get('swarmId'))
     print('tmuxSession:', st.get('tmuxSession'))
-    for logical, aid in roles['agents'].items():
-        ag=st.get('agents',{}).get(aid)
-        print(f'{logical}/{aid}:', 'FOUND' if ag else 'MISSING', ag.get('tmuxTarget') if ag else '')
+else:
+    failures.append('missing swarm-state.json')
+for logical, aid in roles['agents'].items():
+    ag=st.get('agents',{}).get(aid)
+    print(f'{logical}/{aid}:', 'FOUND' if ag else 'MISSING', ag.get('tmuxTarget') if ag else '')
+    if not ag:
+        failures.append(f'missing role agent {logical}/{aid}')
+    if not (root/'.pi/swarm/mailboxes'/f'{aid}.jsonl').exists():
+        failures.append(f'missing mailbox for {aid}')
 trace=root/'.pi/swarm/traces/events.jsonl'
+events=[]
 if trace.exists():
     events=[json.loads(l) for l in trace.read_text().splitlines() if l.strip()]
-    for name in ['agent.spawn.ok','message.enqueue','message.input_intercept','message.inject.ok','mailbox.poll']:
+    for name in ['agent.spawn.ok','message.enqueue','message.input_intercept','message.inject.ok','message.ack','mailbox.poll']:
         print(name, sum(1 for e in events if e.get('event')==name))
+else:
+    failures.append('missing trace events.jsonl')
+agent_ids=set(roles['agents'].values())
+run_events=[e for e in events if e.get('agentId') in agent_ids or e.get('to') in agent_ids or e.get('from') in agent_ids or e.get('id') in st.get('messages',{})]
+for name in ['agent.spawn.ok','message.enqueue','message.inject.ok']:
+    if not any(e.get('event')==name and (e.get('agentId') in agent_ids or e.get('to') in agent_ids or e.get('from') in agent_ids) for e in events):
+        failures.append(f'missing run event {name}')
+print('run_related_events', len(run_events))
+if failures:
+    print('UAT_STATUS: FAIL')
+    for f in failures: print(' -', f)
+    sys.exit(1)
+print('UAT_STATUS: PASS')
 PY
 
 log "DONE. Review $LOG_DIR/summary.txt and attach to tmux swarm session from swarm-state.json."
