@@ -12,6 +12,9 @@
  *    `timeout`. An optional ceiling PI_TOOL_TIMEOUT_MAX_S clamps that
  *    escalation. When a bash command times out, a hint is appended to the
  *    result telling the model how to retry.
+ *  - The timeout policy (default / ceiling / how to self-adjust / env var
+ *    names) is also injected into the system prompt via `before_agent_start`,
+ *    so the model knows it proactively instead of only reacting after a kill.
  *
  * Config (env):
  *   PI_TOOL_TIMEOUT_S       default timeout in seconds (default 120). 0 disables.
@@ -148,6 +151,18 @@ export default function (pi: ExtensionAPI) {
 		const ceiling = maxS !== undefined ? `, up to a maximum of ${maxS}s` : "";
 		const hint = `The command was terminated because it exceeded the per-tool timeout. If it legitimately needs more time, call the bash tool again with a larger "timeout" parameter (in seconds)${ceiling}.`;
 		return { content: [...event.content, { type: "text" as const, text: hint }] };
+	});
+
+	// Make the timeout policy known upfront (env var names included) so the model
+	// can plan around it and self-adjust; the post-timeout hint is the fallback.
+	pi.on("before_agent_start", (event) => {
+		const maxClause = maxS !== undefined ? ` — up to a hard maximum of ${maxS}s` : "";
+		const note =
+			`\n\n[tool-timeout] A per-tool execution timeout is active. ` +
+			`Bash commands use a default timeout of ${seconds}s if you omit the "timeout" parameter; if a command legitimately needs more time, call the bash tool again with a larger "timeout" (in seconds)${maxClause}. ` +
+			`read/grep/find/ls/edit/write are also bounded by ${seconds}s. ` +
+			`(Configurable via PI_TOOL_TIMEOUT_S / PI_TOOL_TIMEOUT_MAX_S.)`;
+		return { systemPrompt: (event.systemPrompt ?? "") + note };
 	});
 
 	// Tiny status command so the active timeout is easy to verify.
