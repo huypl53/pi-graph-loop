@@ -35,6 +35,7 @@ type MessageRecord = {
 	lastError?: string;
 	lastAck?: { by: string; status: string; note?: string; resultMessageId?: string; at: string };
 	ttlMs?: number;
+	idempotencyKey?: string;
 };
 
 type SwarmAgent = {
@@ -79,6 +80,7 @@ type SwarmMessage = {
 	replyTo?: string;
 	requiresAck: boolean;
 	ttlMs?: number;
+	idempotencyKey?: string;
 	headers: Record<string, string>;
 };
 
@@ -214,6 +216,7 @@ function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status: Messa
 		lastError: prev?.lastError,
 		lastAck: prev?.lastAck,
 		ttlMs: msg.ttlMs,
+		idempotencyKey: msg.idempotencyKey,
 		...prev,
 		...patch,
 		status,
@@ -379,17 +382,33 @@ async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg: Swarm
 	return { delivered: true, before, after };
 }
 
-async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; ttlMs?: number }) {
+async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; ttlMs?: number; idempotencyKey?: string }) {
 	let delivery: any = null;
 	const msg = await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const to = safeId(params.to);
+		const from = currentAgentId();
 		if (!st.agents[to]) throw new Error(`Unknown swarm agent: ${to}`);
+
+		// Idempotency check: if from+to+idempotencyKey already exists, return existing message
+		if (params.idempotencyKey) {
+			const existing = Object.values(st.messages).find(
+				(r) => r.from === from && r.to === to && r.idempotencyKey === params.idempotencyKey
+			);
+			if (existing) {
+				const original = (await readMailbox(p, to)).find((m) => m.id === existing.id);
+				if (!original) throw new Error(`Idempotency record ${existing.id} exists but mailbox entry is missing for ${to}`);
+				delivery = { reused: true, delivered: existing.status === "injected" || existing.status === "intercepted" || existing.status === "acked", status: existing.status };
+				await trace(p, "message.idempotent_reuse", { id: existing.id, from, to, idempotencyKey: params.idempotencyKey, status: existing.status });
+				return original;
+			}
+		}
+
 		const createdAt = now();
 		const m: SwarmMessage = {
 			id: `msg-${Date.now()}-${randomUUID().slice(0, 8)}`,
 			swarmId: st.swarmId,
-			from: currentAgentId(),
+			from,
 			to,
 			subject: params.subject,
 			priority: params.priority || "normal",
@@ -401,11 +420,12 @@ async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params
 			replyTo: params.replyTo,
 			requiresAck: params.requiresAck ?? true,
 			ttlMs: params.ttlMs,
+			idempotencyKey: params.idempotencyKey,
 			headers: { cwd, senderModel: currentModel(), senderProvider: currentProvider() },
 		};
 		upsertMessageRecord(st, m, "queued", { queuedAt: createdAt });
 		await appendJsonl(mailboxPath(p, to), m);
-		await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck });
+		await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck, idempotencyKey: m.idempotencyKey });
 		delivery = await deliver(pi, p, st, m);
 		if (delivery?.delivered) {
 			// Injection into the recipient pane is already delivery. Mark it in state
@@ -707,6 +727,7 @@ export default function (pi: ExtensionAPI) {
 			replyTo: Type.Optional(Type.String({ description: "Optional message id this message replies to." })),
 			requiresAck: Type.Optional(Type.Boolean({ description: "Whether recipient should explicitly ack done/failed. Defaults to true." })),
 			ttlMs: Type.Optional(Type.Number({ description: "Optional time-to-live in milliseconds for future reconcile/dead-letter handling." })),
+			idempotencyKey: Type.Optional(Type.String({ description: "Optional idempotency key to prevent duplicate messages. If a message with the same from+to+idempotencyKey exists, it is returned instead." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
