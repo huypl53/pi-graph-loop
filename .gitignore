@@ -34,6 +34,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .DS_Store
 tmux-snapshots
 .pi/swarm/
+.pi/swarm-uat/runs/
 **/__pycache__/
 
 # eval scaffolding for pi-extension-creator (local only)
