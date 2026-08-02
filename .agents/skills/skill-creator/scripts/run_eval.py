@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""Run trigger evaluation for a skill description.
+"""Run trigger evaluation for a skill description (pi-native).
 
-Tests whether a skill's description causes Claude to trigger (read the skill)
-for a set of queries. Outputs results as JSON.
+Tests whether a skill's description causes the pi agent to trigger — i.e. to
+`read` the skill's SKILL.md — for a set of queries. Each query runs in an
+isolated pi invocation: `pi --no-skills --skill <temp-skill>` loads ONLY the
+candidate skill (description in the available-skills list, body on demand),
+and we detect triggering by a `read` tool event on that SKILL.md.
+
+Outputs results as JSON.
 """
 
 import argparse
 import json
 import os
-import select
+import shutil
 import subprocess
 import sys
-import time
-import uuid
+import tempfile
+import textwrap
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -20,16 +25,50 @@ from scripts.utils import parse_skill_md
 
 
 def find_project_root() -> Path:
-    """Find the project root by walking up from cwd looking for .claude/.
+    """Return cwd. Kept for API compatibility with run_loop.py (pi mode does
+    not inject anything into the project tree, unlike the old Claude path)."""
+    return Path.cwd()
 
-    Mimics how Claude Code discovers its project root, so the command file
-    we create ends up where claude -p will look for it.
-    """
-    current = Path.cwd()
-    for parent in [current, *current.parents]:
-        if (parent / ".claude").is_dir():
-            return parent
-    return current
+
+def _env_provider(provider: str | None) -> str | None:
+    return provider or os.environ.get("PI_PROVIDER")
+
+
+def _env_model(model: str | None) -> str | None:
+    return model or os.environ.get("PI_MODEL")
+
+
+def _write_temp_skill(skill_name: str, skill_description: str) -> tuple[Path, Path]:
+    """Create an isolated temp skill dir whose SKILL.md carries the candidate
+    description. The body is a placeholder — triggering depends only on the
+    description pi lists in available-skills, not the body."""
+    tmp = Path(tempfile.mkdtemp(prefix=f"pitrigger_{skill_name}_"))
+    sdir = tmp / skill_name
+    sdir.mkdir()
+    skill_md = sdir / "SKILL.md"
+    indented = "\n".join("  " + line for line in skill_description.split("\n"))
+    skill_md.write_text(
+        f"---\n"
+        f"name: {skill_name}\n"
+        f"description: >-\n{indented}\n"
+        f"---\n\n"
+        f"# {skill_name}\n\n"
+        f"(Skill body — loaded on demand when triggered.)\n"
+    )
+    return tmp, skill_md
+
+
+def _path_matches_skill(p: str, skill_md: Path, tmp: Path) -> bool:
+    """True if read-target path `p` is this query's SKILL.md."""
+    if not p:
+        return False
+    try:
+        if os.path.exists(p) and os.path.samefile(p, skill_md):
+            return True
+    except (OSError, ValueError):
+        pass
+    # Fallback: same temp dir + ends with SKILL.md
+    return p.endswith("SKILL.md") and tmp.name in p
 
 
 def run_single_query(
@@ -37,148 +76,59 @@ def run_single_query(
     skill_name: str,
     skill_description: str,
     timeout: int,
-    project_root: str,
+    project_root: str | None = None,
     model: str | None = None,
+    provider: str | None = None,
 ) -> bool:
-    """Run a single query and return whether the skill was triggered.
+    """Run one query through pi and report whether the agent read the SKILL.md.
 
-    Creates a command file in .claude/commands/ so it appears in Claude's
-    available_skills list, then runs `claude -p` with the raw query.
-    Uses --include-partial-messages to detect triggering early from
-    stream events (content_block_start) rather than waiting for the
-    full assistant message, which only arrives after tool execution.
+    Isolation: `--no-skills` disables all skill discovery; `--skill <dir>`
+    re-adds only the candidate skill. The agent sees only this skill's
+    description in available-skills and decides whether to `read` it.
     """
-    unique_id = uuid.uuid4().hex[:8]
-    clean_name = f"{skill_name}-skill-{unique_id}"
-    project_commands_dir = Path(project_root) / ".claude" / "commands"
-    command_file = project_commands_dir / f"{clean_name}.md"
+    tmp, skill_md = _write_temp_skill(skill_name, skill_description)
+    cmd = [
+        "pi",
+        "--no-extensions",
+        "--no-skills",
+        "--skill", str(tmp / skill_name),
+    ]
+    prov = _env_provider(provider)
+    mdl = _env_model(model)
+    if prov:
+        cmd += ["--provider", prov]
+    if mdl:
+        cmd += ["--model", mdl]
+    cmd += ["--mode", "json", "-p", query]
 
     try:
-        project_commands_dir.mkdir(parents=True, exist_ok=True)
-        # Use YAML block scalar to avoid breaking on quotes in description
-        indented_desc = "\n  ".join(skill_description.split("\n"))
-        command_content = (
-            f"---\n"
-            f"description: |\n"
-            f"  {indented_desc}\n"
-            f"---\n\n"
-            f"# {skill_name}\n\n"
-            f"This skill handles: {skill_description}\n"
-        )
-        command_file.write_text(command_content)
-
-        cmd = [
-            "claude",
-            "-p", query,
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-        ]
-        if model:
-            cmd.extend(["--model", model])
-
-        # Remove CLAUDECODE env var to allow nesting claude -p inside a
-        # Claude Code session. The guard is for interactive terminal conflicts;
-        # programmatic subprocess usage is safe.
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-
-        process = subprocess.Popen(
+        proc = subprocess.run(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            cwd=project_root,
-            env=env,
+            capture_output=True,
+            text=True,
+            env=dict(os.environ),
+            timeout=timeout,
         )
-
-        triggered = False
-        start_time = time.time()
-        buffer = ""
-        # Track state for stream event detection
-        pending_tool_name = None
-        accumulated_json = ""
-
-        try:
-            while time.time() - start_time < timeout:
-                if process.poll() is not None:
-                    remaining = process.stdout.read()
-                    if remaining:
-                        buffer += remaining.decode("utf-8", errors="replace")
-                    break
-
-                ready, _, _ = select.select([process.stdout], [], [], 1.0)
-                if not ready:
-                    continue
-
-                chunk = os.read(process.stdout.fileno(), 8192)
-                if not chunk:
-                    break
-                buffer += chunk.decode("utf-8", errors="replace")
-
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # Early detection via stream events
-                    if event.get("type") == "stream_event":
-                        se = event.get("event", {})
-                        se_type = se.get("type", "")
-
-                        if se_type == "content_block_start":
-                            cb = se.get("content_block", {})
-                            if cb.get("type") == "tool_use":
-                                tool_name = cb.get("name", "")
-                                if tool_name in ("Skill", "Read"):
-                                    pending_tool_name = tool_name
-                                    accumulated_json = ""
-                                else:
-                                    return False
-
-                        elif se_type == "content_block_delta" and pending_tool_name:
-                            delta = se.get("delta", {})
-                            if delta.get("type") == "input_json_delta":
-                                accumulated_json += delta.get("partial_json", "")
-                                if clean_name in accumulated_json:
-                                    return True
-
-                        elif se_type in ("content_block_stop", "message_stop"):
-                            if pending_tool_name:
-                                return clean_name in accumulated_json
-                            if se_type == "message_stop":
-                                return False
-
-                    # Fallback: full assistant message
-                    elif event.get("type") == "assistant":
-                        message = event.get("message", {})
-                        for content_item in message.get("content", []):
-                            if content_item.get("type") != "tool_use":
-                                continue
-                            tool_name = content_item.get("name", "")
-                            tool_input = content_item.get("input", {})
-                            if tool_name == "Skill" and clean_name in tool_input.get("skill", ""):
-                                triggered = True
-                            elif tool_name == "Read" and clean_name in tool_input.get("file_path", ""):
-                                triggered = True
-                            return triggered
-
-                    elif event.get("type") == "result":
-                        return triggered
-        finally:
-            # Clean up process on any exit path (return, exception, timeout)
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-
-        return triggered
+    except subprocess.TimeoutExpired:
+        return False
     finally:
-        if command_file.exists():
-            command_file.unlink()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    triggered = False
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("type") == "tool_execution_start" and ev.get("toolName") == "read":
+            args = ev.get("args") or {}
+            if _path_matches_skill(str(args.get("path", "")), skill_md, tmp):
+                triggered = True
+                break
+    return triggered
 
 
 def run_eval(
@@ -187,10 +137,11 @@ def run_eval(
     description: str,
     num_workers: int,
     timeout: int,
-    project_root: Path,
+    project_root: Path | None = None,
     runs_per_query: int = 1,
     trigger_threshold: float = 0.5,
     model: str | None = None,
+    provider: str | None = None,
 ) -> dict:
     """Run the full eval set and return results."""
     results = []
@@ -205,8 +156,9 @@ def run_eval(
                     skill_name,
                     description,
                     timeout,
-                    str(project_root),
+                    str(project_root) if project_root else None,
                     model,
+                    provider,
                 )
                 future_to_info[future] = (item, run_idx)
 
@@ -257,15 +209,16 @@ def run_eval(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run trigger evaluation for a skill description")
+    parser = argparse.ArgumentParser(description="Run trigger evaluation for a skill description (pi)")
     parser.add_argument("--eval-set", required=True, help="Path to eval set JSON file")
     parser.add_argument("--skill-path", required=True, help="Path to skill directory")
     parser.add_argument("--description", default=None, help="Override description to test")
     parser.add_argument("--num-workers", type=int, default=10, help="Number of parallel workers")
-    parser.add_argument("--timeout", type=int, default=30, help="Timeout per query in seconds")
+    parser.add_argument("--timeout", type=int, default=60, help="Timeout per query in seconds")
     parser.add_argument("--runs-per-query", type=int, default=3, help="Number of runs per query")
     parser.add_argument("--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold")
-    parser.add_argument("--model", default=None, help="Model to use for claude -p (default: user's configured model)")
+    parser.add_argument("--model", default=None, help="pi model id (default: $PI_MODEL)")
+    parser.add_argument("--provider", default=None, help="pi provider (default: $PI_PROVIDER)")
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     args = parser.parse_args()
 
@@ -281,7 +234,8 @@ def main():
     project_root = find_project_root()
 
     if args.verbose:
-        print(f"Evaluating: {description}", file=sys.stderr)
+        print(f"Evaluating: {description[:80]}...", file=sys.stderr)
+        print(f"Provider={_env_provider(args.provider)} Model={_env_model(args.model)}", file=sys.stderr)
 
     output = run_eval(
         eval_set=eval_set,
@@ -293,6 +247,7 @@ def main():
         runs_per_query=args.runs_per_query,
         trigger_threshold=args.trigger_threshold,
         model=args.model,
+        provider=args.provider,
     )
 
     if args.verbose:

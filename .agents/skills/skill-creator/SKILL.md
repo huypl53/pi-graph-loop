@@ -353,12 +353,13 @@ Save the eval set to the workspace, then run in the background:
 python -m scripts.run_loop \
   --eval-set <path-to-trigger-eval.json> \
   --skill-path <path-to-skill> \
-  --model <model-id-powering-this-session> \
+  --provider <PI_PROVIDER> \
+  --model <PI_MODEL> \
   --max-iterations 5 \
   --verbose
 ```
 
-Use the model ID from your system prompt (the one powering the current session) so the triggering test matches what the user actually experiences.
+Provider and model default to the current session's `$PI_PROVIDER` / `$PI_MODEL` environment variables, so the triggering test matches what the user actually experiences — you can omit `--provider` / `--model` when those are set. The loop is pi-native: each query runs `pi --no-skills --skill <temp-skill>` and counts a trigger when the agent `read`s the skill's SKILL.md.
 
 While it runs, periodically tail the output to give the user updates on which iteration it's on and what the scores look like.
 

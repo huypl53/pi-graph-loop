@@ -54,7 +54,8 @@ def run_loop(
     runs_per_query: int,
     trigger_threshold: float,
     holdout: float,
-    model: str,
+    model: str | None,
+    provider: str | None,
     verbose: bool,
     live_report_path: Path | None = None,
     log_dir: Path | None = None,
@@ -96,6 +97,7 @@ def run_loop(
             runs_per_query=runs_per_query,
             trigger_threshold=trigger_threshold,
             model=model,
+            provider=provider,
         )
         eval_elapsed = time.time() - t0
 
@@ -203,6 +205,7 @@ def run_loop(
             eval_results=train_results,
             history=blinded_history,
             model=model,
+            provider=provider,
             log_dir=log_dir,
             iteration=iteration,
         )
@@ -252,7 +255,8 @@ def main():
     parser.add_argument("--runs-per-query", type=int, default=3, help="Number of runs per query")
     parser.add_argument("--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold")
     parser.add_argument("--holdout", type=float, default=0.4, help="Fraction of eval set to hold out for testing (0 to disable)")
-    parser.add_argument("--model", required=True, help="Model for improvement")
+    parser.add_argument("--model", default=None, help="pi model for improvement (default: $PI_MODEL)")
+    parser.add_argument("--provider", default=None, help="pi provider (default: $PI_PROVIDER)")
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     parser.add_argument("--report", default="auto", help="Generate HTML report at this path (default: 'auto' for temp file, 'none' to disable)")
     parser.add_argument("--results-dir", default=None, help="Save all outputs (results.json, report.html, log.txt) to a timestamped subdirectory here")
@@ -301,6 +305,7 @@ def main():
         trigger_threshold=args.trigger_threshold,
         holdout=args.holdout,
         model=args.model,
+        provider=args.provider,
         verbose=args.verbose,
         live_report_path=live_report_path,
         log_dir=log_dir,
