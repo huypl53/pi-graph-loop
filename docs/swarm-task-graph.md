@@ -735,12 +735,9 @@ Failure propagation for V1:
 
 ## Orchestrator-directed replies
 
-The current runtime does not register `orchestrator` as a routable swarm agent, so child agents cannot reliably `swarm_send_message` to `orchestrator` today. V1 task design should handle this explicitly by either:
+The runtime now registers `orchestrator` as a routable pseudo-agent with its own mailbox. Child agents can call `swarm_send_message(to="orchestrator")` without hitting `Unknown swarm agent`; `ensureOrchestrator()` lazily creates/refreshes the record (also on `session_start` for the orchestrator's own session). Because the orchestrator has no dedicated swarm tmux pane, delivery to it is **mailbox-only**: the message is appended to `.pi/swarm/mailboxes/orchestrator.jsonl`, kept in lifecycle status `queued`, and surfaced via `swarm_check_mailbox` / `swarm_agent_status`. It is not treated as a tmux injection failure, and `swarm_reconcile` reports such messages as `awaiting_mailbox_pickup` rather than retrying injection.
 
-1. creating a pseudo-agent record/mailbox for `orchestrator`, or
-2. assigning a real coordinator agent id as the reply target for each task.
-
-This gap surfaced during review of this document: both glm-5.1 reviewers attempted or considered `swarm_send_message` to `orchestrator`, but the extension rejects unknown recipients.
+Historically the runtime rejected unknown recipients, so earlier reviewers could not reliably reply to `orchestrator`. That gap is closed; task design can simply reply to `orchestrator`, or assign a real coordinator agent id as the reply target per task if preferred.
 
 ## Agent reuse and role pools
 
