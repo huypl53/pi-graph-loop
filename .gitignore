@@ -38,3 +38,4 @@ tmux-snapshots
 
 # eval scaffolding for pi-extension-creator (local only)
 .agents/skills/pi-extension-creator-workspace/
+Session.vim
