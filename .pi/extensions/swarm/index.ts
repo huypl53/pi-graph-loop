@@ -14,6 +14,27 @@ const SYSTEM_START = "[PI-SWARM SYSTEM MESSAGE]";
 const SYSTEM_END = "[/PI-SWARM SYSTEM MESSAGE]";
 
 type AgentStatus = "running" | "stopped" | "unknown";
+type MessageStatus = "queued" | "injected" | "intercepted" | "acked" | "failed" | "dead_letter";
+
+type MessageRecord = {
+	id: string;
+	from: string;
+	to: string;
+	status: MessageStatus;
+	createdAt: string;
+	updatedAt: string;
+	queuedAt?: string;
+	injectedAt?: string;
+	interceptedAt?: string;
+	ackedAt?: string;
+	failedAt?: string;
+	attempts: number;
+	requiresAck: boolean;
+	conversationId?: string;
+	replyTo?: string;
+	lastError?: string;
+	lastAck?: { by: string; status: string; note?: string; resultMessageId?: string; at: string };
+};
 
 type SwarmAgent = {
 	id: string;
@@ -37,6 +58,7 @@ type SwarmState = {
 	tmuxSession: string;
 	agents: Record<string, SwarmAgent>;
 	delivered: Record<string, string[]>;
+	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;
 };
@@ -49,8 +71,13 @@ type SwarmMessage = {
 	subject?: string;
 	priority: string;
 	type: "swarm.message";
+	schemaVersion: number;
 	createdAt: string;
 	body: string;
+	conversationId?: string;
+	replyTo?: string;
+	requiresAck: boolean;
+	ttlMs?: number;
 	headers: Record<string, string>;
 };
 
@@ -136,6 +163,7 @@ function defaultState(cwd: string): SwarmState {
 		tmuxSession: `pi-swarm-${projectSlug(cwd)}-${swarmId.slice(-6)}`,
 		agents: {},
 		delivered: {},
+		messages: {},
 		createdAt: ts,
 		updatedAt: ts,
 	};
@@ -148,7 +176,11 @@ async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 		await writeFile(p.state, `${JSON.stringify(st, null, 2)}\n`, "utf8");
 		return st;
 	}
-	return JSON.parse(await readFile(p.state, "utf8"));
+	const st = JSON.parse(await readFile(p.state, "utf8")) as SwarmState;
+	st.messages ||= {};
+	st.delivered ||= {};
+	st.agents ||= {};
+	return st;
 }
 
 async function writeState(p: Paths, state: SwarmState) {
@@ -163,6 +195,28 @@ async function appendJsonl(file: string, value: unknown) {
 
 async function trace(p: Paths, event: string, data: Record<string, unknown> = {}) {
 	await appendJsonl(p.events, { ts: now(), event, ...data });
+}
+
+function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status: MessageStatus, patch: Partial<MessageRecord> = {}) {
+	const ts = now();
+	const prev = state.messages[msg.id];
+	state.messages[msg.id] = {
+		id: msg.id,
+		from: msg.from,
+		to: msg.to,
+		createdAt: prev?.createdAt || msg.createdAt,
+		queuedAt: prev?.queuedAt,
+		attempts: prev?.attempts ?? 0,
+		requiresAck: msg.requiresAck,
+		conversationId: msg.conversationId,
+		replyTo: msg.replyTo,
+		lastError: prev?.lastError,
+		lastAck: prev?.lastAck,
+		...prev,
+		...patch,
+		status,
+		updatedAt: ts,
+	};
 }
 
 function currentAgentId() {
@@ -256,13 +310,13 @@ function parseSystemDelivery(text: string): SwarmMessage | null {
 	if (body.startsWith("b64:")) {
 		try {
 			const msg = JSON.parse(Buffer.from(body.slice(4).trim(), "base64").toString("utf8")) as SwarmMessage;
-			return { ...msg, type: "swarm.message", headers: msg.headers || {} };
+			return { ...msg, type: "swarm.message", schemaVersion: msg.schemaVersion || 1, requiresAck: msg.requiresAck ?? true, headers: msg.headers || {} };
 		} catch {}
 	}
 	if (body.startsWith("{")) {
 		try {
 			const msg = JSON.parse(body) as SwarmMessage;
-			return { ...msg, type: "swarm.message", headers: msg.headers || {} };
+			return { ...msg, type: "swarm.message", schemaVersion: msg.schemaVersion || 1, requiresAck: msg.requiresAck ?? true, headers: msg.headers || {} };
 		} catch {}
 	}
 	const [headerPart, ...rest] = body.split(/\n\n/);
@@ -281,8 +335,10 @@ function parseSystemDelivery(text: string): SwarmMessage | null {
 		priority: headers.priority || "normal",
 		subject: headers.subject || undefined,
 		type: "swarm.message",
+		schemaVersion: 1,
 		createdAt: headers.created_at || now(),
 		body: (m ? m[1] : fullBody).trim(),
+		requiresAck: true,
 		headers,
 	};
 }
@@ -321,12 +377,13 @@ async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg: Swarm
 	return { delivered: true, before, after };
 }
 
-async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string }) {
+async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; ttlMs?: number }) {
 	let delivery: any = null;
 	const msg = await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const to = safeId(params.to);
 		if (!st.agents[to]) throw new Error(`Unknown swarm agent: ${to}`);
+		const createdAt = now();
 		const m: SwarmMessage = {
 			id: `msg-${Date.now()}-${randomUUID().slice(0, 8)}`,
 			swarmId: st.swarmId,
@@ -335,21 +392,31 @@ async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params
 			subject: params.subject,
 			priority: params.priority || "normal",
 			type: "swarm.message",
-			createdAt: now(),
+			schemaVersion: 1,
+			createdAt,
 			body: params.body,
+			conversationId: params.conversationId,
+			replyTo: params.replyTo,
+			requiresAck: params.requiresAck ?? true,
+			ttlMs: params.ttlMs,
 			headers: { cwd, senderModel: currentModel(), senderProvider: currentProvider() },
 		};
+		upsertMessageRecord(st, m, "queued", { queuedAt: createdAt });
 		await appendJsonl(mailboxPath(p, to), m);
-		await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority });
+		await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck });
 		delivery = await deliver(pi, p, st, m);
 		if (delivery?.delivered) {
 			// Injection into the recipient pane is already delivery. Mark it in state
 			// atomically with enqueue+inject so pending mailbox polling does not
 			// reprocess the same message after a restart or delayed poll.
 			st.delivered[to] = Array.from(new Set([...(st.delivered[to] || []), m.id]));
+			upsertMessageRecord(st, m, "injected", { injectedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1 });
+			await writeState(p, st);
+		} else {
+			upsertMessageRecord(st, m, "failed", { failedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1, lastError: delivery?.reason || "delivery skipped" });
 			await writeState(p, st);
 		}
-		await trace(p, delivery?.delivered ? "message.inject.ok" : "message.inject.skip", { id: m.id, to: m.to, delivery, markedDelivered: Boolean(delivery?.delivered) });
+		await trace(p, delivery?.delivered ? "message.inject.ok" : "message.inject.skip", { id: m.id, to: m.to, delivery, markedDelivered: Boolean(delivery?.delivered), status: st.messages[m.id]?.status });
 		return m;
 	});
 	return { msg, delivery };
@@ -456,7 +523,12 @@ export default function (pi: ExtensionAPI) {
 		const msg = parseSystemDelivery(event.text);
 		if (!msg) return { action: "continue" };
 		const p = paths(ctx.cwd);
-		await trace(p, "message.input_intercept", { id: msg.id, from: msg.from, to: msg.to, agentId: currentAgentId() });
+		await withLock(p, async () => {
+			const st = await readState(p, ctx.cwd);
+			upsertMessageRecord(st, msg, "intercepted", { interceptedAt: now() });
+			await writeState(p, st);
+		});
+		await trace(p, "message.input_intercept", { id: msg.id, from: msg.from, to: msg.to, agentId: currentAgentId(), status: "intercepted" });
 		pi.sendMessage({
 			customType: "swarm-message",
 			content: `Inter-agent swarm message from ${msg.from} to ${msg.to}${msg.subject ? ` (${msg.subject})` : ""}:\n\n${msg.body}`,
@@ -538,11 +610,77 @@ export default function (pi: ExtensionAPI) {
 			body: Type.String({ description: "Message body." }),
 			subject: Type.Optional(Type.String({ description: "Short subject." })),
 			priority: Type.Optional(Type.String({ description: "low, normal, or high. Defaults to normal." })),
+			conversationId: Type.Optional(Type.String({ description: "Optional conversation/thread id for related messages." })),
+			replyTo: Type.Optional(Type.String({ description: "Optional message id this message replies to." })),
+			requiresAck: Type.Optional(Type.Boolean({ description: "Whether recipient should explicitly ack done/failed. Defaults to true." })),
+			ttlMs: Type.Optional(Type.Number({ description: "Optional time-to-live in milliseconds for future reconcile/dead-letter handling." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
 			const { msg, delivery } = await enqueueAndDeliver(pi, ctx.cwd, p, params);
 			return textResult(`Sent ${msg.id} to ${msg.to}. Injected: ${Boolean(delivery?.delivered)}`, { message: msg, delivery });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_ack_message",
+		label: "Swarm Ack",
+		description: "Acknowledge swarm message processing status. Use this after you have seen, completed, or failed a message-triggered task.",
+		promptGuidelines: ["Use `swarm_ack_message` after processing a swarm message, especially when the message requires acknowledgement."],
+		parameters: Type.Object({
+			messageId: Type.String({ description: "Message id to acknowledge." }),
+			status: Type.String({ description: "Ack status: seen, processing, done, failed." }),
+			note: Type.Optional(Type.String({ description: "Short note about what happened." })),
+			resultMessageId: Type.Optional(Type.String({ description: "Optional reply/result message id produced from this message." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const agentId = currentAgentId();
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const rec = st.messages[params.messageId];
+				if (!rec) throw new Error(`Unknown message id: ${params.messageId}`);
+				if (rec.to !== agentId && agentId !== "orchestrator") throw new Error(`Message ${params.messageId} belongs to ${rec.to}, not ${agentId}`);
+				const ackAt = now();
+				const failed = params.status === "failed";
+				st.messages[params.messageId] = {
+					...rec,
+					status: failed ? "failed" : "acked",
+					updatedAt: ackAt,
+					ackedAt: failed ? rec.ackedAt : ackAt,
+					failedAt: failed ? ackAt : rec.failedAt,
+					lastError: failed ? params.note || rec.lastError : rec.lastError,
+					lastAck: { by: agentId, status: params.status, note: params.note, resultMessageId: params.resultMessageId, at: ackAt },
+				};
+				st.delivered[rec.to] = Array.from(new Set([...(st.delivered[rec.to] || []), params.messageId]));
+				await writeState(p, st);
+				await trace(p, "message.ack", { id: params.messageId, agentId, status: params.status, note: params.note, resultMessageId: params.resultMessageId });
+				return st.messages[params.messageId];
+			});
+			return textResult(`Acked ${params.messageId} as ${params.status}`, { message: result });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_message_status",
+		label: "Swarm Message Status",
+		description: "Inspect lifecycle status records for swarm messages, optionally filtered by agent or status.",
+		promptGuidelines: ["Use `swarm_message_status` to debug whether swarm messages are queued, injected, intercepted, acked, or failed."],
+		parameters: Type.Object({
+			messageId: Type.Optional(Type.String({ description: "Specific message id to inspect." })),
+			agentId: Type.Optional(Type.String({ description: "Filter messages by recipient agent id." })),
+			status: Type.Optional(Type.String({ description: "Filter by lifecycle status." })),
+			limit: Type.Optional(Type.Number({ description: "Maximum records to return. Defaults to 50." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const st = await readState(p, ctx.cwd);
+			let records = Object.values(st.messages || {});
+			if (params.messageId) records = records.filter((r) => r.id === params.messageId);
+			if (params.agentId) records = records.filter((r) => r.to === safeId(params.agentId!));
+			if (params.status) records = records.filter((r) => r.status === params.status);
+			records = records.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-Math.max(1, Math.min(200, params.limit || 50)));
+			return textResult(JSON.stringify({ count: records.length, records }, null, 2), { records });
 		},
 	}));
 
