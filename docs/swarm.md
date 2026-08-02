@@ -254,6 +254,10 @@ Agent liveness is partly persisted and partly observed:
 
 This is not a distributed consensus system and does not run a heartbeat daemon. If a process dies without a `session_shutdown` event, `tmuxAlive` and stale `lastHeartbeatAt` are the primary signals.
 
+## Task graph roadmap
+
+The next orchestration layer is specified in [`docs/swarm-task-graph.md`](./swarm-task-graph.md). It proposes durable task folders, task state JSON, workflow templates, task artifacts, and task tools so agents can coordinate around task ids/node ids instead of long ad hoc prompts.
+
 ## Recommended agent protocol
 
 Spawned agents receive an identity card and should:
