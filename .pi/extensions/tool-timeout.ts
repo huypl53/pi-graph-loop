@@ -6,12 +6,17 @@
  *    wrapped so an AbortSignal fires after the timeout. All built-in fs tools
  *    already honor AbortSignal, so they abort cleanly when the timeout hits.
  *  - bash: a default `timeout` (seconds) is injected via the `tool_call` event
- *    ONLY when the model omits it. The bash tool's native process-kill + partial
- *    output is used. The model's explicit timeout is always respected (no
- *    clamping) — leave the cap to pi / a future flag.
+ *    when the model omits it. The bash tool's native process-kill + partial
+ *    output is used. The model's explicit timeout is respected so it can
+ *    self-adjust: on a timeout it sees the error and may retry with a larger
+ *    `timeout`. An optional ceiling PI_TOOL_TIMEOUT_MAX_S clamps that
+ *    escalation. When a bash command times out, a hint is appended to the
+ *    result telling the model how to retry.
  *
  * Config (env):
- *   PI_TOOL_TIMEOUT_S   default timeout in seconds (default 120). 0 disables.
+ *   PI_TOOL_TIMEOUT_S       default timeout in seconds (default 120). 0 disables.
+ *   PI_TOOL_TIMEOUT_MAX_S   optional ceiling (seconds) the model may escalate a
+ *                           bash timeout up to. Unset = no clamp (default).
  *
  * Limitation: tools registered by *other* extensions can't be wrapped this way
  * — the public API (`getAllTools`) exposes only their metadata, not `execute`.
@@ -27,6 +32,7 @@ import {
 	createLsToolDefinition,
 	createReadToolDefinition,
 	createWriteToolDefinition,
+	isBashToolResult,
 	isToolCallEventType,
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
@@ -40,6 +46,15 @@ function readTimeoutSeconds(): number {
 	if (raw === undefined || raw === "") return DEFAULT_TIMEOUT_S;
 	const n = Number(raw);
 	if (!Number.isFinite(n) || n <= 0) return 0; // 0 / invalid → disabled
+	return n;
+}
+
+/** Optional ceiling (seconds) the model may escalate a bash timeout up to. */
+function readMaxSeconds(): number | undefined {
+	const raw = process.env.PI_TOOL_TIMEOUT_MAX_S;
+	if (raw === undefined || raw === "") return undefined;
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n <= 0) return undefined;
 	return n;
 }
 
@@ -97,6 +112,7 @@ export default function (pi: ExtensionAPI) {
 	if (seconds <= 0) return; // disabled
 
 	const ms = seconds * 1000;
+	const maxS = readMaxSeconds();
 	const cwd = process.cwd();
 
 	// Re-register the built-in fs tools, wrapping only `execute`. The factory
@@ -114,11 +130,24 @@ export default function (pi: ExtensionAPI) {
 		pi.registerTool(withTimeout(def, ms));
 	}
 
-	// bash: inject a default timeout (seconds) only when the model omits it.
+	// bash: inject a default timeout (seconds) when the model omits it, and
+	// (optionally) clamp the model's explicit timeout to the configured ceiling
+	// so self-adjustment can't escalate past it.
 	pi.on("tool_call", (event) => {
-		if (isToolCallEventType("bash", event) && event.input.timeout === undefined) {
-			event.input.timeout = seconds;
-		}
+		if (!isToolCallEventType("bash", event)) return;
+		if (event.input.timeout === undefined) event.input.timeout = seconds;
+		if (maxS !== undefined && event.input.timeout > maxS) event.input.timeout = maxS;
+	});
+
+	// bash: when a command times out, append a hint so the model knows it can
+	// retry with a larger `timeout` (and what the ceiling is, if any).
+	pi.on("tool_result", (event) => {
+		if (!isBashToolResult(event) || !event.isError) return;
+		const text = event.content.map((c) => ("text" in c ? c.text : "")).join("\n");
+		if (!/timed out after \d+ seconds?/i.test(text)) return;
+		const ceiling = maxS !== undefined ? `, up to a maximum of ${maxS}s` : "";
+		const hint = `The command was terminated because it exceeded the per-tool timeout. If it legitimately needs more time, call the bash tool again with a larger "timeout" parameter (in seconds)${ceiling}.`;
+		return { content: [...event.content, { type: "text" as const, text: hint }] };
 	});
 
 	// Tiny status command so the active timeout is easy to verify.
@@ -127,8 +156,9 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) return;
 			const where = `${CONFIG_DIR_NAME}/extensions/tool-timeout.ts`;
+			const max = maxS !== undefined ? `; escalation ceiling: ${maxS}s` : "";
 			ctx.ui.notify(
-				`Per-tool timeout: ${seconds}s${process.env.PI_TOOL_TIMEOUT_S ? "" : " (default)"}. Set PI_TOOL_TIMEOUT_S to change; 0 disables. (${where})`,
+				`Per-tool timeout: ${seconds}s${process.env.PI_TOOL_TIMEOUT_S ? "" : " (default)"}${max}. Set PI_TOOL_TIMEOUT_S / PI_TOOL_TIMEOUT_MAX_S; 0 disables. (${where})`,
 				"info",
 			);
 		},
