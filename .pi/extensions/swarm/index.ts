@@ -34,6 +34,7 @@ type MessageRecord = {
 	replyTo?: string;
 	lastError?: string;
 	lastAck?: { by: string; status: string; note?: string; resultMessageId?: string; at: string };
+	ttlMs?: number;
 };
 
 type SwarmAgent = {
@@ -212,6 +213,7 @@ function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status: Messa
 		replyTo: msg.replyTo,
 		lastError: prev?.lastError,
 		lastAck: prev?.lastAck,
+		ttlMs: msg.ttlMs,
 		...prev,
 		...patch,
 		status,
@@ -485,6 +487,97 @@ function shellQuote(value: string) {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function isTmuxRunning(pi: ExtensionAPI, target: string): Promise<boolean> {
+	return tmux(pi, ["display-message", "-p", "-t", target, "#{pane_alive}"], 3_000)
+		.then((out) => out.trim() === "1")
+		.catch(() => false);
+}
+
+const MAX_ATTEMPTS = 5;
+
+async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { agentId?: string; dryRun?: boolean }) {
+	const result = await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		const nowMs = Date.now();
+		const actions: Array<{ messageId: string; action: string; reason: string }> = [];
+		const targetAgentId = options.agentId ? safeId(options.agentId) : undefined;
+
+		for (const [msgId, rec] of Object.entries(st.messages)) {
+			if (rec.status === "dead_letter") continue;
+			if (rec.status === "acked") continue;
+			if (targetAgentId && rec.to !== targetAgentId) continue;
+			if (rec.status !== "queued" && rec.status !== "failed" && rec.status !== "injected" && rec.status !== "intercepted") continue;
+
+			const ageMs = nowMs - new Date(rec.createdAt).getTime();
+			const expired = rec.ttlMs !== undefined ? ageMs > rec.ttlMs : false;
+			const maxAttempts = rec.attempts >= MAX_ATTEMPTS;
+			const agent = st.agents[rec.to];
+			const agentRunning = agent?.status === "running" && agent?.tmuxTarget ? await isTmuxRunning(pi, agent.tmuxTarget) : false;
+
+			if (expired || maxAttempts) {
+				if (!options.dryRun) {
+					upsertMessageRecord(st, { id: msgId, swarmId: st.swarmId, from: rec.from, to: rec.to, priority: "normal", type: "swarm.message" as const, schemaVersion: 1, createdAt: rec.createdAt, body: "", headers: {}, requiresAck: rec.requiresAck, ttlMs: rec.ttlMs }, "dead_letter", { failedAt: now(), lastError: expired ? "TTL expired" : "Max attempts exceeded" });
+					await trace(p, "reconcile.dead_letter", { id: msgId, to: rec.to, reason: expired ? "ttl_expired" : "max_attempts", attempts: rec.attempts, ageMs });
+				}
+				actions.push({ messageId: msgId, action: "dead_letter", reason: expired ? "TTL expired" : "Max attempts exceeded" });
+				continue;
+			}
+
+			if ((rec.status === "queued" || rec.status === "failed") && agentRunning) {
+				if (!options.dryRun) {
+					const msg = await readMailbox(p, rec.to).then((msgs) => msgs.find((m) => m.id === msgId));
+					if (msg) {
+						const delivery = await deliver(pi, p, st, msg);
+						if (delivery?.delivered) {
+							st.delivered[rec.to] = Array.from(new Set([...(st.delivered[rec.to] || []), msgId]));
+							upsertMessageRecord(st, msg, "injected", { injectedAt: now(), attempts: rec.attempts + 1 });
+							await trace(p, "reconcile.retry.ok", { id: msgId, to: rec.to, attempts: rec.attempts + 1 });
+							actions.push({ messageId: msgId, action: "retried", reason: "Agent running, injection successful" });
+						} else {
+							upsertMessageRecord(st, msg, "failed", { failedAt: now(), attempts: rec.attempts + 1, lastError: delivery?.reason || "Injection failed" });
+							await trace(p, "reconcile.retry.failed", { id: msgId, to: rec.to, attempts: rec.attempts + 1, error: delivery?.reason });
+							actions.push({ messageId: msgId, action: "retry_failed", reason: delivery?.reason || "Injection failed" });
+						}
+					} else {
+						await trace(p, "reconcile.skip", { id: msgId, to: rec.to, reason: "Message not found in mailbox" });
+						actions.push({ messageId: msgId, action: "skipped", reason: "Message not found in mailbox" });
+					}
+				} else {
+					actions.push({ messageId: msgId, action: "would_retry", reason: "Agent running (dry run)" });
+				}
+				continue;
+			}
+
+			if ((rec.status === "queued" || rec.status === "failed") && !agentRunning) {
+				actions.push({ messageId: msgId, action: "pending", reason: "Recipient agent not running" });
+				continue;
+			}
+
+			if ((rec.status === "injected" || rec.status === "intercepted") && !rec.ackedAt) {
+				const injectedAge = rec.injectedAt ? (nowMs - new Date(rec.injectedAt).getTime()) : 0;
+				const staleThreshold = 300_000; // 5 minutes
+				if (injectedAge > staleThreshold) {
+					if (!options.dryRun) {
+						upsertMessageRecord(st, { id: msgId, swarmId: st.swarmId, from: rec.from, to: rec.to, priority: "normal", type: "swarm.message" as const, schemaVersion: 1, createdAt: rec.createdAt, body: "", headers: {}, requiresAck: rec.requiresAck, ttlMs: rec.ttlMs }, "failed", { failedAt: now(), attempts: rec.attempts + 1, lastError: "Injected but not acked (stale)" });
+						await trace(p, "reconcile.stale_injected", { id: msgId, to: rec.to, injectedAge, attempts: rec.attempts + 1 });
+					}
+					actions.push({ messageId: msgId, action: "stale", reason: "Injected but not acked (stale)" });
+				} else {
+					actions.push({ messageId: msgId, action: "awaiting_ack", reason: "Recently injected, awaiting ack" });
+				}
+				continue;
+			}
+		}
+
+		if (!options.dryRun) {
+			await writeState(p, st);
+		}
+		return { actions, count: actions.length, dryRun: Boolean(options.dryRun) };
+	});
+	await trace(p, "reconcile.complete", { agentId: options.agentId, dryRun: options.dryRun, result });
+	return result;
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		const p = paths(ctx.cwd);
@@ -748,6 +841,44 @@ export default function (pi: ExtensionAPI) {
 			const file = await capturePane(pi, p, agent.id, agent.tmuxTarget, `manual-${Date.now()}`);
 			await trace(p, "tmux.capture", { agentId: agent.id, target: agent.tmuxTarget, file: relative(ctx.cwd, file) });
 			return textResult(`Captured ${agent.id} pane to ${relative(ctx.cwd, file)}`, { file, agent });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_reconcile",
+		label: "Swarm Reconcile",
+		description: "Reconcile swarm mailbox state. Inspects queued/failed/injected messages requiring ack, retries failed/queued injections when recipient tmux is running, marks expired or max-attempt messages dead_letter, and traces events.",
+		promptGuidelines: ["Use `swarm_reconcile` to recover stuck messages, retry failed deliveries, and move expired/unrecoverable messages to dead_letter."],
+		parameters: Type.Object({
+			agentId: Type.Optional(Type.String({ description: "Optional agent id to reconcile only that agent's messages." })),
+			dryRun: Type.Optional(Type.Boolean({ description: "If true, inspect and report actions without modifying state. Defaults to false." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const result = await reconcile(pi, ctx.cwd, p, { agentId: params.agentId, dryRun: params.dryRun });
+			const summary = result.actions.map((a) => `  ${a.messageId}: ${a.action} (${a.reason})`).join("\n");
+			return textResult(`Reconciled ${result.count} messages (${result.dryRun ? "dry run" : "applied"}):\n${summary}`, result);
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_dead_letters",
+		label: "Swarm Dead Letters",
+		description: "List or inspect dead-lettered swarm messages that exceeded max attempts or TTL.",
+		promptGuidelines: ["Use `swarm_dead_letters` to review messages that failed permanently and may require manual intervention."],
+		parameters: Type.Object({
+			agentId: Type.Optional(Type.String({ description: "Filter by recipient agent id." })),
+			messageId: Type.Optional(Type.String({ description: "Specific dead-letter message id to inspect." })),
+			limit: Type.Optional(Type.Number({ description: "Maximum records to return. Defaults to 20." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const st = await readState(p, ctx.cwd);
+			let records = Object.values(st.messages || {}).filter((r) => r.status === "dead_letter");
+			if (params.messageId) records = records.filter((r) => r.id === params.messageId);
+			if (params.agentId) records = records.filter((r) => r.to === safeId(params.agentId!));
+			records = records.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)).slice(-Math.max(1, Math.min(100, params.limit || 20)));
+			return textResult(JSON.stringify({ count: records.length, records }, null, 2), { records });
 		},
 	}));
 
