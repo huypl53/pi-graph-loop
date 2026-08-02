@@ -14,6 +14,8 @@ const SYSTEM_START = "[PI-SWARM SYSTEM MESSAGE]";
 const SYSTEM_END = "[/PI-SWARM SYSTEM MESSAGE]";
 
 type AgentStatus = "running" | "stopped" | "unknown";
+type RuntimeStatus = "starting" | "idle" | "busy" | "tool_running" | "shutting_down" | "stopped";
+type HealthStatus = "healthy" | "degraded" | "unhealthy";
 type MessageStatus = "queued" | "injected" | "intercepted" | "acked" | "failed" | "dead_letter";
 
 type MessageRecord = {
@@ -42,6 +44,15 @@ type SwarmAgent = {
 	id: string;
 	role: string;
 	status: AgentStatus;
+	runtimeStatus: RuntimeStatus;
+	health: HealthStatus;
+	lastHeartbeatAt?: string;
+	lastSessionStartAt?: string;
+	lastAgentStartAt?: string;
+	lastAgentSettledAt?: string;
+	lastToolAt?: string;
+	lastShutdownAt?: string;
+	pid?: number;
 	tmuxSession: string;
 	tmuxWindow: string;
 	tmuxTarget: string;
@@ -475,6 +486,10 @@ async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmS
 		id,
 		role: input.role,
 		status: "running",
+		runtimeStatus: "starting",
+		health: "healthy",
+		lastSessionStartAt: ts,
+		lastAgentStartAt: ts,
 		tmuxSession: state.tmuxSession,
 		tmuxWindow: window,
 		tmuxTarget: target,
@@ -602,26 +617,48 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		const p = paths(ctx.cwd);
 		await ensureDirs(p);
+		const agentId = currentAgentId();
+		const ts = now();
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
-			await trace(p, "session.start", { agentId: currentAgentId(), mode: ctx.mode, state: relative(ctx.cwd, p.state) });
-			if (currentAgentId() !== "orchestrator" && !st.agents[currentAgentId()]) {
-				st.agents[currentAgentId()] = {
-					id: currentAgentId(), role: "Externally started swarm agent", status: "running",
-					tmuxSession: st.tmuxSession, tmuxWindow: currentAgentId(), tmuxTarget: "unknown",
+			await trace(p, "session.start", { agentId, mode: ctx.mode, state: relative(ctx.cwd, p.state) });
+			if (agentId !== "orchestrator" && !st.agents[agentId]) {
+				st.agents[agentId] = {
+					id: agentId, role: "Externally started swarm agent", status: "running",
+					runtimeStatus: "starting", health: "healthy",
+					lastSessionStartAt: ts, lastAgentStartAt: ts, pid: process.pid,
+					tmuxSession: st.tmuxSession, tmuxWindow: agentId, tmuxTarget: "unknown",
 					model: currentModel(), provider: currentProvider(), cwd: ctx.cwd,
-					mailbox: relative(ctx.cwd, mailboxPath(p, currentAgentId())), createdAt: now(), updatedAt: now(),
+					mailbox: relative(ctx.cwd, mailboxPath(p, agentId)), createdAt: ts, updatedAt: ts,
 				};
 				await writeState(p, st);
+			} else if (st.agents[agentId]) {
+				st.agents[agentId].lastSessionStartAt = ts;
+				st.agents[agentId].lastHeartbeatAt = ts;
+				st.agents[agentId].runtimeStatus = "idle";
+				st.agents[agentId].health = "healthy";
+				st.agents[agentId].pid = process.pid;
+				st.agents[agentId].updatedAt = ts;
+				await writeState(p, st);
+				await trace(p, "agent.status", { agentId, runtimeStatus: st.agents[agentId].runtimeStatus, health: st.agents[agentId].health });
 			}
 		});
-		if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${currentAgentId()}`);
+		if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${agentId}`);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		const agentId = currentAgentId();
 		if (agentId === "orchestrator") return;
 		const p = paths(ctx.cwd);
+		await withLock(p, async () => {
+			const st = await readState(p, ctx.cwd);
+			const agent = st.agents[agentId];
+			if (agent) {
+				agent.pid = process.pid;
+				agent.updatedAt = now();
+				await writeState(p, st);
+			}
+		});
 		const st = await readState(p, ctx.cwd);
 		const agent = st.agents[agentId];
 		if (!agent) return;
@@ -629,6 +666,103 @@ export default function (pi: ExtensionAPI) {
 		return {
 			systemPrompt: `${event.systemPrompt}\n\nPi Swarm identity: you are agent \`${agentId}\` (${agent.role}). Your durable role card is \`${identityRel}\`. Follow it as your agent-specific AGENT.md. Use swarm tools for peer coordination.`,
 		};
+	});
+
+	pi.on("agent_start", async (_event, ctx) => {
+		const agentId = currentAgentId();
+		if (agentId === "orchestrator") return;
+		const p = paths(ctx.cwd);
+		await withLock(p, async () => {
+			const st = await readState(p, ctx.cwd);
+			const agent = st.agents[agentId];
+			if (agent) {
+				const ts = now();
+				agent.lastAgentStartAt = ts;
+				agent.runtimeStatus = "busy";
+				agent.health = "healthy";
+				agent.lastHeartbeatAt = ts;
+				agent.pid = process.pid;
+				agent.updatedAt = ts;
+				await writeState(p, st);
+				await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
+			}
+		});
+	});
+
+	pi.on("agent_settled", async (_event, ctx) => {
+		const agentId = currentAgentId();
+		if (agentId === "orchestrator") return;
+		const p = paths(ctx.cwd);
+		await withLock(p, async () => {
+			const st = await readState(p, ctx.cwd);
+			const agent = st.agents[agentId];
+			if (agent) {
+				const ts = now();
+				agent.lastAgentSettledAt = ts;
+				agent.runtimeStatus = "idle";
+				agent.health = "healthy";
+				agent.lastHeartbeatAt = ts;
+				agent.updatedAt = ts;
+				await writeState(p, st);
+				await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
+			}
+		});
+	});
+
+	pi.on("tool_execution_start", async (_event, ctx) => {
+		const agentId = currentAgentId();
+		if (agentId === "orchestrator") return;
+		const p = paths(ctx.cwd);
+		await withLock(p, async () => {
+			const st = await readState(p, ctx.cwd);
+			const agent = st.agents[agentId];
+			if (agent) {
+				const ts = now();
+				agent.lastToolAt = ts;
+				agent.runtimeStatus = "tool_running";
+				agent.lastHeartbeatAt = ts;
+				agent.updatedAt = ts;
+				await writeState(p, st);
+				await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
+			}
+		});
+	});
+
+	pi.on("tool_execution_end", async (_event, ctx) => {
+		const agentId = currentAgentId();
+		if (agentId === "orchestrator") return;
+		const p = paths(ctx.cwd);
+		await withLock(p, async () => {
+			const st = await readState(p, ctx.cwd);
+			const agent = st.agents[agentId];
+			if (agent) {
+				const ts = now();
+				agent.runtimeStatus = "busy";
+				agent.lastHeartbeatAt = ts;
+				agent.updatedAt = ts;
+				await writeState(p, st);
+			}
+		});
+	});
+
+	pi.on("session_shutdown", async (_event, ctx) => {
+		const agentId = currentAgentId();
+		if (agentId === "orchestrator") return;
+		const p = paths(ctx.cwd);
+		await withLock(p, async () => {
+			const st = await readState(p, ctx.cwd);
+			const agent = st.agents[agentId];
+			if (agent) {
+				const ts = now();
+				agent.lastShutdownAt = ts;
+				agent.runtimeStatus = "stopped";
+				agent.health = "unhealthy";
+				agent.status = "stopped";
+				agent.updatedAt = ts;
+				await writeState(p, st);
+				await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
+			}
+		});
 	});
 
 	pi.on("input", async (event, ctx) => {
@@ -650,6 +784,52 @@ export default function (pi: ExtensionAPI) {
 		}, { triggerTurn: true, deliverAs: ctx.isIdle() ? "steer" : "followUp" });
 		return { action: "handled" };
 	});
+
+	pi.registerTool(defineTool({
+		name: "swarm_agent_status",
+		label: "Swarm Agent Status",
+		description: "Report runtime/liveness status for swarm agents using pi lifecycle state, tmux pane liveness, and mailbox message counts.",
+		promptGuidelines: ["Use `swarm_agent_status` to inspect which swarm agents are idle, busy, tool-running, stopped, alive in tmux, or have pending/unacked/dead-letter messages."],
+		parameters: Type.Object({
+			agentId: Type.Optional(Type.String({ description: "Optional agent id. If omitted, returns all agents." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const st = await readState(p, ctx.cwd);
+			const filter = params.agentId ? safeId(params.agentId) : undefined;
+			const agents = Object.values(st.agents).filter((a) => !filter || a.id === filter);
+			const rows = [];
+			for (const agent of agents) {
+				const tmuxAlive = agent.tmuxTarget && agent.tmuxTarget !== "unknown" ? await isTmuxRunning(pi, agent.tmuxTarget) : false;
+				const records = Object.values(st.messages || {}).filter((m) => m.to === agent.id);
+				const pendingMessages = records.filter((m) => m.status === "queued" || m.status === "failed").length;
+				const unackedMessages = records.filter((m) => m.requiresAck && !m.ackedAt && (m.status === "injected" || m.status === "intercepted")).length;
+				const deadLetters = records.filter((m) => m.status === "dead_letter").length;
+				const lastHeartbeatAgeSec = agent.lastHeartbeatAt ? Math.round((Date.now() - new Date(agent.lastHeartbeatAt).getTime()) / 1000) : undefined;
+				rows.push({
+					agentId: agent.id,
+					status: agent.status,
+					runtimeStatus: agent.runtimeStatus || "idle",
+					health: agent.health || (tmuxAlive ? "healthy" : "degraded"),
+					tmuxAlive,
+					pid: agent.pid,
+					lastHeartbeatAt: agent.lastHeartbeatAt,
+					lastHeartbeatAgeSec,
+					lastSessionStartAt: agent.lastSessionStartAt,
+					lastAgentStartAt: agent.lastAgentStartAt,
+					lastAgentSettledAt: agent.lastAgentSettledAt,
+					lastToolAt: agent.lastToolAt,
+					lastShutdownAt: agent.lastShutdownAt,
+					pendingMessages,
+					unackedMessages,
+					deadLetters,
+					tmuxTarget: agent.tmuxTarget,
+				});
+			}
+			await trace(p, "agent.status.read", { agentId: filter, count: rows.length });
+			return textResult(JSON.stringify({ count: rows.length, agents: rows }, null, 2), { agents: rows });
+		},
+	}));
 
 	pi.registerTool(defineTool({
 		name: "swarm_list_agents",
@@ -902,6 +1082,7 @@ export default function (pi: ExtensionAPI) {
 			return textResult(JSON.stringify({ count: records.length, records }, null, 2), { records });
 		},
 	}));
+
 
 	pi.registerCommand("swarm", {
 		description: "Manage pi swarm agents: init | list | spawn <id> [role] | send <to> <message> | trace | capture <id>",
