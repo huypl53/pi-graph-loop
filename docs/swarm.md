@@ -182,6 +182,7 @@ Inspects lifecycle records, optionally filtered by:
 Lifecycle statuses:
 
 - `queued`: mailbox append happened, injection pending.
+- `mailbox_delivered`: message was durably appended for a mailbox-only recipient, such as the orchestrator pseudo-agent with no tmux pane.
 - `injected`: tmux injection succeeded.
 - `intercepted`: recipient pi input hook parsed the system marker.
 - `acked`: recipient acknowledged the message.
@@ -200,6 +201,10 @@ Parameters:
 ### `swarm_dead_letters`
 
 Lists dead-lettered messages, optionally filtered by recipient or message id.
+
+### `swarm_prune`
+
+Orchestrator/admin cleanup tool. Dry-run by default. It detects zombie agents whose tmux panes are gone, can mark them stopped, and can optionally remove stopped agent records from swarm state. It does not delete mailboxes or traces in V1.
 
 ### `swarm_trace`
 
@@ -230,9 +235,10 @@ The recipient extension input hook decodes the payload, marks the lifecycle reco
 
 Important distinctions:
 
+- `mailbox_delivered` means the recipient is mailbox-only; no tmux injection was attempted.
 - `injected` means text reached the tmux pane.
 - `intercepted` means the recipient extension parsed the marker.
-- `acked` means the recipient explicitly called `swarm_ack_message`.
+- `acked` means the recipient explicitly called `swarm_ack_message` with a final `done` ack. Progress acks such as `seen`/`processing` update `lastAck` but do not complete the message.
 
 ## Idempotency
 

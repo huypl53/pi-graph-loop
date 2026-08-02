@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, writeFile, appendFile, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, rm, stat, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, dirname, relative } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -20,7 +20,7 @@ const FAST_PROVIDER = "openai";
 type AgentStatus = "running" | "stopped" | "unknown";
 type RuntimeStatus = "starting" | "idle" | "busy" | "tool_running" | "shutting_down" | "stopped";
 type HealthStatus = "healthy" | "degraded" | "unhealthy";
-type MessageStatus = "queued" | "injected" | "intercepted" | "acked" | "failed" | "dead_letter";
+type MessageStatus = "queued" | "mailbox_delivered" | "injected" | "intercepted" | "acked" | "failed" | "dead_letter";
 
 type MessageRecord = {
 	id: string;
@@ -192,7 +192,7 @@ async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	await ensureDirs(p);
 	if (!existsSync(p.state)) {
 		const st = defaultState(cwd);
-		await writeFile(p.state, `${JSON.stringify(st, null, 2)}\n`, "utf8");
+		await atomicWriteFile(p.state, `${JSON.stringify(st, null, 2)}\n`);
 		return st;
 	}
 	const st = JSON.parse(await readFile(p.state, "utf8")) as SwarmState;
@@ -202,9 +202,16 @@ async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	return st;
 }
 
+async function atomicWriteFile(file: string, content: string) {
+	await mkdir(dirname(file), { recursive: true });
+	const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+	await writeFile(tmp, content, "utf8");
+	await rename(tmp, file);
+}
+
 async function writeState(p: Paths, state: SwarmState) {
 	state.updatedAt = now();
-	await writeFile(p.state, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+	await atomicWriteFile(p.state, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 async function appendJsonl(file: string, value: unknown) {
@@ -506,7 +513,7 @@ async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params
 				// Mailbox-only delivery (e.g. orchestrator has no swarm tmux pane): the message is
 				// safely appended to the recipient mailbox and picked up via swarm_check_mailbox.
 				// Keep status "queued" so it is not mistaken for a tmux injection failure.
-				upsertMessageRecord(st, m, "queued", { lastError: undefined });
+				upsertMessageRecord(st, m, "mailbox_delivered", { lastError: undefined });
 				await trace(p, "message.mailbox_only", { id: m.id, to: m.to, reason: delivery.reason });
 			} else {
 				upsertMessageRecord(st, m, "injected", { injectedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1 });
@@ -590,8 +597,11 @@ function shellQuote(value: string) {
 }
 
 function isTmuxRunning(pi: ExtensionAPI, target: string): Promise<boolean> {
-	return tmux(pi, ["display-message", "-p", "-t", target, "#{pane_alive}"], 3_000)
-		.then((out) => out.trim() === "1")
+	// `#{pane_alive}` is not portable/reliable across tmux versions and was observed
+	// to report false for live panes. A target is alive if tmux can resolve it to a
+	// pane id; `display-message` exits non-zero when the pane/window/session is gone.
+	return tmux(pi, ["display-message", "-p", "-t", target, "#{pane_id}"], 3_000)
+		.then((out) => out.trim().length > 0)
 		.catch(() => false);
 }
 
@@ -608,7 +618,7 @@ async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { age
 			if (rec.status === "dead_letter") continue;
 			if (rec.status === "acked") continue;
 			if (targetAgentId && rec.to !== targetAgentId) continue;
-			if (rec.status !== "queued" && rec.status !== "failed" && rec.status !== "injected" && rec.status !== "intercepted") continue;
+			if (rec.status !== "queued" && rec.status !== "failed" && rec.status !== "mailbox_delivered" && rec.status !== "injected" && rec.status !== "intercepted") continue;
 
 			const ageMs = nowMs - new Date(rec.createdAt).getTime();
 			const expired = rec.ttlMs !== undefined ? ageMs > rec.ttlMs : false;
@@ -654,14 +664,19 @@ async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { age
 
 			if ((rec.status === "queued" || rec.status === "failed") && !agentRunning) {
 				if (mailboxOnly) {
-					actions.push({ messageId: msgId, action: "awaiting_mailbox_pickup", reason: `Recipient ${rec.to} is mailbox-only (no tmux pane); message awaits swarm_check_mailbox` });
+					if (!options.dryRun) {
+						upsertMessageRecord(st, { id: msgId, swarmId: st.swarmId, from: rec.from, to: rec.to, priority: "normal", type: "swarm.message" as const, schemaVersion: 1, createdAt: rec.createdAt, body: "", headers: {}, requiresAck: rec.requiresAck, ttlMs: rec.ttlMs }, "mailbox_delivered", { lastError: undefined });
+						await trace(p, "reconcile.mailbox_delivered", { id: msgId, to: rec.to, previousStatus: rec.status });
+					}
+					actions.push({ messageId: msgId, action: options.dryRun ? "would_mark_mailbox_delivered" : "mailbox_delivered", reason: `Recipient ${rec.to} is mailbox-only (no tmux pane); message awaits swarm_check_mailbox` });
 				} else {
 					actions.push({ messageId: msgId, action: "pending", reason: "Recipient agent not running" });
 				}
 				continue;
 			}
 
-			if ((rec.status === "injected" || rec.status === "intercepted") && !rec.ackedAt) {
+			if ((rec.status === "mailbox_delivered" || rec.status === "injected" || rec.status === "intercepted") && !rec.ackedAt) {
+				if (!rec.requiresAck) continue;
 				// Consider the most recent delivery timestamp. Previously this only checked injectedAt, so
 				// `intercepted` messages (which set interceptedAt, not injectedAt) were never detected as stale.
 				const sinceMs = Math.max(
@@ -901,8 +916,9 @@ export default function (pi: ExtensionAPI) {
 				const tmuxAlive = agent.tmuxTarget && agent.tmuxTarget !== "unknown" ? await isTmuxRunning(pi, agent.tmuxTarget) : false;
 				const records = Object.values(st.messages || {}).filter((m) => m.to === agent.id);
 				const pendingMessages = records.filter((m) => m.status === "queued" || m.status === "failed").length;
-				const unackedMessages = records.filter((m) => m.requiresAck && !m.ackedAt && (m.status === "injected" || m.status === "intercepted")).length;
-				const ackMissing = records.filter((m) => Boolean(m.ackMissingAt) && !m.ackedAt).length;
+				const mailboxDelivered = records.filter((m) => m.status === "mailbox_delivered").length;
+				const unackedMessages = records.filter((m) => m.requiresAck && !m.ackedAt && (m.status === "mailbox_delivered" || m.status === "injected" || m.status === "intercepted")).length;
+				const ackMissing = records.filter((m) => m.requiresAck && Boolean(m.ackMissingAt) && !m.ackedAt).length;
 				const deadLetters = records.filter((m) => m.status === "dead_letter").length;
 				const lastHeartbeatAgeSec = agent.lastHeartbeatAt ? Math.round((Date.now() - new Date(agent.lastHeartbeatAt).getTime()) / 1000) : undefined;
 				rows.push({
@@ -920,6 +936,7 @@ export default function (pi: ExtensionAPI) {
 					lastToolAt: agent.lastToolAt,
 					lastShutdownAt: agent.lastShutdownAt,
 					pendingMessages,
+					mailboxDelivered,
 					unackedMessages,
 					ackMissing,
 					deadLetters,
@@ -928,6 +945,59 @@ export default function (pi: ExtensionAPI) {
 			}
 			await trace(p, "agent.status.read", { agentId: filter, count: rows.length });
 			return textResult(JSON.stringify({ count: rows.length, agents: rows }, null, 2), { agents: rows });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_prune",
+		label: "Swarm Prune",
+		description: "Orchestrator/admin cleanup tool. Dry-run by default. Marks zombie agents whose tmux panes are gone and can optionally remove stopped agent records from state.",
+		promptGuidelines: ["Use `swarm_prune` only for orchestrator/admin cleanup. Do not use it for normal worker tasks. Run dryRun first before mutating state."],
+		parameters: Type.Object({
+			dryRun: Type.Optional(Type.Boolean({ description: "Preview actions without modifying state. Defaults to true." })),
+			markDead: Type.Optional(Type.Boolean({ description: "Mark running agents with missing tmux panes as stopped. Defaults to true." })),
+			removeStopped: Type.Optional(Type.Boolean({ description: "Remove stopped agent records from swarm state. Does not delete mailboxes/traces. Defaults to false." })),
+			stoppedOlderThanMs: Type.Optional(Type.Number({ description: "Only remove stopped agent records older than this age. Defaults to 0." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const dryRun = params.dryRun !== false;
+			const markDead = params.markDead !== false;
+			const removeStopped = Boolean(params.removeStopped);
+			const stoppedOlderThanMs = Math.max(0, params.stoppedOlderThanMs || 0);
+			const actions: Array<{ agentId: string; action: string; reason: string }> = [];
+			await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const ts = now();
+				const nowMs = Date.now();
+				for (const [agentId, agent] of Object.entries(st.agents)) {
+					if (agentId === "orchestrator") continue;
+					const hasPane = Boolean(agent.tmuxTarget) && agent.tmuxTarget !== "unknown";
+					const tmuxAlive = hasPane ? await isTmuxRunning(pi, agent.tmuxTarget) : false;
+					if (markDead && agent.status === "running" && !tmuxAlive) {
+						actions.push({ agentId, action: "mark_stopped", reason: "tmux pane is not alive" });
+						if (!dryRun) {
+							agent.status = "stopped";
+							agent.runtimeStatus = "stopped";
+							agent.health = "unhealthy";
+							agent.lastShutdownAt ||= ts;
+							agent.updatedAt = ts;
+						}
+					}
+					const stoppedAt = agent.lastShutdownAt || agent.updatedAt || agent.createdAt;
+					const stoppedAge = stoppedAt ? nowMs - new Date(stoppedAt).getTime() : Number.POSITIVE_INFINITY;
+					if (removeStopped && agent.status === "stopped" && stoppedAge >= stoppedOlderThanMs) {
+						actions.push({ agentId, action: "remove_agent_record", reason: `stopped for ${Math.round(stoppedAge / 1000)}s` });
+						if (!dryRun) {
+							delete st.agents[agentId];
+							delete st.delivered[agentId];
+						}
+					}
+				}
+				if (!dryRun && actions.length) await writeState(p, st);
+			});
+			await trace(p, "swarm.prune", { dryRun, markDead, removeStopped, stoppedOlderThanMs, actions });
+			return textResult(JSON.stringify({ dryRun, count: actions.length, actions }, null, 2), { dryRun, actions });
 		},
 	}));
 
@@ -1066,7 +1136,7 @@ export default function (pi: ExtensionAPI) {
 		name: "swarm_message_status",
 		label: "Swarm Message Status",
 		description: "Inspect lifecycle status records for swarm messages, optionally filtered by agent or status.",
-		promptGuidelines: ["Use `swarm_message_status` to debug whether swarm messages are queued, injected, intercepted, acked, or failed."],
+		promptGuidelines: ["Use `swarm_message_status` to debug whether swarm messages are queued, mailbox_delivered, injected, intercepted, acked, failed, or dead_letter."],
 		parameters: Type.Object({
 			messageId: Type.Optional(Type.String({ description: "Specific message id to inspect." })),
 			agentId: Type.Optional(Type.String({ description: "Filter messages by recipient agent id." })),

@@ -38,6 +38,7 @@ Useful tools:
 - `swarm_ack_message`
 - `swarm_message_status`
 - `swarm_reconcile`
+- `swarm_prune`
 - `swarm_dead_letters`
 - `swarm_trace`
 - `swarm_capture_agent_pane`
