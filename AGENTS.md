@@ -9,7 +9,7 @@
 - use tmux skill to create a dedicated tmux session for validation/review work; if a full new session is not practical, create a clearly named pane/window instead
 - in that session/pane create pi session with the models below:
 ```
-pi --model glm-4.5 --provider zai-coding-cn
+pi --model glm-5.1 --provider zai-coding-cn
 pi --model gpt-5.4-mini --provider openai
 ```
 

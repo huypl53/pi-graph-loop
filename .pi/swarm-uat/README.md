@@ -9,7 +9,7 @@ scripts/swarm_uat.sh
 If OpenAI credentials are unavailable, run the same scenario with another provider/model:
 
 ```bash
-SWARM_MODEL=glm-4.5 SWARM_PROVIDER=zai-coding-cn scripts/swarm_uat.sh
+SWARM_MODEL=glm-5.1 SWARM_PROVIDER=zai-coding-cn scripts/swarm_uat.sh
 ```
 
 Useful env vars:

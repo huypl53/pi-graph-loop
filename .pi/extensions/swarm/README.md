@@ -17,7 +17,7 @@ docs/swarm.md
 Quick start:
 
 ```bash
-pi --model glm-4.5 --provider zai-coding-cn -e .pi/extensions/swarm/index.ts
+pi --model glm-5.1 --provider zai-coding-cn -e .pi/extensions/swarm/index.ts
 ```
 
 Inside pi:

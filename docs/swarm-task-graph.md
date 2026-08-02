@@ -514,7 +514,62 @@ nodes:
       Commit only scoped files with a focused commit message.
 ```
 
-## New tools
+## Tool surface and automatic resource management
+
+Do not expose every internal resource operation as a normal worker tool. Too many tools confuse agents and invite unsafe calls. V1 should prefer **high-level task tools** plus internal helper functions. Resource management should happen automatically inside task lifecycle operations, with manual destructive controls reserved for the orchestrator/admin.
+
+### Worker core tools
+
+Worker agents should normally need only:
+
+```text
+swarm_agent_identity
+swarm_check_mailbox
+swarm_ack_message
+swarm_task_status
+swarm_update_task
+swarm_write_task_artifact
+swarm_task_message
+```
+
+These let workers receive work, acknowledge it, inspect assigned state, write evidence, and ask task-scoped clarifying questions.
+
+### Orchestrator task tools
+
+The orchestrator should use high-level graph operations:
+
+```text
+swarm_create_task
+swarm_assign_task
+swarm_task_status
+swarm_update_task
+swarm_print_graph
+swarm_validate_graph
+swarm_next_nodes
+```
+
+`swarm_assign_task` should encapsulate role lookup, reuse, optional spawn, assignment state update, task message send, and active-task bookkeeping. The orchestrator should not need to manually chain low-level find/spawn/send/update operations for normal task flow.
+
+### Admin/resource controls
+
+Admin controls should be orchestrator-only and not part of the normal worker toolbox:
+
+```text
+swarm_spawn_agent
+swarm_list_agents
+swarm_reconcile
+swarm_agent_status
+swarm_message_status
+swarm_dead_letters
+swarm_trace
+swarm_capture_agent_pane
+```
+
+`swarm_send_message` remains the low-level messaging primitive used by orchestrators and by `swarm_task_message`; normal task workers should prefer `swarm_task_message` once task tools exist, so task metadata and handoffs are recorded consistently.
+
+Future destructive controls such as `swarm_stop_agent` and `swarm_gc_agents` should default to dry-run, require explicit orchestrator/admin use, and never be suggested to worker agents.
+
+## New high-level tools
 
 ### `swarm_create_task`
 
@@ -612,17 +667,19 @@ Input fields:
 - `relativePath`
 - `content`
 
-### `swarm_find_agent`
+### Internal `findReusableAgent` helper
 
-Finds reusable agents by role/capability/liveness before assignment.
+Do not register `swarm_find_agent` as a public worker tool in V1. Implement agent lookup as an internal helper used by `swarm_assign_task` and optionally exposed later only to orchestrator/debug contexts.
 
-Input fields:
+Internal inputs:
 
 - `roleKind?`
 - `capabilities?`
 - `requireIdle?`
 - `requireTmuxAlive?`
 - `includeBusy?`
+
+Internal result should still be traceable with `agent.find`, but normal agents should not have to choose peers manually.
 
 ### `swarm_task_message`
 
@@ -791,15 +848,15 @@ When assigning a node, use this order:
 5. If no match exists and `autoSpawn=true`, call `swarm_spawn_agent` once to create a new long-lived role agent.
 6. If no match exists and `autoSpawn=false`, return a corrective error such as `NO_AVAILABLE_AGENT` with suggested existing candidates or spawn parameters.
 
-### Proposed agent lookup tool
+### Internal agent lookup helper
 
-Add a reusable lookup tool before or alongside task assignment. This section is the canonical behavior reference; the New tools list below should cross-reference it instead of duplicating semantics.
+Agent lookup should be an internal helper used by `swarm_assign_task`, not a default public worker tool. The implementation can expose it later only to orchestrator/debug contexts if needed.
 
 ```text
-swarm_find_agent
+findReusableAgent(...)
 ```
 
-Input fields:
+Internal inputs:
 
 - `roleKind?`
 - `capabilities?`
@@ -807,7 +864,7 @@ Input fields:
 - `requireTmuxAlive?`
 - `includeBusy?`
 
-Example result:
+Example internal result:
 
 ```json
 {
@@ -847,6 +904,17 @@ Important semantics:
 - Reassignment to an existing agent should update `activeTaskIds`/node state and send a task message, not create a new tmux window.
 - Assignment completion should remove the task from `activeTaskIds`.
 
+### Automatic lifecycle hooks
+
+Resource bookkeeping should happen as part of task operations:
+
+- `swarm_assign_task` resolves/reuses/spawns the assignee and adds the task/node to `activeTaskIds`.
+- `swarm_update_task` removes finished node assignments from `activeTaskIds` when status reaches `done`, `failed`, `blocked`, or `skipped`.
+- Task terminal transitions release advisory `editLocks` and mark unused ephemeral agents `gcEligible`.
+- `swarm_reconcile`, `/swarm status`, and `swarm_task_status(runtime=true)` can run a non-destructive mark-only resource sweep.
+
+Do not auto-kill tmux windows in V1. Auto cleanup may mark stale/idle/eligible resources and surface warnings, but destructive cleanup requires an orchestrator/admin action.
+
 ### Validation and cleanup implications
 
 Agent reuse adds new validation checks:
@@ -856,13 +924,11 @@ Agent reuse adds new validation checks:
 - flag stale `activeTaskIds` when a task is terminal;
 - ensure an existing agent's tmux target is alive before assignment.
 
-Known V1 cleanup gap: `swarm_assign_task` may add a task id to `activeTaskIds` before dedicated cleanup tooling exists. Until `swarm_update_task` or a lifecycle helper removes completed assignments automatically, validators must flag stale active-task pointers on terminal tasks.
+Manual resource tooling can come later, but it should remain orchestrator/admin-only:
 
-It also implies future lifecycle tools:
-
-- `swarm_stop_agent`: stop one long-lived or ephemeral agent safely;
-- `swarm_gc_agents`: list/stop stale ephemeral agents and clean stale active-task pointers;
-- `swarm_release_agent_task`: remove an active task assignment after done/failed/cancelled.
+- `swarm_stop_agent`: stop one long-lived or ephemeral agent safely; default should refuse active tasks unless `force=true`.
+- `swarm_gc_agents`: list/stop stale ephemeral agents and clean stale active-task pointers; default should be `dryRun=true`.
+- `swarm_release_agent_task`: remove an active task assignment after done/failed/cancelled when automatic release needs repair.
 
 ## Graph start, edges, and branching
 
@@ -1361,10 +1427,10 @@ Pass criteria:
 - Add task path helpers and types.
 - Add TaskState/TaskNode/Gate TypeScript types.
 - Add structured agent reuse fields (`roleKind`, `capabilities`, `activeTaskIds`, `maxConcurrentTasks`) with backward-compatible defaults for existing agents.
+- Add internal `findReusableAgent` helper, not a public worker tool.
 - Add path helpers for `.pi/swarm/tasks/<task-id>/`.
 - Add `swarm_create_task`.
 - Add `swarm_task_status`.
-- Add `swarm_find_agent`.
 - Use temp-file + rename for `task.json`; back-port atomic writes to `swarm-state.json`.
 - Use the existing global lock for V1 task mutations.
 - Trace `task.create`, `task.status.read`, and `agent.find`.
@@ -1378,8 +1444,8 @@ Pass criteria:
 
 ### Commit 4: assign/update and task messaging
 
-- Add `swarm_assign_task`.
-- Add `swarm_update_task`.
+- Add `swarm_assign_task` as the high-level automatic resource-management entrypoint: reuse idle matching agents, optionally spawn, update assignment state, send task message, and record active task ids.
+- Add `swarm_update_task` with automatic active-task release on node terminal states.
 - Add `swarm_task_message` for task-scoped chat/handoffs.
 - Include `taskId`/`nodeId`/`replyTarget` in message headers/details.
 - Store assignment message ids in task state.

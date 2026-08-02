@@ -12,6 +12,10 @@ const SEND_SETTLE_MS = 700;
 const SPAWN_SETTLE_MS = 2_500;
 const SYSTEM_START = "[PI-SWARM SYSTEM MESSAGE]";
 const SYSTEM_END = "[/PI-SWARM SYSTEM MESSAGE]";
+const DEFAULT_MODEL = "glm-5.1";
+const DEFAULT_PROVIDER = "zai-coding-cn";
+const FAST_MODEL = "gpt-5.4-mini";
+const FAST_PROVIDER = "openai";
 
 type AgentStatus = "running" | "stopped" | "unknown";
 type RuntimeStatus = "starting" | "idle" | "busy" | "tool_running" | "shutting_down" | "stopped";
@@ -241,11 +245,16 @@ function currentAgentId() {
 }
 
 function currentModel() {
-	return process.env.PI_SWARM_DEFAULT_MODEL || "glm-5.1";
+	return process.env.PI_SWARM_DEFAULT_MODEL || DEFAULT_MODEL;
 }
 
-function currentProvider() {
-	return process.env.PI_SWARM_DEFAULT_PROVIDER || "zai-coding-cn";
+function providerForModel(model: string) {
+	if (model === FAST_MODEL) return FAST_PROVIDER;
+	return DEFAULT_PROVIDER;
+}
+
+function currentProvider(model = currentModel()) {
+	return process.env.PI_SWARM_DEFAULT_PROVIDER || providerForModel(model);
 }
 
 function childPiArgs() {
@@ -517,7 +526,7 @@ async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmS
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
 	if (state.agents[id]?.status === "running") throw new Error(`Agent already exists and is running: ${id}`);
 	const model = input.model || currentModel();
-	const provider = input.provider || currentProvider();
+	const provider = input.provider || currentProvider(model);
 	const window = id;
 	const target = `${state.tmuxSession}:${window}.0`;
 	const envPrefix = [
@@ -943,8 +952,8 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "Stable agent id, e.g. planner or reviewer. Lowercase letters, digits, dash and underscore are safest." })),
 			role: Type.String({ description: "Role/instructions for the agent." }),
-			model: Type.Optional(Type.String({ description: "pi model id. Defaults to PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1." })),
-			provider: Type.Optional(Type.String({ description: "pi provider id. Defaults to PI_SWARM_DEFAULT_PROVIDER/current session provider, fallback zai-coding-cn." })),
+			model: Type.Optional(Type.String({ description: "pi model id. Defaults to PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1. Supported fast preset: gpt-5.4-mini." })),
+			provider: Type.Optional(Type.String({ description: "pi provider id. Defaults to PI_SWARM_DEFAULT_PROVIDER or model preset provider (zai-coding-cn for glm-5.1, openai for gpt-5.4-mini)." })),
 			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt to send into the spawned agent after pi starts." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -953,7 +962,8 @@ export default function (pi: ExtensionAPI) {
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				await trace(p, "agent.spawn.request", { requestedBy: currentAgentId(), ...params });
-				const r = await spawnAgent(pi, ctx.cwd, p, st, { ...params, model: params.model || currentModel(), provider: params.provider || currentProvider() });
+				const model = params.model || currentModel();
+				const r = await spawnAgent(pi, ctx.cwd, p, st, { ...params, model, provider: params.provider || currentProvider(model) });
 				await writeState(p, st);
 				return { swarmId: st.swarmId, tmuxSession: st.tmuxSession, ...r };
 			});
@@ -1202,7 +1212,7 @@ export default function (pi: ExtensionAPI) {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm spawn <id> [role]", "warning"); return; }
 					const role = rest.join(" ") || id;
-					const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await spawnAgent(pi, ctx.cwd, p, st, { id, role, model: currentModel(), provider: currentProvider() }); await writeState(p, st); return r; });
+					const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const model = currentModel(); const r = await spawnAgent(pi, ctx.cwd, p, st, { id, role, model, provider: currentProvider(model) }); await writeState(p, st); return r; });
 					ctx.ui.notify(`Spawned ${result.agent.id} at ${result.agent.tmuxTarget}`, "info");
 					return;
 				}

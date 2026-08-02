@@ -33,7 +33,7 @@ docs/swarm.md
 Start pi with the local extension:
 
 ```bash
-pi --model glm-4.5 --provider zai-coding-cn -e .pi/extensions/swarm/index.ts
+pi --model glm-5.1 --provider zai-coding-cn -e .pi/extensions/swarm/index.ts
 ```
 
 Then inside pi:
@@ -55,7 +55,7 @@ Call swarm_agent_status for all agents.
 Run the UAT harness:
 
 ```bash
-SWARM_MODEL=glm-4.5 SWARM_PROVIDER=zai-coding-cn scripts/swarm_uat.sh
+SWARM_MODEL=glm-5.1 SWARM_PROVIDER=zai-coding-cn scripts/swarm_uat.sh
 ```
 
 UAT docs and artifacts:

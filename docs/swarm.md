@@ -34,8 +34,10 @@ Runtime files are local to the current working directory and are ignored by git.
 Start pi with the project-local extension:
 
 ```bash
-pi --model glm-4.5 --provider zai-coding-cn -e .pi/extensions/swarm/index.ts
+pi --model glm-5.1 --provider zai-coding-cn -e .pi/extensions/swarm/index.ts
 ```
+
+The extension defaults to `glm-5.1` / `zai-coding-cn`. It also knows the fast preset `gpt-5.4-mini`: when `swarm_spawn_agent` receives `model: "gpt-5.4-mini"` and no explicit provider/default-provider env override, it auto-selects provider `openai`. Precedence is explicit `provider` parameter, then `PI_SWARM_DEFAULT_PROVIDER`, then model preset.
 
 Inside pi, initialize/check the swarm:
 
@@ -274,7 +276,7 @@ Spawned agents receive an identity card and should:
 Run the UAT harness with GLM/Zai:
 
 ```bash
-SWARM_MODEL=glm-4.5 SWARM_PROVIDER=zai-coding-cn scripts/swarm_uat.sh
+SWARM_MODEL=glm-5.1 SWARM_PROVIDER=zai-coding-cn scripts/swarm_uat.sh
 ```
 
 Artifacts are written to:

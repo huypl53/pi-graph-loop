@@ -4,7 +4,7 @@ set -euo pipefail
 # UAT harness for .pi/extensions/swarm/index.ts
 # Defaults intentionally use OpenAI gpt-5.4-mini per project validation preference.
 # Override when needed:
-#   SWARM_MODEL=glm-4.5 SWARM_PROVIDER=zai-coding-cn scripts/swarm_uat.sh
+#   SWARM_MODEL=glm-5.1 SWARM_PROVIDER=zai-coding-cn scripts/swarm_uat.sh
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
