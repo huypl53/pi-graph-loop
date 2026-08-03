@@ -4,6 +4,13 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(extensions): `message-timestamp` — time at the start of every agent message
+
+- New project-local extension `.pi/extensions/message-timestamp.ts`. It renders a small dim `HH:MM:SS` timestamp line at the very beginning of each agent (assistant) message in the TUI, including every assistant message in a multi-turn (tool-using) reply.
+- Implementation: hooks `message_start` for `role === "assistant"` and appends a TUI-only custom entry (`appendEntry` + `registerEntryRenderer`). Using a custom entry means the timestamp is purely visual — it is **not** added to the message content, so it never pollutes the LLM context.
+- Hook choice matters: `turn_start` fires before the user message is committed to the log (so an entry there renders above the user message); `message_start` for the assistant role fires as the agent reply itself begins, so the entry lands right at the top of the agent message.
+- Validated in an isolated tmux session (`ext-validate-msgts-*`, pi 0.83.0, glm-5.1/zai-coding-cn): confirmed correct placement for both a single-turn reply and a two-turn tool-using reply (one timestamp per assistant message). Snapshots under `tmux-snapshots/`.
+
 ### fix(swarm): auto-pump orchestrator mailbox reports
 
 - Fixed a PM/orchestrator reporting bug where workers could correctly update task state and send `swarm_send_message(to="orchestrator")`, but the orchestrator would not notice until it manually polled the mailbox.
