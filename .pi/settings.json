@@ -1,0 +1,6 @@
+{
+  "swarm": {
+    "defaultModel": "gpt-5.4-mini",
+    "defaultProvider": "openai"
+  }
+}
