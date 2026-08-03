@@ -4,6 +4,12 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### fix(swarm): auto-pump orchestrator mailbox reports
+
+- Fixed a PM/orchestrator reporting bug where workers could correctly update task state and send `swarm_send_message(to="orchestrator")`, but the orchestrator would not notice until it manually polled the mailbox.
+- The orchestrator session now runs a session-scoped mailbox pump that marks pending orchestrator messages delivered and surfaces them locally as `swarm-message` events, using `triggerTurn` when idle and `followUp` while busy.
+- This preserves mailbox-only routing for the orchestrator pseudo-agent while making completion reports and handoffs visible without manual `swarm_check_mailbox`.
+
 ### feat(swarm): engine-enforced task closure for task graph loop
 
 - Added Commit 4 task-graph execution tools to `.pi/extensions/swarm/index.ts`: `swarm_assign_task`, `swarm_update_task`, and `swarm_task_message`.

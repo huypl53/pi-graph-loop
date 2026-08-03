@@ -1061,6 +1061,39 @@ async function readMailbox(p: Paths, agentId: string): Promise<SwarmMessage[]> {
 	return raw.split(/\n+/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
+function formatSwarmMessageContent(msg: SwarmMessage) {
+	const ackLine = msg.requiresAck
+		? `\n\n[PI-SWARM ACK REQUIRED] This message requires acknowledgement. Call \`swarm_ack_message\` with messageId="${msg.id}" and status=\`seen\`|\`processing\`|\`done\`|\`failed\` (ack \`seen\`/\`processing\` now, then \`done\`/\`failed\` when complete). Unacked delivered messages are surfaced as ack_missing.`
+		: "";
+	return `Inter-agent swarm message from ${msg.from} to ${msg.to}${msg.subject ? ` (${msg.subject})` : ""}:\n\n${msg.body}${ackLine}`;
+}
+
+async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reason: string) {
+	if (currentAgentId() !== "orchestrator") return { delivered: 0, ids: [] as string[] };
+	const pending = await withLock(p, async () => {
+		const st = await readState(p, ctx.cwd);
+		ensureOrchestrator(st, ctx.cwd, p);
+		const deliveredIds = new Set(st.delivered.orchestrator || []);
+		const messages = (await readMailbox(p, "orchestrator")).filter((m) => !deliveredIds.has(m.id));
+		if (!messages.length) return [] as SwarmMessage[];
+		st.delivered.orchestrator = Array.from(new Set([...(st.delivered.orchestrator || []), ...messages.map((m) => m.id)]));
+		await writeState(p, st);
+		return messages.slice(0, 10);
+	});
+	if (!pending.length) return { delivered: 0, ids: [] as string[] };
+	for (let i = 0; i < pending.length; i++) {
+		const msg = pending[i];
+		pi.sendMessage({
+			customType: "swarm-message",
+			content: formatSwarmMessageContent(msg),
+			display: true,
+			details: msg,
+		}, i === 0 && ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" });
+	}
+	await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), idleAtStart: ctx.isIdle() });
+	return { delivered: pending.length, ids: pending.map((m) => m.id) };
+}
+
 function truncate(text: string) {
 	const t = truncateHead(text, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
 	if (!t.truncated) return text;
@@ -1462,6 +1495,25 @@ async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { age
 }
 
 export default function (pi: ExtensionAPI) {
+	let orchestratorMailboxTimer: NodeJS.Timeout | undefined;
+	let orchestratorMailboxPumpRunning = false;
+	const stopOrchestratorMailboxPump = () => {
+		if (orchestratorMailboxTimer) clearInterval(orchestratorMailboxTimer);
+		orchestratorMailboxTimer = undefined;
+	};
+	const startOrchestratorMailboxPump = (ctx: any) => {
+		stopOrchestratorMailboxPump();
+		if (currentAgentId() !== "orchestrator") return;
+		const p = paths(ctx.cwd);
+		const run = async (reason: string) => {
+			if (orchestratorMailboxPumpRunning) return;
+			orchestratorMailboxPumpRunning = true;
+			try { await pumpOrchestratorMailbox(pi, ctx, p, reason); } finally { orchestratorMailboxPumpRunning = false; }
+		};
+		void run("session_start");
+		orchestratorMailboxTimer = setInterval(() => { void run("interval"); }, 5_000);
+	};
+
 	pi.on("session_start", async (_event, ctx) => {
 		const p = paths(ctx.cwd);
 		await ensureDirs(p);
@@ -1496,6 +1548,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		});
 		if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${agentId}`);
+		if (agentId === "orchestrator") startOrchestratorMailboxPump(ctx);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -1545,7 +1598,11 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		const agentId = currentAgentId();
-		if (agentId === "orchestrator") return;
+		if (agentId === "orchestrator") {
+			const p = paths(ctx.cwd);
+			await pumpOrchestratorMailbox(pi, ctx, p, "agent_settled");
+			return;
+		}
 		const p = paths(ctx.cwd);
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
@@ -1608,7 +1665,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		const agentId = currentAgentId();
-		if (agentId === "orchestrator") return;
+		if (agentId === "orchestrator") {
+			stopOrchestratorMailboxPump();
+			return;
+		}
 		const p = paths(ctx.cwd);
 		await ensureDirs(p);
 		await withLock(p, async () => {
@@ -1653,12 +1713,9 @@ export default function (pi: ExtensionAPI) {
 			await writeState(p, st);
 		});
 		await trace(p, "message.input_intercept", { id: msg.id, from: msg.from, to: msg.to, agentId: currentAgentId(), status: "intercepted" });
-		const ackLine = msg.requiresAck
-			? `\n\n[PI-SWARM ACK REQUIRED] This message requires acknowledgement. Call \`swarm_ack_message\` with messageId="${msg.id}" and status=\`seen\`|\`processing\`|\`done\`|\`failed\` (ack \`seen\`/\`processing\` now, then \`done\`/\`failed\` when complete). Unacked delivered messages are surfaced as ack_missing.`
-			: "";
 		pi.sendMessage({
 			customType: "swarm-message",
-			content: `Inter-agent swarm message from ${msg.from} to ${msg.to}${msg.subject ? ` (${msg.subject})` : ""}:\n\n${msg.body}${ackLine}`,
+			content: formatSwarmMessageContent(msg),
 			display: true,
 			details: msg,
 		}, { triggerTurn: true, deliverAs: ctx.isIdle() ? "steer" : "followUp" });
