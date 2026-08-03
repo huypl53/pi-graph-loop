@@ -88,6 +88,17 @@ If you want to test the package without editing settings, you can also launch pi
 pi --model gpt-5.4-mini --provider openai -e /absolute/path/to/pi-graph-agents
 ```
 
+### Optimization/memory setup for a new project
+
+Before asking agents to optimize a project, define the project-specific quality gate and evidence policy:
+
+1. Create a metric contract with `swarm_metric_define` (metric id, direction, value type, source, and `evidenceRequired`).
+2. Record a baseline run with `swarm_run_record` and complete `evidenceRefs`; then create an iteration session with `swarm_iteration_create`.
+3. For each candidate, give the agent `swarm_iteration_context` first, record the candidate with `swarm_run_record`, append it with `swarm_iteration_record`, then inspect `swarm_iteration_status` or the dashboard.
+4. Agents may propose memory only from passing/approved runs with file-backed evidence; reviewer/orchestrator must accept it. See [`docs/swarm-memory.md`](docs/swarm-memory.md) for read/propose/accept rules and anti-patterns.
+
+V1 loops are explicit: repeat candidate run + `swarm_iteration_record` as many times as needed. There is no daemon or native graph-cycle runner; the demo validates baseline + one accepted candidate + one rejected incomplete-evidence run, and longer loops are just more explicit records.
+
 ## Validation
 
 Recent validation covered:

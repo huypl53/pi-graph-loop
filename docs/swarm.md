@@ -399,6 +399,20 @@ Tools (8):
 
 Run records can optionally link to a swarm task via `taskId`/`nodeId`; when tied to a graph, also stamp `task.json.sharedContext`/`task.json.evidence`, but `runs.jsonl` remains the authoritative metric/evidence store. See [`docs/swarm-task-graph.md`](./swarm-task-graph.md) and the `swarm_metric_designer` skill for the iteration demo flow.
 
+### New-project optimization setup checklist
+
+After installing this package into a new project, set up optimization explicitly; swarm does not invent project metrics for you.
+
+1. **Define the quality/metric contract** with `swarm_metric_define` before recording runs. Pick a project-specific primary metric (`quality_score`, `pass_rate`, `eval_score`, etc.), direction (`maximize|minimize|target|passfail`), type, source artifact/command/report, and `evidenceRequired` refs. This contract is the quality gate for iteration ranking and memory eligibility.
+2. **Create an evidence convention** in the target project, e.g. `.pi/swarm/evidence/<task-or-run>/summary.md` plus `.patch`/`.diff` for code/config changes. `swarm_run_record` captures SHA-256 digests for every evidence ref; later memory promotion fails if evidence is missing or mutated.
+3. **Run a baseline** with `swarm_run_record(status="done", verdict="pass", metrics={...}, evidenceRefs=[...])`, then `swarm_iteration_create(metricContractId=..., baselineRunId=...)`.
+4. **For each candidate iteration**, give the agent the `swarm_iteration_context` bundle first. It includes `memoryPolicyRef: "docs/swarm-memory.md"`, previous best, active/pinned memories, and excluded stale memories. The agent should read memory before planning changes.
+5. **Record the candidate** with `swarm_run_record`, then append it with `swarm_iteration_record`. The best/improvement roll-up is recomputed from the metric contract; failed/running/cross-contract/stale-version/wrong-type runs cannot win.
+6. **Memory write path**: agents may `swarm_memory_propose` only from a passing/approved run with complete file-backed evidence. A reviewer/orchestrator must `swarm_memory_accept` before the claim becomes active. Pane-only, ack-only, mailbox-only, generic, or evidence-incomplete claims stay rejected/auditable and are not carried forward.
+7. **Dashboard/review**: use `swarm_iteration_status(includeContext=true)`, `scripts/swarm_iteration_watch.sh`, or `scripts/swarm_dashboard.sh` to see per-iteration improvement, memory carry-forward, and task/message evidence.
+
+**Iteration count:** V1 has no daemon and no native graph-cycle runner. Iterations are explicit `swarm_run_record` + `swarm_iteration_record` calls; you can append as many candidate entries as your file-backed session can reasonably handle. The demo validates a baseline, one accepted candidate, and one rejected/incomplete-evidence run; longer loops are just repeated candidate records. If you want an automatic loop, model it as an orchestrated sequence or create a new task node per iteration — do not rely on graph cycles in V1.
+
 ## Memory protocol
 
 Memory is governed by a dedicated runtime policy: [`docs/swarm-memory.md`](./swarm-memory.md). Generated agent identity files link to it, and the iteration-context bundle surfaces its path as `memoryPolicyRef`. In short:
