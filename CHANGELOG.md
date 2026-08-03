@@ -4,6 +4,12 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### docs(swarm): fresh graph UAT scenario + gap-closure validation
+
+- Added `docs/swarm-graph-uat-scenario.md`, a clean-reset swarm graph UAT scenario covering the happy path, blocked/stale/session probes, both rework loops, and the exact last-live-holder self-stop case.
+- Re-ran the scenario from a fresh swarm reset with newly spawned agents and confirmed the previously missing coverage gaps are now exercised end-to-end.
+- Recorded two non-blocking findings from the rework loops: after `fix_from_test` the `test` node did not auto-reopen, and after `fix_from_review` the `review` node did not auto-reopen; both required an orchestrator/manual reopen to complete coverage.
+
 ### feat(swarm): production hardening batch 1 (task closure sweep, reconcile task sweep, PM summary, task-graph UAT)
 
 - **Project-local default model/provider config:** the swarm extension now reads `.pi/settings.json` before env vars when resolving default child-agent `model` / `provider`. Recommended keys: top-level `swarm.defaultModel` / `swarm.defaultProvider`. `extensions.swarm.defaultModel` / `extensions.swarm.defaultProvider` are still accepted for backward compatibility. Precedence is explicit tool params → `.pi/settings.json` → `PI_SWARM_DEFAULT_MODEL` / `PI_SWARM_DEFAULT_PROVIDER` → code defaults/model presets.
