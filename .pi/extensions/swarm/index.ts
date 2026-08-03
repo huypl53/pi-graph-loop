@@ -124,6 +124,7 @@ type TaskNode = {
 	maxAttempts?: number;
 	terminal?: boolean;
 	lastActivityAt?: string;
+	staleAt?: string;
 };
 
 type TaskEdge = {
@@ -569,11 +570,18 @@ async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task: TaskS
 		for (const msgId of node.messageIds || []) {
 			const rec = st.messages[msgId];
 			if (!rec) { warnings.push(`node ${id} references missing message ${msgId}`); continue; }
+			if (rec.status === "dead_letter") warnings.push(`node ${id} assignment/handoff message ${msgId} is dead-lettered (${rec.lastError || "unknown"})`);
 			if (rec.requiresAck && !rec.ackedAt) warnings.push(`node ${id} message ${msgId} requires ack but is ${rec.status}`);
+			// Assignment acked done but the node was never advanced past assigned/in_progress.
+			if (rec.lastAck?.status === "done" && (node.status === "assigned" || node.status === "in_progress")) warnings.push(`node ${id} message ${msgId} acked done but node is still ${node.status}`);
 		}
 		if (node.status === "in_progress" && node.lastActivityAt) {
 			const age = nowMs - new Date(node.lastActivityAt).getTime();
 			if (age > 24 * 60 * 60 * 1000) warnings.push(`node ${id} in_progress for ${Math.round(age / 3_600_000)}h without update`);
+		}
+		// Terminal nodes must have released their advisory edit locks.
+		if (TERMINAL_NODE_STATUSES.has(node.status)) {
+			for (const [file, lock] of Object.entries(task.editLocks)) if (lock?.nodeId === id) warnings.push(`terminal node ${id} still holds editLock for ${file}`);
 		}
 	}
 	if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
@@ -591,6 +599,84 @@ function collectDeclaredArtifacts(task: TaskState): string[] {
 		for (const a of [...(node.readArtifacts || []), ...(node.writeArtifacts || [])]) set.add(a);
 	}
 	return [...set];
+}
+
+// Per-node closure summary derived purely from machine state (assignment contract + message ack +
+// task state + artifact existence + runtime health). ACK-done is NOT sufficient: a node is closed
+// only when its lifecycle status is terminal; ACK-done-without-terminal-node is a surfaced blocker.
+type NodeClosureSummary = {
+	nodeId: string;
+	role: string;
+	assignee: string | null;
+	status: TaskNodeStatus;
+	closed: boolean;
+	verdict: "done" | "failed" | "skipped" | "open";
+	blocking: string[];
+	assignmentAck: { messageId: string; status: string; acked: boolean; ackStatus: string | null } | null;
+	artifacts: Array<{ path: string; exists: boolean }>;
+	evidence: string[];
+};
+
+function nodeVerdict(status: TaskNodeStatus): NodeClosureSummary["verdict"] {
+	if (status === "done") return "done";
+	if (status === "failed") return "failed";
+	if (status === "skipped") return "skipped";
+	return "open";
+}
+
+function computeNodeClosureSummary(st: SwarmState, task: TaskState, nodeId: string, tp: TaskPaths): NodeClosureSummary {
+	const node = task.nodes[nodeId];
+	const verdict = nodeVerdict(node.status);
+	const blocking: string[] = [];
+	const agent = node.assignee ? st.agents[node.assignee] : undefined;
+	if (verdict === "open") blocking.push(`status is ${node.status} (not terminal)`);
+	if (node.staleAt) blocking.push(`marked stale at ${node.staleAt}`);
+	if (agent) {
+		ensureAgentDefaults(agent);
+		if (agent.status === "stopped" || agent.health === "unhealthy") blocking.push(`assignee ${agent.id} is ${agent.status}/${agent.health}`);
+	}
+	let assignmentAck: NodeClosureSummary["assignmentAck"] = null;
+	for (const msgId of node.messageIds || []) {
+		const rec = st.messages[msgId];
+		if (!rec) { blocking.push(`references missing message ${msgId}`); continue; }
+		if (!assignmentAck) assignmentAck = { messageId: msgId, status: rec.status, acked: Boolean(rec.ackedAt), ackStatus: rec.lastAck?.status ?? null };
+		if (rec.status === "dead_letter") blocking.push(`message ${msgId} is dead-lettered (${rec.lastError || "unknown"})`);
+		if (rec.requiresAck && !rec.ackedAt) blocking.push(`assignment message ${msgId} not acknowledged`);
+		if (rec.lastAck?.status === "done" && verdict === "open") blocking.push(`message ${msgId} acked done but node is still ${node.status}`);
+	}
+	const artifacts = (node.writeArtifacts || []).map((path) => ({ path, exists: existsSync(join(tp.root, path)) }));
+	for (const a of artifacts) if (verdict === "done" && !a.exists) blocking.push(`declared artifact ${a.path} missing`);
+	for (const [file, lock] of Object.entries(task.editLocks)) if (lock?.nodeId === nodeId && verdict !== "open") blocking.push(`holds editLock for ${file}`);
+	const evidence = [`task.md node "${nodeId}"`, ...artifacts.filter((a) => a.exists).map((a) => a.path)];
+	return { nodeId, role: node.role, assignee: node.assignee ?? null, status: node.status, closed: verdict !== "open", verdict, blocking, assignmentAck, artifacts, evidence };
+}
+
+// Task-level closure roll-up: machine-state closure + open/stale assignments + blockers. `derived`
+// is computeTaskStatus applied fresh so callers see drift between stored and derived status. This is
+// the pane-free done-detector: closure is knowable from task.json + swarm state alone.
+function computeTaskClosure(st: SwarmState, task: TaskState, tp: TaskPaths) {
+	const nodeClosure = Object.keys(task.nodes).map((id) => computeNodeClosureSummary(st, task, id, tp));
+	const openAssignments = nodeClosure.filter((n) => n.assignee && (n.status === "assigned" || n.status === "in_progress")).map((n) => ({ nodeId: n.nodeId, assignee: n.assignee as string, status: n.status }));
+	const staleReason = (n: NodeClosureSummary) => n.blocking.find((b) => b.includes("stale") || b.includes("stopped") || b.includes("unhealthy") || b.includes("dead-lettered"));
+	const staleAssignments = nodeClosure.filter((n) => n.assignee && staleReason(n)).map((n) => ({ nodeId: n.nodeId, assignee: n.assignee as string, reason: staleReason(n) || "stale" }));
+	const derived = computeTaskStatus(task);
+	const storedClosed = task.status === "done" || task.status === "failed" || task.status === "cancelled";
+	const blocking: string[] = [];
+	if (derived !== task.status && task.status !== "cancelled") blocking.push(`stored task.status=${task.status} but nodes derive ${derived}`);
+	if (!storedClosed && openAssignments.length === 0 && nodeClosure.some((n) => n.verdict === "open")) blocking.push("task open but no active assignments (stalled)");
+	return {
+		taskId: task.taskId,
+		storedStatus: task.status,
+		derivedStatus: derived,
+		closed: storedClosed,
+		closedNodes: nodeClosure.filter((n) => n.closed).length,
+		openNodes: nodeClosure.filter((n) => !n.closed).length,
+		staleNodes: staleAssignments.length,
+		openAssignments,
+		staleAssignments,
+		blocking,
+		nodeClosure,
+	};
 }
 
 function printGraphText(task: TaskState, ready: string[], current: string[], artifactStatus?: Array<{ path: string; exists: boolean }>): string {
@@ -643,6 +729,135 @@ function graphJsonSummary(task: TaskState, ready: string[], current: string[]) {
 		nodes: Object.entries(task.nodes).map(([id, n]) => ({ id, role: n.role, status: n.status, assignee: n.assignee || null, outcome: n.outcome || null, terminal: Boolean(n.terminal), dependsOn: n.dependsOn })),
 		edges: task.edges, gates: task.gates,
 	};
+}
+
+// ---- Task lifecycle helpers (assign / update / transition) ----
+
+// Allowed non-orchestrator node status transitions. Terminal states (done/failed/skipped) cannot
+// regress without an orchestrator override. The orchestrator bypasses this map entirely.
+const ALLOWED_NODE_TRANSITIONS: Record<string, Set<string>> = {
+	pending: new Set(["ready", "assigned", "blocked", "skipped", "failed"]),
+	ready: new Set(["assigned", "blocked", "skipped"]),
+	assigned: new Set(["in_progress", "done", "failed", "blocked", "ready"]),
+	in_progress: new Set(["done", "failed", "blocked"]),
+	blocked: new Set(["assigned", "in_progress", "ready", "skipped"]),
+};
+const TERMINAL_NODE_STATUSES = new Set<TaskNodeStatus>(["done", "failed", "skipped"]);
+
+function isAllowedNodeTransition(from: TaskNodeStatus, to: TaskNodeStatus) {
+	if (from === to) return true;
+	if (TERMINAL_NODE_STATUSES.has(from)) return false;
+	return Boolean(ALLOWED_NODE_TRANSITIONS[from]?.has(to));
+}
+
+// Release an agent's active-task pointer and advisory edit locks when a node reaches a terminal-ish
+// state (done/failed/blocked/skipped). activeTaskIds is task-granular; re-assignment re-adds it.
+function releaseNodeAssignment(st: SwarmState, task: TaskState, nodeId: string) {
+	const node = task.nodes[nodeId];
+	if (!node || !node.assignee) return;
+	const isTerminalish = node.status === "done" || node.status === "failed" || node.status === "blocked" || node.status === "skipped";
+	if (!isTerminalish) return;
+	const agent = st.agents[node.assignee];
+	if (agent) {
+		ensureAgentDefaults(agent);
+		agent.activeTaskIds = agent.activeTaskIds.filter((t) => t !== task.taskId);
+	}
+	for (const [file, lock] of Object.entries(task.editLocks)) {
+		if (lock?.nodeId === nodeId) delete task.editLocks[file];
+	}
+}
+
+// Derive the authoritative task status from node states. Closure is a deterministic consequence of
+// the last node transition: failed if any node failed; done iff every graph-terminal node is
+// done/skipped (and none failed); in_progress once any node has started; ready before that.
+// `cancelled` is orchestrator-explicit and never auto-derived here.
+function computeTaskStatus(task: TaskState): TaskStatus {
+	const nodes = Object.values(task.nodes);
+	if (nodes.some((n) => n.status === "failed")) return "failed";
+	const hasOutgoing = (id: string) => task.edges.some((e) => e.from === id) || Object.values(task.nodes).some((n) => (n.dependsOn || []).includes(id));
+	const terminals = Object.keys(task.nodes).filter((id) => task.nodes[id].terminal || !hasOutgoing(id)).map((id) => task.nodes[id]);
+	if (terminals.length && terminals.every((n) => n.status === "done" || n.status === "skipped")) return "done";
+	const started = nodes.some((n) => n.status === "assigned" || n.status === "in_progress" || n.status === "blocked" || n.status === "done" || n.status === "failed" || n.status === "skipped");
+	return started ? "in_progress" : "ready";
+}
+
+// Set task.status from node states unless the orchestrator explicitly cancelled it.
+function applyTaskStatus(task: TaskState): { changed: boolean; terminal: boolean } {
+	if (task.status === "cancelled") return { changed: false, terminal: true };
+	const prev = task.status;
+	task.status = computeTaskStatus(task);
+	const terminal = task.status === "done" || task.status === "failed";
+	return { changed: task.status !== prev, terminal };
+}
+
+// Remove a closed task from every agent's activeTaskIds (terminal bookkeeping cleanup).
+function releaseTaskFromAllAgents(st: SwarmState, taskId: string) {
+	for (const a of Object.values(st.agents)) { ensureAgentDefaults(a); a.activeTaskIds = a.activeTaskIds.filter((t) => t !== taskId); }
+}
+
+// Find non-terminal assigned/in_progress nodes still owned by an agent across its active tasks.
+// Used by session_shutdown to nudge/escalate instead of silently orphaning open assignments.
+async function scanAgentOpenAssignments(p: Paths, agentId: string, taskIds: string[]): Promise<Array<{ task: TaskState; tp: TaskPaths; nodeId: string }>> {
+	const out: Array<{ task: TaskState; tp: TaskPaths; nodeId: string }> = [];
+	for (const rawId of taskIds) {
+		const tp = taskPaths(p, safeId(rawId));
+		if (!existsSync(tp.taskJson)) continue;
+		const task = await readTaskState(tp.taskJson);
+		for (const [nodeId, node] of Object.entries(task.nodes)) {
+			if (node.assignee === agentId && (node.status === "assigned" || node.status === "in_progress") && !TERMINAL_NODE_STATUSES.has(node.status)) out.push({ task, tp, nodeId });
+		}
+	}
+	return out;
+}
+
+// Apply gate updates { gateName: { status, by?, artifact? } }. `by` defaults to the acting agent.
+function applyGateUpdates(task: TaskState, gateUpdates: Record<string, { status: TaskGateStatus; by?: string; artifact?: string | null }>, by: string) {
+	const ts = now();
+	for (const [name, upd] of Object.entries(gateUpdates)) {
+		const prev = task.gates[name] || { status: "open" as TaskGateStatus, by: null as (string | null), artifact: null as (string | null) };
+		task.gates[name] = { status: upd.status, by: upd.by || by, artifact: upd.artifact !== undefined ? upd.artifact : prev.artifact };
+	}
+	return ts;
+}
+
+// Append durable shared-context updates (decisions/risks/openQuestions get generated ids + by/at).
+function applySharedContextUpdates(task: TaskState, upd: { summary?: string; decisions?: Array<{ text: string; severity?: string }>; risks?: Array<{ text: string; severity?: string }>; openQuestions?: Array<{ text: string }> }, by: string) {
+	const ts = now();
+	const ctx = task.sharedContext;
+	if (upd.summary) ctx.summary = upd.summary;
+	for (const d of upd.decisions || []) ctx.decisions.push({ id: `decision-${randomUUID().slice(0, 8)}`, by, at: ts, text: d.text });
+	for (const r of upd.risks || []) ctx.risks.push({ id: `risk-${randomUUID().slice(0, 8)}`, by, at: ts, severity: r.severity, text: r.text, status: "open" });
+	for (const q of upd.openQuestions || []) ctx.openQuestions.push({ id: `question-${randomUUID().slice(0, 8)}`, by, at: ts, text: q.text });
+}
+
+// Build the assignment message body. Carries task/node pointers, scope, artifacts, and reply target
+// so the assignee discovers the rest from durable files instead of a long orchestrator prompt.
+function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget: string, note?: string) {
+	const node = task.nodes[nodeId];
+	const lines: string[] = [];
+	lines.push(`You are assigned task ${task.taskId}, node ${nodeId} (${node.role}).`);
+	lines.push(`Read .pi/swarm/tasks/${task.taskId}/task.md and .pi/swarm/tasks/${task.taskId}/task.json, plus any prior artifacts below.`);
+	lines.push(`Reply to ${replyTarget} when done, blocked, or needing clarification.`);
+	const scope = node.allowedFiles && node.allowedFiles.length ? node.allowedFiles.join(", ") : node.allowedFilesFrom ? `(inherit scope from node ${node.allowedFilesFrom})` : "(none specified)";
+	lines.push(`Scope: ${scope}`);
+	if (node.readArtifacts && node.readArtifacts.length) lines.push(`Read artifacts: ${node.readArtifacts.join(", ")}`);
+	if (node.writeArtifacts && node.writeArtifacts.length) lines.push(`Write artifacts: ${node.writeArtifacts.join(", ")}`);
+	if (task.acceptanceCriteria.length) lines.push(`Acceptance: ${task.acceptanceCriteria.join("; ")}`);
+	if (note) lines.push(`Note: ${note}`);
+	lines.push(`When finished, call swarm_update_task with taskId=${task.taskId}, nodeId=${nodeId}, status=done (or failed/blocked) and an outcome. Ack this assignment message too.`);
+	return lines.join("\n");
+}
+
+// Throw a structured, machine-readable corrective error and trace it as task.tool.invalid. Always
+// called BEFORE any state mutation so invalid calls leave task.json untouched (no partial writes).
+async function failTaskTool(tp: TaskPaths | null, p: Paths, code: string, message: string, details: Record<string, unknown>): Promise<never> {
+	const body = JSON.stringify({ ok: false, errorCode: code, message, ...details }, null, 2);
+	const traceData = { code, taskId: details.taskId, nodeId: details.nodeId, received: details.received };
+	if (tp) await traceTask(tp, "task.tool.invalid", traceData);
+	else await trace(p, "task.tool.invalid", traceData);
+	const err = new Error(`${code}: ${message}\n${body}`);
+	(err as any).errorCode = code;
+	throw err;
 }
 
 type NodeInput = {
@@ -941,75 +1156,80 @@ async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg: Swarm
 	return { delivered: true, mailboxOnly: false, before, after };
 }
 
-async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; ttlMs?: number; idempotencyKey?: string }) {
-	let delivery: any = null;
-	const msg = await withLock(p, async () => {
-		const st = await readState(p, cwd);
-		const to = safeId(params.to);
-		const from = currentAgentId();
-		if (to === "orchestrator") ensureOrchestrator(st, cwd, p);
-		if (!st.agents[to]) throw new Error(`Unknown swarm agent: ${to}`);
+// Lock-free core of message enqueue+deliver. Mutates the passed-in `st` (message record, delivered[],
+// orchestrator pseudo-agent) and appends to the recipient mailbox; it does NOT read/write state or
+// acquire the lock. Callers that already hold the swarm lock (task tools that send within one atomic
+// operation) use this directly and writeState once afterward.
+async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; ttlMs?: number; idempotencyKey?: string }): Promise<{ msg: SwarmMessage; delivery: any }> {
+	const to = safeId(params.to);
+	const from = currentAgentId();
+	if (to === "orchestrator") ensureOrchestrator(st, cwd, p);
+	if (!st.agents[to]) throw new Error(`Unknown swarm agent: ${to}`);
 
-		// Idempotency check: if from+to+idempotencyKey already exists, return existing message
-		if (params.idempotencyKey) {
-			const existing = Object.values(st.messages).find(
-				(r) => r.from === from && r.to === to && r.idempotencyKey === params.idempotencyKey
-			);
-			if (existing) {
-				const original = (await readMailbox(p, to)).find((m) => m.id === existing.id);
-				if (!original) throw new Error(`Idempotency record ${existing.id} exists but mailbox entry is missing for ${to}`);
-				delivery = { reused: true, delivered: existing.status === "injected" || existing.status === "intercepted" || existing.status === "acked", status: existing.status };
-				await trace(p, "message.idempotent_reuse", { id: existing.id, from, to, idempotencyKey: params.idempotencyKey, status: existing.status });
-				return original;
-			}
+	// Idempotency check: if from+to+idempotencyKey already exists, return existing message
+	if (params.idempotencyKey) {
+		const existing = Object.values(st.messages).find(
+			(r) => r.from === from && r.to === to && r.idempotencyKey === params.idempotencyKey
+		);
+		if (existing) {
+			const original = (await readMailbox(p, to)).find((m) => m.id === existing.id);
+			if (!original) throw new Error(`Idempotency record ${existing.id} exists but mailbox entry is missing for ${to}`);
+			await trace(p, "message.idempotent_reuse", { id: existing.id, from, to, idempotencyKey: params.idempotencyKey, status: existing.status });
+			return { msg: original, delivery: { reused: true, delivered: existing.status === "injected" || existing.status === "intercepted" || existing.status === "acked", status: existing.status } };
 		}
+	}
 
-		const createdAt = now();
-		const m: SwarmMessage = {
-			id: `msg-${Date.now()}-${randomUUID().slice(0, 8)}`,
-			swarmId: st.swarmId,
-			from,
-			to,
-			subject: params.subject,
-			priority: params.priority || "normal",
-			type: "swarm.message",
-			schemaVersion: 1,
-			createdAt,
-			body: params.body,
-			conversationId: params.conversationId,
-			replyTo: params.replyTo,
-			requiresAck: params.requiresAck ?? true,
-			ttlMs: params.ttlMs,
-			idempotencyKey: params.idempotencyKey,
-			headers: { cwd, senderModel: currentModel(), senderProvider: currentProvider() },
-		};
-		upsertMessageRecord(st, m, "queued", { queuedAt: createdAt });
-		await appendJsonl(mailboxPath(p, to), m);
-		await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck, idempotencyKey: m.idempotencyKey });
-		delivery = await deliver(pi, p, st, m);
-		if (delivery?.delivered) {
-			// Injection into the recipient pane is already delivery. Mark it in state
-			// atomically with enqueue+inject so pending mailbox polling does not
+	const createdAt = now();
+	const m: SwarmMessage = {
+		id: `msg-${Date.now()}-${randomUUID().slice(0, 8)}`,
+		swarmId: st.swarmId,
+		from,
+		to,
+		subject: params.subject,
+		priority: params.priority || "normal",
+		type: "swarm.message",
+		schemaVersion: 1,
+		createdAt,
+		body: params.body,
+		conversationId: params.conversationId,
+		replyTo: params.replyTo,
+		requiresAck: params.requiresAck ?? true,
+		ttlMs: params.ttlMs,
+		idempotencyKey: params.idempotencyKey,
+		headers: { cwd, senderModel: currentModel(), senderProvider: currentProvider() },
+	};
+	upsertMessageRecord(st, m, "queued", { queuedAt: createdAt });
+	await appendJsonl(mailboxPath(p, to), m);
+	await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck, idempotencyKey: m.idempotencyKey });
+	const delivery = await deliver(pi, p, st, m);
+	if (delivery?.delivered) {
+		// Injection into the recipient pane is already delivery. Mark it in state
+		// atomically with enqueue+inject so pending mailbox polling does not
 			// reprocess the same message after a restart or delayed poll.
-			st.delivered[to] = Array.from(new Set([...(st.delivered[to] || []), m.id]));
-			if (delivery.mailboxOnly) {
-				// Mailbox-only delivery (e.g. orchestrator has no swarm tmux pane): the message is
-				// safely appended to the recipient mailbox and picked up via swarm_check_mailbox.
-				// Keep status "queued" so it is not mistaken for a tmux injection failure.
-				upsertMessageRecord(st, m, "mailbox_delivered", { lastError: undefined });
-				await trace(p, "message.mailbox_only", { id: m.id, to: m.to, reason: delivery.reason });
-			} else {
-				upsertMessageRecord(st, m, "injected", { injectedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1 });
-			}
-			await writeState(p, st);
+		st.delivered[to] = Array.from(new Set([...(st.delivered[to] || []), m.id]));
+		if (delivery.mailboxOnly) {
+			// Mailbox-only delivery (e.g. orchestrator has no swarm tmux pane): the message is
+			// safely appended to the recipient mailbox and picked up via swarm_check_mailbox.
+			// Keep status "queued" so it is not mistaken for a tmux injection failure.
+			upsertMessageRecord(st, m, "mailbox_delivered", { lastError: undefined });
+			await trace(p, "message.mailbox_only", { id: m.id, to: m.to, reason: delivery.reason });
 		} else {
-			upsertMessageRecord(st, m, "failed", { failedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1, lastError: delivery?.reason || "delivery skipped" });
-			await writeState(p, st);
+			upsertMessageRecord(st, m, "injected", { injectedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1 });
 		}
-		await trace(p, delivery?.delivered ? (delivery.mailboxOnly ? "message.deliver.mailbox_only" : "message.inject.ok") : "message.inject.skip", { id: m.id, to: m.to, delivery, markedDelivered: Boolean(delivery?.delivered), status: st.messages[m.id]?.status });
-		return m;
+	} else {
+		upsertMessageRecord(st, m, "failed", { failedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1, lastError: delivery?.reason || "delivery skipped" });
+	}
+	await trace(p, delivery?.delivered ? (delivery.mailboxOnly ? "message.deliver.mailbox_only" : "message.inject.ok") : "message.inject.skip", { id: m.id, to: m.to, delivery, markedDelivered: Boolean(delivery?.delivered), status: st.messages[m.id]?.status });
+	return { msg: m, delivery };
+}
+
+async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; ttlMs?: number; idempotencyKey?: string }) {
+	return withLock(p, async () => {
+		const st = await readState(p, cwd);
+		const r = await deliverMessageLocked(pi, cwd, p, st, params);
+		await writeState(p, st);
+		return r;
 	});
-	return { msg, delivery };
 }
 
 async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; model?: string; provider?: string; initialPrompt?: string }) {
@@ -1307,17 +1527,19 @@ export default function (pi: ExtensionAPI) {
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
 			const agent = st.agents[agentId];
-			if (agent) {
-				const ts = now();
-				agent.lastAgentStartAt = ts;
-				agent.runtimeStatus = "busy";
-				agent.health = "healthy";
-				agent.lastHeartbeatAt = ts;
-				agent.pid = process.pid;
-				agent.updatedAt = ts;
-				await writeState(p, st);
-				await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
-			}
+			if (!agent) return;
+			if (agent.pid && agent.pid !== process.pid) return; // pid-guard
+			const ts = now();
+			const resurrect = agent.status === "stopped" || agent.health === "unhealthy";
+			agent.lastAgentStartAt = ts;
+			agent.runtimeStatus = "busy";
+			agent.health = "healthy";
+			agent.status = "running";
+			agent.lastHeartbeatAt = ts;
+			agent.pid = process.pid;
+			agent.updatedAt = ts;
+			await writeState(p, st);
+			await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health, resurrect });
 		});
 	});
 
@@ -1328,16 +1550,20 @@ export default function (pi: ExtensionAPI) {
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
 			const agent = st.agents[agentId];
-			if (agent) {
-				const ts = now();
-				agent.lastAgentSettledAt = ts;
-				agent.runtimeStatus = "idle";
-				agent.health = "healthy";
-				agent.lastHeartbeatAt = ts;
-				agent.updatedAt = ts;
-				await writeState(p, st);
-				await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
-			}
+			if (!agent) return;
+			if (agent.pid && agent.pid !== process.pid) return; // pid-guard
+			const ts = now();
+			agent.lastAgentSettledAt = ts;
+			agent.runtimeStatus = "idle";
+			agent.health = "healthy";
+			agent.lastHeartbeatAt = ts;
+			agent.updatedAt = ts;
+			ensureAgentDefaults(agent);
+			await writeState(p, st);
+			await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
+			// Loop-safe observability: a settle while still holding open assignments is a stale signal
+			// (no forced inject; runtimeTaskWarnings does the active flagging).
+			if (agent.activeTaskIds.length) await trace(p, "task.stale.settled", { agentId, openTaskCount: agent.activeTaskIds.length });
 		});
 	});
 
@@ -1348,15 +1574,18 @@ export default function (pi: ExtensionAPI) {
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
 			const agent = st.agents[agentId];
-			if (agent) {
-				const ts = now();
-				agent.lastToolAt = ts;
-				agent.runtimeStatus = "tool_running";
-				agent.lastHeartbeatAt = ts;
-				agent.updatedAt = ts;
-				await writeState(p, st);
-				await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
-			}
+			if (!agent) return;
+			if (agent.pid && agent.pid !== process.pid) return; // pid-guard
+			const ts = now();
+			const resurrect = agent.status === "stopped" || agent.health === "unhealthy";
+			agent.lastToolAt = ts;
+			agent.runtimeStatus = "tool_running";
+			agent.status = "running";
+			agent.health = "healthy";
+			agent.lastHeartbeatAt = ts;
+			agent.updatedAt = ts;
+			await writeState(p, st);
+			await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health, resurrect });
 		});
 	});
 
@@ -1367,13 +1596,13 @@ export default function (pi: ExtensionAPI) {
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
 			const agent = st.agents[agentId];
-			if (agent) {
-				const ts = now();
-				agent.runtimeStatus = "busy";
-				agent.lastHeartbeatAt = ts;
-				agent.updatedAt = ts;
-				await writeState(p, st);
-			}
+			if (!agent) return;
+			if (agent.pid && agent.pid !== process.pid) return; // pid-guard
+			const ts = now();
+			agent.runtimeStatus = "busy";
+			agent.lastHeartbeatAt = ts;
+			agent.updatedAt = ts;
+			await writeState(p, st);
 		});
 	});
 
@@ -1381,19 +1610,35 @@ export default function (pi: ExtensionAPI) {
 		const agentId = currentAgentId();
 		if (agentId === "orchestrator") return;
 		const p = paths(ctx.cwd);
+		await ensureDirs(p);
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
 			const agent = st.agents[agentId];
-			if (agent) {
-				const ts = now();
-				agent.lastShutdownAt = ts;
-				agent.runtimeStatus = "stopped";
-				agent.health = "unhealthy";
-				agent.status = "stopped";
-				agent.updatedAt = ts;
-				await writeState(p, st);
-				await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
+			if (!agent) return;
+			// pid-guard: only the owning process may mark this agent stopped. A transient process sharing
+			// the agentId (e.g. `pi --mode print`) must not poison a live agent's record.
+			if (agent.pid && agent.pid !== process.pid) { await trace(p, "agent.shutdown.skip_pid_guard", { agentId, ownerPid: agent.pid, callerPid: process.pid }); return; }
+			const ts = now();
+			agent.lastShutdownAt = ts;
+			agent.runtimeStatus = "stopped";
+			agent.health = "unhealthy";
+			agent.status = "stopped";
+			agent.updatedAt = ts;
+			// Engine-enforced closure: if this agent is dying while it still owns open assigned/in_progress
+			// nodes, mark them stale and nudge the orchestrator (mailbox-only) instead of orphaning them.
+			ensureAgentDefaults(agent);
+			if (agent.activeTaskIds.length) {
+				const open = await scanAgentOpenAssignments(p, agentId, agent.activeTaskIds);
+				for (const { task, tp, nodeId } of open) { task.nodes[nodeId].staleAt = ts; await writeTaskState(tp, task); }
+				if (open.length) {
+					await trace(p, "task.stale.shutdown", { agentId, open: open.map((o) => ({ taskId: o.task.taskId, nodeId: o.nodeId })) });
+					const list = open.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
+					try { await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject: `agent ${agentId} shut down with open task node(s)`, body: `Agent ${agentId} shut down (session_shutdown) while still assigned ${open.length} non-terminal node(s): ${list}. Those nodes were marked stale (staleAt). Reassign via swarm_assign_task or reconcile as needed.`, requiresAck: false }); }
+					catch (err: any) { await trace(p, "task.stale.shutdown.nudge_failed", { agentId, error: String(err?.message || err) }); }
+				}
 			}
+			await writeState(p, st);
+			await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
 		});
 	});
 
@@ -1873,13 +2118,21 @@ export default function (pi: ExtensionAPI) {
 			let artifacts: Array<{ path: string; exists: boolean }> | undefined;
 			if (params.includeArtifacts) artifacts = collectDeclaredArtifacts(task).map((path) => ({ path, exists: existsSync(join(tp.root, path)) }));
 			let runtimeWarnings: string[] | undefined;
+			let closure: ReturnType<typeof computeTaskClosure> | undefined;
 			if (params.runtime) {
 				const st = await readState(p, ctx.cwd);
 				runtimeWarnings = await runtimeTaskWarnings(pi, st, task);
+				closure = computeTaskClosure(st, task, tp);
 			}
 			await traceTask(tp, "task.status.read", { taskId, includeArtifacts: Boolean(params.includeArtifacts), runtime: Boolean(params.runtime) });
-			const text = printGraphText(task, ready, current, artifacts) + (runtimeWarnings?.length ? `\n\nRuntime warnings:\n${runtimeWarnings.map((w) => `  ⚠ ${w}`).join("\n")}` : "");
-			return textResult(text, { task: summary, taskId, artifacts, runtimeWarnings });
+			const closureBlock = closure
+				? `\n\nClosure: storedStatus=${closure.storedStatus} derivedStatus=${closure.derivedStatus} closed=${closure.closedNodes}/${closure.nodeClosure.length} open=${closure.openNodes} stale=${closure.staleNodes}`
+					+ (closure.openAssignments.length ? `\n  Open assignments: ${closure.openAssignments.map((a) => `${a.nodeId}→${a.assignee}(${a.status})`).join(", ")}` : "")
+					+ (closure.staleAssignments.length ? `\n  Stale assignments: ${closure.staleAssignments.map((a) => `${a.nodeId}→${a.assignee} (${a.reason})`).join(", ")}` : "")
+					+ (closure.blocking.length ? `\n  Task blockers: ${closure.blocking.join("; ")}` : "")
+				: "";
+			const text = printGraphText(task, ready, current, artifacts) + (runtimeWarnings?.length ? `\n\nRuntime warnings:\n${runtimeWarnings.map((w) => `  ⚠ ${w}`).join("\n")}` : "") + closureBlock;
+			return textResult(text, { task: summary, taskId, artifacts, runtimeWarnings, closure });
 		},
 	}));
 
@@ -1972,6 +2225,206 @@ export default function (pi: ExtensionAPI) {
 			const lines: string[] = [`Ready: ${actionable.length ? actionable.join(", ") : "(none)"}`, `Current: ${result.current.length ? result.current.join(", ") : "(none)"}`];
 			for (const s of suggestions) lines.push(`  ${s.nodeId} (${s.role}) -> ${s.suggestedAssignee || "(no reusable agent; spawn needed)"}`);
 			return textResult(lines.join("\n"), { taskId, ready: actionable, current: result.current, suggestions, autoAssign: Boolean(params.autoAssign) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_assign_task",
+		label: "Swarm Assign Task",
+		description: "Assign a task graph node to an agent: reuse an idle role-matching agent by default, optionally spawn, update node assignment state + activeTaskIds, and send a structured assignment message carrying taskId/nodeId/replyTarget. task.json is the source of truth. Orchestrator-level tool.",
+		promptGuidelines: ["Use `swarm_assign_task` to assign a ready node; it reuses an idle role-matching agent unless autoSpawn/spawnIsolated is set. If it returns NODE_NOT_READY, call swarm_next_nodes first. If NO_AVAILABLE_AGENT, enable autoSpawn or pass an explicit agentId."],
+		parameters: Type.Object({
+			taskId: Type.String({ description: "Task id." }),
+			nodeId: Type.String({ description: "Node id to assign." }),
+			agentId: Type.Optional(Type.String({ description: "Exact existing agent id to assign to. Bypasses reuse lookup." })),
+			reusePolicy: Type.Optional(Type.String({ description: "prefer_idle_existing (default). Reserved for future policies." })),
+			autoSpawn: Type.Optional(Type.Boolean({ description: "Spawn a new long-lived role agent when no reusable agent exists. Defaults to false." })),
+			spawnIsolated: Type.Optional(Type.Boolean({ description: "Force a fresh agent for this node instead of reusing. Defaults to false." })),
+			replyTarget: Type.Optional(Type.String({ description: "Agent id the assignee should reply to. Defaults to the assigning agent (sender)." })),
+			note: Type.Optional(Type.String({ description: "Optional extra assignment note appended to the message body." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const me = currentAgentId();
+			const reusePolicy = params.reusePolicy || "prefer_idle_existing";
+			let spawned = false;
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
+				const taskId = task.taskId;
+				const node = task.nodes[params.nodeId];
+				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId } });
+				if (TERMINAL_NODE_STATUSES.has(node.status)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} is terminal (${node.status}); cannot assign.`, { taskId, nodeId: params.nodeId, received: { nodeStatus: node.status } });
+				// Readiness: assignable when actionable (ready, or unassigned ready-status current) or already active (reassign).
+				const cr = computeReadyNodes(task);
+				const actionable = new Set([...cr.ready, ...cr.current.filter((id) => task.nodes[id].status === "ready" && !task.nodes[id].assignee)]);
+				if (node.status === "pending" && !actionable.has(params.nodeId)) await failTaskTool(tp, p, "NODE_NOT_READY", `Node ${params.nodeId} is not ready yet (dependencies/gates not satisfied).`, { taskId, nodeId: params.nodeId, expected: { ready: cr.ready, current: cr.current }, received: { nodeStatus: node.status }, suggestedNextCall: { tool: "swarm_next_nodes", params: { taskId } } });
+
+				ensureOrchestrator(st, ctx.cwd, p);
+				const expectedKind = inferRoleKind(params.nodeId, node.role);
+				let candidates: ReusableAgentMatch[] = [];
+				let assigneeId: string | undefined;
+				if (params.agentId) {
+					const aid = safeId(params.agentId);
+					if (!st.agents[aid]) await failTaskTool(tp, p, "AGENT_NOT_FOUND", `Agent ${aid} is not registered.`, { taskId, nodeId: params.nodeId, received: { agentId: aid }, suggestedNextCall: { tool: "swarm_spawn_agent", params: { id: aid, role: node.role } } });
+					assigneeId = aid;
+				} else if (expectedKind === "orchestrator") {
+					// Orchestrator-role nodes (e.g. commit) are owned by the orchestrator pseudo-agent.
+					assigneeId = "orchestrator";
+				} else {
+					const found = await findReusableAgent(pi, st, { roleKind: expectedKind, requireIdle: false, requireTmuxAlive: false, includeBusy: false });
+					candidates = found.matches;
+					if (found.recommended) assigneeId = found.recommended;
+					else if (params.autoSpawn || params.spawnIsolated) { const r = await spawnAgent(pi, ctx.cwd, p, st, { id: `${expectedKind}-01`, role: node.role }); assigneeId = r.agent.id; spawned = true; }
+					else await failTaskTool(tp, p, "NO_AVAILABLE_AGENT", `No reusable ${expectedKind} agent for node ${params.nodeId}.`, { taskId, nodeId: params.nodeId, expected: { roleKind: expectedKind }, received: { reusePolicy }, suggestedNextCall: { tool: "swarm_assign_task", params: { taskId, nodeId: params.nodeId, autoSpawn: true } } });
+				}
+				const assignee = assigneeId ? st.agents[assigneeId] : undefined;
+				if (!assignee) await failTaskTool(tp, p, "AGENT_NOT_FOUND", `Resolved agent is missing for node ${params.nodeId}.`, { taskId, nodeId: params.nodeId, received: { agentId: assigneeId } });
+				ensureAgentDefaults(assignee);
+
+				const prevStatus = node.status;
+				// Reassignment bookkeeping: free the previous assignee's active-task pointer.
+				if (node.assignee && node.assignee !== assignee.id) {
+					const old = st.agents[node.assignee];
+					if (old) { ensureAgentDefaults(old); old.activeTaskIds = old.activeTaskIds.filter((t) => t !== task.taskId); }
+				}
+				// Count a fresh work attempt when (re)entering assigned from a non-active state.
+				if (["pending", "ready", "blocked"].includes(prevStatus)) {
+					if (node.maxAttempts && node.attempts >= node.maxAttempts) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} reached maxAttempts (${node.maxAttempts}); cannot reassign.`, { taskId, nodeId: params.nodeId, received: { attempts: node.attempts, maxAttempts: node.maxAttempts } });
+					node.attempts += 1;
+				}
+				node.assignee = assignee.id;
+				node.status = "assigned";
+				node.lastActivityAt = now();
+				if (!assignee.activeTaskIds.includes(task.taskId)) assignee.activeTaskIds.push(task.taskId);
+				applyTaskStatus(task);
+				task.currentNodes = computeReadyNodes(task).current;
+
+				const replyTarget = params.replyTarget || me;
+				const conversationId = `task:${task.taskId}:${params.nodeId}`;
+				const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note);
+				const { msg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: assignee.id, body, subject: `Task ${task.taskId} / node ${params.nodeId} assigned`, conversationId, requiresAck: true });
+				node.messageIds = Array.from(new Set([...(node.messageIds || []), msg.id]));
+				task.handoffs.push({ fromNode: null, toNode: params.nodeId, by: me, toAgent: assignee.id, messageId: msg.id, at: now(), kind: "assign", status: delivery?.delivered ? (delivery.mailboxOnly ? "mailbox_only" : "delivered") : "queued" });
+
+				await writeTaskState(tp, task);
+				await writeState(p, st);
+				await traceTask(tp, "task.assign", { taskId, nodeId: params.nodeId, assignee: assignee.id, messageId: msg.id, spawned, reusePolicy, prevStatus, delivered: Boolean(delivery?.delivered), mailboxOnly: Boolean(delivery?.mailboxOnly) });
+				return { task, tp, msg, delivery, candidates, assigneeId: assignee.id };
+			});
+			const delivery = result.delivery;
+			const injected = Boolean(delivery?.delivered) && !delivery?.mailboxOnly;
+			return textResult(`Assigned node ${params.nodeId} of ${result.task.taskId} to ${result.assigneeId}${spawned ? " (spawned)" : ""}. Message ${result.msg.id} ${delivery?.delivered ? (delivery.mailboxOnly ? "queued (mailbox-only)" : "delivered") : "queued (agent not running; reconcile will retry)"}.`, { taskId: result.task.taskId, nodeId: params.nodeId, assignee: result.assigneeId, spawned, messageId: result.msg.id, injected, delivery, candidates: result.candidates });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_update_task",
+		label: "Swarm Update Task",
+		description: "Update an assigned task node's status/outcome/note/artifact/gate/sharedContext. Enforces ownership (current agent must be the node assignee, or orchestrator via force) and allowed lifecycle transitions; releases activeTaskIds + editLocks on terminal-ish node states. Validation precedes any write, so invalid calls leave task.json untouched.",
+		promptGuidelines: ["Use `swarm_update_task` to advance YOUR assigned node. If NODE_ASSIGNEE_MISMATCH, send a task message to the assignee instead of forcing. If OUTCOME_REQUIRED (node done with outgoing branches), retry with an outcome matching an edge `when`. If INVALID_TRANSITION, follow pending->ready->assigned->in_progress->done|failed|blocked; terminal states need the orchestrator force override."],
+		parameters: Type.Object({
+			taskId: Type.String({ description: "Task id." }),
+			nodeId: Type.String({ description: "Node id to update." }),
+			status: Type.Optional(Type.String({ description: "New node status: pending/ready/assigned/in_progress/blocked/done/failed/skipped." })),
+			outcome: Type.Optional(Type.String({ description: "Branch signal (e.g. planned/implemented/passed/failed/approved/rejected). Required when moving to done on a node with outgoing edges." })),
+			note: Type.Optional(Type.String({ description: "Free-text update note (traced with the update)." })),
+			artifact: Type.Optional(Type.String({ description: "Artifact path produced/referenced by this update (e.g. artifacts/review.md)." })),
+			gateUpdates: Type.Optional(Type.Record(Type.String(), Type.Object({ status: Type.String({ description: "open/passed/failed/waived" }), by: Type.Optional(Type.String()), artifact: Type.Optional(Type.String()) }))),
+			sharedContextUpdates: Type.Optional(Type.Object({
+				summary: Type.Optional(Type.String()),
+				decisions: Type.Optional(Type.Array(Type.Object({ text: Type.String(), severity: Type.Optional(Type.String()) }))),
+				risks: Type.Optional(Type.Array(Type.Object({ text: Type.String(), severity: Type.Optional(Type.String()) }))),
+				openQuestions: Type.Optional(Type.Array(Type.Object({ text: Type.String() }))),
+			})),
+			force: Type.Optional(Type.Boolean({ description: "Orchestrator override: skip ownership + transition checks. Defaults to false." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const me = currentAgentId();
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
+				const taskId = task.taskId;
+				const node = task.nodes[params.nodeId];
+				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId } });
+				const isOrch = me === "orchestrator" || Boolean(params.force);
+				if (!isOrch && node.assignee !== me) await failTaskTool(tp, p, "NODE_ASSIGNEE_MISMATCH", `Node ${params.nodeId} is assigned to ${node.assignee || "(unassigned)"}, but current agent is ${me}.`, { taskId, nodeId: params.nodeId, expected: { assignee: node.assignee || null, allowedAction: "update your own assigned node or send a task message" }, received: { agentId: me, requestedStatus: params.status } });
+				if (params.artifact && !isSafeRelativePath(params.artifact)) await failTaskTool(tp, p, "PATH_OUTSIDE_TASK", `Artifact path is unsafe (must be relative, no ..): ${params.artifact}`, { taskId, nodeId: params.nodeId, received: { artifact: params.artifact } });
+
+				const prevStatus = node.status;
+				const newStatus = (params.status as TaskNodeStatus | undefined) || prevStatus;
+				if (newStatus !== prevStatus && !isOrch && !isAllowedNodeTransition(prevStatus, newStatus)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} cannot move ${prevStatus} -> ${newStatus}.`, { taskId, nodeId: params.nodeId, expected: { lifecycle: "pending->ready->assigned->in_progress->done|failed|blocked; terminal states need orchestrator override" }, received: { from: prevStatus, to: newStatus } });
+				const outEdges = task.edges.filter((e) => e.from === params.nodeId);
+				if (newStatus === "done" && outEdges.length && !params.outcome && !node.outcome) await failTaskTool(tp, p, "OUTCOME_REQUIRED", `Node ${params.nodeId} has outgoing branches but no outcome was provided.`, { taskId, nodeId: params.nodeId, expected: { validOutcomes: [...new Set(outEdges.map((e) => e.when))] }, received: { outcome: params.outcome }, suggestedNextCall: { tool: "swarm_update_task", params: { taskId, nodeId: params.nodeId, status: "done", outcome: outEdges[0].when } } });
+
+				// Validation complete; apply (no earlier writes occurred).
+				node.status = newStatus;
+				if (params.outcome !== undefined) node.outcome = params.outcome;
+				node.lastActivityAt = now();
+				if (params.gateUpdates) applyGateUpdates(task, params.gateUpdates as Record<string, { status: TaskGateStatus; by?: string; artifact?: string | null }>, me);
+				if (params.sharedContextUpdates) applySharedContextUpdates(task, params.sharedContextUpdates as { summary?: string; decisions?: Array<{ text: string; severity?: string }>; risks?: Array<{ text: string; severity?: string }>; openQuestions?: Array<{ text: string }> }, me);
+				if (params.artifact) node.writeArtifacts = Array.from(new Set([...(node.writeArtifacts || []), params.artifact]));
+				releaseNodeAssignment(st, task, params.nodeId);
+				const taskStatusChange = applyTaskStatus(task);
+				if (taskStatusChange.terminal) releaseTaskFromAllAgents(st, task.taskId);
+				task.currentNodes = computeReadyNodes(task).current;
+				await writeTaskState(tp, task);
+				await writeState(p, st);
+				await traceTask(tp, "task.update", { taskId, nodeId: params.nodeId, prevStatus, status: newStatus, outcome: params.outcome, note: Boolean(params.note), artifact: params.artifact, gateUpdates: params.gateUpdates ? Object.keys(params.gateUpdates) : [], sharedContext: Boolean(params.sharedContextUpdates), by: me });
+				if (taskStatusChange.terminal) await traceTask(tp, "task.close", { taskId, status: task.status, nodeId: params.nodeId, by: me });
+				return { task, prevStatus, newStatus, taskStatus: task.status };
+			});
+			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${params.note ? ` Note: ${params.note}` : ""}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, by: me });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_task_message",
+		label: "Swarm Task Message",
+		description: "Send a task-scoped discussion/handoff message that wraps swarm_send_message and records a handoff + attaches taskId/fromNode/toNode/conversationId/artifactRefs. The graph advances only via swarm_update_task; this is for clarification/handoff chat between nodes.",
+		promptGuidelines: ["Use `swarm_task_message` for task-scoped clarification or handoff between nodes. It records handoffs and attaches task metadata. Do NOT use it to advance node status (use swarm_update_task for that)."],
+		parameters: Type.Object({
+			taskId: Type.String({ description: "Task id." }),
+			fromNode: Type.String({ description: "Node id the message originates from." }),
+			to: Type.String({ description: "Recipient agent id (or 'orchestrator')." }),
+			subject: Type.Optional(Type.String({ description: "Short subject." })),
+			body: Type.String({ description: "Message body." }),
+			toNode: Type.Optional(Type.String({ description: "Target node id, when this is a node-to-node handoff." })),
+			artifactRefs: Type.Optional(Type.Array(Type.String({ description: "Artifact paths to reference (e.g. artifacts/test-report.md)." }))),
+			replyExpected: Type.Optional(Type.Boolean({ description: "Whether the recipient should ack. Defaults to true." })),
+			priority: Type.Optional(Type.String({ description: "low, normal, high. Defaults to normal." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const me = currentAgentId();
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
+				const taskId = task.taskId;
+				if (!task.nodes[params.fromNode]) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `fromNode ${params.fromNode} does not exist in task ${taskId}.`, { taskId, nodeId: params.fromNode, received: { fromNode: params.fromNode } });
+				if (params.toNode && !task.nodes[params.toNode]) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `toNode ${params.toNode} does not exist in task ${taskId}.`, { taskId, nodeId: params.toNode, received: { toNode: params.toNode } });
+				for (const ref of params.artifactRefs || []) if (!isSafeRelativePath(ref)) await failTaskTool(tp, p, "PATH_OUTSIDE_TASK", `Artifact ref is unsafe (must be relative, no ..): ${ref}`, { taskId, nodeId: params.fromNode, received: { artifactRef: ref } });
+				ensureOrchestrator(st, ctx.cwd, p);
+				const toId = safeId(params.to);
+				if (!st.agents[toId]) await failTaskTool(tp, p, "AGENT_NOT_FOUND", `Recipient ${toId} is not registered.`, { taskId, nodeId: params.fromNode, received: { to: toId }, suggestedNextCall: { tool: "swarm_list_agents", params: {} } });
+
+				const conversationId = `task:${taskId}:${params.fromNode}${params.toNode ? `->${params.toNode}` : ""}`;
+				let body = params.body;
+				if (params.artifactRefs && params.artifactRefs.length) body += `\n\nArtifact refs: ${params.artifactRefs.join(", ")}`;
+				const { msg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: toId, body, subject: params.subject, conversationId, requiresAck: params.replyExpected !== false, priority: params.priority });
+				task.nodes[params.fromNode].messageIds = Array.from(new Set([...(task.nodes[params.fromNode].messageIds || []), msg.id]));
+				if (params.toNode) task.handoffs.push({ fromNode: params.fromNode, toNode: params.toNode, fromAgent: me, toAgent: toId, messageId: msg.id, at: now(), artifactRefs: params.artifactRefs || [], status: delivery?.delivered ? (delivery.mailboxOnly ? "mailbox_only" : "delivered") : "queued" });
+				await writeTaskState(tp, task);
+				await writeState(p, st);
+				await traceTask(tp, "task.message", { taskId, fromNode: params.fromNode, toNode: params.toNode, to: toId, messageId: msg.id, artifactRefs: params.artifactRefs || [], replyExpected: params.replyExpected !== false });
+				return { task, msg, delivery };
+			});
+			const delivery = result.delivery;
+			return textResult(`Sent task message ${result.msg.id} from node ${params.fromNode} to ${params.to}${params.toNode ? ` (node ${params.toNode})` : ""}. ${delivery?.delivered ? (delivery.mailboxOnly ? "Queued (mailbox-only)." : "Delivered.") : "Queued (agent not running; reconcile will retry)."}`, { taskId: result.task.taskId, messageId: result.msg.id, fromNode: params.fromNode, toNode: params.toNode, to: params.to, delivery });
 		},
 	}));
 

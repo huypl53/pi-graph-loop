@@ -4,6 +4,13 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(swarm): engine-enforced task closure for task graph loop
+
+- Added Commit 4 task-graph execution tools to `.pi/extensions/swarm/index.ts`: `swarm_assign_task`, `swarm_update_task`, and `swarm_task_message`.
+- Made assignment a durable runtime contract in `task.json`, with task-scoped handoff metadata, active-task lifecycle bookkeeping, and task-state-driven graph advancement.
+- Added engine-enforced closure behavior and PM-facing closure summaries/runtime warnings so stale/open assignments, dead-lettered handoffs, ack-done-without-task-update, and other closeout inconsistencies are surfaced from machine state instead of pane text.
+- Validated through swarm review/self-validation loops with typecheck-clean current tree and dedicated task-graph closure/detector evidence under `.pi/swarm-uat/runs/`.
+
 ### fix(extensions): `compact-resume` — avoid double agent-run on pre-prompt compaction
 
 - **Bug:** the `ctx.isIdle()` delivery branch conflated two idle cases. A
