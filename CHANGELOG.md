@@ -4,6 +4,25 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### fix(extensions): `compact-resume` — avoid double agent-run on pre-prompt compaction
+
+- **Bug:** the `ctx.isIdle()` delivery branch conflated two idle cases. A
+  threshold compaction can also run *before* a queued user message is sent
+  (`prompt()` → `_checkCompaction` → `_runAgentPrompt`, while idle) — e.g. after
+  resuming a large session, or aborting a huge response then typing. There the
+  old code fired `triggerTurn`, starting a second `_runAgentPrompt` that raced
+  the user's own run and could corrupt agent state or throw "Agent is already
+  processing".
+- **Fix:** delivery is now trigger-specific, not just idle-state: manual
+  `/compact` (idle, nothing pending) → `triggerTurn`; threshold mid-run
+  (`!idle`) → `followUp` (drained by the continuation loop); threshold while
+  idle (pre-prompt) → **skip** (a user turn is already imminent, so resuming is
+  redundant and unsafe).
+- **Validation:** regression-checked both preserved paths in an isolated tmux
+  session — the `followUp` probe still yields `FOLLOWUP_OK`, and a manual
+  `/compact` still auto-resumes. Snapshot under
+  `tmux-snapshots/compact-resume-validation/fix-regression-run.txt` (gitignored).
+
 ### feat(swarm): task graph MVP (create/status/validate/print/next)
 
 - Added the first task-graph layer to `.pi/extensions/swarm/index.ts` with task state/types, atomic `task.json` writes, and `.pi/swarm/tasks/<task-id>/` runtime layout.

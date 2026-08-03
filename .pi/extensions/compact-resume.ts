@@ -15,13 +15,16 @@
  *       return this.agent.hasQueuedMessages();`
  *   i.e. pi only keeps going if a message is already queued.
  *
- *   Delivery differs by trigger:
- *     - threshold compact fires *during* the agent run (isStreaming===true),
- *       so a `deliverAs:"followUp"` message is queued and pi's continuation
- *       loop drains it.
- *     - manual `/compact` fires while idle (isStreaming===false), so we must use
- *       `triggerTurn:true` to actually start a turn — a followUp alone would be
- *       appended with no turn. We branch on `ctx.isIdle()`.
+ *   Delivery depends on the trigger AND run state (not just isIdle):
+ *     - manual `/compact` while idle        → triggerTurn (truly idle; safe).
+ *     - threshold after agent_end (!idle)    → deliverAs:"followUp", drained by
+ *       pi's continuation loop (while(_handlePostAgentRun()) agent.continue()).
+ *     - threshold while idle (pre-prompt)    → SKIP. pi also runs compaction
+ *       *before* sending a user message (prompt() → _checkCompaction, before
+ *       _runAgentPrompt). There a user turn is already imminent, so resuming is
+ *       redundant — and triggerTurn there would start a SECOND _runAgentPrompt
+ *       racing the user's own, corrupting agent state. So we never triggerTurn
+ *       on a threshold compaction; we only followUp mid-run, or skip when idle.
  *
  * How it works (all verified against the source):
  *   The `session_compact` event fires *inside* `_runAutoCompaction`, right
@@ -214,16 +217,30 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		// Pre-prompt guard: threshold compaction can run WHILE IDLE, right before a
+		// queued user message is sent (prompt() → _checkCompaction → _runAgentPrompt).
+		// There a user turn is already imminent, so resuming is redundant — and worse,
+		// triggerTurn would start a second _runAgentPrompt racing the user's own run.
+		// Only manual /compact is a legitimate idle trigger (nothing else pending).
+		if (event.reason !== "manual" && ctx.isIdle()) {
+			if (ctx.hasUI) {
+				ctx.ui.notify(
+					"compact-resume: threshold compaction ran before a queued user message — skipping auto-resume (user is already engaging).",
+					"info",
+				);
+			}
+			return;
+		}
+
 		consecutiveResumes++;
 		lastTurnWasResume = true;
 
-		// Feed one message into pi's continuation path. The mode depends on whether
-		// we're mid-run (threshold: queue a followUp for the continuation loop) or
-		// idle (manual /compact: trigger a fresh turn).
-		const idle = ctx.isIdle();
+		// After the guard above, an idle state can ONLY be manual /compact →
+		// triggerTurn. Any non-idle state (threshold post-agent_end, or another
+		// extension's ctx.compact() mid-run) → followUp, drained by the loop.
 		pi.sendMessage(
 			{ customType: "compact-resume", content: RESUME_PROMPT, display: true },
-			idle ? { triggerTurn: true } : { deliverAs: "followUp" },
+			ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" },
 		);
 
 		if (ctx.hasUI) {
