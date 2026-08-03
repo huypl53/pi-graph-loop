@@ -4,6 +4,12 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(packages): expose swarm extension as a real pi package
+
+- Added a real `package.json` manifest with `keywords: ["pi-package"]` and `pi.extensions = ["./extensions"]` so the repo can be installed into another pi project with `pi install /path/to/pi-graph-agents`.
+- Added packaged extension entry `extensions/swarm/index.ts` and repointed the local dev entry `.pi/extensions/swarm/index.ts` to re-export from the packaged source.
+- Updated `README.md` with package install/usage instructions for a fresh pi project.
+
 ### docs(swarm): fresh graph UAT scenario + gap-closure validation
 
 - Added `docs/swarm-graph-uat-scenario.md`, a clean-reset swarm graph UAT scenario covering the happy path, blocked/stale/session probes, both rework loops, and the exact last-live-holder self-stop case.

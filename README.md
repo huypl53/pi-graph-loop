@@ -1,16 +1,20 @@
 # pi-graph-agents
 
-Experimental graph/loop agent harness built on top of [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). The current focus is a project-local `swarm` extension that lets one orchestrator pi session spawn and coordinate multiple child pi agents in tmux.
+Pi package for the swarm graph/task extension.
 
-## Swarm extension
+This repository now exposes the swarm extension as a real **pi package** via:
 
-The swarm extension lives at:
+- `package.json` with `keywords: ["pi-package"]`
+- `pi.extensions = ["./extensions"]`
+- packaged extension entry at `extensions/swarm/index.ts`
 
-```text
-.pi/extensions/swarm/index.ts
-```
+The project-local dev entry still works too:
 
-It provides:
+- `.pi/extensions/swarm/index.ts` → re-exports the packaged source from `extensions/swarm/index.ts`
+
+## What the package provides
+
+The swarm extension provides:
 
 - tmux-backed child pi agents in the same project working directory
 - shared project resources, including `.pi/extensions` and `.agents/skills`
@@ -20,55 +24,66 @@ It provides:
 - structured traces and tmux pane snapshots
 - durable agent identity files
 - message lifecycle tracking, acknowledgements, reconciliation, dead letters, and idempotency keys
-- runtime status/heartbeat fields from pi lifecycle events
+- task-graph tooling, assignment/update flows, closure derivation, and runtime warnings
 
 Full docs are in:
 
 ```text
 docs/swarm.md
+docs/swarm-task-graph.md
+docs/swarm-graph-uat-scenario.md
 ```
 
-## Quick start
+## Install into a new pi project
 
-Start pi with the local extension:
+From the target project:
 
 ```bash
-pi --model glm-5.1 --provider zai-coding-cn -e .pi/extensions/swarm/index.ts
+pi install -l /absolute/path/to/pi-graph-agents
 ```
 
-Then inside pi:
+Or try it for one run only:
+
+```bash
+pi -e /absolute/path/to/pi-graph-agents
+```
+
+Because this is a pi package, pi will load the packaged extension from:
+
+```text
+extensions/swarm/index.ts
+```
+
+## Quick start after install
+
+Inside the target project, start pi normally. Then inside pi:
 
 ```text
 /swarm init
 /swarm status
-/swarm spawn reviewer Review the current diff and report risks. Do not edit files.
+Call swarm_agent_status for all agents.
 ```
 
-For richer JSON output, ask pi to use the swarm tools, for example:
+If you want to test the package without editing settings, you can also launch pi directly with the package path:
 
-```text
-Call swarm_agent_status for all agents.
+```bash
+pi --model gpt-5.4-mini --provider openai -e /absolute/path/to/pi-graph-agents
 ```
 
 ## Validation
 
-Run the UAT harness:
+Recent validation covered:
+
+- happy-path swarm graph execution
+- blocked / stale / session-safe probes
+- both rework loops
+- exact self-stop / stale-nudge case
+- package-oriented fresh-run scenario documentation
+
+Typecheck the packaged extension source:
 
 ```bash
-SWARM_MODEL=glm-5.1 SWARM_PROVIDER=zai-coding-cn scripts/swarm_uat.sh
-```
-
-UAT docs and artifacts:
-
-```text
-.pi/swarm-uat/README.md
-.pi/swarm-uat/runs/<run-id>/
-```
-
-Typecheck the extension:
-
-```bash
-NODE_PATH=$(npm root -g) npx tsc --noEmit --module nodenext --moduleResolution nodenext --skipLibCheck --target es2022 --lib es2022 .pi/extensions/swarm/index.ts
+NODE_PATH=$(npm root -g) npx tsc --noEmit --module nodenext --moduleResolution nodenext --skipLibCheck --target es2022 --lib es2022 extensions/swarm/index.ts
 ```
 
 ## Repository notes
@@ -80,4 +95,4 @@ Runtime swarm data is intentionally not committed:
 .pi/swarm-uat/runs/
 ```
 
-This project also contains early package scaffolding from `bun init`; the swarm extension is currently the active development target.
+The package source of truth is now `extensions/swarm/index.ts`. The project-local `.pi/extensions/swarm/index.ts` file is only a thin development wrapper.

@@ -1,0 +1,30 @@
+{
+  "name": "pi-graph-agents",
+  "version": "0.1.0",
+  "description": "Pi package for the swarm graph/task extension and related validation artifacts.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "swarm",
+    "agents",
+    "task-graph"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "files": [
+    "extensions/",
+    "docs/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE*"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*",
+    "typescript": "^5"
+  }
+}
