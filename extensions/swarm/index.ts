@@ -2949,7 +2949,7 @@ export default function (pi: ExtensionAPI) {
 
 
 	pi.registerCommand("swarm", {
-		description: "Manage pi swarm agents: init | list | status (PM rollup: tasks/agents/closure) | spawn <id> [role] | send <to> <message> | trace | capture <id>",
+		description: "Manage pi swarm agents: init | list | status (PM rollup: tasks/agents/closure) | graph <task-id> [text|mermaid|json] | spawn <id> [role] | send <to> <message> | trace | capture <id>",
 		handler: async (args, ctx) => {
 			const p = paths(ctx.cwd);
 			await ensureDirs(p);
@@ -2972,6 +2972,27 @@ export default function (pi: ExtensionAPI) {
 					const { text, details } = await buildSwarmStatusSummary(p, st);
 					await trace(p, "swarm.status", { by: currentAgentId(), details });
 					ctx.ui.notify(text, "info");
+					return;
+				}
+				if (cmd === "graph") {
+					const taskId = rest.shift();
+					const format = (rest.shift() || "text").toLowerCase();
+					if (!taskId) { ctx.ui.notify("Usage: /swarm graph <task-id> [text|mermaid|json]", "warning"); return; }
+					if (!["text", "mermaid", "json"].includes(format)) { ctx.ui.notify("Graph format must be text, mermaid, or json", "warning"); return; }
+					const tp = taskPaths(p, taskId);
+					const task = await readTaskState(tp.taskJson);
+					const { ready, current } = computeReadyNodes(task);
+					const out = format === "mermaid"
+						? printGraphMermaid(task)
+						: format === "json"
+							? JSON.stringify(graphJsonSummary(task, ready, current), null, 2)
+							: printGraphText(task, ready, current);
+					const graphsDir = join(p.traces, "graphs");
+					await mkdir(graphsDir, { recursive: true });
+					const ext = format === "mermaid" ? "mmd" : format === "json" ? "json" : "txt";
+					const outFile = join(graphsDir, `${safeId(taskId)}.${ext}`);
+					await writeFile(outFile, `${out}\n`, "utf8");
+					ctx.ui.notify(`Wrote ${format} graph for ${taskId} to ${relative(ctx.cwd, outFile)}`, "info");
 					return;
 				}
 				if (cmd === "spawn") {

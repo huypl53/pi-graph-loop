@@ -4,6 +4,11 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(swarm): human-facing `/swarm graph` command
+
+- Added `/swarm graph <task-id> [text|mermaid|json]` so a human operator can render a task graph directly without asking the model to call `swarm_print_graph`.
+- Supports text, Mermaid, and JSON output using the same graph-print helpers as the tool path.
+
 ### feat(packages): expose swarm extension as a real pi package
 
 - Added a real `package.json` manifest with `keywords: ["pi-package"]` and `pi.extensions = ["./extensions"]` so the repo can be installed into another pi project with `pi install /path/to/pi-graph-agents`.
