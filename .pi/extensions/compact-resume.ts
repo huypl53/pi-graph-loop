@@ -33,6 +33,10 @@
  *   drains the queue and starts a fresh turn. No re-entrancy, no new API — we
  *   just feed one message into pi's existing continuation path.
  *
+ *   Empirical hardening: `scripts/compact_resume_followup_probe.ts` queues one
+ *   followUp from a `turn_end` hook and confirms pi continues into that queued
+ *   turn without any extra user input.
+ *
  * Loop safety (the important part):
  *   A naive "always resume after compact" loops forever: after the task is done
  *   the context can still be over threshold, so each agent_end → compact →
@@ -44,18 +48,28 @@
  *        agent had nothing left to do, so the next compaction shouldn't kick it
  *        again. (Hard cap is the backstop; this is the smart guard.)
  *
- * Config (env):
- *   PI_COMPACT_RESUME          "0" disables the extension entirely (default: on).
- *   PI_COMPACT_RESUME_MANUAL   "1" to ALSO resume after an explicit `/compact`
- *                              (default: off — a manual compact usually means
- *                              the user wants to take over).
- *   PI_COMPACT_RESUME_MAX      max consecutive auto-resumes per real user turn
- *                              (default: 5; 0 = unlimited — not recommended).
+ * Config precedence (highest first):
+ *   1. Env vars:
+ *      PI_COMPACT_RESUME          "0" disables the extension entirely.
+ *      PI_COMPACT_RESUME_MANUAL   "1" to ALSO resume after an explicit `/compact`.
+ *      PI_COMPACT_RESUME_MAX      max consecutive auto-resumes per real user turn.
+ *   2. Project-local `.pi/settings.json`:
+ *      {
+ *        "extensions": {
+ *          "compact-resume": { "enabled": true, "manual": false, "max": 5 }
+ *        }
+ *      }
+ *      A top-level `compactResume` object is also accepted for convenience.
+ *   3. Defaults:
+ *      enabled=true (intentional: this extension exists to close a project-wide
+ *      usability gap), manual=false, max=5.
  *
  * Project-local: loads after the project is trusted. `/reload` hot-reloads.
  */
 
 import { CONFIG_DIR_NAME, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const DEFAULT_MAX = 5;
 
@@ -67,23 +81,61 @@ const RESUME_PROMPT =
 	"input. If the task is already complete, briefly confirm completion and stop; " +
 	"do not invent new, unplanned work.";
 
-function enabled(): boolean {
-	const v = process.env.PI_COMPACT_RESUME;
-	if (v === undefined || v === "") return true; // on by default
-	return v !== "0" && v.toLowerCase() !== "false";
+type CompactResumeSettings = {
+	enabled?: boolean;
+	manual?: boolean;
+	max?: number;
+};
+
+function readSettings(): CompactResumeSettings {
+	const file = join(process.cwd(), CONFIG_DIR_NAME, "settings.json");
+	if (!existsSync(file)) return {};
+	try {
+		const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, any>;
+		const fromExtensions = raw?.extensions?.["compact-resume"];
+		const fromTopLevel = raw?.compactResume;
+		const cfg = (fromExtensions && typeof fromExtensions === "object" ? fromExtensions : undefined) ||
+			(fromTopLevel && typeof fromTopLevel === "object" ? fromTopLevel : undefined);
+		if (!cfg || typeof cfg !== "object") return {};
+		return {
+			enabled: typeof cfg.enabled === "boolean" ? cfg.enabled : undefined,
+			manual: typeof cfg.manual === "boolean" ? cfg.manual : undefined,
+			max: typeof cfg.max === "number" && Number.isFinite(cfg.max) ? Math.floor(cfg.max) : undefined,
+		};
+	} catch {
+		return {};
+	}
 }
 
-function resumeManualToo(): boolean {
-	const v = process.env.PI_COMPACT_RESUME_MANUAL;
-	return v === "1" || v === "true";
+function envBool(name: string): boolean | undefined {
+	const v = process.env[name];
+	if (v === undefined || v === "") return undefined;
+	if (v === "1" || v.toLowerCase() === "true") return true;
+	if (v === "0" || v.toLowerCase() === "false") return false;
+	return undefined;
 }
 
-function maxResumes(): number {
+function enabled(settings: CompactResumeSettings): boolean {
+	const env = envBool("PI_COMPACT_RESUME");
+	if (env !== undefined) return env;
+	if (settings.enabled !== undefined) return settings.enabled;
+	return true; // on by default, intentionally
+}
+
+function resumeManualToo(settings: CompactResumeSettings): boolean {
+	const env = envBool("PI_COMPACT_RESUME_MANUAL");
+	if (env !== undefined) return env;
+	return settings.manual ?? false;
+}
+
+function maxResumes(settings: CompactResumeSettings): number {
 	const raw = process.env.PI_COMPACT_RESUME_MAX;
-	if (raw === undefined || raw === "") return DEFAULT_MAX;
-	const n = Number(raw);
-	if (!Number.isFinite(n) || n < 0) return DEFAULT_MAX;
-	return Math.floor(n); // 0 = unlimited
+	if (raw !== undefined && raw !== "") {
+		const n = Number(raw);
+		if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+	}
+	if (settings.max !== undefined && Number.isFinite(settings.max) && settings.max >= 0) return Math.floor(settings.max);
+	return DEFAULT_MAX;
 }
 
 function isRealUserSource(source: string | undefined): boolean {
@@ -91,9 +143,10 @@ function isRealUserSource(source: string | undefined): boolean {
 }
 
 export default function (pi: ExtensionAPI) {
-	if (!enabled()) return;
+	const settings = readSettings();
+	if (!enabled(settings)) return;
 
-	const max = maxResumes();
+	const max = maxResumes(settings);
 
 	// Per-session counters. Reset on session_start (covers /reload, /fork, resume)
 	// and on any genuine user message. A closure is fine here: these are
@@ -133,7 +186,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Only the gap case. Overflow already retries; manual is opt-in.
 		if (event.reason === "overflow") return;
-		if (event.reason === "manual" && !resumeManualToo()) return;
+		if (event.reason === "manual" && !resumeManualToo(settings)) return;
 
 		// Defensive: never double-trigger when pi is already going to retry.
 		if (event.willRetry) return;
@@ -189,11 +242,12 @@ export default function (pi: ExtensionAPI) {
 			const where = `${CONFIG_DIR_NAME}/extensions/compact-resume.ts`;
 			ctx.ui.notify(
 				[
-					`compact-resume: ${enabled() ? "enabled" : "disabled"}`,
-					`resume-after-/compact: ${resumeManualToo() ? "on" : "off"}`,
+					`compact-resume: ${enabled(settings) ? "enabled" : "disabled"}`,
+					`resume-after-/compact: ${resumeManualToo(settings) ? "on" : "off"}`,
 					`max consecutive resumes: ${max > 0 ? max : "∞ (unlimited)"}`,
 					`current consecutive resumes this turn: ${consecutiveResumes}`,
-					`config: PI_COMPACT_RESUME / _MANUAL / _MAX  (${where})`,
+					`config precedence: env -> ${CONFIG_DIR_NAME}/settings.json -> defaults`,
+					`config knobs: PI_COMPACT_RESUME / _MANUAL / _MAX  (${where})`,
 				].join("\n"),
 				"info",
 			);
