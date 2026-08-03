@@ -16,7 +16,7 @@ Options:
       --reuse-session       reuse the named session if it already exists
       --window-name NAME    initial window name when creating a session (default: validate)
       --cwd DIR             working directory for a created session/window
-  -d, --debounce SECONDS    wait before C-m (default: 0.15)
+  -d, --debounce SECONDS    wait before C-m (default: 1.0)
   -p, --post-pause SECONDS  wait after C-m before capturing (default: 0.40)
   -s, --snapdir DIR         snapshot directory (default: ./tmux-snapshots/<timestamp>)
       --history-start N     capture pane history from line N (default: -2000)
@@ -205,7 +205,7 @@ require_cmd python3
 list_only=0
 target=""
 cmd=""
-debounce="0.15"
+debounce="1.0"
 post_pause="0.40"
 snapdir=""
 history_start="-2000"

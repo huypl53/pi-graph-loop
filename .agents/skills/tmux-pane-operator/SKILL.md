@@ -116,7 +116,7 @@ If you want to reuse a known session name:
 .agents/skills/tmux-pane-operator/scripts/tmux_run_capture.sh \
   -t mysession:0.1 \
   -c "pytest -q" \
-  -d 0.15 \
+  -d 1.0 \
   -p 0.50
 ```
 
@@ -132,7 +132,7 @@ Pane ids like `%123` are also supported:
 ```bash
 .agents/skills/tmux-pane-operator/scripts/tmux_run_capture.sh \
   -c "npm test" \
-  -d 0.15 \
+  -d 1.0 \
   -p 0.50
 ```
 
@@ -197,7 +197,7 @@ Use this JSON when another tool or agent step needs structured feedback.
 ## Good operating rules
 - Use `send-keys -l` for literal command text.
 - Keep `C-m` separate from the typed command.
-- Default debounce is `0.15s`; increase if tmux or the remote shell is laggy.
+- Default debounce is `1.0s`; reduce or increase it depending on how quickly the target shell/TUI reliably accepts Enter after pasted text.
 - If output is noisy, increase history capture with `--history-start -4000`.
 - For interactive startup flows, use `--wait-for` instead of relying only on fixed sleeps.
 - For long-running commands, capture more than once if the user wants a later steady-state result.
