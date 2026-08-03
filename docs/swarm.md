@@ -401,6 +401,8 @@ Run records can optionally link to a swarm task via `taskId`/`nodeId`; when tied
 
 ### New-project optimization setup checklist
 
+For the complete operator guide, including fixed **N-iteration** graph templates and metric-gate node contracts, see [`docs/swarm-new-project-setup.md`](./swarm-new-project-setup.md).
+
 After installing this package into a new project, set up optimization explicitly; swarm does not invent project metrics for you.
 
 1. **Define the quality/metric contract** with `swarm_metric_define` before recording runs. Pick a project-specific primary metric (`quality_score`, `pass_rate`, `eval_score`, etc.), direction (`maximize|minimize|target|passfail`), type, source artifact/command/report, and `evidenceRequired` refs. This contract is the quality gate for iteration ranking and memory eligibility.
