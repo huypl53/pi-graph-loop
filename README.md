@@ -125,7 +125,7 @@ scripts/swarm_iteration_watch.sh --task <taskId> --once                 # review
 Visual HTML dashboard (static, dependency-free, browser-reviewable):
 
 ```bash
-scripts/swarm_dashboard.sh --out dashboard.html        # one-shot V2 dashboard (role/branch lanes for parallel branches)
+scripts/swarm_dashboard.sh --out dashboard.html        # one-shot V2 dashboard (collapsible sections + floating outline + role/branch lanes)
 scripts/swarm_dashboard.sh --live --interval 3           # regenerate + auto-refresh
 ```
 

@@ -4,6 +4,8 @@
 
 Dashboard V2 keeps the same static/offline contract but makes the operator view easier to scan: task graphs can render as **role lanes** or **branch lanes**, compact cards collapse into chips, conversations are grouped by **conversationId → node pair**, and the inspector can focus a **node** or **artifact** as well as runs/messages/memories.
 
+The generated page also includes a **floating outline** on wide screens and every major section is **collapsible**. Use the outline or top navigation to jump to a section, and use **Expand all / Collapse all** to focus on the part you are reading. Collapse state is remembered in browser `localStorage` for that local file.
+
 It prioritizes four sections: **per-iteration metric improvement**, **task-graph node flow**, **agent conversation**, and **inspector/raw details**, while still showing memory/evidence, runs, and trace events.
 
 Data loaders are shared with [`scripts/swarm_iteration_watch.sh`](../scripts/swarm_iteration_watch.py) (the text/Markdown reviewer), so the two tools reflect one data model.
@@ -57,6 +59,8 @@ scripts/swarm_dashboard.sh --cwd "$DEMO_CWD" --out demo-dashboard.html
 2. **Per-iteration metric improvement** *(primary)* — per session: contract/direction, baseline, **recomputed** best (improvement/meaningful, `DRIFT` flag vs stored `bestRunId`), an inline **SVG bar chart** of per-iteration values with Δ labels and a dashed target line, and a visible **text summary** of the trend. `compute_best` mirrors the extension's `computeIterationBest` (maximize/minimize/target/passfail).
 3. **Task graph node flow** *(primary)* — V2 supports `--lanes role|branch|none`. Role lanes group nodes by owner type, branch lanes group by topological layer, and `--compact` collapses cards to chips for dense graphs. Status is conveyed by color **and** text/icon (not color alone). Parallel branches render side-by-side instead of a single brittle spine.
 4. **Agent conversation** *(primary)* — per task: messages are grouped by conversation/thread and node pair, with `from → to`, subject, ack badge, response/result status, expandable body, and dashed reply links for `resultMessageId`. When a task is focused, the section shows node jump chips for the task's nodes.
+
+All major sections are rendered as native `<details>` panels, so they work without a framework and remain accessible from keyboard/screen readers.
 5. **Memory & evidence** — status cards (active/proposed/rejected/expired) + a table with per-ref evidence ✓/✗ present/missing and rejection reasons.
 6. **Inspector / raw details** — when a focus flag is passed (`--run`/`--task`/`--node`/`--iteration`/`--message`/`--memory`/`--artifact`), shows the selected raw JSON or artifact text in a `<pre>`; otherwise a collapsible raw-state summary with counts and ids.
 7. **Recent runs** / **Recent trace events** — tables.

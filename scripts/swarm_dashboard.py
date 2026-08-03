@@ -642,12 +642,27 @@ code{background:var(--panel2);padding:.05em .35em;border-radius:4px;font-size:.9
 .topbar .sub{color:var(--muted);font-size:.82rem;margin:.15rem 0 .6rem}
 .toc{display:flex;flex-wrap:wrap;gap:.35rem .8rem;font-size:.85rem}
 .toc a{color:var(--muted)}
+.outline{position:fixed;right:1rem;top:6.2rem;z-index:9;width:13.5rem;max-height:calc(100vh - 8rem);overflow:auto;background:rgba(22,29,46,.94);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:10px;padding:.65rem;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.outline .otitle{font-weight:700;font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.35rem}
+.outline a{display:block;color:var(--ink);padding:.18rem .25rem;border-radius:5px;font-size:.8rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.outline a:hover,.outline a:focus{background:var(--panel2);text-decoration:none}
+.outline .outline-actions{display:flex;gap:.35rem;margin:.45rem 0 .2rem}
+.outline button,.section-actions button{cursor:pointer;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--ink);font:inherit;font-size:.72rem;padding:.18rem .4rem}
 .modebar{margin:.6rem 0 0;padding:.45rem .7rem;border-radius:6px;border:1px solid var(--line);background:var(--panel2);font-size:.83rem;display:flex;flex-wrap:wrap;gap:.4rem 1.2rem}
 .modebar .live{color:var(--ok);font-weight:600}
 .modebar .once{color:var(--warn);font-weight:600}
 main{max-width:1280px;margin:0 auto;padding:1.2rem}
-section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1rem 1.1rem;margin-bottom:1.2rem}
-section>h2{margin-top:0;font-size:1.1rem;border-bottom:1px solid var(--line);padding-bottom:.4rem}
+@media(min-width:1500px){main{margin-left:calc((100vw - 1280px)/2);margin-right:16rem}}
+section.dash-section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:0;margin-bottom:1.2rem;scroll-margin-top:6.5rem}
+.dash-section>details{padding:0}
+.dash-section>details>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:.55rem;padding:1rem 1.1rem;border-radius:10px;color:var(--ink)}
+.dash-section>details>summary::-webkit-details-marker{display:none}
+.dash-section>details>summary h2{margin:0;font-size:1.1rem;flex:1}
+.dash-section>details>summary .chev{color:var(--accent);font-weight:800;transition:transform .15s ease}
+.dash-section>details[open]>summary{border-bottom:1px solid var(--line);border-radius:10px 10px 0 0}
+.dash-section>details[open]>summary .chev{transform:rotate(90deg)}
+.section-body{padding:1rem 1.1rem}
+.section-actions{display:flex;gap:.35rem;justify-content:flex-end;margin:-.3rem 0 .5rem}
 h3{font-size:.98rem;margin:.2rem 0 .5rem}
 .goal,.muted{color:var(--muted)}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.7rem;margin:.4rem 0 .9rem}
@@ -734,9 +749,43 @@ footer{color:var(--muted);font-size:.78rem;text-align:center;padding:1rem}
 .totop{position:fixed;right:1rem;bottom:1rem;background:var(--accent);color:#000;padding:.4rem .7rem;border-radius:6px;font-size:.8rem}
 body.compact .nodecard{padding:.4rem .5rem}
 body.compact .nodecard .nrole,body.compact .nodecard .noutcome,body.compact .nodecard .nwho,body.compact .nodecard .nstatus,body.compact .nodecard .artifact{display:none}
+@media(max-width:1200px){.outline{display:none}}
 @media(max-width:900px){main{padding:1rem .7rem}.cards{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}.lanegrid{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}}
-@media(max-width:600px){.topbar{padding:.7rem .8rem}.toc{font-size:.78rem}.nodecard{min-width:100%;max-width:100%}.pipeline{flex-direction:column}.arrow{transform:rotate(90deg);align-self:flex-start}.lanegrid{grid-template-columns:1fr}}
-@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+@media(max-width:600px){.topbar{padding:.7rem .8rem}.toc{font-size:.78rem}.nodecard{min-width:100%;max-width:100%}.pipeline{flex-direction:column}.arrow{transform:rotate(90deg);align-self:flex-start}.lanegrid{grid-template-columns:1fr}.dash-section>details>summary{padding:.8rem}.section-body{padding:.8rem}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.dash-section>details>summary .chev{transition:none}}
+"""
+
+
+def render_dashboard_section(section_id, title, body, open_by_default=True):
+    open_attr = " open" if open_by_default else ""
+    return (
+        f'<section id="{esc(section_id)}" class="dash-section" data-section="{esc(section_id)}">'
+        f'<details{open_attr}><summary><span class="chev" aria-hidden="true">›</span>'
+        f'<h2>{esc(title)}</h2></summary><div class="section-body">{body}</div></details></section>'
+    )
+
+
+DASHBOARD_JS = """
+<script>
+(function(){
+  function sections(){ return Array.from(document.querySelectorAll('.dash-section > details')); }
+  function setAll(open){ sections().forEach(function(d){ d.open = open; }); }
+  window.swarmDashboardSetAll = setAll;
+  sections().forEach(function(d){
+    d.addEventListener('toggle', function(){
+      var section = d.closest('.dash-section');
+      if (!section || !window.localStorage) return;
+      try { localStorage.setItem('swarmDash.section.' + section.id, d.open ? 'open' : 'closed'); } catch(e) {}
+    });
+    var section = d.closest('.dash-section');
+    try {
+      var saved = section && localStorage.getItem('swarmDash.section.' + section.id);
+      if (saved === 'open') d.open = true;
+      if (saved === 'closed') d.open = false;
+    } catch(e) {}
+  });
+})();
+</script>
 """
 
 
@@ -774,6 +823,7 @@ def build_html(args, root, generated_at):
         ("#runs", "Runs"), ("#events", "Events"),
     ]
     toc_html = " ".join(f'<a href="{h}">{esc(t)}</a>' for h, t in toc)
+    outline_html = "".join(f'<a href="{h}">{esc(t)}</a>' for h, t in toc)
 
     parts = []
     parts.append("<!doctype html>")
@@ -787,18 +837,21 @@ def build_html(args, root, generated_at):
     parts.append(f'<nav class="toc" aria-label="Sections">{toc_html}</nav>')
     parts.append(f'<div class="modebar" role="status" aria-live="polite">Mode: {mode_html} &middot; generated <time>{esc(generated_at)}</time></div>')
     parts.append('</header>')
+    parts.append(f'<aside class="outline" aria-label="Floating outline"><div class="otitle">Outline</div>{outline_html}<div class="outline-actions"><button type="button" onclick="swarmDashboardSetAll(true)">Expand all</button><button type="button" onclick="swarmDashboardSetAll(false)">Collapse all</button></div></aside>')
     parts.append('<main id="main">')
-    parts.append('<section id="overview"><h2>Overview</h2>' + render_overview(ctx, args) + '</section>')
-    parts.append('<section id="iterations"><h2>Per-iteration metric improvement</h2>' + render_iterations(ctx, args) + '</section>')
-    parts.append('<section id="graphs"><h2>Task graph node flow</h2>' + render_graphs(ctx, args) + '</section>')
-    parts.append('<section id="conversation"><h2>Agent conversation</h2>' + render_conversation(ctx, args) + '</section>')
-    parts.append('<section id="memories"><h2>Memory &amp; evidence</h2>' + render_memories(ctx, args) + '</section>')
-    parts.append('<section id="inspector"><h2>Inspector / raw details</h2>' + render_inspector(ctx, args) + '</section>')
-    parts.append('<section id="runs"><h2>Recent runs</h2>' + render_runs(ctx, args) + '</section>')
-    parts.append('<section id="events"><h2>Recent trace events</h2>' + render_events(ctx, args) + '</section>')
+    parts.append('<div class="section-actions"><button type="button" onclick="swarmDashboardSetAll(true)">Expand all</button><button type="button" onclick="swarmDashboardSetAll(false)">Collapse all</button></div>')
+    parts.append(render_dashboard_section('overview', 'Overview', render_overview(ctx, args), True))
+    parts.append(render_dashboard_section('iterations', 'Per-iteration metric improvement', render_iterations(ctx, args), True))
+    parts.append(render_dashboard_section('graphs', 'Task graph node flow', render_graphs(ctx, args), True))
+    parts.append(render_dashboard_section('conversation', 'Agent conversation', render_conversation(ctx, args), True))
+    parts.append(render_dashboard_section('memories', 'Memory & evidence', render_memories(ctx, args), True))
+    parts.append(render_dashboard_section('inspector', 'Inspector / raw details', render_inspector(ctx, args), True))
+    parts.append(render_dashboard_section('runs', 'Recent runs', render_runs(ctx, args), True))
+    parts.append(render_dashboard_section('events', 'Recent trace events', render_events(ctx, args), True))
     parts.append('</main>')
     parts.append('<footer>Generated by <code>scripts/swarm_dashboard.sh</code> \u2014 static, dependency-free, read-only.</footer>')
     parts.append('<a class="totop" href="#main">Top</a>')
+    parts.append(DASHBOARD_JS)
     parts.append("</body></html>")
     return "\n".join(parts)
 
