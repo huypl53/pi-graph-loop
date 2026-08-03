@@ -1202,16 +1202,25 @@ async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, rea
 		return toSurface;
 	});
 	if (!pending.length) return { delivered: 0, ids: [] as string[] };
-	for (let i = 0; i < pending.length; i++) {
-		const msg = pending[i];
-		pi.sendMessage({
-			customType: "swarm-message",
-			content: formatSwarmMessageContent(msg),
-			display: true,
-			details: msg,
-		}, i === 0 && ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" });
+	// Delivery is TUI-only (session-bound APIs: pi.sendMessage/ctx.isIdle). In print/rpc/json mode,
+	// the captured ctx is invalidated on session teardown and these throw "ctx is stale" errors.
+	// The decision block above (readState/writeState/trace) runs in all modes to record surfacing
+	// decisions without ctx usage.
+	if (ctx.mode === "tui") {
+		for (let i = 0; i < pending.length; i++) {
+			const msg = pending[i];
+			pi.sendMessage({
+				customType: "swarm-message",
+				content: formatSwarmMessageContent(msg),
+				display: true,
+				details: msg,
+			}, i === 0 && ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" });
+		}
+		await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart: ctx.isIdle() });
+	} else {
+		// In non-TUI mode, still trace pump activity (without ctx.isIdle) for visibility.
+		await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, mode: ctx.mode });
 	}
-	await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart: ctx.isIdle() });
 	return { delivered: pending.length, ids: pending.map((m) => m.id) };
 }
 
@@ -1799,19 +1808,21 @@ export default function (pi: ExtensionAPI) {
 		if (orchestratorMailboxTimer) clearInterval(orchestratorMailboxTimer);
 		orchestratorMailboxTimer = undefined;
 	};
-	const startOrchestratorMailboxPump = (ctx: any) => {
+	const startOrchestratorMailboxPump = async (ctx: any) => {
 		stopOrchestratorMailboxPump();
-		// The auto-pump surfaces mailbox notifications to the interactive PM via pi.sendMessage({triggerTurn})
-		// and ctx.isIdle() — both TUI-only, session-bound APIs. In print/rpc/json mode there is no
-		// interactive PM to surface to (sendMessage is a no-op in print mode), and the captured ctx is
-		// invalidated on session teardown/replacement; running the pump there reliably throws the
-		// "This extension ctx is stale after session replacement or reload" error. This is exactly why
-		// every pi -p validation/UAT run (which defaults to agentId "orchestrator" when PI_SWARM_AGENT_ID
-		// is unset) hit the stale-ctx error. Gate the pump to the interactive orchestrator TUI session
-		// (matches the single-interactive-session design); non-tui callers read mailboxes via
-		// swarm_check_mailbox, which never touches a captured ctx.
-		if (currentAgentId() !== "orchestrator" || ctx.mode !== "tui") return;
+		// The auto-pump records a surfacing DECISION (per-pid set + writeState) in every orchestrator session,
+		// including explicit orchestrator opt-in runs (PI_SWARM_IS_ORCHESTRATOR=1 or PI_SWARM_AGENT_ID=orchestrator).
+		// The decision block is ctx-free file IO (see pumpOrchestratorMailbox), so it cannot hit
+		// the "This extension ctx is stale after session replacement or reload" error. The delivery loop
+		// (sendMessage/isIdle) and the trace that uses ctx.isIdle are now mode-gated to TUI only inside
+		// pumpOrchestratorMailbox, so non-TUI sessions (print/rpc/json) never make ctx-bound calls.
+		// The 5s polling interval is TUI-only (print sessions exit immediately after one turn); non-TUI
+		// callers read mailboxes via swarm_check_mailbox, which never touches a captured ctx.
+		if (currentAgentId() !== "orchestrator") return;
 		const p = paths(ctx.cwd);
+		// NOTE: the session_start one-shot below is awaited (not fire-and-forget) so that a pi -p / print
+		// session — which exits immediately after its single turn — actually completes the surfacing
+		// decision (writeState + trace) before teardown. The interval timer remains fire-and-forget.
 		const run = async (reason: string) => {
 			if (orchestratorMailboxPumpRunning) return;
 			orchestratorMailboxPumpRunning = true;
@@ -1826,8 +1837,8 @@ export default function (pi: ExtensionAPI) {
 				await trace(p, "mailbox.orchestrator_pump_error", { reason, error: msg, stale: /stale after session/i.test(msg) }).catch(() => {});
 			} finally { orchestratorMailboxPumpRunning = false; }
 		};
-		void run("session_start");
-		orchestratorMailboxTimer = setInterval(() => { void run("interval"); }, 5_000);
+		await run("session_start");
+		if (ctx.mode === "tui") orchestratorMailboxTimer = setInterval(() => { void run("interval"); }, 5_000);
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -1874,7 +1885,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		});
 		if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${agentId}`);
-		if (agentId === "orchestrator") startOrchestratorMailboxPump(ctx);
+		if (agentId === "orchestrator") await startOrchestratorMailboxPump(ctx);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {

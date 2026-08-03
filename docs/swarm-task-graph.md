@@ -567,7 +567,9 @@ swarm_capture_agent_pane
 
 `swarm_send_message` remains the low-level messaging primitive used by orchestrators and by `swarm_task_message`; normal task workers should prefer `swarm_task_message` once task tools exist, so task metadata and handoffs are recorded consistently.
 
-Future destructive controls such as `swarm_stop_agent` and `swarm_gc_agents` should default to dry-run, require explicit orchestrator/admin use, and never be suggested to worker agents.
+`swarm_reconcile` is the recovery entrypoint for both mail and tasks: it retries failed/queued message injections, dead-letters expired/max-attempt messages, surfaces `ack_missing`, AND sweeps every `task.json` for closure drift + stale/nudge signals (mark-only; `mark=true` repairs status drift). It never auto-fails a node.
+
+Destructive controls such as `swarm_stop_agent` and `swarm_gc_agents` are **deferred** (see [Validation and cleanup implications](#validation-and-cleanup-implications)); use `swarm_reconcile` and the admin `swarm_prune` (dry-run first) until they ship.
 
 ## New high-level tools
 
@@ -792,7 +794,11 @@ Failure propagation for V1:
 
 ## Orchestrator-directed replies
 
-The runtime now registers `orchestrator` as a routable pseudo-agent with its own mailbox. Child agents can call `swarm_send_message(to="orchestrator")` without hitting `Unknown swarm agent`; `ensureOrchestrator()` lazily creates/refreshes the record (also on `session_start` for the orchestrator's own session). Because the orchestrator has no dedicated swarm tmux pane, delivery to it is **mailbox-only**: the message is appended to `.pi/swarm/mailboxes/orchestrator.jsonl`, kept in lifecycle status `queued`, and surfaced via `swarm_check_mailbox` / `swarm_agent_status`. It is not treated as a tmux injection failure, and `swarm_reconcile` reports such messages as `awaiting_mailbox_pickup` rather than retrying injection.
+The runtime now registers `orchestrator` as a routable pseudo-agent with its own mailbox. Child agents can call `swarm_send_message(to="orchestrator")` without hitting `Unknown swarm agent`; `ensureOrchestrator()` lazily creates/refreshes the record (also on `session_start` for the orchestrator's own session). Because the orchestrator has no dedicated swarm tmux pane, delivery to it is **mailbox-only**: the message is appended to `.pi/swarm/mailboxes/orchestrator.jsonl`, kept in lifecycle status `queued`, and surfaced by an orchestrator auto-pump (`pumpOrchestratorMailbox`, on `session_start`/`agent_settled`/interval) in addition to `swarm_check_mailbox` / `swarm_agent_status`. It is not treated as a tmux injection failure, and `swarm_reconcile` reports such messages as `awaiting_mailbox_pickup` rather than retrying injection.
+
+**The auto-pump is session-safe and read-safe.** It tracks "already surfaced" **per process** (`st.orchestratorPumpSessions`, keyed by `process.pid`), so each orchestrator-context process surfaces each notification once — a second orchestrator lane or a validation `pi -p` run cannot starve the primary PM session. It does **not** key on `PI_SESSION_ID` (a child `pi -p` spawned from an agent's bash inherits the parent's `PI_SESSION_ID`, which would reintroduce starvation), and it never reads the shared `st.delivered.orchestrator` ledger — that set is written by `swarm_check_mailbox(markDelivered=true)` and `swarm_ack_message`, so neither a manual mailbox read nor an explicit ack can pre-empt a later pump surface. The surfaced set is bounded (`PUMP_SESSION_ID_CAP`) and stale dead processes are pruned (`PUMP_SESSION_TTL_MS`, 1h); recent work is bounded by `PUMP_SCAN_WINDOW`. The `mailbox.orchestrator_pump` trace carries `cid` (pid) and `sid` (`PI_SESSION_ID`) for attribution. The repeatable proof is section 12 of `scripts/swarm_task_uat.sh` (two distinct orchestrator sessions each surface one notification; `check_mailbox(markDelivered)` does not pre-empt a later pump surface). The pump splits decision from delivery: the **surfacing decision** (per-pid set update + `mailbox.orchestrator_pump` trace) is ctx-free file IO and runs in **every** orchestrator session including `pi -p` UAT runs (the `session_start` one-shot is awaited so it completes before a print-mode turn exits); the **TUI delivery** (`pi.sendMessage`/`ctx.isIdle()`) is mode-gated to the live interactive orchestrator session and is a no-op in print mode. The 5s polling **interval** is tui-only — its long-lived captured ctx is the real source of the `This extension ctx is stale after session replacement or reload` error — and on any ctx error the pump stops itself cleanly (traced `mailbox.orchestrator_pump_error`) instead of retrying into a stale ctx. **Reload contract:** extension code is not hot-applied to a running orchestrator session — `/reload` (or restart) is required to load an edited pump; the pump is multi-process-safe (pid-keyed), and on `/reload` (new pid) it re-surfaces recent un-acked notifications (bounded by the scan window) as the recovery path for a stale session, while already-acked messages are not re-surfaced.
+
+**PM auto-notify on closure/settle.** The orchestrator must not have to poll to learn a node closed or a worker settled idle with open work. When `swarm_update_task` transitions a node into a closure-ish status (`done`/`failed`/`blocked`) — i.e. a genuine transition, not every update — it enqueues a concise mailbox report to `orchestrator` (taskId/nodeId, prev→new, outcome, assignee, artifact, task status, next-ready nodes), and emits the stronger `task <id> closed (<status>)` variant when the task itself goes terminal (`done`/`failed`/`cancelled`). When a worker's `agent_settled` fires while it still holds open assignment(s), the engine enqueues an `agent <id> settled idle with open assignment(s)` nudge to `orchestrator`. Both are mailbox-only to `orchestrator`, `requiresAck=false`, and the settle nudge is cooldown-guarded per agent via persisted `lastSettleNotifyAt` so repeated settles in a window don't multiply (loop-safe: it targets the mailbox-only orchestrator, never the worker, and mutates no node status). This is engine behavior, not prompt convention.
 
 Historically the runtime rejected unknown recipients, so earlier reviewers could not reliably reply to `orchestrator`. That gap is closed; task design can simply reply to `orchestrator`, or assign a real coordinator agent id as the reply target per task if preferred.
 
@@ -829,7 +835,7 @@ Current `SwarmAgent.role` is a free-text role card. That is useful for humans/LL
 }
 ```
 
-`roleKind` should match graph node roles such as `planner`, `implementer`, `tester`, `reviewer`, and `observer`. `capabilities` refine matching when multiple agents have the same role kind. The `health` field is the same persisted/derived health concept exposed by `swarm_agent_status` (`healthy`, `degraded`, `unhealthy`); `tmuxAlive` remains a live check of the target pane.
+`roleKind` should match graph node roles such as `planner`, `implementer`, `tester`, `reviewer`, and `observer`. `capabilities` refine matching when multiple agents have the same role kind. `health` is the same persisted/derived health concept exposed by `swarm_agent_status` (`healthy`, `degraded`, `unhealthy`); `tmuxAlive` remains a live check of the target pane. `inferRoleKind(id, role)` is **id-first**: a strong role keyword in the agent id (e.g. `implementer-02`) wins over incidental words in the role text (e.g. "coordinate with tester/reviewer"), then the combined id+role text is used as a fallback; this avoids misclassification where a worker's role prose mentions another role. `roleKind` is re-derived on each `ensureAgentDefaults` unless explicitly pinned at spawn (`roleKindExplicit`), so classification self-heals when inference improves; `swarm_spawn_agent` accepts an optional `roleKind` to pin the override.
 
 ### Reuse policy
 
@@ -906,29 +912,56 @@ Important semantics:
 
 ### Automatic lifecycle hooks
 
-Resource bookkeeping should happen as part of task operations:
+Resource bookkeeping happens as part of task operations (all engine-enforced in V1):
 
+- `swarm_create_task`, `swarm_assign_task`, and `swarm_update_task` each recompute task status inside the same locked write via `applyTaskStatus`/`computeTaskStatus`. Closure is a deterministic consequence of the last node transition — there is no polling loop and no mini server.
 - `swarm_assign_task` resolves/reuses/spawns the assignee and adds the task/node to `activeTaskIds`.
-- `swarm_update_task` removes finished node assignments from `activeTaskIds` when status reaches `done`, `failed`, `blocked`, or `skipped`.
-- Task terminal transitions release advisory `editLocks` and mark unused ephemeral agents `gcEligible`.
-- `swarm_reconcile`, `/swarm status`, and `swarm_task_status(runtime=true)` can run a non-destructive mark-only resource sweep.
+- `swarm_update_task` removes finished node assignments from `activeTaskIds` when status reaches `done`, `failed`, `blocked`, or `skipped`; terminal task transitions (`done`/`failed`/`cancelled`) release every agent's `activeTaskIds` pointer for that task and clear advisory `editLocks`.
+- Orchestrator `force` + `cancelTask=true` marks a task `cancelled` (sticky; releases all assignments).
+- `session_shutdown` of an agent that still owns `assigned`/`in_progress` nodes stamps `node.staleAt` and nudges the orchestrator (mailbox-only) instead of orphaning the nodes.
+- `swarm_reconcile` now sweeps `tasksDir` in addition to the mailbox: it reports stored-vs-derived status drift, surfaces stale/nudge signals (dead assignee, tmux-dead pane, dead-lettered assignment, `in_progress` past the stale/nudge thresholds, `ack_missing`), and stamps advisory `node.staleAt`. Mark-only by default; pass `mark=true` to also persist the recomputed `task.status`. It never auto-fails a node.
+- `/swarm status` and `swarm_task_status(runtime=true)` emit a structured PM rollup (per-task status/current/next/unacked, agent counts, closure line) so graph health is readable from tool output without capturing panes.
 
-Do not auto-kill tmux windows in V1. Auto cleanup may mark stale/idle/eligible resources and surface warnings, but destructive cleanup requires an orchestrator/admin action.
+Do not auto-kill tmux windows in V1. Reconcile/status may mark stale/idle/eligible resources and surface warnings, but destructive cleanup requires an orchestrator/admin action.
+
+### Task closure rules (`computeTaskStatus`)
+
+`computeTaskStatus(task)` is a pure, no-I/O function that derives the authoritative task status from node states:
+
+- any node `failed` → task `failed`;
+- every graph-terminal node (`terminal:true` or no outgoing edge) is `done`/`skipped` (and none failed) → task `done`;
+- otherwise, if **every** active (non-terminal, non-pending) node is `blocked` (and at least one exists) → task `blocked` (resumable — a node leaving `blocked` returns the task to `in_progress`/`done`);
+- otherwise, if any node has started (`assigned`/`in_progress`/`blocked`/`done`/`failed`/`skipped`) → `in_progress`;
+- otherwise → `ready`.
+
+`cancelled` is orchestrator-explicit and sticky: `applyTaskStatus` preserves an existing `cancelled` and never re-derives over it. Stored-vs-derived drift is surfaced by `swarm_reconcile` and the closure block of `swarm_task_status(runtime=true)` rather than silently repaired.
+
+### Stale / nudge ladder (advisory, no daemon)
+
+- **nudge** — `assigned`/`in_progress` node whose assignment message is delivered-but-unacked past the 5-min `ack_missing` window, or `in_progress` with no `lastActivityAt` bump past ~30 min. Reconcile traces `task.nudge` and surfaces the node in actions/PM summary.
+- **stale** — `in_progress` past 24h, or the assignee is `stopped`/`unhealthy`/tmux-dead/missing while the node is active. Reconcile stamps `node.staleAt` and traces `task.stale.reconcile`; nothing is released or failed.
+- **blocked** — the existing `status=blocked` node path (resumable; releases `activeTaskIds`/`editLocks`).
+- **fail/reassign** — `maxAttempts` (guarded) or orchestrator force-fail → `failed`, which recomputes closure.
+
+Reminder re-injection of reminder messages is intentionally **deferred** (kept reconcile idempotent and storm-free); the PM summary + `swarm_task_status` make these signals visible without re-injection.
 
 ### Validation and cleanup implications
 
-Agent reuse adds new validation checks:
+Agent reuse adds validation checks:
 
 - warn if a node assignment would exceed `maxConcurrentTasks`;
 - warn if a role has no reusable agent and `autoSpawn=false`;
 - flag stale `activeTaskIds` when a task is terminal;
-- ensure an existing agent's tmux target is alive before assignment.
+- ensure an existing agent's tmux target is alive before assignment;
+- warn when `task.status` is terminal but the task still appears in some agent's `activeTaskIds`.
 
-Manual resource tooling can come later, but it should remain orchestrator/admin-only:
+The following destructive/resource tools are **deferred** (referenced today only as warnings / manual reconcile). They are intentionally not first-class worker tools in V1:
 
 - `swarm_stop_agent`: stop one long-lived or ephemeral agent safely; default should refuse active tasks unless `force=true`.
 - `swarm_gc_agents`: list/stop stale ephemeral agents and clean stale active-task pointers; default should be `dryRun=true`.
 - `swarm_release_agent_task`: remove an active task assignment after done/failed/cancelled when automatic release needs repair.
+
+Until those land, use `swarm_reconcile` (mark-only, or `mark=true` to repair drift) plus `swarm_prune` (admin/orchestrator dry-run-first cleanup) to surface and recover these conditions.
 
 ## Graph start, edges, and branching
 
