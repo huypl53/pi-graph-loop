@@ -5,6 +5,8 @@ node_modules
 out
 dist
 *.tgz
+/dashboard*.html
+/artifacts/
 
 # code coverage
 coverage
@@ -35,10 +37,14 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 tmux-snapshots
 .pi/swarm/
 .pi/swarm-uat/runs/
+.pi/swarm-uat/*.sh
 .pi/tasks/
 .pi/fusion/
 **/__pycache__/
 
-# eval scaffolding for pi-extension-creator (local only)
+# eval scaffolding / local skill bundles (local only)
 .agents/skills/pi-extension-creator-workspace/
+.agents/skills/ak-*/
+.agents/skills-stale/
 Session.vim
+.pi/delegate/

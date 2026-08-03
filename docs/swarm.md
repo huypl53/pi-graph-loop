@@ -243,7 +243,40 @@ Captures a child agent's tmux pane to `.pi/swarm/traces/tmux/` for review/debugg
 
 ### `swarm_agent_identity`
 
-Reads or refreshes the durable identity card at `.pi/swarm/agents/<agent-id>.md`.
+Reads or refreshes the durable identity card at `.pi/swarm/agents/<agent-id>.md`. With `refresh: true` (or when no effective file exists yet) it rebuilds the **effective** identity = generated card + optional override + provenance footer (see [Identity override & reload](#identity-override--reload)) and stamps `identityVersion`/`identityHash`/`identityLoadedAt` on the agent record.
+
+## Identity override & reload
+
+Every swarm agent has a **generated** identity card (role, operating protocol, ACK protocol, peer-discovery, memory link). Generation alone would overwrite human edits, so an agent's effective identity is built from two sources:
+
+1. **Generated base** — `.pi/swarm/agents/<agent-id>.md` (fully rebuilt each time from swarm state).
+2. **Editable override** — `.pi/swarm/agents/<agent-id>.override.md` (a separate, optional file that is **only ever read**, never written or deleted by the extension).
+
+The effective file written to `<agent-id>.md` is `base + override (if present) + Identity provenance footer`. Regeneration always rebuilds base+override, so edits in `.override.md` survive. The override body is wrapped in clearly delimited markers:
+
+```text
+<!-- PI-SWARM IDENTITY OVERRIDE START -->
+## Custom instructions (from override)
+
+<your override text>
+<!-- PI-SWARM IDENTITY OVERRIDE END -->
+```
+
+### Provenance: version / hash / loadedAt
+
+Each effective-identity write stamps the agent record and appends an `## Identity provenance` footer:
+
+- `identityVersion` — monotonically bumps when the effective **content** (base + override body) changes since the last stamp, or on first creation. A no-op rewrite is idempotent; adding, removing, or editing the override (or a role/state change) bumps the version.
+- `identityHash` — sha256 hex of the effective content (base + override body; the provenance footer is excluded so version-bump detection stays stable).
+- `identityLoadedAt` — ISO timestamp of the last effective-identity write.
+
+### Reloading a running agent
+
+Use `swarm_reload_identity` (tool) or `/swarm identity reload <agent-id> [note]` (command) to regenerate the effective identity for a live agent. If the agent's tmux pane is alive, a `[PI-SWARM IDENTITY RELOAD]` instruction is injected into the pane telling the agent to re-read its identity now; if the pane is dead, the new identity still takes effect on the next `session_start`/identity read. Injection is **best-effort and never fails the reload** — a dead pane or transient tmux error is traced (`agent.identity.reload_inject_failed`) and reported as `injected: false`.
+
+`/swarm identity show <agent-id>` prints the effective identity file plus the current version/hash/loadedAt/override-present header.
+
+The reload re-injects into living agents so an operator can push new instructions (via the override file) without restarting the agent — see [docs/swarm-task-graph.md](./swarm-task-graph.md) for how this interacts with living assigned agents.
 
 ## Message delivery semantics
 
@@ -278,6 +311,27 @@ from + to + idempotencyKey
 ```
 
 This prevents duplicate task assignment when a coordinator retries a send prompt.
+
+### Assignment idempotency & supersede
+
+`swarm_assign_task` is **idempotent per task/node/assignee/attempt**. It derives a deterministic key `assign:<taskId>:<nodeId>:<assignee>:<attempt>` and passes it to the message send, so an exact retry of the same assignment (same attempt) **returns the existing message** (`message.idempotent_reuse` trace) instead of creating a duplicate. The node also records the canonical current assignment as `node.assignmentMessageId`.
+
+When a **new** assignment supersedes prior open ones for the same task/node (e.g. a reassign after stale-status repair bumped the attempt), the older still-open assignment messages are **superseded + waived** automatically:
+
+- `message.superseded = { at, by, supersededBy }` and `response.status = "waived"` are stamped on the prior message (`message.superseded` trace).
+- Because the response becomes `waived`, the existing reconcile/reuse logic already **excludes** it from `response_missing` nagging and from reuse blocking — no special-case reconcile code is needed. `runtimeTaskWarnings`/closure summaries skip superseded messages and prefer `assignmentMessageId`.
+- `node.messageIds[]` keeps the full audit history; `assignmentMessageId` is the single completable current assignment.
+
+**Retries do not require a duplicate response.** `swarm_ack_message` guards superseded assignments: a `done` or `processing` ack on a superseded message throws `ASSIGNMENT_SUPERSEDED` (pointing at the current assignment) so an implementer replying to an old assignment cannot double-complete. A `failed` ack is always allowed (informational). The orchestrator can override with `swarm_ack_message(..., status="done", waive=true)` to accept a superseded assignment as `waived`. This preserves `requiresResponse` semantics on the **current** assignment while making retries safe and non-duplicative.
+
+### Stale & reassignment cleanup
+
+When a node is **reassigned** (e.g. the old owner died and was replaced), the harness cleans up so the prior owner's lifecycle cannot pollute the new assignment:
+
+- **`node.staleAt` is cleared on (re)assign.** A fresh `swarm_assign_task` deletes any prior `staleAt` (`task.stale.cleared` trace), and `swarm_update_task` clearing it on active (re)entry (`assigned`/`in_progress`/`ready`) — so a marker stamped by a dead previous owner never carries onto the new owner. (It is advisory only; `swarm_reconcile` may re-stamp it later if the new owner actually goes idle.)
+- **Old assignment messages are superseded + waived** (see above), so they are already excluded from `response_missing` nagging and reuse blocking — no special-case reconcile code is needed.
+- **Old assignee `activeTaskIds` is released** on reassign and on terminal-ish transitions.
+- **Shutdown/settle only claims a node while it is the *canonical* owner.** The dying-agent scan skips a node when `node.assignee !== agentId`, when the canonical `assignmentMessageId` is missing/superseded, or when that canonical message is addressed to a different agent. So an old owner that shuts down/settles after a reassign will **not** be reported as still holding the node, and will **not** stamp `staleAt` onto the new owner.
 
 ## Response-required protocol
 
@@ -332,18 +386,31 @@ File layout:
 
 Tools (8):
 
-- `swarm_metric_define` — create/replace a project metric contract (validates safe id, direction, value type).
+- `swarm_metric_define` — create/replace a versioned project metric contract (validates safe id, direction, value type; replacement increments `version`).
 - `swarm_metric_get` — read a metric contract by id.
-- `swarm_run_record` — append a run record with best-effort `git` capture and safe evidence refs.
+- `swarm_run_record` — validate status/verdict/primary metric, bind the run to the current contract version, capture SHA-256 evidence digests plus best-effort git state, and append under the swarm lock.
 - `swarm_run_get` — read the latest record for a runId.
 - `swarm_run_compare` — generic comparison of 2..N runs against an optional metric (contract `direction` wins; otherwise `higherBetter` is a hint).
 - `swarm_memory_propose` — propose a claim sourced from a run; runs the evidence gate (still appends as `rejected` with a `rejectionReason` on failure, never auto-activates).
 - `swarm_memory_search` — file-backed substring + scope filter (no vector DB/embeddings).
 - `swarm_memory_accept` — reviewer/orchestrator moves `proposed`→`active`/`rejected`, re-running the evidence gate before activating.
 
-**Evidence gate** (enforced at propose and again at accept): the source run must exist with verdict `pass`/`approved`; `evidenceRefs` must be non-empty, safe relative paths that **exist and are readable**; and a code/config-changing run must carry a git commit or a `.patch`/`.diff` ref so the change is reconstructable. Pane-only, ack-only, mailbox-only, or incomplete claims never promote.
+**Evidence gate** (enforced at propose, accept, and iteration-context retrieval): the source run must be `done` with verdict `pass`/`approved`, match the current metric-contract id + version, and carry a correctly typed primary metric. `evidenceRefs` must be non-empty, safe relative paths that exist/read; every contract `evidenceRequired` entry must be present; and each artifact must still match the SHA-256 digest captured when the run was recorded. A run that describes a code/config change must carry a `.patch`/`.diff` ref or distinct git base/head commits. Pane-only, ack-only, mailbox-only, mutated, stale-contract, or incomplete claims never promote or carry forward. `swarm_memory_accept` is role-gated to reviewer/orchestrator and enforces `proposed→active`; append transitions use the global swarm lock.
 
 Run records can optionally link to a swarm task via `taskId`/`nodeId`; when tied to a graph, also stamp `task.json.sharedContext`/`task.json.evidence`, but `runs.jsonl` remains the authoritative metric/evidence store. See [`docs/swarm-task-graph.md`](./swarm-task-graph.md) and the `swarm_metric_designer` skill for the iteration demo flow.
+
+## Memory protocol
+
+Memory is governed by a dedicated runtime policy: [`docs/swarm-memory.md`](./swarm-memory.md). Generated agent identity files link to it, and the iteration-context bundle surfaces its path as `memoryPolicyRef`. In short:
+
+- **Read** memory (`swarm_memory_search`) at task start, before proposing changes, when blocked, and during review — scope-first retrieval.
+- **Propose** (`swarm_memory_propose`, any agent) only after a terminal `done`/`pass`|`approved` run bound to the current metric-contract version, with complete file-backed evidence that still matches its recorded SHA-256 digests.
+- **Claim quality**: specific, falsifiable, scoped (`scope.kind/id`), one finding per claim, tied to a `sourceRunId`. No generalities.
+- **Evidence**: non-empty existing `evidenceRefs`, all contract `evidenceRequired` present, digests unmutated; code/config claims need a `.patch`/`.diff` or distinct git base/head. Pane-only / ack-only / mailbox-only / incomplete claims never promote.
+- **Roles**: any agent may propose; only reviewer/orchestrator may `swarm_memory_accept` (gate re-runs before activation). Rejected claims are auditable, never dropped.
+- **Self-check**: if you cannot reconstruct the claim from git + artifact files + trace alone, do not propose it.
+
+The evidence gate is enforced at propose, accept, and on every iteration-context retrieval; see [`docs/swarm-memory.md`](./swarm-memory.md) for the full policy.
 
 ## Iteration loop V1
 
@@ -357,12 +424,12 @@ File layout:
 
 Tools (4):
 
-- `swarm_iteration_create` — create a session over an existing metric contract (optional `baselineRunId`, pinned `memoryIds`; all ids validated to exist).
-- `swarm_iteration_record` — append an entry referencing an **existing** runId, then recompute best/improvement; optionally pin more active memories; warns (trace) on cross-contract runs.
+- `swarm_iteration_create` — create a session over an existing metric contract; the optional baseline must be a valid terminal run and pinned memories must be active.
+- `swarm_iteration_record` — append a unique, valid run bound to the same contract/version, then recompute best/improvement; failed/running/cross-contract/stale-version runs are rejected and cannot win.
 - `swarm_iteration_status` — session JSON + the derived best/improvement roll-up (per-run value, baseline/best, `improvement`, `meaningful`, missing-metric count); optional `includeContext`.
-- `swarm_iteration_context` — next-iteration retrieval: previous best run summary + active evidence-backed memories for the session scope (pinned or scope-matching); proposed/rejected memories are never carried forward.
+- `swarm_iteration_context` — next-iteration retrieval: previous best run summary + active memories matching scope `kind+id` (or explicitly pinned). Memories are revalidated against current evidence digests, ranked pinned-first then confidence/recency, and stale entries are returned under `excludedMemories` instead of being carried forward.
 
-**Best/improvement is generic**: `computeIterationBest` is the single decision point. It reads `run.metrics[contract.primaryMetric.id]` (never a hard-coded key) and honors the contract `direction` — `maximize` (max), `minimize` (min), `target` (closest to `primaryMetric.target`, falls back to maximize if unset), `passfail` (a passing boolean run). `improvement` is signed in the favored direction (for `target`, reduction in distance); `meaningful` uses `primaryMetric.minimumMeaningfulChange` when set. Missing/non-numeric values are skipped (counted as `present:false`), never crash.
+**Best/improvement is generic and eligibility-gated**: `computeIterationBest` is the single decision point. It first excludes missing, running, failed/rejected, cross-contract, stale-version, or wrongly typed runs, exposing per-run `exclusionReasons` plus `invalidCount`. It then reads `run.metrics[contract.primaryMetric.id]` (never a hard-coded key) and honors the contract `direction` — `maximize` (max), `minimize` (min), `target` (closest to `primaryMetric.target`, falls back to maximize if unset), `passfail` (a passing boolean run). `improvement` is signed in the favored direction; zero delta is never meaningful, and positive delta must meet `primaryMetric.minimumMeaningfulChange` when set.
 
 Demo flow (uses only real tools): `swarm_metric_define` → `swarm_run_record` baseline → `swarm_iteration_create` → `swarm_run_record` run-001 → `swarm_iteration_record(runId=run-001)` → `swarm_memory_propose`/`swarm_memory_accept` → `swarm_iteration_context` feeds the next agent → repeat; `swarm_iteration_status` shows the trend. Success question: from the session JSON + `runs.jsonl` + `memory.jsonl` + trace lines alone, can an agent reconstruct the best run, improvement, and carry-forward memories?
 
@@ -388,6 +455,18 @@ scripts/swarm_iteration_watch.sh --task <taskId> --once               # one comp
 ```
 
 The Markdown dashboard emits three Mermaid diagrams: a task-graph **flowchart** (nodes by status/outcome/artifact + edges), an agent **sequenceDiagram** (messages/handoffs with ack/response/result links), and an **iteration metric timeline** (per-iteration values + Δ, best highlighted). See [`docs/swarm-iteration-demo.md`](swarm-iteration-demo.md) ("Reviewing iteration state (live + completed)") for flags and usage.
+
+### Static HTML dashboard
+
+For a visual/browser review, `scripts/swarm_dashboard.sh` generates a **single self-contained, dependency-free HTML dashboard** (inline CSS, no CDN/build) prioritizing per-iteration metric improvement (inline SVG chart), task-graph node flow (status-colored node cards), and agent conversation (message timeline with ack/result links), plus memory/evidence state and a raw inspector. One-shot (historical/completed) and `--live` regeneration modes.
+
+```bash
+scripts/swarm_dashboard.sh --out dashboard.html        # one-shot, open in a browser
+scripts/swarm_dashboard.sh --live --interval 3           # regenerate + auto-refresh
+scripts/swarm_dashboard.sh --task <taskId> --out t.html  # focus one task graph
+```
+
+See [`docs/swarm-dashboard.md`](swarm-dashboard.md) for sections, accessibility/responsive details, and validation.
 
 ## Recommended agent protocol
 

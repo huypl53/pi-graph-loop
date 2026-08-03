@@ -22,6 +22,8 @@ set -euo pipefail
 #  11. PM settle-notify -> worker settled w/ open work -> orchestrator mailbox + auto-surfaced (cooldown-guarded)
 #  12. Session-safe + read-safe pump -> two orchestrator sessions both surface ONE notification (no theft);
 #      check_mailbox(markDelivered:true) cannot pre-empt a later pump surface (per-process surfaced set)
+#  14. Identity override + reload -> effective <agent>.md = base+override+provenance; version/hash/loadedAt
+#      stamped on the agent record; reload of a missing agent errors; override removal clears the marker
 #
 # Usage:
 #   scripts/swarm_task_uat.sh
@@ -230,6 +232,57 @@ PY
 	else
 		fail "state[$aid] $expr == '$got' (expected '$expected')"
 	fi
+}
+
+# state_msg_eq <msgId> <expr-on-`m`> <expected>: read a message record from swarm-state.json.
+state_msg_eq() {
+	local mid="$1" expr="$2" expected="$3"
+	local f="$STATE_JSON"
+	[[ -f "$f" ]] || { fail "state_msg_eq: missing $f"; return 0; }
+	local got
+	got="$(python3 - "$f" "$mid" "$expr" <<'PY'
+import json, sys
+f, mid, expr = sys.argv[1], sys.argv[2], sys.argv[3]
+st = json.load(open(f))
+m = st.get("messages", {}).get(mid)
+print(eval(expr, {"m": m})) if m else print("__MISSING__")
+PY
+)"
+	if [[ "$got" == "$expected" ]]; then
+		log "  ok msg[$mid] $expr == $expected"
+	else
+		fail "msg[$mid] $expr == '$got' (expected '$expected')"
+	fi
+}
+
+# trace_global_has <event>: confirm an event fired in the GLOBAL swarm trace (traces/events.jsonl).
+# (message.idempotent_reuse / message.superseded are global, not per-task.)
+trace_global_has() {
+	local event="$1"
+	local f="$TRACE_JSONL"
+	[[ -f "$f" ]] || { fail "trace_global_has: missing $f"; return 0; }
+	if python3 - "$f" "$event" <<'PY'; then
+import json, sys
+f, event = sys.argv[1], sys.argv[2]
+found = any(json.loads(l).get("event") == event for l in open(f) if l.strip())
+sys.exit(0 if found else 1)
+PY
+		log "  ok trace(global) has '$event'"
+	else
+		fail "trace(global) missing event '$event'"
+	fi
+}
+
+# node_assign_msg <taskId> <nodeId>: print the current canonical assignment message id.
+node_assign_msg() {
+	local tid="$1" nid="$2"
+	local f="$TASKS_DIR/$tid/task.json"
+	python3 - "$f" "$nid" <<'PY'
+import json, sys
+f, nid = sys.argv[1], sys.argv[2]
+t = json.load(open(f))
+print(t.get("nodes", {}).get(nid, {}).get("assignmentMessageId") or "")
+PY
 }
 
 # mailbox_has <recipientId> <subjectSubstring> <label>: assert <recipient>.jsonl contains a message
@@ -580,6 +633,230 @@ if [[ " $probeB_sids " == *" uat-delta "* ]]; then
 else
 	fail "read-safe[probe-B] NOT surfaced by uat-delta after check_mailbox(markDelivered) — read pre-empted pump (sids={$probeB_sids})"
 fi
+
+# ---------- 13. Assignment idempotency + supersede + ack guard ----------
+# Covers: deterministic idempotency key (same task/node/assignee/attempt -> reuse, no duplicate);
+# newer assignment supersedes prior OPEN assignment (waived, excluded from response_missing); canonical
+# node.assignmentMessageId; swarm_ack_message rejects done/processing on a superseded assignment unless
+# the orchestrator passes waive=true. All assertions are file-backed (task.json + swarm-state messages
+# + global trace); tool stdout (ASSIGNMENT_SUPERSEDED) is a secondary signal.
+IDEM_AGENT="uat-idem-worker-${SUFFIX}"
+IDEM_TASK="uat-taskgraph-idem-${SUFFIX}"
+fabricate_agent "$IDEM_AGENT" "Swarm implementer worker for assignment idempotency"
+run_step create-idem swarm_create_task \
+	"Call swarm_create_task exactly once with title \"UAT idem\", goal \"assignment idempotency\", taskId \"$IDEM_TASK\", start \"w\", nodes {\"w\":{"role":"implementer work","terminal":true}}, edges []. Then reply done."
+# (1) first assign -> msg1 (canonical pointer set)
+run_step assign-idem-1 swarm_assign_task \
+	"Call swarm_assign_task exactly once with taskId \"$IDEM_TASK\", nodeId \"w\", agentId \"$IDEM_AGENT\". Then reply done."
+MSG1="$(node_assign_msg "$IDEM_TASK" "w")"
+log "  idem msg1=$MSG1"
+if [[ -z "$MSG1" ]]; then fail "idem: no assignmentMessageId after first assign"; fi
+# (2) exact retry (same attempt) -> idempotent REUSE: canonical unchanged + global idempotent_reuse trace
+run_step assign-idem-2 swarm_assign_task \
+	"Call swarm_assign_task exactly once with taskId \"$IDEM_TASK\", nodeId \"w\", agentId \"$IDEM_AGENT\". Then reply done."
+MSG1B="$(node_assign_msg "$IDEM_TASK" "w")"
+if [[ -n "$MSG1" && "$MSG1" == "$MSG1B" ]]; then
+	log "  ok idem: retry reused the same assignment message ($MSG1)"
+else
+	fail "idem: retry produced a different/new message (msg1=$MSG1 msg1b=$MSG1B) — idempotency key not honored"
+fi
+trace_global_has "message.idempotent_reuse"
+# (3) force a fresh attempt: orchestrator resets node -> ready, then assign -> new msg2 + supersede msg1
+run_step reset-idem-ready swarm_update_task \
+	"Call swarm_update_task exactly once with taskId \"$IDEM_TASK\", nodeId \"w\", status \"ready\", force true. Then reply done."
+run_step assign-idem-3 swarm_assign_task \
+	"Call swarm_assign_task exactly once with taskId \"$IDEM_TASK\", nodeId \"w\", agentId \"$IDEM_AGENT\". Then reply done."
+MSG2="$(node_assign_msg "$IDEM_TASK" "w")"
+log "  idem msg2=$MSG2"
+if [[ -n "$MSG2" && "$MSG2" != "$MSG1" ]]; then
+	log "  ok idem: new attempt produced a new message ($MSG2 != $MSG1)"
+else
+	fail "idem: new attempt did not produce a new message (msg1=$MSG1 msg2=$MSG2)"
+fi
+trace_global_has "message.superseded"
+state_msg_eq "$MSG1" "(m.get('superseded') or {}).get('supersededBy')" "$MSG2"
+state_msg_eq "$MSG1" "(m.get('response') or {}).get('status')" "waived"
+task_json_eq "$IDEM_TASK" "t['nodes']['w']['assignmentMessageId']" "$MSG2"
+# (4) ack guard: worker attempts done on the superseded msg1 -> rejected (ASSIGNMENT_SUPERSEDED).
+# The guard fires before the result-check, so no resultMessageId is required. File-backed proof:
+# msg1 is NOT completed by the worker (lastAck from worker never becomes 'done'); only the orchestrator
+# waive in step (5) can complete it. The ASSIGNMENT_SUPERSEDED stdout signal is secondary/soft because a
+# constrained model may decline to call a "negative" tool — the hard check is the non-completion.
+log "RUN idem-ack-guard [pi -p as $IDEM_AGENT; retry on 429]"
+set +e
+retry_cmd "$SWARM_MAX_ATTEMPTS" 6 env PI_SWARM_AGENT_ID="$IDEM_AGENT" "${PI_BASE[@]}" --tools swarm_ack_message -p "Call swarm_ack_message exactly once with messageId \"$MSG1\", status \"done\". Then reply done." >"$LOG_DIR/idem-ack-guard.out" 2>"$LOG_DIR/idem-ack-guard.err" || true
+set -e
+if grep -qF "ASSIGNMENT_SUPERSEDED" "$LOG_DIR/idem-ack-guard.out" "$LOG_DIR/idem-ack-guard.err" 2>/dev/null; then
+	log "  ok idem: ack of superseded assignment rejected with ASSIGNMENT_SUPERSEDED"
+else
+	log "  note idem: ASSIGNMENT_SUPERSEDED not captured (model may not have called the tool); relying on file-backed non-completion below"
+fi
+# HARD: the worker could not complete the superseded assignment. lastAck.status must not be 'done' yet
+# (the orchestrator waive in step 5 is what completes it). response must still be waived.
+state_msg_eq "$MSG1" "(m.get('response') or {}).get('status')" "waived"
+state_msg_eq "$MSG1" "(m.get('lastAck') or {}).get('status') == 'done'" "False"
+# (5) orchestrator waive override: ack msg1 done with waive=true -> accepted as waived.
+run_step idem-waive swarm_ack_message \
+	"Call swarm_ack_message exactly once with messageId \"$MSG1\", status \"done\", waive true. Then reply done."
+state_msg_eq "$MSG1" "(m.get('lastAck') or {}).get('status')" "done"
+state_msg_eq "$MSG1" "(m.get('response') or {}).get('status')" "waived"
+
+# ---------- 14. Identity override + reload (effective identity, version/hash, missing-agent error) ----------
+# Deterministic + model-independent: writes an override file (bash), reloads via the tool, then asserts
+# on the effective <agent>.md file and the agent record in swarm-state.json. The orchestrator agent is
+# created by the preflight create_task step, so it already exists in swarm-state.json. tmux injection is
+# best-effort and NOT asserted here (the orchestrator is mailbox-only, tmuxTarget="unknown").
+ID_AGENT="orchestrator"
+ID_FILE="$SWARM_CWD/.pi/swarm/agents/${ID_AGENT}.md"
+ID_OV="$SWARM_CWD/.pi/swarm/agents/${ID_AGENT}.override.md"
+ID_MARKER="DETERMINISTIC-UAT-IDENTITY-OVERRIDE-${SUFFIX}"
+mkdir -p "$(dirname "$ID_OV")"
+# (1) Write the override file (model-free). Generation must NEVER write this file; only read it.
+printf 'Custom override instructions for %s. Unique marker: %s.\nFollow these custom rules when summarizing work.\n' "$ID_AGENT" "$ID_MARKER" > "$ID_OV"
+log "identity: wrote override $ID_OV (marker=$ID_MARKER)"
+# (2) Reload effective identity for the orchestrator (generated base + override + provenance).
+run_step iden-reload swarm_reload_identity \
+	"Call swarm_reload_identity exactly once with agentId \"$ID_AGENT\". Then reply done."
+# (3) Effective file must contain the override marker AND the provenance footer (version/hash/loadedAt).
+if grep -qF "$ID_MARKER" "$ID_FILE" && grep -qF "## Identity provenance" "$ID_FILE" && grep -qF "Version:" "$ID_FILE" && grep -qF "Hash:" "$ID_FILE"; then
+	log "  ok identity[$ID_AGENT] effective file has override marker + provenance"
+else
+	fail "identity[$ID_AGENT] effective file missing override marker and/or provenance"
+	sed -n '1,60p' "$ID_FILE" | tee -a "$LOG_DIR/harness.log" || true
+fi
+# (4) Agent record stamped with version (>=1) and hash + loadedAt.
+ID_VER="$(python3 - "$STATE_JSON" "$ID_AGENT" <<'PY'
+import json, sys
+st = json.load(open(sys.argv[1]))
+a = (st.get('agents') or {}).get(sys.argv[2]) or {}
+v = a.get('identityVersion')
+print(v if isinstance(v, int) else '')
+PY
+)"
+ID_HASH="$(python3 - "$STATE_JSON" "$ID_AGENT" <<'PY'
+import json, sys
+st = json.load(open(sys.argv[1]))
+a = (st.get('agents') or {}).get(sys.argv[2]) or {}
+print((a.get('identityHash') or '')[:12])
+PY
+)"
+ID_LOADED="$(python3 - "$STATE_JSON" "$ID_AGENT" <<'PY'
+import json, sys
+st = json.load(open(sys.argv[1]))
+a = (st.get('agents') or {}).get(sys.argv[2]) or {}
+print(a.get('identityLoadedAt') or '')
+PY
+)"
+if [[ "$ID_VER" =~ ^[0-9]+$ && "$ID_VER" -ge 1 && -n "$ID_HASH" && -n "$ID_LOADED" ]]; then
+	log "  ok identity[$ID_AGENT] stamped version=$ID_VER hash=$ID_HASH loadedAt=$ID_LOADED"
+else
+	fail "identity[$ID_AGENT] not stamped (version='$ID_VER' hash='$ID_HASH' loadedAt='$ID_LOADED')"
+fi
+# (5) Reload of a MISSING agent must NOT materialize it: the tool throws "Unknown swarm agent" inside
+#     its withLock BEFORE writeState, so no agent record and no <id>.md file are created. We assert that
+#     negative invariant (deterministic + model-independent) rather than grepping pi print-mode stdout,
+#     which only echoes the model's final reply (often "done") and not the tool-error text.
+ID_MISSING="uat-missing-identity-${SUFFIX}"
+run_step iden-reload-missing swarm_reload_identity \
+	"Call swarm_reload_identity exactly once with agentId \"$ID_MISSING\". Then reply done."
+ID_MISSING_INSTATE="$(python3 - "$STATE_JSON" "$ID_MISSING" <<'PY'
+import json, sys
+st = json.load(open(sys.argv[1]))
+print("true" if sys.argv[2] in (st.get('agents') or {}) else "false")
+PY
+)"
+if [[ "$ID_MISSING_INSTATE" == "false" && ! -f "$SWARM_CWD/.pi/swarm/agents/${ID_MISSING}.md" ]]; then
+	log "  ok identity reload of missing agent did not materialize it (not in state, no identity file)"
+else
+	fail "identity reload of missing agent materialized it (inState=$ID_MISSING_INSTATE)"
+fi
+# (6) Removing the override + reload -> effective file no longer carries the marker (override is read,
+#     not stored in the generated base); provenance footer is retained.
+rm -f "$ID_OV"
+run_step iden-reload-noov swarm_reload_identity \
+	"Call swarm_reload_identity exactly once with agentId \"$ID_AGENT\". Then reply done."
+if ! grep -qF "$ID_MARKER" "$ID_FILE" && grep -qF "## Identity provenance" "$ID_FILE"; then
+	log "  ok identity[$ID_AGENT] override removed: marker gone, provenance retained"
+else
+	fail "identity[$ID_AGENT] override removal did not clear marker from effective file"
+fi
+
+# ---------- 15. Stale/reassign lifecycle cleanup ----------
+# Regression: a node reassigned old->new must (1) clear node.staleAt, (2) supersede+waive the old
+# assignment message, (3) release old activeTaskIds, and (4) the shutdown/settle canonical-assignment
+# guard must not let the (dying) old owner claim the node. Criteria 1-3 are file-backed on real
+# swarm_assign_task output; criterion 4 is the scanAgentOpenAssignments predicate reimplemented 1:1
+# over on-disk task.json + state.messages (design option ii; the real hook is also exercised in the
+# focused live validation). All steps run in orchestrator context.
+STALE_OLD="uat-stale-old-${SUFFIX}"
+STALE_NEW="uat-stale-new-${SUFFIX}"
+STALE_TK="uat-taskgraph-stale-reassign-${SUFFIX}"
+fabricate_agent "$STALE_OLD" "Swarm tester worker (old owner)"
+fabricate_agent "$STALE_NEW" "Swarm tester worker (new owner)"
+run_step create-stale swarm_create_task \
+	"Call swarm_create_task exactly once with title \"UAT stale\", goal \"stale reassign\", taskId \"$STALE_TK\", start \"v\", nodes {\"v\":{"role":"tester work","terminal":true}}, edges []. Then reply done."
+# (1) first assign -> msgOld (old owns the node)
+run_step assign-stale-old swarm_assign_task \
+	"Call swarm_assign_task exactly once with taskId \"$STALE_TK\", nodeId \"v\", agentId \"$STALE_OLD\". Then reply done."
+MSG_OLD="$(node_assign_msg "$STALE_TK" "v")"
+log "  stale msgOld=$MSG_OLD"
+[[ -n "$MSG_OLD" ]] || fail "stale: no assignmentMessageId after first assign"
+state_msg_eq "$MSG_OLD" "m.get('to')" "$STALE_OLD"
+state_msg_eq "$MSG_OLD" "str(bool(m.get('superseded')))" "False"
+state_json_eq "$STALE_OLD" "str('$STALE_TK' in (a.get('activeTaskIds') or []))" "True"
+# simulate the old owner having gone idle/dead and stamped staleAt onto the node
+fabricate "$STALE_TK" "t['nodes']['v']['staleAt'] = '2026-01-01T00:00:00Z'"
+task_json_eq "$STALE_TK" "t['nodes']['v'].get('staleAt')" "2026-01-01T00:00:00Z"
+# (2) reassign old -> new
+run_step assign-stale-new swarm_assign_task \
+	"Call swarm_assign_task exactly once with taskId \"$STALE_TK\", nodeId \"v\", agentId \"$STALE_NEW\". Then reply done."
+MSG_NEW="$(node_assign_msg "$STALE_TK" "v")"
+log "  stale msgNew=$MSG_NEW"
+[[ -n "$MSG_NEW" && "$MSG_NEW" != "$MSG_OLD" ]] || fail "stale: reassign did not produce a new canonical message (old=$MSG_OLD new=$MSG_NEW)"
+task_json_eq "$STALE_TK" "t['nodes']['v'].get('assignee')" "$STALE_NEW"
+state_msg_eq "$MSG_NEW" "m.get('to')" "$STALE_NEW"
+state_msg_eq "$MSG_NEW" "str(bool(m.get('superseded')))" "False"
+# criterion 2: old assignment superseded + waived
+state_msg_eq "$MSG_OLD" "(m.get('superseded') or {}).get('supersededBy')" "$MSG_NEW"
+state_msg_eq "$MSG_OLD" "(m.get('response') or {}).get('status')" "waived"
+# criterion 3: old activeTaskIds released, new acquired
+state_json_eq "$STALE_OLD" "str('$STALE_TK' in (a.get('activeTaskIds') or []))" "False"
+state_json_eq "$STALE_NEW" "str('$STALE_TK' in (a.get('activeTaskIds') or []))" "True"
+# criterion 1 (GAP A): node.staleAt cleared for the new assignment
+task_json_eq "$STALE_TK" "str(t['nodes']['v'].get('staleAt'))" "None"
+trace_has "task.stale.cleared" "$STALE_TK"
+# criterion 4 (GAP B): scanAgentOpenAssignments predicate (1:1 mirror) over on-disk task.json +
+# state.messages. (a) real post-reassign state: old does not hold, new holds. (b) simulated
+# dying-old-owner stale-readState race (assignee read as old but canonical still points at new's
+# message): the canonical-message guard must STILL reject old — this is the core of criterion 4 and
+# is independent of the assignee check. The real shutdown/settle hook is also exercised in the
+# focused live validation.
+python3 - "$STATE_JSON" "$TASKS_DIR/$STALE_TK/task.json" "$STALE_OLD" "$STALE_NEW" <<'PY' || fail "stale: scanAgentOpenAssignments predicate mismatch (criterion 4)"
+import json, sys, copy
+state_p, task_p, old, new = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+messages = json.load(open(state_p)).get("messages", {})
+node = json.load(open(task_p))["nodes"]["v"]
+TERMINAL = {"done", "failed", "skipped"}
+def holds(n, agent_id):
+	# 1:1 mirror of scanAgentOpenAssignments per-node guard (extensions/swarm/index.ts)
+	if n.get("assignee") != agent_id: return False
+	if n.get("status") not in ("assigned", "in_progress"): return False
+	if n.get("status") in TERMINAL: return False
+	canon = n.get("assignmentMessageId")
+	if canon:
+		rec = messages.get(canon)
+		if not rec: return False
+		if rec.get("superseded"): return False
+		if rec.get("to") != agent_id: return False
+	return True
+# (a) real post-reassign state
+assert not holds(node, old), "old should not hold node (assignee moved to new)"
+assert holds(node, new), "new should hold node (canonical msg addressed to new, not superseded)"
+# (b) stale-readState race: assignee read as old but canonical still new's message -> canonical guard rejects old
+race = copy.deepcopy(node); race["assignee"] = old
+assert not holds(race, old), "canonical guard must reject old even if assignee read is stale (criterion 4 core)"
+PY
+log "  ok stale: scanAgentOpenAssignments predicate -> old never holds; new holds [v] (incl. stale-readState race)"
 
 # ---------- Summary ----------
 LOG_DIR="$LOG_DIR" python3 - "$HAPPY_ID" "$FAIL_ID" "$CANCEL_ID" "$STALE_ID" "$DRIFT_ID" "$BLK_ID" "$RK_AGENT" "$FAILURES" <<'PY' | tee "$LOG_DIR/summary.txt"

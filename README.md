@@ -28,6 +28,7 @@ Full docs are in:
 
 ```text
 docs/swarm.md
+docs/swarm-memory.md
 docs/swarm-task-graph.md
 docs/swarm-graph-uat-scenario.md
 ```
@@ -119,6 +120,13 @@ Review iteration state live **or** as a completed-task dashboard (read-only, dep
 scripts/swarm_iteration_watch.sh --once                                 # text review report
 scripts/swarm_iteration_watch.sh --format markdown --out review.md      # Mermaid dashboard
 scripts/swarm_iteration_watch.sh --task <taskId> --once                 # review a completed task graph
+```
+
+Visual HTML dashboard (static, dependency-free, browser-reviewable):
+
+```bash
+scripts/swarm_dashboard.sh --out dashboard.html        # one-shot V2 dashboard (role/branch lanes for parallel branches)
+scripts/swarm_dashboard.sh --live --interval 3           # regenerate + auto-refresh
 ```
 
 ## Repository notes

@@ -115,6 +115,10 @@ On each turn:
 Do not ask the human to relay inter-agent messages. Use swarm tools.
 ```
 
+### Reloading identity into a living agent
+
+An operator can push new instructions to an already-assigned, running agent without restarting it: edit (or create) the editable override at `.pi/swarm/agents/<agent-id>.override.md`, then run `swarm_reload_identity` (tool) or `/swarm identity reload <agent-id> [note]` (command). The reload regenerates the **effective** identity (generated card + override) onto `<agent-id>.md`, bumps `identityVersion`/`identityHash`/`identityLoadedAt`, and — if the agent's tmux pane is alive — injects a `[PI-SWARM IDENTITY RELOAD]` instruction telling the agent to re-read its identity and follow any new instructions immediately. Injection is best-effort: a dead pane never fails the reload (it is traced and reported `injected: false`; the new identity then takes effect on the next `session_start`). Because the override file is only ever read (never written by generation), operator edits survive every regeneration. See [docs/swarm.md](./swarm.md#identity-override--reload) for the override format and provenance fields.
+
 ## Task brief: `task.md`
 
 `task.md` is the LLM-readable brief. It should be stable enough that every role can read it without needing a long prompt.
@@ -395,6 +399,16 @@ Examples:
 - Tester ran validation successfully but the feature failed: `status=done`, `outcome=failed`.
 - Tester could not run validation because the environment is broken: `status=blocked`, `outcome=needs_clarification` or `environment_blocked`.
 - Reviewer completed review and rejects the diff: `status=done`, `outcome=rejected` or `changes_requested`.
+
+### Assignment idempotency & supersede
+
+Assignment (`swarm_assign_task`) is **idempotent per task/node/assignee/attempt**: an exact retry of the same assignment reuses the existing message (no duplicate, `message.idempotent_reuse` trace) and the node records the canonical current assignment as `node.assignmentMessageId`. When a new assignment supersedes prior open ones for the same task/node (e.g. a reassign after stale-status repair bumped the attempt), the older still-open assignment messages are stamped `superseded` and their `response.status` becomes `waived` (`message.superseded` trace) — so they are excluded from `response_missing` nagging and reuse blocking without special-case reconcile code. `node.messageIds[]` keeps the full audit history; `assignmentMessageId` is the single completable current assignment.
+
+**Retries do not require a duplicate response.** `swarm_ack_message` rejects a `done`/`processing` ack on a superseded assignment with `ASSIGNMENT_SUPERSEDED` (it points at the current assignment), so an implementer replying to an old assignment cannot double-complete. A `failed` ack is always allowed (informational); the orchestrator can override with `waive=true` to accept a superseded assignment as `waived`. `requiresResponse` semantics remain intact on the current assignment.
+
+### Stale & reassignment cleanup
+
+**Reassign semantics.** When a node is reassigned, the harness clears the prior owner's state so it cannot pollute the new assignment: a fresh `swarm_assign_task` deletes any prior `node.staleAt` (`task.stale.cleared` trace; `swarm_update_task` also clears it on active re-entry to `assigned`/`in_progress`/`ready`); the old assignment message is superseded + waived (excluded from `response_missing` and reuse blocking); the old assignee's `activeTaskIds` is released. The shutdown/settle dying-agent scan only claims a node while the agent is its **canonical** owner — it skips nodes where `node.assignee !== agentId`, where the canonical `assignmentMessageId` is missing/superseded, or where that canonical message is addressed to a different agent. Thus an old owner that shuts down or settles after a reassign is not reported as still holding the node and does not stamp `staleAt` onto the new owner. `staleAt` is advisory only; `swarm_reconcile` may re-stamp it if the new owner actually goes idle.
 
 ## Shared task state
 
