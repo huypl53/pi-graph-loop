@@ -26,6 +26,8 @@ Missing answers:
 
 Without this layer, orchestration depends too much on long prompts from the human/orchestrator. Agents can communicate, but they do not yet have a shared task graph to organize around.
 
+For terminal workflow closure, the graph also needs an **autonomous closer**. A terminal orchestrator-owned node such as `commit` must not require the human PM to notice a reviewer mailbox message and manually poke the final node. The runtime now auto-closes a ready **orchestrator-owned graph-terminal node** inside the same locked update that made it reachable, so a path like `review --approved--> commit` can finish without a separate human intervention turn.
+
 ## Design goals
 
 1. Reduce prompt bloat: agents should receive a task id/node id and discover the rest from durable files.
@@ -780,6 +782,12 @@ Nodes and gates must not duplicate each other semantically. Recommended rule:
 - `gates.<gate>.status` is the authoritative commit/release blocker.
 
 For example, review node `done` means the reviewer finished writing a review artifact; `gates.reviewApproved=passed|failed` says whether the review approves commit.
+
+If a newly-ready node is both:
+- orchestrator-owned (`inferRoleKind(nodeId, node.role) === "orchestrator"`), and
+- graph-terminal (`terminal:true` or no outgoing edges),
+
+then the engine may auto-close it to `done` immediately instead of waiting for a separate PM/manual task update. This is specifically to avoid a dead-end where all worker/reviewer agents are idle and the task still remains `in_progress` only because the pseudo-orchestrator final node has no executor.
 
 Dependency semantics are AND-join by default: a node becomes ready only when all `dependsOn` nodes are `done` and no relevant gate is failed.
 

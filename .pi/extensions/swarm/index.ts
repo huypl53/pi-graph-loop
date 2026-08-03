@@ -476,6 +476,15 @@ function computeReadyNodes(task: TaskState) {
 	return { ready, current: Array.from(current) };
 }
 
+function hasOutgoingTaskEdge(task: TaskState, id: string) {
+	return task.edges.some((e) => e.from === id) || Object.values(task.nodes).some((n) => (n.dependsOn || []).includes(id));
+}
+
+function isGraphTerminalNode(task: TaskState, nodeId: string) {
+	const node = task.nodes[nodeId];
+	return Boolean(node && (node.terminal || !hasOutgoingTaskEdge(task, nodeId)));
+}
+
 function buildTaskMarkdown(task: TaskState) {
 	const allowed = task.allowedFiles.length ? task.allowedFiles.map((file) => `- \
 \`${file}\``).join("\n") : "- None specified";
@@ -808,8 +817,7 @@ function releaseNodeAssignment(st: SwarmState, task: TaskState, nodeId: string) 
 function computeTaskStatus(task: TaskState): TaskStatus {
 	const nodes = Object.values(task.nodes);
 	if (nodes.some((n) => n.status === "failed")) return "failed";
-	const hasOutgoing = (id: string) => task.edges.some((e) => e.from === id) || Object.values(task.nodes).some((n) => (n.dependsOn || []).includes(id));
-	const terminals = Object.keys(task.nodes).filter((id) => task.nodes[id].terminal || !hasOutgoing(id)).map((id) => task.nodes[id]);
+	const terminals = Object.keys(task.nodes).filter((id) => isGraphTerminalNode(task, id)).map((id) => task.nodes[id]);
 	if (terminals.length && terminals.every((n) => n.status === "done" || n.status === "skipped")) return "done";
 	// Task-level blocked: every active (non-terminal, non-pending) node is blocked => the task cannot
 	// make progress. Pure (derived from node states, not the possibly-stale task.currentNodes); resumable
@@ -871,6 +879,24 @@ function applySharedContextUpdates(task: TaskState, upd: { summary?: string; dec
 
 // Build the assignment message body. Carries task/node pointers, scope, artifacts, and reply target
 // so the assignee discovers the rest from durable files instead of a long orchestrator prompt.
+function autoCloseOrchestratorTerminalNodes(task: TaskState) {
+	const closed: string[] = [];
+	for (;;) {
+		const { ready } = computeReadyNodes(task);
+		const candidate = ready.find((nodeId) => {
+			const node = task.nodes[nodeId];
+			return node && node.status === "pending" && inferRoleKind(nodeId, node.role) === "orchestrator" && isGraphTerminalNode(task, nodeId);
+		});
+		if (!candidate) break;
+		const node = task.nodes[candidate];
+		node.assignee ||= "orchestrator";
+		node.status = "done";
+		node.lastActivityAt = now();
+		closed.push(candidate);
+	}
+	return { closed };
+}
+
 function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget: string, note?: string) {
 	const node = task.nodes[nodeId];
 	const lines: string[] = [];
@@ -2525,6 +2551,11 @@ export default function (pi: ExtensionAPI) {
 				const { ready, current } = computeReadyNodes(task);
 				task.currentNodes = current;
 				applyTaskStatus(task); // engine-enforced closure: a fresh task derives `ready`
+				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
+				if (autoClosed.closed.length) {
+					applyTaskStatus(task);
+					task.currentNodes = computeReadyNodes(task).current;
+				}
 				// Actionable = newly-ready nodes PLUS already-ready unassigned nodes (e.g. a fresh task's start node,
 				// which is born status:"ready" and lands in `current`, not the raw `ready` set). Keeps the "Ready:"
 				// report consistent with swarm_next_nodes so orchestrators see what is assignable right now.
@@ -2536,10 +2567,11 @@ export default function (pi: ExtensionAPI) {
 				await mkdir(tp.artifacts, { recursive: true });
 				await writeTaskState(tp, task);
 				await writeFile(tp.taskMd, buildTaskMarkdown(task), "utf8");
-				await traceTask(tp, "task.create", { taskId, title: task.title, workflow: task.workflow, owner: task.owner, start: task.start, nodeCount: Object.keys(task.nodes).length, ready, actionable });
-				return { taskId, task, tp, ready, actionable };
+				await traceTask(tp, "task.create", { taskId, title: task.title, workflow: task.workflow, owner: task.owner, start: task.start, nodeCount: Object.keys(task.nodes).length, ready, actionable, autoClosed: autoClosed.closed });
+				if (autoClosed.closed.length) await traceTask(tp, "task.autoclose.orchestrator", { taskId, nodeIds: autoClosed.closed, by: "engine" });
+				return { taskId, task, tp, ready, actionable, autoClosed: autoClosed.closed };
 			});
-			return textResult(`Created task ${result.taskId} at ${relative(ctx.cwd, result.tp.root)}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}`, { taskId: result.taskId, task: result.task, taskMd: relative(ctx.cwd, result.tp.taskMd), taskJson: relative(ctx.cwd, result.tp.taskJson) });
+			return textResult(`Created task ${result.taskId} at ${relative(ctx.cwd, result.tp.root)}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}${result.autoClosed?.length ? `\nAuto-closed orchestrator terminal nodes: ${result.autoClosed.join(", ")}` : ""}`, { taskId: result.taskId, task: result.task, taskMd: relative(ctx.cwd, result.tp.taskMd), taskJson: relative(ctx.cwd, result.tp.taskJson), autoClosed: result.autoClosed });
 		},
 	}));
 
@@ -2818,13 +2850,17 @@ export default function (pi: ExtensionAPI) {
 				// releases every agent's active-task pointer for this task.
 				const cancelled = Boolean(params.cancelTask) && (me === "orchestrator" || Boolean(params.force));
 				if (cancelled) task.status = "cancelled";
-				const taskStatusChange = applyTaskStatus(task);
+				let taskStatusChange = applyTaskStatus(task);
+				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
+				for (const nodeId of autoClosed.closed) releaseNodeAssignment(st, task, nodeId);
+				if (autoClosed.closed.length) taskStatusChange = applyTaskStatus(task);
 				if (taskStatusChange.terminal) releaseTaskFromAllAgents(st, task.taskId);
 				const nextReady = computeReadyNodes(task);
 				task.currentNodes = nextReady.current;
 				await writeTaskState(tp, task);
 				await writeState(p, st);
-				await traceTask(tp, "task.update", { taskId, nodeId: params.nodeId, prevStatus, status: newStatus, outcome: params.outcome, note: Boolean(params.note), artifact: params.artifact, gateUpdates: params.gateUpdates ? Object.keys(params.gateUpdates) : [], sharedContext: Boolean(params.sharedContextUpdates), by: me });
+				await traceTask(tp, "task.update", { taskId, nodeId: params.nodeId, prevStatus, status: newStatus, outcome: params.outcome, note: Boolean(params.note), artifact: params.artifact, gateUpdates: params.gateUpdates ? Object.keys(params.gateUpdates) : [], sharedContext: Boolean(params.sharedContextUpdates), by: me, autoClosed: autoClosed.closed });
+				if (autoClosed.closed.length) await traceTask(tp, "task.autoclose.orchestrator", { taskId, nodeIds: autoClosed.closed, triggerNodeId: params.nodeId, by: "engine" });
 				if (cancelled) await traceTask(tp, "task.cancel", { taskId, nodeId: params.nodeId, by: me });
 				if (taskStatusChange.terminal) await traceTask(tp, "task.close", { taskId, status: task.status, nodeId: params.nodeId, by: me });
 				// PM auto-notify (engine behavior): when a node transitions INTO a closure-ish status
@@ -2858,9 +2894,9 @@ export default function (pi: ExtensionAPI) {
 					}
 					await writeState(p, st); // persist the notify message record + orchestrator pseudo-agent
 				}
-				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled };
+				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled, autoClosed: autoClosed.closed };
 			});
-			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${result.cancelled ? " Task marked cancelled; all assignments released." : ""}${params.note ? ` Note: ${params.note}` : ""}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, taskStatus: result.taskStatus, cancelled: result.cancelled, by: me });
+			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${result.cancelled ? " Task marked cancelled; all assignments released." : ""}${result.autoClosed?.length ? ` Auto-closed orchestrator terminal nodes: ${result.autoClosed.join(", ")}.` : ""}${params.note ? ` Note: ${params.note}` : ""}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, taskStatus: result.taskStatus, cancelled: result.cancelled, by: me, autoClosed: result.autoClosed });
 		},
 	}));
 

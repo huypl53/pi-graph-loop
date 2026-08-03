@@ -12,8 +12,9 @@ set -euo pipefail
 #   2. validate(structure + runtime)          (no hard errors)
 #   3. assign  -> orchestrator-role node      (activeTaskIds gains task; assignment msg enqueued)
 #   4. update  -> in_progress -> done(outcome)(node terminal; activeTaskIds released)
-#   5. closure -> task.status = done          (every terminal done => derived done)
-#   6. failed  -> task.status = failed        (any node failed => derived failed)
+#   5. terminal closer -> ready orchestrator-owned terminal node auto-closes
+#   6. closure -> task.status = done          (every terminal done => derived done)
+#   7. failed  -> task.status = failed        (any node failed => derived failed)
 #   7. cancel  -> task.status = cancelled     (orchestrator force + cancelTask; sticky)
 #   8. stale   -> reconcile surfaces stale    (fabricated old lastActivityAt => task_node_stale)
 #   9. drift   -> reconcile mark repairs      (fabricated status drift => task_status_repaired)
@@ -402,22 +403,14 @@ run_step upd-kickoff-done swarm_update_task \
 	"Call swarm_update_task exactly once with taskId \"$HAPPY_ID\", nodeId \"kickoff\", status \"done\", outcome \"go\". Then reply done."
 task_json_eq "$HAPPY_ID" "t['nodes']['kickoff']['status']" "done"
 task_json_eq "$HAPPY_ID" "t['nodes']['kickoff']['outcome']" "go"
-# Path (a) — PM close-notify: node kickoff -> done must land in the orchestrator mailbox (no polling).
-mailbox_has "orchestrator" "node kickoff -> done" "close-notify (kickoff->done)"
-trace_has "task.close.notify" "$HAPPY_ID"
-# Auto-surface proof: the orchestrator pump surfaced the close-notify to a turn WITHOUT polling
-# (this run is constrained to swarm_update_task, so swarm_check_mailbox is impossible).
-pump_surfaced "node kickoff -> done" "auto-surface close-notify"
-
-run_step assign-ship swarm_assign_task \
-	"Call swarm_assign_task exactly once with taskId \"$HAPPY_ID\", nodeId \"ship\". Then reply done."
-task_json_eq "$HAPPY_ID" "t['nodes']['ship']['status']" "assigned"
-
-run_step upd-ship-done swarm_update_task \
-	"Call swarm_update_task exactly once with taskId \"$HAPPY_ID\", nodeId \"ship\", status \"done\", outcome \"go\". Then reply done."
 task_json_eq "$HAPPY_ID" "t['nodes']['ship']['status']" "done"
-# Path (a) — PM close-notify: task going terminal (done) emits the stronger "task ... closed (done)".
-mailbox_has "orchestrator" "closed (done)" "task-close-notify (ship->done, task terminal)"
+trace_has "task.autoclose.orchestrator" "$HAPPY_ID"
+# Path (a) — PM close-notify: task going terminal (done) emits the stronger "task ... closed (done)"
+# even though the terminal ship node was auto-closed by the engine.
+mailbox_has "orchestrator" "closed (done)" "task-close-notify (autoclosed ship, task terminal)"
+# Auto-surface proof: the orchestrator pump surfaced the task-close notify to a turn WITHOUT polling
+# (this run is constrained to swarm_update_task, so swarm_check_mailbox is impossible).
+pump_surfaced "closed (done)" "auto-surface close-notify"
 
 # Closure assertion: every terminal done => derived task.status == done; orchestrator released.
 task_json_eq "$HAPPY_ID" "t['status']" "done"
