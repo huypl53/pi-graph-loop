@@ -1064,6 +1064,19 @@ function validateResultMessage(st: SwarmState, rec: MessageRecord, resultMessage
 	return result;
 }
 
+// Whether a message record is a retryable DELIVERY failure eligible for reconcile re-injection
+// (and worth surfacing as "pending" in agent status). Message `status` "queued"/"failed" is
+// OVERLOADED: it covers both (a) a delivery that never reached the recipient (no `lastAck` -> safe
+// to re-inject once the agent is running) and (b) a message the recipient already received and
+// acknowledged as failed (`lastAck` present -> terminal). The discriminator is `lastAck`: once the
+// recipient has sent ANY ack (seen/processing/done/failed) the message has been delivered AND
+// processed, so re-injecting it would loop — the recipient already saw it and would ack the same
+// way again, escalating attempts until dead_letter. This is the fix for the ack-then-re-deliver
+// loop: reconcile must only re-inject messages the recipient has NEVER acknowledged.
+export function isDeliveryFailureRetryable(rec: { status: string; lastAck?: unknown }): boolean {
+	return (rec.status === "queued" || rec.status === "failed") && !rec.lastAck;
+}
+
 // ---- Metric / run / memory V1 helpers (file-backed, no daemon, no vector DB) ----
 // Swarm is the harness; the project defines the metric. Nothing here hard-codes accuracy/latency/cost.
 // Records are append-only JSONL; memory promotion is gated on file-backed evidence that exists + reads.
@@ -2042,7 +2055,9 @@ async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { age
 				continue;
 			}
 
-			if ((rec.status === "queued" || rec.status === "failed") && agentRunning) {
+			// Only re-inject genuine delivery failures (recipient never acknowledged). An acked-failed
+			// message (status "failed" WITH lastAck) is terminal and must NOT be re-injected, or it loops.
+			if (isDeliveryFailureRetryable(rec) && agentRunning) {
 				if (!options.dryRun) {
 					const msg = await readMailbox(p, rec.to).then((msgs) => msgs.find((m) => m.id === msgId));
 					if (msg) {
@@ -2067,7 +2082,9 @@ async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { age
 				continue;
 			}
 
-			if ((rec.status === "queued" || rec.status === "failed") && !agentRunning) {
+			// Same guard: an already-acknowledged message is not pending delivery, so do not stage it for
+			// mailbox/pending re-delivery. See isDeliveryFailureRetryable.
+			if (isDeliveryFailureRetryable(rec) && !agentRunning) {
 				if (mailboxOnly) {
 					if (!options.dryRun) {
 						upsertMessageRecord(st, { id: msgId, swarmId: st.swarmId, from: rec.from, to: rec.to, priority: "normal", type: "swarm.message" as const, schemaVersion: 1, createdAt: rec.createdAt, body: "", headers: {}, requiresAck: rec.requiresAck, ttlMs: rec.ttlMs }, "mailbox_delivered", { lastError: undefined });
@@ -2530,7 +2547,9 @@ export default function (pi: ExtensionAPI) {
 			for (const agent of agents) {
 				const tmuxAlive = agent.tmuxTarget && agent.tmuxTarget !== "unknown" ? await isTmuxRunning(pi, agent.tmuxTarget) : false;
 				const records = Object.values(st.messages || {}).filter((m) => m.to === agent.id);
-				const pendingMessages = records.filter((m) => m.status === "queued" || m.status === "failed").length;
+				// Pending = awaiting delivery/retry. A message the recipient already acknowledged (incl.
+				// acked-failed) is not pending; only never-acknowledged queued/failed count.
+				const pendingMessages = records.filter((m) => isDeliveryFailureRetryable(m)).length;
 				const mailboxDelivered = records.filter((m) => m.status === "mailbox_delivered").length;
 				const unackedMessages = records.filter((m) => m.requiresAck && !m.ackedAt && (m.status === "mailbox_delivered" || m.status === "injected" || m.status === "intercepted")).length;
 				const ackMissing = records.filter((m) => m.requiresAck && Boolean(m.ackMissingAt) && !m.ackedAt).length;

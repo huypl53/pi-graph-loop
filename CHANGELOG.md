@@ -4,6 +4,12 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### fix(swarm): stop the "ack then re-deliver" loop for acked-failed messages
+
+- `swarm_ack_message(status="failed")` set the message record `status = "failed"`, which is the SAME status `swarm_reconcile` uses for retryable DELIVERY failures. So reconcile re-injected messages the recipient had already received and acknowledged as failed -> the agent saw the same message again, acked-failed again, looping until `MAX_ATTEMPTS`/TTL -> `dead_letter`.
+- New helper `isDeliveryFailureRetryable(rec)` discriminates via `lastAck`: a `queued`/`failed` message the recipient has ALREADY acknowledged (any ack, incl. `failed`) is terminal and must never be re-injected. Reconcile's re-inject branch, its pending/mailbox branch, and the agent-status `pendingMessages` count now all use it.
+- Net effect: acked-failed messages are no longer re-delivered or counted as pending, while genuine never-delivered `queued`/`failed` messages are still retried. Verified end-to-end against live state (the 3 acked-failed records no longer appear as `would_retry`/`pending`/`retried`) plus regression scripts `extensions/swarm/delivery.test.mjs` and `extensions/swarm/reconcile-loop.validate.mjs`.
+
 ### feat(swarm): human-facing `/swarm graph` command
 
 - Added `/swarm graph <task-id> [text|mermaid|json]` so a human operator can render a task graph directly without asking the model to call `swarm_print_graph`.
