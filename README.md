@@ -36,19 +36,37 @@ docs/swarm-graph-uat-scenario.md
 
 ## Install into a new pi project
 
-From the target project:
+From the target project, install this repo as a **project-local pi package**:
 
 ```bash
 pi install -l /absolute/path/to/pi-graph-agents
 ```
 
-Or try it for one run only:
+This writes the package path into the target project's `.pi/settings.json` under `packages`.
+
+You can verify it with:
+
+```bash
+cat .pi/settings.json
+```
+
+Expected shape:
+
+```json
+{
+  "packages": [
+    "/absolute/path/to/pi-graph-agents"
+  ]
+}
+```
+
+Or try it for one run only without changing settings:
 
 ```bash
 pi -e /absolute/path/to/pi-graph-agents
 ```
 
-Because this is a pi package, pi will load the packaged extension from:
+Because this is a pi package, pi loads the packaged extension from:
 
 ```text
 extensions/swarm/index.ts
@@ -56,7 +74,7 @@ extensions/swarm/index.ts
 
 ## Quick start after install
 
-Inside the target project, start pi normally. Then inside pi:
+After `pi install -l ...`, start pi normally in the target project. Then inside pi:
 
 ```text
 /swarm init
