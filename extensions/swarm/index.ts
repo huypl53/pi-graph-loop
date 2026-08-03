@@ -185,6 +185,70 @@ type TaskGate = {
 	artifact?: string | null;
 };
 
+// V1.5 opt-in post-iteration proposal loop. Metadata only: it does NOT change node routing,
+// branch logic, or task closure rules. When absent or enabled !== true, the graph behaves exactly
+// as it does today. Loop state lives under .pi/swarm/loops/<taskId>.json (see loop helpers).
+type LoopConfig = {
+	enabled: boolean;
+	proposalAgents: string[];
+	refreshAgents?: string[];
+	maxRounds?: number;
+};
+
+type LoopPhase = "idle" | "collecting_proposals" | "awaiting_plan" | "planned" | "refreshing";
+
+type LoopProposalStatus = "requested" | "received" | "skipped" | "failed";
+
+type LoopProposal = {
+	agentId: string;
+	messageId?: string;
+	status: LoopProposalStatus;
+	receivedAt?: string;
+	summary?: string;
+	body?: string;
+	error?: string;
+};
+
+type LoopRefreshMode = "tmux_new" | "identity_reload" | "skipped";
+
+type LoopRefreshResult = {
+	agentId: string;
+	mode: LoopRefreshMode;
+	tmuxAlive?: boolean;
+	injected?: boolean;
+	error?: string;
+};
+
+type LoopPlan = {
+	artifact: string;
+	summary: string;
+	nextSteps?: string;
+	createdAt: string;
+	createdBy: string;
+};
+
+type LoopRound = {
+	round: number;
+	phase: LoopPhase;
+	startedAt: string;
+	endedAt?: string;
+	proposalMessageIds: string[];
+	proposals: LoopProposal[];
+	plan?: LoopPlan;
+	refreshResults: LoopRefreshResult[];
+};
+
+type LoopState = {
+	taskId: string;
+	enabled: boolean;
+	config: LoopConfig;
+	currentRound: number;
+	phase: LoopPhase;
+	rounds: LoopRound[];
+	createdAt: string;
+	updatedAt: string;
+};
+
 type TaskState = {
 	version: number;
 	taskId: string;
@@ -213,6 +277,8 @@ type TaskState = {
 	gates: Record<string, TaskGate>;
 	editLocks: Record<string, { nodeId: string; by: string; at: string; expiresAt?: string }>;
 	evidence: Record<string, unknown>;
+	// V1.5 opt-in post-iteration loop config. Absent or enabled !== true => no behavior change.
+	loop?: LoopConfig;
 };
 
 type TaskPaths = {
@@ -238,6 +304,7 @@ type Paths = {
 	runArtifactsDir: string;
 	memoryDir: string;
 	iterationsDir: string;
+	loopsDir: string;
 };
 
 function now() {
@@ -318,6 +385,7 @@ function paths(cwd: string): Paths {
 		runArtifactsDir: join(root, "runs"),
 		memoryDir: join(root, "memory"),
 		iterationsDir: join(root, "iterations"),
+		loopsDir: join(root, "loops"),
 	};
 }
 
@@ -341,6 +409,7 @@ async function ensureDirs(p: Paths) {
 	await mkdir(p.runsDir, { recursive: true });
 	await mkdir(p.memoryDir, { recursive: true });
 	await mkdir(p.iterationsDir, { recursive: true });
+	await mkdir(p.loopsDir, { recursive: true });
 }
 
 async function withLock<T>(p: Paths, fn: () => Promise<T>): Promise<T> {
@@ -1458,6 +1527,378 @@ function runSummary(run: RunRecord | undefined, metricId: string) {
 	return { runId: run.runId, primaryMetricValue: run.metrics?.[metricId], verdict: run.verdict, gitHeadCommit: run.git?.headCommit, evidenceRefs: run.evidenceRefs || [], recordedAt: run.recordedAt };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// V1.5 iteration proposal loop. Opt-in post-iteration wrapper that runs ONLY after a loop-enabled
+// task reaches terminal DONE completion. Default tasks (no `loop` config) are completely unaffected.
+// No daemon, no automatic graph cycle: the orchestrator manually synthesizes the next plan.
+// State is file-backed under .pi/swarm/loops/<taskId>.* and human-readable artifacts under the task
+// artifact folder. Refresh is best-effort (tmux /new + identity reload) and never corrupts loop state.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function loopStateFile(p: Paths, taskId: string) {
+	return join(p.loopsDir, `${safeId(taskId)}.json`);
+}
+
+function loopDir(p: Paths, taskId: string) {
+	return join(p.loopsDir, safeId(taskId));
+}
+
+function loopHistoryFile(p: Paths, taskId: string) {
+	return join(loopDir(p, taskId), "history.jsonl");
+}
+
+function loopRoundFile(p: Paths, taskId: string, round: number) {
+	return join(loopDir(p, taskId), `round-${round}.json`);
+}
+
+// Normalize the raw task.loop block. Returns undefined when absent/disabled so callers can treat the
+// loop as a no-op with a single falsy check. proposalAgents default to [] (a no-op fanout is valid
+// and lets an orchestrator record a plan without any proposal agents configured).
+function getLoopConfig(loop: Partial<LoopConfig> | undefined): LoopConfig | undefined {
+	const raw = loop;
+	if (!raw || typeof raw !== "object" || raw.enabled !== true) return undefined;
+	return {
+		enabled: true,
+		proposalAgents: Array.from(new Set((Array.isArray(raw.proposalAgents) ? raw.proposalAgents : []).map((a) => safeId(String(a))))),
+		refreshAgents: Array.isArray(raw.refreshAgents) ? Array.from(new Set(raw.refreshAgents.map((a) => safeId(String(a))))) : undefined,
+		maxRounds: typeof raw.maxRounds === "number" && raw.maxRounds > 0 ? Math.floor(raw.maxRounds) : undefined,
+	};
+}
+
+async function readLoopState(p: Paths, taskId: string): Promise<LoopState | undefined> {
+	const file = loopStateFile(p, taskId);
+	if (!existsSync(file)) return undefined;
+	try {
+		return JSON.parse(await readFile(file, "utf8")) as LoopState;
+	} catch {
+		return undefined;
+	}
+}
+
+async function writeLoopState(p: Paths, state: LoopState) {
+	state.updatedAt = now();
+	await atomicWriteFile(loopStateFile(p, state.taskId), `${JSON.stringify(state, null, 2)}\n`);
+}
+
+async function appendLoopHistory(p: Paths, taskId: string, entry: Record<string, unknown>) {
+	await mkdir(loopDir(p, taskId), { recursive: true });
+	await appendJsonl(loopHistoryFile(p, taskId), { at: now(), ...entry });
+}
+
+function buildProposalRequest(task: TaskState, round: number, artifacts: string[]): string {
+	const arts = artifacts.length ? artifacts.map((a) => `- ${a}`).join("\n") : "- (no declared artifacts)";
+	return [
+		`[PI-SWARM ITERATION PROPOSAL REQUEST]`,
+		``,
+		`Task ${task.taskId} ("${task.title}") just completed iteration ${round}. The swarm is collecting proposals for the best NEXT-iteration change before the orchestrator synthesizes a plan.`,
+		``,
+		`Goal of this task: ${task.goal}`,
+		``,
+		`Key artifacts:`,
+		arts,
+		``,
+		`Propose ONE concrete, high-leverage improvement for the next iteration. Keep it short: a summary line, the rationale, and the specific change you would make. Reply to this message with your proposal (your reply is recorded as your proposal). Do NOT start implementing.`,
+	].join("\n");
+}
+
+// Enrich the requested-proposal records with live ack/response state and detected reply messages so
+// the read-only status surface reflects reality without mutating loop state. Reply bodies live in
+// mailboxes (MessageRecord carries no body): replies to proposal requests land in the orchestrator
+// mailbox (the proposal sender), so we scan it (and the proposer mailboxes as a fallback) by id.
+async function collectLoopProposalStatus(p: Paths, st: SwarmState, round: LoopRound): Promise<LoopProposal[]> {
+	const replyByReplyTo = new Map<string, MessageRecord>();
+	for (const rec of Object.values(st.messages)) {
+		if (rec.replyTo) {
+			const prev = replyByReplyTo.get(rec.replyTo);
+			// keep the latest reply by updatedAt
+			if (!prev || (rec.updatedAt || "") > (prev.updatedAt || "")) replyByReplyTo.set(rec.replyTo, rec);
+		}
+	}
+	const replyIds = new Set<string>();
+	for (const prop of round.proposals) if (prop.messageId && replyByReplyTo.has(prop.messageId)) replyIds.add(replyByReplyTo.get(prop.messageId)!.id);
+	const bodyById = new Map<string, string>();
+	if (replyIds.size) {
+		const boxes = ["orchestrator", ...Array.from(new Set(round.proposals.map((x) => x.agentId)))];
+		for (const mbox of boxes) {
+			try { for (const m of await readMailbox(p, mbox)) { if (replyIds.has(m.id) && !bodyById.has(m.id)) bodyById.set(m.id, m.body || ""); } } catch {}
+			if (bodyById.size >= replyIds.size) break;
+		}
+	}
+	return round.proposals.map((prop) => {
+		if (prop.status === "skipped" || prop.status === "failed") return prop;
+		const reply = prop.messageId ? replyByReplyTo.get(prop.messageId) : undefined;
+		if (reply) {
+			const body = bodyById.get(reply.id) || "";
+			return {
+				...prop,
+				status: "received" as LoopProposalStatus,
+				receivedAt: reply.createdAt,
+				summary: body.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 1).join(" ").slice(0, 200) || "(empty reply)",
+				body: prop.body,
+			};
+		}
+		return prop;
+	});
+}
+
+async function writeProposalsArtifact(tp: TaskPaths, round: LoopRound, proposals: LoopProposal[]) {
+	const lines: string[] = [
+		`# Iteration ${round.round} proposals`,
+		"",
+		`Phase:  ${round.phase}`,
+		`Started: ${round.startedAt}`,
+		"",
+		"| Agent | Status | Message | Summary / error |",
+		"| --- | --- | --- | --- |",
+	];
+	for (const p of proposals) {
+		const summary = p.status === "received" ? (p.summary || "") : (p.error || "");
+		lines.push(`| ${p.agentId} | ${p.status} | ${p.messageId || "-"} | ${(summary || "").replace(/\|/g, "\\|")} |`);
+	}
+	await mkdir(tp.artifacts, { recursive: true });
+	await writeFile(join(tp.artifacts, `proposals-round-${round.round}.md`), `${lines.join("\n")}\n`, "utf8");
+}
+
+async function writeNextPlanArtifact(tp: TaskPaths, round: number, plan: LoopPlan, proposals: LoopProposal[]) {
+	const lines: string[] = [
+		`# Next-iteration plan (round ${round})`,
+		"",
+		`- Created at: ${plan.createdAt}`,
+		`- Created by: ${plan.createdBy}`,
+		`- Artifact: ${plan.artifact}`,
+		"",
+		`## Summary`,
+		"",
+		plan.summary,
+		"",
+	];
+	if (plan.nextSteps && plan.nextSteps.trim()) {
+		lines.push(`## Next steps`, "", plan.nextSteps.trim(), "");
+	}
+	lines.push(`## Proposals considered`, "", ` ${proposals.length} proposal(s) this round:`, "");
+	for (const p of proposals) lines.push(`- **${p.agentId}** (${p.status}): ${p.status === "received" ? (p.summary || "(no summary)") : (p.error || p.status)}`);
+	await mkdir(tp.artifacts, { recursive: true });
+	await writeFile(join(tp.artifacts, "next-plan.md"), `${lines.join("\n")}\n`, "utf8");
+}
+
+// Kick off the post-iteration proposal round for a loop-enabled task. Runs INSIDE the caller's swarm
+// lock (used by swarm_update_task on terminal DONE close) so proposal fanout is atomic with the close.
+// Best-effort: never throws (failures are traced). Guards: no-op when loop disabled, task not done,
+// an active round already exists, or maxRounds reached. Persists proposal message records via writeState.
+async function kickoffLoopIfEnabled(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, task: TaskState, tp: TaskPaths): Promise<void> {
+	const cfg = getLoopConfig(task.loop);
+	if (!cfg) return;
+	if (task.status !== "done") return;
+	const existing = await readLoopState(p, task.taskId);
+	if (existing && ["collecting_proposals", "awaiting_plan", "refreshing"].includes(existing.phase)) {
+		await traceTask(tp, "task.loop.kickoff_skipped", { taskId: task.taskId, phase: existing.phase, reason: "active round exists" });
+		return;
+	}
+	const round = (existing?.currentRound || 0) + 1;
+	if (cfg.maxRounds && round > cfg.maxRounds) {
+		await traceTask(tp, "task.loop.kickoff_skipped", { taskId: task.taskId, round, maxRounds: cfg.maxRounds, reason: "maxRounds reached" });
+		return;
+	}
+	const ts = now();
+	const pool = cfg.proposalAgents;
+	const conversationId = `task:${task.taskId}:loop:${round}`;
+	const artifactsList = collectDeclaredArtifacts(task);
+	const proposals: LoopProposal[] = [];
+	const proposalMessageIds: string[] = [];
+	for (const agentId of pool) {
+		if (!st.agents[agentId]) {
+			proposals.push({ agentId, status: "skipped", error: "agent not registered" });
+			continue;
+		}
+		const body = buildProposalRequest(task, round, artifactsList);
+		try {
+			const { msg } = await deliverMessageLocked(pi, cwd, p, st, {
+				to: agentId,
+				subject: `Task ${task.taskId} iteration ${round}: propose next change`,
+				body,
+				conversationId,
+				requiresAck: true,
+				requiresResponse: true,
+				idempotencyKey: `loop:${task.taskId}:round:${round}:propose:${agentId}`,
+			});
+			proposals.push({ agentId, messageId: msg.id, status: "requested" });
+			proposalMessageIds.push(msg.id);
+		} catch (err: any) {
+			proposals.push({ agentId, status: "failed", error: String((err as Error)?.message || err) });
+		}
+	}
+	// Orchestrator nudge: there is no event hook for "all proposal replies received", so explicitly tell the
+	// orchestrator a round started and how to advance it. Informational, mailbox-only (requiresAck:false).
+	// Sent for loop-enabled tasks only; never sent when task.loop is absent/disabled.
+	try {
+		const statusLines = proposals.map((x) => `- ${x.agentId}: ${x.status}${x.messageId ? ` (messageId=${x.messageId})` : ""}${x.error ? ` [${x.error}]` : ""}`).join("\n");
+		await deliverMessageLocked(pi, cwd, p, st, {
+			to: "orchestrator",
+			subject: `Task ${task.taskId} iteration loop: round ${round} started — proposals requested`,
+			body: `The V1.5 iteration proposal loop started for task ${task.taskId} after it reached terminal-done.\n\nRound ${round}. Proposal requests sent to ${pool.length} agent(s):\n${statusLines}\n\nTo advance this round before the next iteration:\n1. Wait for proposal replies, then inspect \`swarm_loop_status\` (or \`/swarm loop status ${task.taskId}\`). Status shows \"collecting proposals\" until replies arrive, then \"ready to plan\".\n2. Synthesize the next-iteration plan by calling \`swarm_loop_plan\` with taskId, summary, and optional nextSteps. Recording the plan also best-effort refreshes task.loop.refreshAgents (tmux /new + identity reload) when configured.\n3. This round is not post-processed until a plan is recorded.\n\n(This is an informational nudge; no acknowledgement is required.)`,
+			conversationId,
+			requiresAck: false,
+			idempotencyKey: `loop:${task.taskId}:round:${round}:nudge:orchestrator`,
+		});
+	} catch (err: any) {
+		await traceTask(tp, "task.loop.nudge_failed", { taskId: task.taskId, round, error: String((err as Error)?.message || err) });
+	}
+	const phase: LoopPhase = proposalMessageIds.length ? "collecting_proposals" : "awaiting_plan";
+	const roundRec: LoopRound = { round, phase, startedAt: ts, proposalMessageIds, proposals, refreshResults: [] };
+	const loopState: LoopState = {
+		taskId: task.taskId,
+		enabled: true,
+		config: { ...cfg },
+		currentRound: round,
+		phase,
+		rounds: [...(existing?.rounds || []), roundRec],
+		createdAt: existing?.createdAt || ts,
+		updatedAt: ts,
+	};
+	try {
+		await mkdir(loopDir(p, task.taskId), { recursive: true });
+		await writeFile(loopRoundFile(p, task.taskId, round), `${JSON.stringify(roundRec, null, 2)}\n`, "utf8");
+		await writeLoopState(p, loopState);
+		await writeProposalsArtifact(tp, roundRec, proposals);
+		await appendLoopHistory(p, task.taskId, { type: "round_start", round, phase, proposalMessageIds, pool });
+		// Persist the proposal message records added by deliverMessageLocked (mailbox jsonl is already
+		// written; this persists the swarm-state.json message ledger so status/acks survive a restart).
+		await writeState(p, st);
+		await traceTask(tp, "task.loop.kickoff", { taskId: task.taskId, round, phase, proposalMessageIds, pool, skipped: proposals.filter((x) => x.status === "skipped").map((x) => x.agentId), failed: proposals.filter((x) => x.status === "failed").map((x) => x.agentId) });
+	} catch (err: any) {
+		await traceTask(tp, "task.loop.kickoff_partial", { taskId: task.taskId, round, error: String((err as Error)?.message || err), proposalMessageIds });
+	}
+}
+
+// Best-effort agent refresh used after a plan is recorded. Prefers a tmux `/new` context reset for a
+// live pane, then reloads+injects the durable identity. Runs OUTSIDE the swarm lock (reloadIdentity
+// acquires the lock itself), so callers must not already hold it. Never throws; failures are captured
+// per-agent into a LoopRefreshResult so a refresh outage cannot corrupt loop state.
+async function refreshLoopAgent(pi: ExtensionAPI, cwd: string, p: Paths, agentId: string): Promise<LoopRefreshResult> {
+	const result: LoopRefreshResult = { agentId, mode: "skipped", tmuxAlive: false, injected: false };
+	let st: SwarmState;
+	try {
+		st = await readState(p, cwd);
+	} catch (err: any) {
+		result.error = `readState failed: ${String((err as Error)?.message || err)}`;
+		return result;
+	}
+	const agent = st.agents[agentId];
+	if (!agent) {
+		result.error = "agent not registered";
+		return result;
+	}
+	result.mode = "identity_reload";
+	if (agent.tmuxTarget && agent.tmuxTarget !== "unknown") {
+		try {
+			const alive = await isTmuxRunning(pi, agent.tmuxTarget);
+			result.tmuxAlive = alive;
+			if (alive) {
+				// tmux /new-style refresh: reset the running agent's conversation context so the next
+				// iteration starts clean. Best-effort; if it cannot be sent we still identity-reload below.
+				try {
+					await tmux(pi, ["send-keys", "-t", agent.tmuxTarget, "/new", "Enter"], 10_000);
+					result.mode = "tmux_new";
+					await sleep(SPAWN_SETTLE_MS);
+				} catch (err: any) {
+					await trace(p, "loop.refresh.tmux_new_failed", { agentId, error: String((err as Error)?.message || err) });
+				}
+			}
+		} catch (err: any) {
+			result.error = `tmux probe failed: ${String((err as Error)?.message || err)}`;
+		}
+	}
+	try {
+		const r = await reloadIdentity(pi, cwd, p, agentId, { note: "loop refresh after plan recorded", source: "loop" });
+		result.injected = r.injected;
+		result.tmuxAlive = result.tmuxAlive || r.tmuxAlive;
+		if (result.mode === "identity_reload" && r.injected) result.mode = "identity_reload";
+	} catch (err: any) {
+		result.error = (result.error ? result.error + "; " : "") + `identity reload failed: ${String((err as Error)?.message || err)}`;
+	}
+	return result;
+}
+
+// Read-only snapshot of loop state for a task (used by the swarm_loop_status tool and the
+// `/swarm loop status` command). Enriches the current round's proposals with live ack/response/reply
+// state. Returns enabled:false when no loop is configured so callers can report a clean no-op.
+async function loopStatusSnapshot(p: Paths, cwd: string, taskId: string): Promise<{ enabled: boolean; started: boolean; taskId: string; proposalState?: string; config?: LoopConfig; loop?: LoopState; round?: LoopRound; proposals?: LoopProposal[]; paths: { loopStateFile: string; historyFile?: string; proposalsArtifact?: string; planArtifact?: string } }> {
+	const tp = taskPaths(p, taskId);
+	if (!existsSync(tp.taskJson)) throw new Error(`TASK_NOT_FOUND: ${taskId}`);
+	const task = await readTaskState(tp.taskJson);
+	const cfg = getLoopConfig(task.loop);
+	const loop = await readLoopState(p, taskId);
+	const basePaths = { loopStateFile: relative(cwd, loopStateFile(p, taskId)) };
+	if (!cfg || !loop) return { enabled: Boolean(cfg), started: false, taskId, proposalState: "not_started", config: cfg, paths: basePaths };
+	const st = await readState(p, cwd);
+	const round = loop.rounds[loop.rounds.length - 1];
+	const proposals = round ? await collectLoopProposalStatus(p, st, round) : [];
+	const pending = proposals.filter((x) => x.status === "requested").length;
+	const proposalState: string = loop.phase === "planned" ? "planned" : (pending > 0 ? "collecting_proposals" : "ready_to_plan");
+	return {
+		enabled: true, started: true, taskId, proposalState, config: loop.config, loop, round, proposals,
+		paths: {
+			loopStateFile: relative(cwd, loopStateFile(p, taskId)),
+			historyFile: relative(cwd, loopHistoryFile(p, taskId)),
+			proposalsArtifact: round ? relative(cwd, join(tp.artifacts, `proposals-round-${round.round}.md`)) : undefined,
+			planArtifact: round?.plan ? relative(cwd, join(tp.artifacts, "next-plan.md")) : undefined,
+		},
+	};
+}
+
+// Orchestrator write path (used by the swarm_loop_plan tool and the `/swarm loop plan` command):
+// record/synthesize the next-iteration plan, write artifacts/next-plan.md, advance loop state to
+// 'planned', append a durable round record to loop history, and optionally best-effort refresh
+// configured refreshAgents. Refresh runs OUTSIDE the swarm lock (reloadIdentity takes the lock), so
+// this function must NOT be called while holding the lock. Refresh failures are captured per-agent
+// and never corrupt loop state.
+async function recordLoopPlan(pi: ExtensionAPI, cwd: string, p: Paths, taskId: string, opts: { summary: string; nextSteps?: string; artifact?: string; refresh?: boolean }): Promise<{ artifact: string; phase: LoopPhase; round: number; refreshResults: LoopRefreshResult[]; loopStateFile: string; historyFile: string }> {
+	const me = currentAgentId();
+	const tp = taskPaths(p, taskId);
+	if (!existsSync(tp.taskJson)) throw new Error(`TASK_NOT_FOUND: ${taskId}`);
+	const task = await readTaskState(tp.taskJson);
+	const cfg = getLoopConfig(task.loop);
+	if (!cfg) throw new Error(`LOOP_NOT_ENABLED: task ${taskId} has no enabled loop (task.loop.enabled !== true)`);;
+	const artifactRel = opts.artifact || "artifacts/next-plan.md";
+	if (!isSafeRelativePath(artifactRel)) throw new Error(`PATH_OUTSIDE_TASK: artifact must be relative, no ..: ${artifactRel}`);
+	const loop = await readLoopState(p, taskId);
+	if (!loop) throw new Error(`LOOP_NOT_STARTED: no loop state for ${taskId}; the task must close terminal-done first to start the proposal round`);
+	const round = loop.rounds[loop.rounds.length - 1];
+	if (!round) throw new Error(`LOOP_NO_ROUND: loop state for ${taskId} has no round to plan`);
+	const st = await readState(p, cwd);
+	const proposals = await collectLoopProposalStatus(p, st, round);
+	const plan: LoopPlan = { artifact: artifactRel, summary: opts.summary, nextSteps: opts.nextSteps, createdAt: now(), createdBy: me };
+	round.plan = plan;
+	round.phase = "planned";
+	round.endedAt = now();
+	loop.phase = "planned";
+	await writeLoopState(p, loop);
+	await writeNextPlanArtifact(tp, round.round, plan, proposals);
+	await writeProposalsArtifact(tp, round, proposals);
+	await appendLoopHistory(p, taskId, { type: "plan_recorded", round: round.round, summary: opts.summary, artifact: artifactRel, createdBy: me });
+	await trace(p, "loop.plan", { taskId, round: round.round, artifact: artifactRel, proposals: proposals.length, by: me });
+	const wantRefresh = opts.refresh !== undefined ? opts.refresh : Boolean(cfg.refreshAgents && cfg.refreshAgents.length);
+	const refreshResults: LoopRefreshResult[] = [];
+	if (wantRefresh && cfg.refreshAgents && cfg.refreshAgents.length) {
+		loop.phase = "refreshing";
+		await writeLoopState(p, loop);
+		for (const agentId of cfg.refreshAgents) {
+			try {
+				const r = await refreshLoopAgent(pi, cwd, p, agentId);
+				refreshResults.push(r);
+				await trace(p, "loop.refresh", { taskId, round: round.round, agentId, mode: r.mode, tmuxAlive: r.tmuxAlive, injected: r.injected, error: r.error });
+			} catch (err: any) {
+				refreshResults.push({ agentId, mode: "skipped", error: String((err as Error)?.message || err) });
+			}
+		}
+		round.refreshResults = [...(round.refreshResults || []), ...refreshResults];
+		loop.phase = "planned";
+		await writeLoopState(p, loop);
+		await appendLoopHistory(p, taskId, { type: "refresh_done", round: round.round, refreshResults });
+	}
+	return { artifact: artifactRel, phase: loop.phase, round: round.round, refreshResults, loopStateFile: relative(cwd, loopStateFile(p, taskId)), historyFile: relative(cwd, loopHistoryFile(p, taskId)) };
+}
+
 // Shared path to the project memory policy (a committed doc; agents read it relative to repo root).
 // Declared in the memory-surface region; the identity region references this constant when appending
 // the `## Memory protocol` link to generated agent identity. The dedicated policy file defines the
@@ -1549,6 +1990,7 @@ function readSwarmSettings(cwd = process.cwd()): SwarmSettings {
 		return {};
 	}
 }
+
 
 function currentModel() {
 	const settings = readSwarmSettings();
@@ -1667,6 +2109,7 @@ function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 function identityPrompt(cwd: string, identityRelPath: string) {
 	return `\n\n[PI-SWARM IDENTITY]\nYour durable swarm identity is stored at ${identityRelPath}. Read it before acting when you need role details. Treat it as your agent-specific AGENT.md.\nFor any swarm message with requiresAck=true, you MUST acknowledge it with swarm_ack_message. If requiresResponse=true, send a result message first and ack done with resultMessageId.\n[/PI-SWARM IDENTITY]`;
 }
+
 
 // Override file path: `.pi/swarm/agents/<id>.override.md`. This file is USER-EDITABLE and is ONLY EVER
 // READ by generation — it is never written or deleted by the extension, so edits survive regeneration.
@@ -2606,6 +3049,7 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
+
 	pi.on("agent_start", async (_event, ctx) => {
 		const agentId = currentAgentId();
 		if (agentId === "orchestrator") return;
@@ -3269,6 +3713,12 @@ export default function (pi: ExtensionAPI) {
 				rework: Type.Optional(Type.Boolean()), parallel: Type.Optional(Type.Boolean()),
 			}))),
 			gates: Type.Optional(Type.Record(Type.String(), Type.Any())),
+			loop: Type.Optional(Type.Object({
+				enabled: Type.Boolean({ description: "Opt-in V1.5 post-iteration loop. Must be true to enable; absent/false = no behavior change." }),
+				proposalAgents: Type.Optional(Type.Array(Type.String({ description: "Fixed agent pool to request next-iteration proposals from after terminal-done close." }))),
+				refreshAgents: Type.Optional(Type.Array(Type.String({ description: "Agents to best-effort refresh (tmux /new + identity reload) after a plan is recorded." }))),
+				maxRounds: Type.Optional(Type.Number({ description: "Optional cap on rounds (defensive; V1.5 is one round per task)." })),
+			})),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
@@ -3289,6 +3739,10 @@ export default function (pi: ExtensionAPI) {
 					sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 					nodes: graph.nodes, edges: graph.edges, handoffs: [], gates: graph.gates, editLocks: {}, evidence: {},
 				};
+				// V1.5 opt-in loop config: normalize + persist only when enabled. Metadata only — it does not
+				// affect node routing, branch logic, closure, or readiness. getLoopConfig returns undefined otherwise.
+				const loopCfg = getLoopConfig(params.loop as Partial<LoopConfig> | undefined);
+				if (loopCfg) task.loop = loopCfg;
 				// Reject structurally-invalid graphs at creation (hard errors only; soft warnings are still allowed)
 				// so a broken task can't be written and linger. Run swarm_validate_graph for the full report.
 				const createValidation = validateTaskGraph(task);
@@ -3651,6 +4105,16 @@ export default function (pi: ExtensionAPI) {
 						await traceTask(tp, "task.close.notify_failed", { taskId, nodeId: params.nodeId, error: String(err?.message || err) });
 					}
 					await writeState(p, st); // persist the notify message record + orchestrator pseudo-agent
+				}
+				// V1.5 opt-in post-iteration loop: when a loop-enabled task reaches terminal DONE, kick off the
+				// proposal round (best-effort; never alters default graph behavior). Runs inside this lock so
+				// proposal fanout is atomic with the close; failures are traced, not thrown.
+				if (taskStatusChange.terminal && task.status === "done") {
+					try {
+						await kickoffLoopIfEnabled(pi, ctx.cwd, p, st, task, tp);
+					} catch (err: any) {
+						await traceTask(tp, "task.loop.kickoff_failed", { taskId: task.taskId, nodeId: params.nodeId, error: String((err as Error)?.message || err) });
+					}
 				}
 				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled, autoClosed: autoClosed.closed };
 			});
@@ -4197,9 +4661,68 @@ export default function (pi: ExtensionAPI) {
 		},
 	}));
 
+	pi.registerTool(defineTool({
+		name: "swarm_loop_status",
+		label: "Swarm Loop Status",
+		description: "Read-only V1.5 iteration-loop status for a task: loop config snapshot, current phase/round, proposal request + ack/response/reply state, plan artifact path, refresh results, and loop history path. Returns 'no loop configured' when the task has no enabled loop. Does not mutate anything.",
+		promptGuidelines: ["Use `swarm_loop_status` to inspect an opt-in iteration proposal loop without mutating it. Loop mode is opt-in per task (task.loop.enabled)."],
+		parameters: Type.Object({
+			taskId: Type.String({ description: "Task id." }),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const snap = await loopStatusSnapshot(p, ctx.cwd, params.taskId);
+			if (!snap.enabled) {
+				return textResult(`Task ${params.taskId} has no enabled iteration loop (task.loop absent or disabled). Default task behavior is unchanged.`, { taskId: params.taskId, enabled: false, started: false, paths: snap.paths });
+			}
+			if (!snap.started || !snap.loop || !snap.round) {
+				return textResult(`Task ${params.taskId} has an enabled loop but it has not started yet: close the task terminal-done to begin the proposal round.`, { taskId: params.taskId, enabled: true, started: false, config: snap.config, paths: snap.paths });
+			}
+			const summary = {
+				taskId: snap.taskId,
+				enabled: true,
+				config: snap.config,
+				currentRound: snap.loop.currentRound,
+				phase: snap.loop.phase,
+				proposalState: snap.proposalState,
+				roundCount: snap.loop.rounds.length,
+				round: snap.round ? { round: snap.round.round, phase: snap.round.phase, startedAt: snap.round.startedAt, endedAt: snap.round.endedAt, proposals: snap.proposals, plan: snap.round.plan, refreshResults: snap.round.refreshResults } : undefined,
+				loopStateFile: snap.paths.loopStateFile,
+				historyFile: snap.paths.historyFile,
+				proposalsArtifact: snap.paths.proposalsArtifact,
+				planArtifact: snap.paths.planArtifact,
+			};
+			await trace(p, "loop.status", { taskId: params.taskId, phase: snap.loop.phase, proposalState: snap.proposalState, round: snap.loop.currentRound, proposals: snap.proposals?.length || 0 });
+			const stateLabel = snap.proposalState === "collecting_proposals" ? "collecting proposals" : snap.proposalState === "ready_to_plan" ? "ready to plan — call swarm_loop_plan to synthesize the next plan" : snap.proposalState === "planned" ? "plan recorded" : snap.proposalState || "unknown";
+			return textResult(`Task ${params.taskId} loop — round ${snap.loop.currentRound}, phase=${snap.loop.phase}, state=${stateLabel}.\n\n${JSON.stringify(summary, null, 2)}`, summary);
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_loop_plan",
+		label: "Swarm Loop Plan",
+		description: "Orchestrator-facing V1.5 write: record/synthesize the next-iteration plan for a loop-enabled task. Writes artifacts/next-plan.md, advances loop state to 'planned', appends a durable round record to loop history, and (optionally) best-effort refreshes configured agents via tmux /new + identity reload. Refresh failures are recorded but never corrupt loop state. No daemon, no automatic next cycle.",
+		promptGuidelines: ["Use `swarm_loop_plan` to synthesize the next-iteration plan after collecting proposals. Refresh defaults to true when refreshAgents are configured; failures are best-effort."],
+		parameters: Type.Object({
+			taskId: Type.String({ description: "Task id with an enabled loop." }),
+			summary: Type.String({ description: "Short next-iteration plan summary." }),
+			nextSteps: Type.Optional(Type.String({ description: "Optional concrete next steps / notes." })),
+			artifact: Type.Optional(Type.String({ description: "Plan artifact path. Defaults to artifacts/next-plan.md." })),
+			refresh: Type.Optional(Type.Boolean({ description: "Best-effort refresh configured refreshAgents after recording the plan. Defaults to true when refreshAgents are configured." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const r = await recordLoopPlan(pi, ctx.cwd, p, params.taskId, { summary: params.summary, nextSteps: params.nextSteps, artifact: params.artifact, refresh: params.refresh });
+			const ok = r.refreshResults.filter((x) => !x.error).length;
+			const failed = r.refreshResults.filter((x) => x.error).length;
+			return textResult(`Recorded next-iteration plan for ${params.taskId} (round ${r.round}) at ${r.artifact}. Loop phase=${r.phase}.${r.refreshResults.length ? ` Refresh: ${ok} ok, ${failed} failed (best-effort; loop state intact).` : ""}`, { taskId: params.taskId, round: r.round, phase: r.phase, planArtifact: r.artifact, loopStateFile: r.loopStateFile, historyFile: r.historyFile, refreshResults: r.refreshResults });
+		},
+	}));
 
 	pi.registerCommand("swarm", {
-		description: "Manage pi swarm agents: init | list | status (PM rollup: tasks/agents/closure) | graph <task-id> [text|mermaid|json] | spawn <id> [role] | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id>",
+		description: "Manage pi swarm agents: init | list | status (PM rollup: tasks/agents/closure) | graph <task-id> [text|mermaid|json] | spawn <id> [role] | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>",
 		handler: async (args, ctx) => {
 			const p = paths(ctx.cwd);
 			await ensureDirs(p);
@@ -4298,6 +4821,33 @@ export default function (pi: ExtensionAPI) {
 						return;
 					}
 					ctx.ui.notify("Usage: /swarm identity reload <agent-id> [note] | identity show <agent-id>", "warning");
+					return;
+				}
+				if (cmd === "loop") {
+					// V1.5 iteration proposal loop: read-only status and orchestrator plan synthesis.
+					const sub = rest.shift();
+					const taskId = rest.shift();
+					if (sub === "status") {
+						if (!taskId) { ctx.ui.notify("Usage: /swarm loop status <task-id>", "warning"); return; }
+						const snap = await loopStatusSnapshot(p, ctx.cwd, taskId);
+						if (!snap.enabled || !snap.loop) {
+							if (snap.enabled && !snap.started) ctx.ui.notify(`Task ${taskId} has an enabled loop but it has not started (close terminal-done to begin).`, "info");
+							else ctx.ui.notify(`Task ${taskId} has no enabled iteration loop.`, "info");
+							return;
+						}
+						const props = snap.proposals || [];
+						ctx.ui.notify(`Loop ${taskId}: round ${snap.loop.currentRound} phase=${snap.loop.phase}. Proposals: ${props.map((x) => `${x.agentId}=${x.status}`).join(", ") || "(none)"}. State: ${snap.paths.loopStateFile}`, "info");
+						return;
+					}
+					if (sub === "plan") {
+						if (!taskId) { ctx.ui.notify("Usage: /swarm loop plan <task-id> <summary...>", "warning"); return; }
+						const summaryText = rest.join(" ");
+						if (!summaryText) { ctx.ui.notify("Usage: /swarm loop plan <task-id> <summary...>", "warning"); return; }
+						const r = await recordLoopPlan(pi, ctx.cwd, p, taskId, { summary: summaryText });
+						ctx.ui.notify(`Recorded next-iteration plan for ${taskId} (round ${r.round}) at ${r.artifact}; phase=${r.phase}.`, "info");
+						return;
+					}
+					ctx.ui.notify("Usage: /swarm loop status <task-id> | loop plan <task-id> <summary...>", "warning");
 					return;
 				}
 				ctx.ui.notify(`Unknown /swarm command: ${cmd}`, "warning");

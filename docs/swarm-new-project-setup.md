@@ -406,3 +406,11 @@ V1 does **not** automatically:
 - run a daemon optimizer.
 
 You must choose `N`, unroll the graph or repeat explicit iteration calls, and enforce your project's metric gate through the metric contract + run recording + iteration recording.
+
+## 9. Task-graph iteration proposal loop (V1.5) — a different, opt-in loop
+
+This setup doc covers the **metric-contract** iteration loop (`swarm_iteration_*`), which optimizes runs against a metric. Separately, the swarm also has an **opt-in task-graph proposal loop** for a different need: after a task *closes terminal-done*, collect improvement proposals from a fixed agent pool and let the orchestrator synthesize the next plan.
+
+It is **opt-in per task** — set `loop.enabled = true` on `task.json` (via `swarm_create_task(loop: {...})`). Tasks without it are completely unaffected. There is no daemon and no automatic cycle; the orchestrator records the plan with `swarm_loop_plan` and the next iteration is a new task.
+
+See [Task-graph iteration proposal loop (V1.5)](swarm-task-graph.md#task-graph-iteration-proposal-loop-v15) for the full flow, file layout, and tools (`swarm_loop_status`, `swarm_loop_plan`, `/swarm loop`).

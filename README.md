@@ -23,6 +23,7 @@ The swarm extension provides:
 - durable agent identity files
 - message lifecycle tracking, acknowledgements, reconciliation, dead letters, and idempotency keys
 - task-graph tooling, assignment/update flows, closure derivation, and runtime warnings
+- opt-in task-graph iteration proposal loop (V1.5): after a loop-enabled task closes terminal-done, collect proposals from a fixed agent pool, synthesize the next plan, and best-effort refresh agents
 
 Full docs are in:
 
@@ -128,6 +129,8 @@ bash scripts/swarm_iteration_demo.sh
 ```
 
 See [`docs/swarm-iteration-demo.md`](docs/swarm-iteration-demo.md) for the scenario, file-backed assertions, and review artifact paths.
+
+> This is the **metric-contract** iteration loop. For the separate **opt-in task-graph proposal loop (V1.5)** — post-task-close proposal collection + orchestrator plan synthesis — see [Task-graph iteration proposal loop (V1.5)](docs/swarm-task-graph.md#task-graph-iteration-proposal-loop-v15). It is exercised by the loop scenario in `scripts/swarm_task_uat.sh`.
 
 Review iteration state live **or** as a completed-task dashboard (read-only, dependency-free):
 

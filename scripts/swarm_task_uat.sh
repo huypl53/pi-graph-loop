@@ -68,6 +68,11 @@ DRIFT_ID="uat-taskgraph-drift-${SUFFIX}"
 BLK_ID="uat-taskgraph-blocked-${SUFFIX}"
 RK_AGENT="uat-implementer-flavored-${SUFFIX}"
 RK_TASK="uat-taskgraph-rolekind-${SUFFIX}"
+# V1.5 iteration proposal loop scenario ids.
+LOOP_ID="uat-taskgraph-loop-${SUFFIX}"
+LOOP_A="uat-loop-proposer-a-${SUFFIX}"
+LOOP_B="uat-loop-proposer-b-${SUFFIX}"
+LOOP_MISSING="uat-loop-refresh-missing-${SUFFIX}"
 
 # Single-tool pi driver. --no-builtin-tools + --tools <name> constrains the model to one tool.
 PI_BASE=(pi --model "$MODEL" --provider "$PROVIDER" --approve -e "$EXT" --no-builtin-tools)
@@ -857,6 +862,78 @@ race = copy.deepcopy(node); race["assignee"] = old
 assert not holds(race, old), "canonical guard must reject old even if assignee read is stale (criterion 4 core)"
 PY
 log "  ok stale: scanAgentOpenAssignments predicate -> old never holds; new holds [v] (incl. stale-readState race)"
+
+# ---------- 15. V1.5 iteration proposal loop (opt-in; default behavior unchanged) ----------
+# Fabricate two mailbox-only proposal agents (no tmux) so kickoff fanout is mailbox-delivered. The
+# loop is opt-in via task.loop; a separate no-loop task below proves default behavior is unchanged.
+fabricate_agent "$LOOP_A" "loop proposer"
+fabricate_agent "$LOOP_B" "loop proposer"
+run_step create-loop swarm_create_task \
+	"Call swarm_create_task exactly once with title \"UAT loop\", goal \"Deterministic V1.5 loop\", taskId \"$LOOP_ID\", start \"kickoff\", nodes {\"kickoff\":{\"role\":\"orchestrator plan\"},\"ship\":{\"role\":\"orchestrator commit\",\"terminal\":true,\"dependsOn\":[\"kickoff\"]}}, edges [{\"from\":\"kickoff\",\"to\":\"ship\",\"when\":\"go\"}], loop {\"enabled\":true,\"proposalAgents\":[\"$LOOP_A\",\"$LOOP_B\"],\"refreshAgents\":[\"$LOOP_A\",\"$LOOP_MISSING\"],\"maxRounds\":2}. Then reply done."
+assert_stdout_contains create-loop "Created task"
+task_json_eq "$LOOP_ID" "str(t.get('loop',{}).get('enabled'))" "True"
+trace_has "task.create" "$LOOP_ID"
+run_step assign-loop-kickoff swarm_assign_task \
+	"Call swarm_assign_task exactly once with taskId \"$LOOP_ID\", nodeId \"kickoff\". Then reply done."
+run_step upd-loop-ip swarm_update_task \
+	"Call swarm_update_task exactly once with taskId \"$LOOP_ID\", nodeId \"kickoff\", status \"in_progress\". Then reply done."
+# Closing kickoff (outcome go) auto-closes the orchestrator terminal 'ship' -> task done -> the V1.5
+# post-close hook fans out proposal requests to the fixed agent pool (mailbox-only, no spawn).
+run_step upd-loop-done swarm_update_task \
+	"Call swarm_update_task exactly once with taskId \"$LOOP_ID\", nodeId \"kickoff\", status \"done\", outcome \"go\". Then reply done."
+task_json_eq "$LOOP_ID" "t['status']" "done"
+trace_has "task.loop.kickoff" "$LOOP_ID"
+# Proposal requests were queued to BOTH configured proposal agents (fixed pool; no per-iteration spawn).
+mailbox_has "$LOOP_A" "propose next change" "loop proposal fanout -> $LOOP_A"
+mailbox_has "$LOOP_B" "propose next change" "loop proposal fanout -> $LOOP_B"
+# Orchestrator informational nudge: mailbox-only, round started, instructs to use status then plan (no ack).
+mailbox_has orchestrator "proposals requested" "kickoff nudge -> orchestrator"
+# Read-only status surfaces the collecting phase without mutating anything.
+run_step loop-status-collecting swarm_loop_status \
+	"Call swarm_loop_status exactly once with taskId \"$LOOP_ID\". Then reply done."
+assert_stdout_contains loop-status-collecting "collecting_proposals"
+assert_stdout_contains loop-status-collecting "collecting proposals"
+# Orchestrator synthesizes the next plan: writes artifacts/next-plan.md + history, advances to planned,
+# and best-effort refreshes refreshAgents. $LOOP_A reloads (identity_reload, no error); $LOOP_MISSING is
+# unregistered -> refresh records an error but MUST NOT corrupt loop state.
+run_step loop-plan swarm_loop_plan \
+	"Call swarm_loop_plan exactly once with taskId \"$LOOP_ID\", summary \"harden validation and add a retry-on-rate-limit integration test\", nextSteps \"extend swarm_task_uat.sh with a retry scenario\". Then reply done."
+assert_stdout_contains loop-plan "phase=planned"
+# Loop state + artifact assertions (deterministic engine outputs, not model output).
+LOOPS_DIR="$SWARM_CWD/.pi/swarm/loops"
+python3 - "$LOOPS_DIR" "$LOOP_ID" "$LOOP_A" "$LOOP_B" "$LOOP_MISSING" "$TASKS_DIR" <<'PY' || fail "loop: state/artifact assertions mismatch"
+import json, os, sys
+loops_dir, tid, a, b, missing, tasks_dir = sys.argv[1:7]
+state_p = os.path.join(loops_dir, f"{tid}.json")
+assert os.path.exists(state_p), f"missing loop state {state_p}"
+ls = json.load(open(state_p))
+assert ls["enabled"] is True, "loop not enabled"
+assert ls["phase"] == "planned", f"phase={ls['phase']} want planned"
+assert ls["currentRound"] == 1, f"currentRound={ls['currentRound']}"
+r = ls["rounds"][-1]
+assert len(r["proposalMessageIds"]) == 2, f"expected 2 proposal msgs, got {len(r['proposalMessageIds'])}"
+agents = {p["agentId"]: p["status"] for p in r["proposals"]}
+assert agents.get(a) == "requested", f"{a}={agents.get(a)}"
+assert agents.get(b) == "requested", f"{b}={agents.get(b)}"
+assert r.get("plan") and "next-plan.md" in r["plan"]["artifact"], "plan not recorded"
+# Refresh: $LOOP_A ok (identity_reload, no error); $LOOP_MISSING failed but recorded, not corrupting.
+refresh = r.get("refreshResults", [])
+refresh_agents = {x["agentId"]: x for x in refresh}
+assert a in refresh_agents and not refresh_agents[a].get("error"), f"{a} refresh should be ok: {refresh_agents.get(a)}"
+assert missing in refresh_agents and refresh_agents[missing].get("error"), f"{missing} refresh should record an error: {refresh_agents.get(missing)}"
+# Durable history + human-readable artifacts were written.
+hist_p = os.path.join(loops_dir, tid, "history.jsonl")
+assert os.path.exists(hist_p), f"missing history {hist_p}"
+types = [json.loads(l)["type"] for l in open(hist_p) if l.strip()]
+assert "round_start" in types and "plan_recorded" in types, f"history types={types}"
+artifacts = os.path.join(tasks_dir, tid, "artifacts")
+assert os.path.exists(os.path.join(artifacts, "next-plan.md")), "missing artifacts/next-plan.md"
+assert os.path.exists(os.path.join(artifacts, "proposals-round-1.md")), "missing artifacts/proposals-round-1.md"
+# Default behavior unchanged: non-loop tasks (no loop config) must NOT create any loop state files.
+_other_loop_states = [d for d in os.listdir(loops_dir) if d.endswith('.json') and d != f"{tid}.json"]
+assert not _other_loop_states, f"non-loop tasks should have no loop state, found {_other_loop_states}"
+PY
+log "  ok loop: kickoff fanout + plan + best-effort refresh (failure-tolerant) + durable artifacts [v]"
 
 # ---------- Summary ----------
 LOG_DIR="$LOG_DIR" python3 - "$HAPPY_ID" "$FAIL_ID" "$CANCEL_ID" "$STALE_ID" "$DRIFT_ID" "$BLK_ID" "$RK_AGENT" "$FAILURES" <<'PY' | tee "$LOG_DIR/summary.txt"

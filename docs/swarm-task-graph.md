@@ -1538,6 +1538,75 @@ Pass criteria:
 - Cover happy path, test failure/fix loop, review rejected/rework loop, agent unavailable/dead-letter, and bad tool-call recovery.
 - Assert task graph state, graph print output, validation output, artifacts, message ACKs, and traces.
 
+## Task-graph iteration proposal loop (V1.5)
+
+> Distinct from the **metric-contract iteration loop V1** (`swarm_iteration_*`, which optimizes runs against a metric contract). This V1.5 layer is a **task-graph** wrapper: after a loop-enabled task closes terminal-done, it collects improvement proposals from a fixed agent pool and lets the orchestrator record the next-iteration plan.
+
+### What it is
+
+An **opt-in** post-iteration wrapper. When a task carries an enabled `loop` config and reaches terminal **done** completion, the engine:
+
+1. kicks off a **proposal round** — sends `requiresResponse` proposal requests to a fixed agent pool;
+2. pauses in `collecting_proposals` / `awaiting_plan` for the orchestrator to synthesize;
+3. records the next plan to a file-backed artifact + loop history;
+4. optionally **best-effort refreshes** configured agents (`tmux /new` + identity reload).
+
+It is metadata only: it does **not** change node routing, branch logic, closure rules, or readiness. Tasks without `loop` config behave exactly as before. There is **no daemon, no automatic graph cycle, and no per-iteration agent spawning** — the next iteration is a new task the orchestrator creates after reading the prior `next-plan.md`.
+
+### Opt-in config (`task.json`)
+
+```json
+{
+  "loop": {
+    "enabled": true,
+    "proposalAgents": ["planner-a", "implementer-b"],
+    "refreshAgents": ["planner-a"],
+    "maxRounds": 2
+  }
+}
+```
+
+- `enabled` must be `true` (absent/false = no behavior change).
+- `proposalAgents` is the **fixed** pool queried after each terminal-done close.
+- `refreshAgents` are best-effort refreshed after a plan is recorded.
+- `maxRounds` is a defensive cap (V1.5 is one round per task; a new task starts a fresh round).
+
+Set it at creation via `swarm_create_task(loop: {...})`, or by editing `task.json` before close.
+
+### File-backed state
+
+```text
+.pi/swarm/loops/<taskId>.json                 # mutable loop state (phase, round, proposals, plan, refresh)
+.pi/swarm/loops/<taskId>/history.jsonl        # append-only audit trail (round_start, plan_recorded, refresh_done)
+.pi/swarm/loops/<taskId>/round-<n>.json        # round snapshot
+.pi/swarm/tasks/<taskId>/artifacts/proposals-round-<n>.md   # human-readable proposal table
+.pi/swarm/tasks/<taskId>/artifacts/next-plan.md              # synthesized next-iteration plan
+```
+
+Loop `phase` transitions: `idle → collecting_proposals → awaiting_plan → planned` (with a transient `refreshing`).
+
+### Runtime flow
+
+1. **Terminal-done close hook** — inside `swarm_update_task`, when a loop-enabled task becomes terminal **done**, `kickoffLoopIfEnabled` runs as a post-close side effect (atomic with the close; failures are traced, never thrown). It is a strict no-op when `loop` is absent/disabled, the task is not `done`, an active round already exists, or `maxRounds` is reached.
+2. **Proposal fanout** — one `requiresResponse`+`requiresAck` message per configured proposal agent (`conversationId = task:<taskId>:loop:<round>`), with a deterministic idempotency key. Unknown agents are recorded as `skipped` (never throw). Mailbox-only recipients (e.g. agents with no tmux pane) are delivered mailbox-only.
+3. **Orchestrator nudge** — immediately after fanout, an informational, mailbox-only, no-ack message is sent to the orchestrator stating the round started, the proposal agents / message ids / statuses, and the instruction to inspect `swarm_loop_status` then call `swarm_loop_plan` before the next iteration. (There is no event hook for "all replies received", so this nudge is necessary; it is sent for loop-enabled tasks only.)
+4. **Orchestrator synthesis pause** — the orchestrator reads `swarm_loop_status` (read-only), which reports `proposalState` = `collecting_proposals` (replies outstanding) → `ready_to_plan` (replies in) → `planned`, then records the plan.
+5. **Plan recording** — `swarm_loop_plan` (the only write tool) writes `artifacts/next-plan.md`, advances loop state to `planned`, appends `history.jsonl`.
+6. **Best-effort refresh (internal)** — as part of `swarm_loop_plan`, for each `refreshAgent`: a `tmux /new` context reset for live panes, then identity reload+injection. Failures are captured per-agent into `refreshResults` and **never corrupt loop state**.
+
+### Tools and commands
+
+- `swarm_loop_status(taskId)` — **read-only**: config snapshot, current phase/round, `proposalState` (`collecting_proposals` → `ready_to_plan` → `planned`), per-proposal request/ack/response/reply state, plan artifact path, refresh results, history path. Reports `disabled` vs `enabled-not-started` vs the live summary.
+- `swarm_loop_plan(taskId, summary, nextSteps?, artifact?, refresh?)` — the only write tool: records the plan, writes `next-plan.md`, advances to `planned`, appends history, and best-effort refreshes configured agents (tmux `/new` + identity reload). `refresh` defaults to true when `refreshAgents` are configured; failures are recorded and never corrupt loop state. Agent refresh is an internal side effect of `swarm_loop_plan`, not a separate public tool.
+- `/swarm loop status <task-id>` and `/swarm loop plan <task-id> <summary…>` — command equivalents.
+
+### Non-goals
+
+- No automatic infinite-loop runner or watcher process.
+- No default change for tasks without `loop` config.
+- No per-iteration agent spawning (fixed pool only).
+- No auto-solving the next plan from proposals without orchestrator input.
+
 ## Recommendation
 
 Adopt the hybrid model:

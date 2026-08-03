@@ -99,6 +99,8 @@ The extension registers `/swarm` for quick TUI use:
 | `/swarm send <to> <message>` | Send a mailbox/tmux-injected message. |
 | `/swarm trace` | Show recent structured trace events. |
 | `/swarm capture <id>` | Capture an agent pane to `.pi/swarm/traces/tmux/`. |
+| `/swarm loop status <task-id>` | Read-only V1.5 iteration-loop status (phase/round/proposals/plan). |
+| `/swarm loop plan <task-id> <summary…>` | Record the next-iteration plan (writes `next-plan.md` + history). |
 
 For detailed JSON results, prefer the tools below.
 
@@ -244,6 +246,10 @@ Captures a child agent's tmux pane to `.pi/swarm/traces/tmux/` for review/debugg
 ### `swarm_agent_identity`
 
 Reads or refreshes the durable identity card at `.pi/swarm/agents/<agent-id>.md`. With `refresh: true` (or when no effective file exists yet) it rebuilds the **effective** identity = generated card + optional override + provenance footer (see [Identity override & reload](#identity-override--reload)) and stamps `identityVersion`/`identityHash`/`identityLoadedAt` on the agent record.
+
+### `swarm_loop_status` / `swarm_loop_plan`
+
+The **task-graph iteration proposal loop (V1.5)** — an opt-in post-iteration wrapper. When a task with `loop.enabled = true` closes terminal-done, the engine kicks off a proposal round to a fixed agent pool and nudges the orchestrator; the orchestrator then synthesizes the next plan. `swarm_loop_status` is read-only and reports `collecting proposals` → `ready to plan` → `plan recorded`; `swarm_loop_plan` records the plan (writes `artifacts/next-plan.md` + loop history, advances to `planned`) and best-effort refreshes configured agents (tmux `/new` + identity reload) — refresh is an internal side effect of `swarm_loop_plan`, not a separate tool. Tasks without `loop` config are unaffected. See [Task-graph iteration proposal loop (V1.5)](swarm-task-graph.md#task-graph-iteration-proposal-loop-v15).
 
 ## Identity override & reload
 
