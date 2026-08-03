@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# UAT harness for .pi/extensions/swarm/index.ts
+# UAT harness for extensions/swarm/index.ts (packaged swarm extension)
 # Defaults intentionally use OpenAI gpt-5.4-mini per project validation preference.
 # Override when needed:
 #   SWARM_MODEL=glm-5.1 SWARM_PROVIDER=zai-coding-cn scripts/swarm_uat.sh
@@ -11,7 +11,7 @@ cd "$ROOT"
 
 MODEL="${SWARM_MODEL:-gpt-5.4-mini}"
 PROVIDER="${SWARM_PROVIDER:-openai}"
-EXT=".pi/extensions/swarm/index.ts"
+EXT="extensions/swarm/index.ts"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 RUN_ID="uat-${STAMP}"
 LOG_DIR=".pi/swarm-uat/runs/${RUN_ID}"
@@ -77,11 +77,11 @@ spawn_agent() {
 
 spawn_agent "$ARCHITECT" \
   "UAT architect. Coordinate a review of the swarm extension and UAT evidence. Do not edit files." \
-  "You are ${ARCHITECT}, UAT architect. First call swarm_list_agents. Then send ${IMPLEMENTER} a task to review .pi/extensions/swarm/index.ts for risks, and send ${OBSERVER} a task to inspect traces/mailboxes/tmux evidence. Ask both to reply to you via swarm_send_message."
+  "You are ${ARCHITECT}, UAT architect. First call swarm_list_agents. Then send ${IMPLEMENTER} a task to review extensions/swarm/index.ts for risks, and send ${OBSERVER} a task to inspect traces/mailboxes/tmux evidence. Ask both to reply to you via swarm_send_message."
 
 spawn_agent "$IMPLEMENTER" \
   "UAT implementer/reviewer. Review swarm extension behavior and report risks; do not edit files." \
-  "You are ${IMPLEMENTER}. Wait for swarm messages. If idle call swarm_check_mailbox pendingOnly=true. When asked, review .pi/extensions/swarm/index.ts and report one concrete risk/improvement to ${ARCHITECT} via swarm_send_message. Do not edit files."
+  "You are ${IMPLEMENTER}. Wait for swarm messages. If idle call swarm_check_mailbox pendingOnly=true. When asked, review extensions/swarm/index.ts and report one concrete risk/improvement to ${ARCHITECT} via swarm_send_message. Do not edit files."
 
 spawn_agent "$OBSERVER" \
   "UAT trace observer. Inspect swarm trace/debug evidence and report whether observability is sufficient; do not edit files." \

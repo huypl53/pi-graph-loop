@@ -23,9 +23,10 @@ const FAST_PROVIDER = "openai";
 const SWARM_GUEST_ID = "swarm-guest";
 
 type AgentStatus = "running" | "stopped" | "unknown";
-type RuntimeStatus = "starting" | "idle" | "busy" | "tool_running" | "shutting_down" | "stopped";
+type RuntimeStatus = "starting" | "idle" | "busy" | "tool_running" | "response_missing" | "shutting_down" | "stopped";
 type HealthStatus = "healthy" | "degraded" | "unhealthy";
 type MessageStatus = "queued" | "mailbox_delivered" | "injected" | "intercepted" | "acked" | "failed" | "dead_letter";
+type MessageResponseStatus = "not_required" | "missing" | "sent" | "verified" | "waived";
 
 type SwarmSettings = {
 	defaultModel?: string;
@@ -47,6 +48,17 @@ type MessageRecord = {
 	ackMissingAt?: string;
 	attempts: number;
 	requiresAck: boolean;
+	requiresResponse?: boolean;
+	response?: {
+		status: MessageResponseStatus;
+		resultMessageId?: string;
+		missingAt?: string;
+		sentAt?: string;
+		verifiedAt?: string;
+		waivedAt?: string;
+		waivedBy?: string;
+		lastError?: string;
+	};
 	conversationId?: string;
 	replyTo?: string;
 	lastError?: string;
@@ -116,6 +128,7 @@ type SwarmMessage = {
 	conversationId?: string;
 	replyTo?: string;
 	requiresAck: boolean;
+	requiresResponse?: boolean;
 	ttlMs?: number;
 	idempotencyKey?: string;
 	headers: Record<string, string>;
@@ -211,6 +224,11 @@ type Paths = {
 	traces: string;
 	tmuxTraces: string;
 	events: string;
+	metricsDir: string;
+	runsDir: string;
+	runArtifactsDir: string;
+	memoryDir: string;
+	iterationsDir: string;
 };
 
 function now() {
@@ -286,6 +304,11 @@ function paths(cwd: string): Paths {
 		traces: join(root, "traces"),
 		tmuxTraces: join(root, "traces", "tmux"),
 		events: join(root, "traces", "events.jsonl"),
+		metricsDir: join(root, "metrics"),
+		runsDir: join(root, "runs"),
+		runArtifactsDir: join(root, "runs"),
+		memoryDir: join(root, "memory"),
+		iterationsDir: join(root, "iterations"),
 	};
 }
 
@@ -305,6 +328,10 @@ async function ensureDirs(p: Paths) {
 	await mkdir(p.agentsDir, { recursive: true });
 	await mkdir(p.tasksDir, { recursive: true });
 	await mkdir(p.tmuxTraces, { recursive: true });
+	await mkdir(p.metricsDir, { recursive: true });
+	await mkdir(p.runsDir, { recursive: true });
+	await mkdir(p.memoryDir, { recursive: true });
+	await mkdir(p.iterationsDir, { recursive: true });
 }
 
 async function withLock<T>(p: Paths, fn: () => Promise<T>): Promise<T> {
@@ -985,6 +1012,10 @@ async function trace(p: Paths, event: string, data: Record<string, unknown> = {}
 function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status: MessageStatus, patch: Partial<MessageRecord> = {}) {
 	const ts = now();
 	const prev = state.messages[msg.id];
+	const requiresResponse = msg.requiresResponse ?? prev?.requiresResponse ?? false;
+	const response = patch.response || prev?.response || (requiresResponse
+		? { status: "missing" as MessageResponseStatus, missingAt: ts }
+		: { status: "not_required" as MessageResponseStatus });
 	state.messages[msg.id] = {
 		id: msg.id,
 		from: msg.from,
@@ -993,6 +1024,8 @@ function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status: Messa
 		queuedAt: prev?.queuedAt,
 		attempts: prev?.attempts ?? 0,
 		requiresAck: msg.requiresAck,
+		requiresResponse,
+		response,
 		conversationId: msg.conversationId,
 		replyTo: msg.replyTo,
 		lastError: prev?.lastError,
@@ -1003,6 +1036,329 @@ function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status: Messa
 		...patch,
 		status,
 		updatedAt: ts,
+	};
+}
+
+function responseMissingRecords(st: SwarmState, agentId: string) {
+	return Object.values(st.messages || {}).filter((m) =>
+		m.to === agentId &&
+		m.requiresResponse &&
+		m.status !== "dead_letter" &&
+		m.status !== "failed" &&
+		m.response?.status !== "verified" &&
+		m.response?.status !== "waived"
+	);
+}
+
+function verifiedResponseCount(st: SwarmState, agentId: string) {
+	return Object.values(st.messages || {}).filter((m) => m.to === agentId && m.requiresResponse && m.response?.status === "verified").length;
+}
+
+function validateResultMessage(st: SwarmState, rec: MessageRecord, resultMessageId: string, agentId: string) {
+	const result = st.messages[resultMessageId];
+	if (!result) throw new Error(`INVALID_RESULT_MESSAGE: resultMessageId ${resultMessageId} does not exist in swarm state.`);
+	if (result.from !== agentId) throw new Error(`INVALID_RESULT_MESSAGE: result ${resultMessageId} was sent by ${result.from}, not ${agentId}.`);
+	if (result.to !== rec.from) throw new Error(`INVALID_RESULT_MESSAGE: result ${resultMessageId} is addressed to ${result.to}, expected original sender ${rec.from}.`);
+	const linked = result.replyTo === rec.id || (Boolean(result.conversationId) && result.conversationId === rec.conversationId);
+	if (!linked) throw new Error(`INVALID_RESULT_MESSAGE: result ${resultMessageId} must replyTo ${rec.id} or share conversationId ${rec.conversationId || "(none)"}.`);
+	return result;
+}
+
+// ---- Metric / run / memory V1 helpers (file-backed, no daemon, no vector DB) ----
+// Swarm is the harness; the project defines the metric. Nothing here hard-codes accuracy/latency/cost.
+// Records are append-only JSONL; memory promotion is gated on file-backed evidence that exists + reads.
+
+type MetricContract = {
+	id: string;
+	title: string;
+	primaryMetric: {
+		id: string;
+		direction: string; // maximize | minimize | target | passfail
+		valueType: string; // number | boolean | string
+		source: { type: string; artifactPath?: string; jsonPath?: string; command?: string };
+		minimumMeaningfulChange?: number;
+		target?: number; // goal value for direction=target
+	};
+	validityRules?: string[];
+	evidenceRequired?: string[];
+	notes?: string;
+	status?: string;
+	createdAt?: string;
+	updatedAt?: string;
+};
+
+type RunRecord = {
+	runId: string;
+	metricContractId?: string;
+	taskId?: string;
+	nodeId?: string;
+	agentId?: string;
+	model?: string;
+	provider?: string;
+	status: string; // running | done | blocked | failed
+	verdict?: string; // pass | fail | approved | rejected | blocked
+	metrics?: Record<string, number | boolean | string>;
+	inputs?: Record<string, unknown>;
+	evidenceRefs?: string[];
+	notes?: string;
+	startedAt?: string;
+	endedAt?: string;
+	git?: { available?: boolean; baseCommit?: string; headCommit?: string };
+	recordedAt?: string;
+};
+
+type MemoryRecord = {
+	memoryId: string;
+	claim: string;
+	sourceRunId: string;
+	evidenceRefs: string[];
+	scope?: { kind?: string; id?: string };
+	confidence?: number;
+	status: string; // proposed | active | rejected | expired
+	reviewedBy?: string;
+	rejectionReason?: string;
+	notes?: string;
+	createdAt?: string;
+	updatedAt?: string;
+};
+
+const METRIC_ID_RE = /^[a-z0-9_-]+$/;
+
+async function captureGitCommit(pi: ExtensionAPI): Promise<{ available: boolean; baseCommit?: string; headCommit?: string }> {
+	try {
+		const r = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 5000 });
+		if (r.code !== 0) return { available: false };
+		const head = (r.stdout || "").trim();
+		if (!head) return { available: false };
+		return { available: true, baseCommit: head, headCommit: head };
+	} catch {
+		return { available: false };
+	}
+}
+
+async function readJsonlRecords<T = any>(file: string): Promise<T[]> {
+	let raw: string;
+	try { raw = await readFile(file, "utf8"); } catch { return []; }
+	const out: T[] = [];
+	for (const line of raw.split("\n")) {
+		const t = line.trim();
+		if (!t) continue;
+		try { out.push(JSON.parse(t) as T); } catch { /* skip malformed line */ }
+	}
+	return out;
+}
+
+// Append-only JSONL with status transitions: readers keep only the latest line per id field.
+async function readJsonlLatestById<T extends Record<string, any>>(file: string, idField: string): Promise<T[]> {
+	const all = await readJsonlRecords<T>(file);
+	const latest = new Map<string, T>();
+	for (const rec of all) {
+		const id = rec?.[idField];
+		if (typeof id === "string") latest.set(id, rec);
+	}
+	return Array.from(latest.values());
+}
+
+async function checkEvidenceRefs(cwd: string, refs: string[]): Promise<{ ok: boolean; reasons: string[]; checked: { ref: string; exists: boolean; readable: boolean }[] }> {
+	const reasons: string[] = [];
+	const checked: { ref: string; exists: boolean; readable: boolean }[] = [];
+	for (const ref of refs) {
+		if (!isSafeRelativePath(ref)) {
+			reasons.push(`evidence ref is unsafe (must be relative, no ..): ${ref}`);
+			checked.push({ ref, exists: false, readable: false });
+			continue;
+		}
+		const abs = join(cwd, ref);
+		let exists = false;
+		let readable = false;
+		try { await readFile(abs, "utf8"); exists = true; readable = true; }
+		catch { exists = existsSync(abs); readable = false; }
+		checked.push({ ref, exists, readable });
+		if (!exists) reasons.push(`evidence ref does not exist: ${ref}`);
+		else if (!readable) reasons.push(`evidence ref exists but is not readable: ${ref}`);
+	}
+	return { ok: reasons.length === 0, reasons, checked };
+}
+
+// Evidence-backed memory gate. Returns accepted=false with reasons for pane-only/ack-only/
+// mailbox-only/incomplete claims. Never auto-activates; the record is still appended (rejected) for audit.
+async function evaluateMemoryGate(opts: { cwd: string; run?: RunRecord; evidenceRefs: string[] }): Promise<{ accepted: boolean; reasons: string[] }> {
+	const { run, evidenceRefs, cwd } = opts;
+	const reasons: string[] = [];
+	if (!run) {
+		reasons.push("sourceRunId does not resolve to a run record");
+	} else {
+		const verdict = (run.verdict || "").toLowerCase();
+		if (verdict !== "pass" && verdict !== "approved") reasons.push(`source run verdict is '${run.verdict || "(none)"}' (must be pass or approved)`);
+	}
+	if (!evidenceRefs || evidenceRefs.length === 0) {
+		reasons.push("no evidenceRefs supplied");
+	} else {
+		const ev = await checkEvidenceRefs(cwd, evidenceRefs);
+		if (!ev.ok) reasons.push(...ev.reasons);
+		// Reconstructability: a code/config-changing run must carry a git commit or a diff/patch artifact.
+		const git = run?.git;
+		const hasCommit = Boolean(git?.headCommit || git?.baseCommit);
+		const hasDiff = evidenceRefs.some((r) => /\.(patch|diff)$/i.test(r));
+		if (!hasCommit && !hasDiff) reasons.push("run must include a git commit or a .patch/.diff evidence ref so the change is reconstructable");
+	}
+	return { accepted: reasons.length === 0, reasons };
+}
+
+// ---- Iteration loop V1 helpers (file-backed session over metric/run/memory; no daemon, no graph cycles) ----
+
+type IterationEntry = {
+	index: number;
+	runId: string;
+	label?: string;
+	recordedAt: string;
+};
+
+type IterationSession = {
+	iterationId: string;
+	metricContractId: string;
+	goal?: string;
+	scope?: { kind?: string; id?: string };
+	baselineRunId?: string;
+	iterations: IterationEntry[];
+	bestRunId?: string;
+	pinnedMemoryIds: string[];
+	status: string; // active | archived
+	notes?: string;
+	createdAt: string;
+	updatedAt: string;
+};
+
+type IterationBest = {
+	metricId: string;
+	direction: string;
+	target?: number;
+	bestRunId?: string;
+	bestValue?: number | boolean;
+	baselineRunId?: string;
+	baselineValue?: number | boolean;
+	improvement?: number; // signed in the favored direction (positive = better); for target, reduction in distance
+	passingCount?: number; // passfail only
+	meaningful: boolean;
+	missingCount: number;
+	perRun: { runId: string; label?: string; value?: number | boolean; present: boolean }[];
+	warnings: string[];
+};
+
+// The SINGLE place "best"/"improvement" is decided. Generic: reads run.metrics[metricId] only,
+// never a hard-coded key. direction comes from the contract. Missing/non-numeric values are skipped.
+function computeIterationBest(entries: { runId: string; label?: string }[], runById: Map<string, RunRecord>, contract: MetricContract): IterationBest {
+	const metricId = contract.primaryMetric.id;
+	const direction = contract.primaryMetric.direction;
+	const mmc = contract.primaryMetric.minimumMeaningfulChange;
+	const target = contract.primaryMetric.target;
+	const warnings: string[] = [];
+	if (direction === "target" && typeof target !== "number") warnings.push("direction=target but contract has no primaryMetric.target; falling back to maximize");
+	const effDir = direction === "target" && typeof target !== "number" ? "maximize" : direction;
+	const perRun = entries.map((e) => {
+		const r = runById.get(e.runId);
+		const raw = r?.metrics?.[metricId];
+		const present = raw !== undefined && raw !== null;
+		return { runId: e.runId, label: e.label, value: present ? (raw as number | boolean) : undefined, present };
+	});
+	const num = perRun.filter((p) => typeof p.value === "number").map((p) => ({ runId: p.runId, label: p.label, value: p.value as number }));
+	const missingCount = perRun.filter((p) => !p.present).length;
+	const baselineEntry = entries[0];
+	const baselineRun = baselineEntry ? runById.get(baselineEntry.runId) : undefined;
+	const baselineRaw = baselineRun?.metrics?.[metricId];
+	const baselineValue = baselineRaw !== undefined && baselineRaw !== null ? (baselineRaw as number | boolean) : undefined;
+	let bestRunId: string | undefined;
+	let bestValue: number | boolean | undefined;
+	let improvement: number | undefined;
+	let passingCount: number | undefined;
+	let meaningful = false;
+	if (effDir === "passfail") {
+		const passing = perRun.filter((p) => p.value === true);
+		passingCount = passing.length;
+		bestRunId = passing[0]?.runId;
+		bestValue = passing.length > 0 ? true : undefined;
+		meaningful = passing.length > 0 && baselineValue !== true;
+	} else if (num.length > 0) {
+		let pick: { runId: string; value: number };
+		if (effDir === "minimize") pick = num.reduce((a, b) => (b.value < a.value ? b : a));
+		else if (effDir === "target" && typeof target === "number") pick = num.reduce((a, b) => (Math.abs(b.value - target) < Math.abs(a.value - target) ? b : a));
+		else pick = num.reduce((a, b) => (b.value > a.value ? b : a)); // maximize / target-fallback
+		bestRunId = pick.runId;
+		bestValue = pick.value;
+		if (typeof baselineValue === "number") {
+			if (effDir === "target" && typeof target === "number") improvement = Math.abs(baselineValue - target) - Math.abs(pick.value - target);
+			else if (effDir === "minimize") improvement = baselineValue - pick.value;
+			else improvement = pick.value - baselineValue; // maximize
+			meaningful = typeof mmc === "number" ? Math.abs(improvement) >= mmc : improvement > 0;
+		} else {
+			meaningful = true; // gained a value where baseline had none
+		}
+	}
+	return { metricId, direction, target, bestRunId, bestValue, baselineRunId: baselineEntry?.runId, baselineValue, improvement, passingCount, meaningful, missingCount, perRun, warnings };
+}
+
+function iterationFile(p: Paths, iterationId: string) {
+	return join(p.iterationsDir, `${safeId(iterationId)}.json`);
+}
+
+async function readIteration(p: Paths, iterationId: string): Promise<IterationSession | undefined> {
+	const file = iterationFile(p, iterationId);
+	if (!existsSync(file)) return undefined;
+	return JSON.parse(await readFile(file, "utf8")) as IterationSession;
+}
+
+async function writeIteration(p: Paths, session: IterationSession) {
+	session.updatedAt = now();
+	await atomicWriteFile(iterationFile(p, session.iterationId), `${JSON.stringify(session, null, 2)}\n`);
+}
+
+async function readMetricContract(p: Paths, id: string): Promise<MetricContract | undefined> {
+	const file = join(p.metricsDir, `${safeId(id)}.json`);
+	if (!existsSync(file)) return undefined;
+	return JSON.parse(await readFile(file, "utf8")) as MetricContract;
+}
+
+async function latestRuns(p: Paths): Promise<RunRecord[]> {
+	return readJsonlLatestById<RunRecord>(join(p.runsDir, "runs.jsonl"), "runId");
+}
+
+async function latestMemories(p: Paths): Promise<MemoryRecord[]> {
+	return readJsonlLatestById<MemoryRecord>(join(p.memoryDir, "memory.jsonl"), "memoryId");
+}
+
+function runSummary(run: RunRecord | undefined, metricId: string) {
+	if (!run) return undefined;
+	return { runId: run.runId, primaryMetricValue: run.metrics?.[metricId], verdict: run.verdict, gitHeadCommit: run.git?.headCommit, evidenceRefs: run.evidenceRefs || [], recordedAt: run.recordedAt };
+}
+
+// Next-iteration retrieval bundle: best run summary + active evidence-backed memories for the session
+// scope (pinned or scope-matching). Proposed/rejected memories are NEVER carried forward.
+async function buildIterationContext(p: Paths, session: IterationSession, runById: Map<string, RunRecord>, contract: MetricContract, best: IterationBest, memoryLimit = 10) {
+	const metricId = contract.primaryMetric.id;
+	const bestRun = best.bestRunId ? runById.get(best.bestRunId) : undefined;
+	const baselineRun = session.baselineRunId ? runById.get(session.baselineRunId) : (session.iterations[0] ? runById.get(session.iterations[0].runId) : undefined);
+	const lastEntry = session.iterations[session.iterations.length - 1];
+	const lastRun = lastEntry ? runById.get(lastEntry.runId) : undefined;
+	const memories = await latestMemories(p);
+	const scopeId = session.scope?.id || session.metricContractId;
+	const seen = new Set<string>();
+	const picked: MemoryRecord[] = [];
+	for (const m of memories) {
+		if (m.status !== "active") continue;
+		const matchesScope = m.scope?.id === scopeId;
+		const pinned = session.pinnedMemoryIds.includes(m.memoryId);
+		if (matchesScope || pinned) {
+			if (!seen.has(m.memoryId)) { seen.add(m.memoryId); picked.push(m); }
+		}
+		if (picked.length >= memoryLimit) break;
+	}
+	const hint = `direction=${contract.primaryMetric.direction}; best=${best.bestRunId || "(none)"}${best.improvement !== undefined ? ` improvement=${best.improvement}` : ""}; meaningful=${best.meaningful}`;
+	return {
+		best: runSummary(bestRun, metricId),
+		baseline: runSummary(baselineRun, metricId),
+		last: runSummary(lastRun, metricId),
+		memories: picked.map((m) => ({ memoryId: m.memoryId, claim: m.claim, sourceRunId: m.sourceRunId, evidenceRefs: m.evidenceRefs || [], scope: m.scope, confidence: m.confidence })),
+		hint,
 	};
 }
 
@@ -1063,7 +1419,7 @@ function currentProvider(model = currentModel()) {
 
 function childPiArgs() {
 	// Default keeps spawned agents in the same trusted project so they discover project extensions/skills.
-	// Tests or unusual projects can override, e.g. PI_SWARM_CHILD_ARGS="--approve --no-extensions -e .pi/extensions/swarm/index.ts".
+	// Tests or unusual projects can override, e.g. PI_SWARM_CHILD_ARGS="--approve --no-extensions -e extensions/swarm/index.ts".
 	return process.env.PI_SWARM_CHILD_ARGS || "--approve";
 }
 
@@ -1136,7 +1492,7 @@ function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 		`## ACK Protocol\n\n` +
 		`- For every swarm message with \`requiresAck=true\`, you MUST acknowledge it with \`swarm_ack_message\`.\n` +
 		`- As soon as you start work, call \`swarm_ack_message\` with the message id and \`status=seen\` or \`status=processing\`.\n` +
-		`- When finished, call \`swarm_ack_message\` again with \`status=done\` (or \`status=failed\` on failure), plus a short \`note\`.\n` +
+		`- When finished, send a result back to the requester with \`swarm_send_message(replyTo=<original-message-id>)\` or \`swarm_task_message\`, then call \`swarm_ack_message(status=done, resultMessageId=<result-message-id>)\`. ACK is lifecycle only; it is not the work result.\n` +
 		`- Never leave a requiresAck message unacked. Reconcile surfaces unacked delivered messages as \`ack_missing\`.\n\n` +
 		`## Lifecycle\n\n` +
 		`- Start by reading this identity when role details are unclear.\n` +
@@ -1154,7 +1510,7 @@ function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 }
 
 function identityPrompt(cwd: string, identityRelPath: string) {
-	return `\n\n[PI-SWARM IDENTITY]\nYour durable swarm identity is stored at ${identityRelPath}. Read it before acting when you need role details. Treat it as your agent-specific AGENT.md.\nFor any swarm message with requiresAck=true, you MUST acknowledge it with swarm_ack_message (status seen|processing|done|failed).\n[/PI-SWARM IDENTITY]`;
+	return `\n\n[PI-SWARM IDENTITY]\nYour durable swarm identity is stored at ${identityRelPath}. Read it before acting when you need role details. Treat it as your agent-specific AGENT.md.\nFor any swarm message with requiresAck=true, you MUST acknowledge it with swarm_ack_message. If requiresResponse=true, send a result message first and ack done with resultMessageId.\n[/PI-SWARM IDENTITY]`;
 }
 
 async function readMailbox(p: Paths, agentId: string): Promise<SwarmMessage[]> {
@@ -1351,7 +1707,7 @@ async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg: Swarm
 // orchestrator pseudo-agent) and appends to the recipient mailbox; it does NOT read/write state or
 // acquire the lock. Callers that already hold the swarm lock (task tools that send within one atomic
 // operation) use this directly and writeState once afterward.
-async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; ttlMs?: number; idempotencyKey?: string }): Promise<{ msg: SwarmMessage; delivery: any }> {
+async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string }): Promise<{ msg: SwarmMessage; delivery: any }> {
 	const to = safeId(params.to);
 	const from = currentAgentId();
 	if (to === "orchestrator") ensureOrchestrator(st, cwd, p);
@@ -1385,13 +1741,14 @@ async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st:
 		conversationId: params.conversationId,
 		replyTo: params.replyTo,
 		requiresAck: params.requiresAck ?? true,
+		requiresResponse: params.requiresResponse ?? false,
 		ttlMs: params.ttlMs,
 		idempotencyKey: params.idempotencyKey,
 		headers: { cwd, senderModel: currentModel(), senderProvider: currentProvider() },
 	};
 	upsertMessageRecord(st, m, "queued", { queuedAt: createdAt });
 	await appendJsonl(mailboxPath(p, to), m);
-	await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck, idempotencyKey: m.idempotencyKey });
+	await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck, requiresResponse: m.requiresResponse, idempotencyKey: m.idempotencyKey });
 	const delivery = await deliver(pi, p, st, m);
 	if (delivery?.delivered) {
 		if (delivery.mailboxOnly) {
@@ -1414,11 +1771,19 @@ async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st:
 	} else {
 		upsertMessageRecord(st, m, "failed", { failedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1, lastError: delivery?.reason || "delivery skipped" });
 	}
+	if (params.replyTo) {
+		const original = st.messages[params.replyTo];
+		if (original?.requiresResponse && original.to === from && original.from === to) {
+			original.response = { ...(original.response || { status: "missing" as MessageResponseStatus }), status: "sent", resultMessageId: m.id, sentAt: now(), lastError: undefined };
+			original.updatedAt = now();
+			await trace(p, "message.response.sent", { id: original.id, resultMessageId: m.id, from, to });
+		}
+	}
 	await trace(p, delivery?.delivered ? (delivery.mailboxOnly ? "message.deliver.mailbox_only" : "message.inject.ok") : "message.inject.skip", { id: m.id, to: m.to, delivery, markedDelivered: Boolean(delivery?.delivered), status: st.messages[m.id]?.status });
 	return { msg: m, delivery };
 }
 
-async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; ttlMs?: number; idempotencyKey?: string }) {
+async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string }) {
 	return withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const r = await deliverMessageLocked(pi, cwd, p, st, params);
@@ -1531,6 +1896,8 @@ async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: { roleK
 		ensureAgentDefaults(agent);
 		if (wantKind && agent.roleKind !== wantKind) continue;
 		if (wantCaps.size && !agent.capabilities.map((c) => c.toLowerCase()).some((c) => wantCaps.has(c))) continue;
+		const responseMissing = responseMissingRecords(st, agent.id).length;
+		if (responseMissing > 0) continue;
 		const idle = agent.runtimeStatus === "idle";
 		if (opts.requireIdle && !idle) continue;
 		if (!opts.includeBusy && !idle && agent.activeTaskIds.length >= agent.maxConcurrentTasks) continue;
@@ -1644,6 +2011,16 @@ async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { age
 
 		for (const [msgId, rec] of Object.entries(st.messages)) {
 			if (rec.status === "dead_letter") continue;
+			if (rec.requiresResponse && rec.response?.status !== "verified" && rec.response?.status !== "waived") {
+				const agent = st.agents[rec.to];
+				if (!options.dryRun) {
+					rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: rec.response?.status === "sent" ? "sent" : "missing", missingAt: rec.response?.missingAt || now(), lastError: `response_missing: awaiting verified result from ${rec.to}` };
+					rec.updatedAt = now();
+					if (agent && agent.runtimeStatus === "idle") { agent.runtimeStatus = "response_missing"; agent.updatedAt = now(); }
+				}
+				actions.push({ messageId: msgId, action: "response_missing", reason: `Message requires a verified response from ${rec.to}` });
+				continue;
+			}
 			if (rec.status === "acked") continue;
 			if (targetAgentId && rec.to !== targetAgentId) continue;
 			if (rec.status !== "queued" && rec.status !== "failed" && rec.status !== "mailbox_delivered" && rec.status !== "injected" && rec.status !== "intercepted") continue;
@@ -1902,7 +2279,7 @@ export default function (pi: ExtensionAPI) {
 			} else if (st.agents[agentId]) {
 				st.agents[agentId].lastSessionStartAt = ts;
 				st.agents[agentId].lastHeartbeatAt = ts;
-				st.agents[agentId].runtimeStatus = "idle";
+				st.agents[agentId].runtimeStatus = responseMissingRecords(st, agentId).length ? "response_missing" : "idle";
 				st.agents[agentId].health = "healthy";
 				st.agents[agentId].pid = process.pid;
 				st.agents[agentId].updatedAt = ts;
@@ -1974,11 +2351,24 @@ export default function (pi: ExtensionAPI) {
 			if (agent.pid && agent.pid !== process.pid) return; // pid-guard
 			const ts = now();
 			agent.lastAgentSettledAt = ts;
-			agent.runtimeStatus = "idle";
 			agent.health = "healthy";
 			agent.lastHeartbeatAt = ts;
 			agent.updatedAt = ts;
 			ensureAgentDefaults(agent);
+			const missingResponses = responseMissingRecords(st, agentId);
+			agent.runtimeStatus = missingResponses.length ? "response_missing" : "idle";
+			if (missingResponses.length) {
+				for (const rec of missingResponses) {
+					rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: "missing", missingAt: rec.response?.missingAt || ts, lastError: `response_missing: ${agentId} settled before sending a verified result` };
+					rec.updatedAt = ts;
+				}
+				try {
+					await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject: `agent ${agentId} settled with missing response(s)`, body: `Agent ${agentId} settled while ${missingResponses.length} requiresResponse message(s) are still missing verified result messages: ${missingResponses.map((m) => m.id).join(", ")}. The agent is marked response_missing and is blocked from reuse until it sends replies and ack done with resultMessageId.`, requiresAck: false });
+					await trace(p, "message.response_missing.settled.notify", { agentId, messageIds: missingResponses.map((m) => m.id) });
+				} catch (err: any) {
+					await trace(p, "message.response_missing.notify_failed", { agentId, error: String(err?.message || err) });
+				}
+			}
 			// PM auto-notify (engine behavior): a settle while still holding open assignments is a
 			// stall/idle signal the orchestrator should not have to poll for. Enqueue a mailbox notify to
 			// the mailbox-only orchestrator. Loop-safe: (a) it targets the orchestrator, never the worker
@@ -2145,6 +2535,9 @@ export default function (pi: ExtensionAPI) {
 				const unackedMessages = records.filter((m) => m.requiresAck && !m.ackedAt && (m.status === "mailbox_delivered" || m.status === "injected" || m.status === "intercepted")).length;
 				const ackMissing = records.filter((m) => m.requiresAck && Boolean(m.ackMissingAt) && !m.ackedAt).length;
 				const deadLetters = records.filter((m) => m.status === "dead_letter").length;
+				const responseMissing = responseMissingRecords(st, agent.id).length;
+				const responsesVerified = verifiedResponseCount(st, agent.id);
+				const blockedFromReuse = responseMissing > 0;
 				const lastHeartbeatAgeSec = agent.lastHeartbeatAt ? Math.round((Date.now() - new Date(agent.lastHeartbeatAt).getTime()) / 1000) : undefined;
 				rows.push({
 					agentId: agent.id,
@@ -2165,6 +2558,9 @@ export default function (pi: ExtensionAPI) {
 					unackedMessages,
 					ackMissing,
 					deadLetters,
+					responseMissing,
+					responsesVerified,
+					blockedFromReuse,
 					tmuxTarget: agent.tmuxTarget,
 				});
 			}
@@ -2303,6 +2699,7 @@ export default function (pi: ExtensionAPI) {
 			conversationId: Type.Optional(Type.String({ description: "Optional conversation/thread id for related messages." })),
 			replyTo: Type.Optional(Type.String({ description: "Optional message id this message replies to." })),
 			requiresAck: Type.Optional(Type.Boolean({ description: "Whether recipient should explicitly ack done/failed. Defaults to true." })),
+			requiresResponse: Type.Optional(Type.Boolean({ description: "Whether recipient must send a result/reply message before acking done and becoming reusable. Defaults to false for direct messages." })),
 			ttlMs: Type.Optional(Type.Number({ description: "Optional time-to-live in milliseconds for future reconcile/dead-letter handling." })),
 			idempotencyKey: Type.Optional(Type.String({ description: "Optional idempotency key to prevent duplicate messages. If a message with the same from+to+idempotencyKey exists, it is returned instead." })),
 		}),
@@ -2337,6 +2734,17 @@ export default function (pi: ExtensionAPI) {
 				const ackAt = now();
 				const failed = params.status === "failed";
 				const done = params.status === "done";
+				let response = rec.response;
+				if (done && rec.requiresResponse) {
+					const resultId = params.resultMessageId || rec.response?.resultMessageId;
+					if (!resultId) throw new Error(`RESPONSE_REQUIRED: Message ${params.messageId} requires a response before ack done. Send swarm_send_message(to="${rec.from}", replyTo="${rec.id}", ...) first, then ack done with resultMessageId.`);
+					validateResultMessage(st, rec, resultId, agentId);
+					response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: "verified", resultMessageId: resultId, verifiedAt: ackAt, lastError: undefined };
+				}
+				if (failed && rec.requiresResponse && params.resultMessageId) {
+					validateResultMessage(st, rec, params.resultMessageId, agentId);
+					response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: "verified", resultMessageId: params.resultMessageId, verifiedAt: ackAt, lastError: undefined };
+				}
 				st.messages[params.messageId] = {
 					...rec,
 					// `seen` and `processing` are progress acks, not completion. Keep the
@@ -2347,6 +2755,7 @@ export default function (pi: ExtensionAPI) {
 					failedAt: failed ? ackAt : rec.failedAt,
 					ackMissingAt: failed ? rec.ackMissingAt : undefined,
 					lastError: failed ? params.note || rec.lastError : rec.lastError?.startsWith("ack_missing") ? undefined : rec.lastError,
+					response,
 					lastAck: { by: agentId, status: params.status, note: params.note, resultMessageId: params.resultMessageId, at: ackAt },
 				};
 				st.delivered[rec.to] = Array.from(new Set([...(st.delivered[rec.to] || []), params.messageId]));
@@ -2779,7 +3188,7 @@ export default function (pi: ExtensionAPI) {
 				const replyTarget = params.replyTarget || me;
 				const conversationId = `task:${task.taskId}:${params.nodeId}`;
 				const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note);
-				const { msg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: assignee.id, body, subject: `Task ${task.taskId} / node ${params.nodeId} assigned`, conversationId, requiresAck: true });
+				const { msg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: assignee.id, body, subject: `Task ${task.taskId} / node ${params.nodeId} assigned`, conversationId, requiresAck: true, requiresResponse: true });
 				node.messageIds = Array.from(new Set([...(node.messageIds || []), msg.id]));
 				task.handoffs.push({ fromNode: null, toNode: params.nodeId, by: me, toAgent: assignee.id, messageId: msg.id, at: now(), kind: "assign", status: delivery?.delivered ? (delivery.mailboxOnly ? "mailbox_only" : "delivered") : "queued" });
 
@@ -2934,7 +3343,7 @@ export default function (pi: ExtensionAPI) {
 				const conversationId = `task:${taskId}:${params.fromNode}${params.toNode ? `->${params.toNode}` : ""}`;
 				let body = params.body;
 				if (params.artifactRefs && params.artifactRefs.length) body += `\n\nArtifact refs: ${params.artifactRefs.join(", ")}`;
-				const { msg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: toId, body, subject: params.subject, conversationId, requiresAck: params.replyExpected !== false, priority: params.priority });
+				const { msg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: toId, body, subject: params.subject, conversationId, requiresAck: params.replyExpected !== false, requiresResponse: params.replyExpected !== false, priority: params.priority });
 				task.nodes[params.fromNode].messageIds = Array.from(new Set([...(task.nodes[params.fromNode].messageIds || []), msg.id]));
 				if (params.toNode) task.handoffs.push({ fromNode: params.fromNode, toNode: params.toNode, fromAgent: me, toAgent: toId, messageId: msg.id, at: now(), artifactRefs: params.artifactRefs || [], status: delivery?.delivered ? (delivery.mailboxOnly ? "mailbox_only" : "delivered") : "queued" });
 				await writeTaskState(tp, task);
@@ -2944,6 +3353,456 @@ export default function (pi: ExtensionAPI) {
 			});
 			const delivery = result.delivery;
 			return textResult(`Sent task message ${result.msg.id} from node ${params.fromNode} to ${params.to}${params.toNode ? ` (node ${params.toNode})` : ""}. ${delivery?.delivered ? (delivery.mailboxOnly ? "Queued (mailbox-only)." : "Delivered.") : "Queued (agent not running; reconcile will retry)."}`, { taskId: result.task.taskId, messageId: result.msg.id, fromNode: params.fromNode, toNode: params.toNode, to: params.to, delivery });
+		},
+	}));
+
+	// ---- Metric / run / memory V1 tools (file-backed, no daemon, no vector DB) ----
+
+	pi.registerTool(defineTool({
+		name: "swarm_metric_define",
+		label: "Swarm Metric Define",
+		description: "Create or replace a project-specific metric contract under .pi/swarm/metrics/<id>.json. The project defines the metric (e.g. quality_score); the harness never hard-codes accuracy/latency/cost. No daemon, no value extraction in V1.",
+		promptGuidelines: ["Use `swarm_metric_define` to author a project metric contract before recording runs against it."],
+		parameters: Type.Object({
+			id: Type.String({ description: "Safe metric id matching /^[a-z0-9_-]+$/." }),
+			title: Type.String({ description: "Human-readable metric title." }),
+			primaryMetric: Type.Object({
+				id: Type.String({ description: "Metric identifier, e.g. quality_score." }),
+				direction: Type.String({ description: "maximize | minimize | target | passfail." }),
+				valueType: Type.String({ description: "number | boolean | string." }),
+				source: Type.Object({
+					type: Type.String({ description: "artifact | command | report | reviewer | external." }),
+					artifactPath: Type.Optional(Type.String({ description: "Artifact path when type=artifact." })),
+					jsonPath: Type.Optional(Type.String({ description: "JSON path into the artifact, e.g. $.quality_score." })),
+					command: Type.Optional(Type.String({ description: "Command source (stored, not auto-run in V1)." })),
+				}),
+				minimumMeaningfulChange: Type.Optional(Type.Number()),
+				target: Type.Optional(Type.Number({ description: "Goal value when direction=target." })),
+			}),
+			validityRules: Type.Optional(Type.Array(Type.String())),
+			evidenceRequired: Type.Optional(Type.Array(Type.String({ description: "Artifact refs required to promote memory from runs against this contract." }))),
+			notes: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			if (!METRIC_ID_RE.test(params.id)) throw new Error(`INVALID_METRIC_ID: id must match /^[a-z0-9_-]+$/ (got '${params.id}')`);
+			if (!["maximize", "minimize", "target", "passfail"].includes(params.primaryMetric.direction)) throw new Error(`INVALID_DIRECTION: primaryMetric.direction must be one of maximize|minimize|target|passfail`);
+			if (!["number", "boolean", "string"].includes(params.primaryMetric.valueType)) throw new Error(`INVALID_VALUE_TYPE: primaryMetric.valueType must be one of number|boolean|string`);
+			if (!params.primaryMetric.id?.trim()) throw new Error("INVALID_PRIMARY_METRIC: primaryMetric.id is required");
+			const ts = now();
+			const file = join(p.metricsDir, `${params.id}.json`);
+			const prevExists = existsSync(file);
+			let prev: MetricContract | undefined;
+			if (prevExists) { try { prev = JSON.parse(await readFile(file, "utf8")) as MetricContract; } catch { prev = undefined; } }
+			const contract: MetricContract = {
+				id: params.id,
+				title: params.title,
+				primaryMetric: params.primaryMetric,
+				validityRules: params.validityRules,
+				evidenceRequired: params.evidenceRequired,
+				notes: params.notes,
+				status: "active",
+				createdAt: prev?.createdAt || ts,
+				updatedAt: ts,
+			};
+			await atomicWriteFile(file, `${JSON.stringify(contract, null, 2)}\n`);
+			await trace(p, "metric.define", { id: contract.id, replaced: prevExists });
+			return textResult(`${prevExists ? "Replaced" : "Created"} metric contract '${contract.id}' at ${relative(ctx.cwd, file)}.`, { contract, path: relative(ctx.cwd, file) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_metric_get",
+		label: "Swarm Metric Get",
+		description: "Read a project-specific metric contract by id.",
+		promptGuidelines: ["Use `swarm_metric_get` to inspect a metric contract before recording or comparing runs."],
+		parameters: Type.Object({
+			id: Type.String({ description: "Metric contract id." }),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const file = join(p.metricsDir, `${safeId(params.id)}.json`);
+			await trace(p, "metric.get", { id: params.id });
+			if (!existsSync(file)) throw new Error(`METRIC_NOT_FOUND: no contract for id '${params.id}' at ${relative(ctx.cwd, file)}`);
+			const contract = JSON.parse(await readFile(file, "utf8")) as MetricContract;
+			return textResult(JSON.stringify(contract, null, 2), { contract, path: relative(ctx.cwd, file) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_run_record",
+		label: "Swarm Run Record",
+		description: "Append one append-only run record to .pi/swarm/runs/runs.jsonl with best-effort git capture and safe evidence refs. Existence of evidence is NOT required to record a run, but it IS required to promote memory.",
+		promptGuidelines: ["Use `swarm_run_record` to durably log a run (with metrics, evidence refs, git commit) before proposing memory from it."],
+		parameters: Type.Object({
+			runId: Type.Optional(Type.String({ description: "Safe run id; generated as run-<timestamp>-<rand> if omitted." })),
+			metricContractId: Type.Optional(Type.String()),
+			taskId: Type.Optional(Type.String()),
+			nodeId: Type.Optional(Type.String()),
+			agentId: Type.Optional(Type.String()),
+			model: Type.Optional(Type.String()),
+			provider: Type.Optional(Type.String()),
+			status: Type.String({ description: "running | done | blocked | failed." }),
+			verdict: Type.Optional(Type.String({ description: "pass | fail | approved | rejected | blocked." })),
+			metrics: Type.Optional(Type.Record(Type.String(), Type.Any({ description: "Free-form { metricId: value }; project-defined." }))),
+			inputs: Type.Optional(Type.Record(Type.String(), Type.Any({ description: "Summary of what was run." }))),
+			evidenceRefs: Type.Optional(Type.Array(Type.String({ description: "Safe relative paths (no .., no absolute)." }))),
+			notes: Type.Optional(Type.String()),
+			startedAt: Type.Optional(Type.String()),
+			endedAt: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			for (const ref of params.evidenceRefs || []) if (!isSafeRelativePath(ref)) throw new Error(`UNSAFE_EVIDENCE_REF: evidence refs must be relative with no '..': ${ref}`);
+			const ts = now();
+			const runId = params.runId && METRIC_ID_RE.test(params.runId) ? params.runId : `run-${ts.replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 6)}`;
+			const git = await captureGitCommit(pi);
+			const rec: RunRecord = {
+				runId,
+				metricContractId: params.metricContractId,
+				taskId: params.taskId,
+				nodeId: params.nodeId,
+				agentId: params.agentId || currentAgentId(),
+				model: params.model,
+				provider: params.provider,
+				status: params.status,
+				verdict: params.verdict,
+				metrics: params.metrics as Record<string, number | boolean | string> | undefined,
+				inputs: params.inputs as Record<string, unknown> | undefined,
+				evidenceRefs: params.evidenceRefs,
+				notes: params.notes,
+				startedAt: params.startedAt || ts,
+				endedAt: params.endedAt || ts,
+				git,
+				recordedAt: ts,
+			};
+			await appendJsonl(join(p.runsDir, "runs.jsonl"), rec);
+			await trace(p, "run.record", { runId: rec.runId, metricContractId: rec.metricContractId, taskId: rec.taskId, status: rec.status, verdict: rec.verdict, gitAvailable: git.available });
+			return textResult(`Recorded run '${rec.runId}' (${rec.status}${rec.verdict ? `, ${rec.verdict}` : ""}). Git: ${git.available ? git.headCommit : "unavailable"}.`, { run: rec, path: relative(ctx.cwd, join(p.runsDir, "runs.jsonl")) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_run_get",
+		label: "Swarm Run Get",
+		description: "Read the latest record for a runId from .pi/swarm/runs/runs.jsonl (append-only; latest line per runId wins).",
+		promptGuidelines: ["Use `swarm_run_get` to inspect a run before proposing memory or comparing runs."],
+		parameters: Type.Object({
+			runId: Type.String({ description: "Run id to read." }),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const file = join(p.runsDir, "runs.jsonl");
+			await trace(p, "run.get", { runId: params.runId });
+			const latest = await readJsonlLatestById<RunRecord>(file, "runId");
+			const run = latest.find((r) => r.runId === params.runId);
+			if (!run) throw new Error(`RUN_NOT_FOUND: no run record for runId '${params.runId}'`);
+			return textResult(JSON.stringify(run, null, 2), { run, path: relative(ctx.cwd, file) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_run_compare",
+		label: "Swarm Run Compare",
+		description: "Compare two or more recorded runs against an optional metric id. Generic: never ranks by a hard-coded metric. If a shared metric contract is linked, its direction wins; otherwise higherBetter is only a hint.",
+		promptGuidelines: ["Use `swarm_run_compare` to summarize metric deltas across runs."],
+		parameters: Type.Object({
+			runIds: Type.Array(Type.String(), { description: "Two or more run ids to compare." }),
+			metricId: Type.Optional(Type.String({ description: "Which metric from run.metrics to compare. If omitted, all metrics are summarized." })),
+			higherBetter: Type.Optional(Type.Boolean({ description: "Hint only; the linked contract's direction wins when present." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const file = join(p.runsDir, "runs.jsonl");
+			if (!params.runIds || params.runIds.length < 2) throw new Error("Compare requires at least two runIds");
+			const latest = await readJsonlLatestById<RunRecord>(file, "runId");
+			const byId = new Map(latest.map((r) => [r.runId, r] as const));
+			let direction: string | undefined;
+			let contractId: string | undefined;
+			for (const id of params.runIds) { const r = byId.get(id); if (r?.metricContractId) { contractId = r.metricContractId; break; } }
+			if (contractId) {
+				const cfile = join(p.metricsDir, `${safeId(contractId)}.json`);
+				if (existsSync(cfile)) { try { direction = (JSON.parse(await readFile(cfile, "utf8")) as MetricContract).primaryMetric.direction; } catch { /* ignore */ } }
+			}
+			const higherBetter = direction ? direction === "maximize" : params.higherBetter !== false;
+			const first = params.runIds[0];
+			const metricIds = params.metricId ? [params.metricId] : Array.from(new Set(params.runIds.flatMap((id) => Object.keys(byId.get(id)?.metrics || {}))));
+			const rows = metricIds.map((mid) => {
+				const values = params.runIds.map((id) => { const v = byId.get(id)?.metrics?.[mid]; return { runId: id, value: v, present: v !== undefined && v !== null }; });
+				const num = values.filter((v) => typeof v.value === "number").map((v) => ({ runId: v.runId, value: v.value as number }));
+				const best = num.length ? (higherBetter ? num.reduce((a, b) => (b.value > a.value ? b : a)) : num.reduce((a, b) => (b.value < a.value ? b : a))).runId : undefined;
+				return { metricId: mid, values, bestRunId: best, baselineRunId: first, baselineValue: byId.get(first)?.metrics?.[mid], direction: direction || (higherBetter ? "higher-better(hint)" : "lower-better(hint)") };
+			});
+			await trace(p, "run.compare", { runIds: params.runIds, metricIds, contractId, direction });
+			return textResult(JSON.stringify({ contractId, direction, compared: params.runIds, metrics: rows }, null, 2), { contractId, runIds: params.runIds, metrics: rows, path: relative(ctx.cwd, file) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_memory_propose",
+		label: "Swarm Memory Propose",
+		description: "Propose an evidence-backed memory claim sourced from a run. Runs the evidence gate; on failure the record is still appended as 'rejected' with a rejectionReason (auditable) but never auto-activates.",
+		promptGuidelines: ["Use `swarm_memory_propose` after a passing/approved run with complete file-backed evidence. Pane-only/ack-only claims are rejected."],
+		parameters: Type.Object({
+			claim: Type.String({ description: "The memory claim text." }),
+			sourceRunId: Type.String({ description: "Run id the claim is sourced from; must exist in runs.jsonl." }),
+			evidenceRefs: Type.Optional(Type.Array(Type.String({ description: "Defaults to the source run's evidenceRefs." }))),
+			scope: Type.Optional(Type.Object({ kind: Type.Optional(Type.String()), id: Type.Optional(Type.String()) })),
+			confidence: Type.Optional(Type.Number({ description: "0..1, default 0.5." })),
+			notes: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const file = join(p.runsDir, "runs.jsonl");
+			const memFile = join(p.memoryDir, "memory.jsonl");
+			const latest = await readJsonlLatestById<RunRecord>(file, "runId");
+			const run = latest.find((r) => r.runId === params.sourceRunId);
+			const evidenceRefs = (params.evidenceRefs && params.evidenceRefs.length ? params.evidenceRefs : run?.evidenceRefs) || [];
+			for (const ref of evidenceRefs) if (!isSafeRelativePath(ref)) throw new Error(`UNSAFE_EVIDENCE_REF: ${ref}`);
+			const gate = await evaluateMemoryGate({ cwd: ctx.cwd, run, evidenceRefs });
+			const ts = now();
+			const memoryId = `mem-${ts.replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 6)}`;
+			const rec: MemoryRecord = {
+				memoryId,
+				claim: params.claim,
+				sourceRunId: params.sourceRunId,
+				evidenceRefs,
+				scope: params.scope,
+				confidence: typeof params.confidence === "number" ? Math.max(0, Math.min(1, params.confidence)) : 0.5,
+				status: gate.accepted ? "proposed" : "rejected",
+				rejectionReason: gate.accepted ? undefined : gate.reasons.join("; "),
+				notes: params.notes,
+				createdAt: ts,
+				updatedAt: ts,
+			};
+			await appendJsonl(memFile, rec);
+			await trace(p, "memory.propose", { memoryId, sourceRunId: params.sourceRunId, accepted: gate.accepted, status: rec.status });
+			return textResult(`${gate.accepted ? "Proposed" : "Rejected (audited)"} memory '${memoryId}' from run '${params.sourceRunId}'.${gate.accepted ? "" : ` Reasons: ${gate.reasons.join("; ")}`}`, { memory: rec, gate, path: relative(ctx.cwd, memFile) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_memory_search",
+		label: "Swarm Memory Search",
+		description: "File-backed substring + scope filter over memory records (no vector DB/embeddings). Returns latest-per-memoryId matching filters.",
+		promptGuidelines: ["Use `swarm_memory_search` to find active/proposed/rejected memory by query or scope."],
+		parameters: Type.Object({
+			query: Type.Optional(Type.String({ description: "Case-insensitive substring over claim/notes." })),
+			scopeId: Type.Optional(Type.String()),
+			kind: Type.Optional(Type.String()),
+			status: Type.Optional(Type.String({ description: "proposed | active | rejected | expired." })),
+			limit: Type.Optional(Type.Number()),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const memFile = join(p.memoryDir, "memory.jsonl");
+			let records = await readJsonlLatestById<MemoryRecord>(memFile, "memoryId");
+			if (params.query) { const q = params.query.toLowerCase(); records = records.filter((r) => `${r.claim || ""} ${r.notes || ""}`.toLowerCase().includes(q)); }
+			if (params.scopeId) records = records.filter((r) => r.scope?.id === params.scopeId);
+			if (params.kind) records = records.filter((r) => r.scope?.kind === params.kind);
+			if (params.status) records = records.filter((r) => r.status === params.status);
+			records = records.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || "")).slice(0, Math.max(1, Math.min(200, params.limit || 20)));
+			await trace(p, "memory.search", { query: params.query, scopeId: params.scopeId, kind: params.kind, status: params.status, count: records.length });
+			return textResult(JSON.stringify({ count: records.length, records }, null, 2), { count: records.length, records, path: relative(ctx.cwd, memFile) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_memory_accept",
+		label: "Swarm Memory Accept",
+		description: "Reviewer/orchestrator moves a proposed memory to active (or rejected) after re-checking the evidence gate. Refuses to activate if evidence is now missing or the source run is not pass/approved.",
+		promptGuidelines: ["Use `swarm_memory_accept` to promote a proposed memory after review; it re-runs the evidence gate before activating."],
+		parameters: Type.Object({
+			memoryId: Type.String({ description: "Memory id to transition." }),
+			status: Type.String({ description: "active | rejected." }),
+			reviewedBy: Type.Optional(Type.String({ description: "Defaults to the current agent id." })),
+			note: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			if (params.status !== "active" && params.status !== "rejected") throw new Error(`INVALID_STATUS: status must be active or rejected (got '${params.status}')`);
+			const memFile = join(p.memoryDir, "memory.jsonl");
+			const runsFile = join(p.runsDir, "runs.jsonl");
+			const latest = await readJsonlLatestById<MemoryRecord>(memFile, "memoryId");
+			const prev = latest.find((r) => r.memoryId === params.memoryId);
+			if (!prev) throw new Error(`MEMORY_NOT_FOUND: no memory record for memoryId '${params.memoryId}'`);
+			if (params.status === "active") {
+				const runLatest = await readJsonlLatestById<RunRecord>(runsFile, "runId");
+				const run = runLatest.find((r) => r.runId === prev.sourceRunId);
+				const gate = await evaluateMemoryGate({ cwd: ctx.cwd, run, evidenceRefs: prev.evidenceRefs || [] });
+				if (!gate.accepted) throw new Error(`GATE_FAILED: cannot activate memory '${params.memoryId}': ${gate.reasons.join("; ")}`);
+			}
+			const ts = now();
+			const rec: MemoryRecord = {
+				...prev,
+				status: params.status,
+				reviewedBy: params.reviewedBy || currentAgentId(),
+				notes: params.note ? `${prev.notes || ""}\n${params.note}`.trim() : prev.notes,
+				updatedAt: ts,
+			};
+			await appendJsonl(memFile, rec);
+			await trace(p, "memory.accept", { memoryId: rec.memoryId, status: rec.status, reviewedBy: rec.reviewedBy });
+			return textResult(`Memory '${rec.memoryId}' is now ${rec.status} (reviewed by ${rec.reviewedBy}).`, { memory: rec, path: relative(ctx.cwd, memFile) });
+		},
+	}));
+
+	// ---- Iteration loop V1 tools (file-backed session over metric/run/memory; no daemon, no graph cycles) ----
+
+	pi.registerTool(defineTool({
+		name: "swarm_iteration_create",
+		label: "Swarm Iteration Create",
+		description: "Create a file-backed iteration session over an existing metric contract under .pi/swarm/iterations/<id>.json. Stores ids only (references runs/memories, never duplicates). No daemon, no graph cycles.",
+		promptGuidelines: ["Use `swarm_iteration_create` to start an evidence-backed optimization session over a metric contract; pass an optional baselineRunId and pinned memoryIds."],
+		parameters: Type.Object({
+			id: Type.Optional(Type.String({ description: "Safe iteration id; generated as iter-<timestamp>-<rand> if omitted." })),
+			metricContractId: Type.String({ description: "Required metric contract id; drives best/improvement derivation." }),
+			goal: Type.Optional(Type.String()),
+			scope: Type.Optional(Type.Object({ kind: Type.Optional(Type.String()), id: Type.Optional(Type.String()) })),
+			baselineRunId: Type.Optional(Type.String({ description: "Optional existing run id to seed as baseline (validated to exist)." })),
+			memoryIds: Type.Optional(Type.Array(Type.String({ description: "Initial pinned active memories (validated to exist)." }))),
+			notes: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const ts = now();
+			const result = await withLock(p, async () => {
+				const contract = await readMetricContract(p, params.metricContractId);
+				if (!contract) throw new Error(`METRIC_NOT_FOUND: metric contract '${params.metricContractId}' does not exist; create it with swarm_metric_define first`);
+				const runs = await latestRuns(p);
+				const runById = new Map(runs.map((r) => [r.runId, r] as const));
+				const memories = await latestMemories(p);
+				const memIds = new Set(memories.map((m) => m.memoryId));
+				const iterations: IterationEntry[] = [];
+				if (params.baselineRunId) {
+					if (!runById.has(params.baselineRunId)) throw new Error(`RUN_NOT_FOUND: baseline run '${params.baselineRunId}' does not exist`);
+					iterations.push({ index: 1, runId: params.baselineRunId, label: "baseline", recordedAt: ts });
+				}
+				const pinned: string[] = [];
+				for (const mid of params.memoryIds || []) {
+					if (!memIds.has(mid)) throw new Error(`MEMORY_NOT_FOUND: memory '${mid}' does not exist`);
+					if (!pinned.includes(mid)) pinned.push(mid);
+				}
+				const iterationId = params.id && METRIC_ID_RE.test(params.id) ? params.id : `iter-${ts.replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 6)}`;
+				if (await readIteration(p, iterationId)) throw new Error(`ITERATION_EXISTS: session '${iterationId}' already exists`);
+				const session: IterationSession = {
+					iterationId,
+					metricContractId: params.metricContractId,
+					goal: params.goal,
+					scope: params.scope || { kind: "metric-contract", id: params.metricContractId },
+					baselineRunId: params.baselineRunId,
+					iterations,
+					pinnedMemoryIds: pinned,
+					status: "active",
+					notes: params.notes,
+					createdAt: ts,
+					updatedAt: ts,
+				};
+				if (iterations.length) session.bestRunId = computeIterationBest(iterations, runById, contract).bestRunId;
+				await writeIteration(p, session);
+				return { session };
+			});
+			await trace(p, "iteration.create", { iterationId: result.session.iterationId, metricContractId: params.metricContractId, baselineRunId: params.baselineRunId });
+			return textResult(`Created iteration '${result.session.iterationId}' over metric '${params.metricContractId}' with ${result.session.iterations.length} run(s) and ${result.session.pinnedMemoryIds.length} pinned memory/memories.`, { iteration: result.session, path: relative(ctx.cwd, iterationFile(p, result.session.iterationId)) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_iteration_record",
+		label: "Swarm Iteration Record",
+		description: "Append an iteration entry referencing an EXISTING runId, then recompute best/improvement from the metric contract direction. Optionally pin additional active memories. Warns (trace) on cross-contract runs.",
+		promptGuidelines: ["Use `swarm_iteration_record` after a new run to add it to a session and recompute the contract-driven best/improvement."],
+		parameters: Type.Object({
+			iterationId: Type.String({ description: "Iteration session id." }),
+			runId: Type.String({ description: "Existing run id to add (validated to exist in runs.jsonl)." }),
+			label: Type.Optional(Type.String()),
+			memoryIds: Type.Optional(Type.Array(Type.String({ description: "Additional active memories to pin (validated to exist)." }))),
+			notes: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const result = await withLock(p, async () => {
+				const session = await readIteration(p, params.iterationId);
+				if (!session) throw new Error(`ITERATION_NOT_FOUND: session '${params.iterationId}' does not exist`);
+				const contract = await readMetricContract(p, session.metricContractId);
+				if (!contract) throw new Error(`METRIC_NOT_FOUND: contract '${session.metricContractId}' no longer exists`);
+				const runs = await latestRuns(p);
+				const runById = new Map(runs.map((r) => [r.runId, r] as const));
+				if (!runById.has(params.runId)) throw new Error(`RUN_NOT_FOUND: run '${params.runId}' does not exist`);
+				const warnings: string[] = [];
+				const run = runById.get(params.runId)!;
+				if (run.metricContractId && run.metricContractId !== session.metricContractId) warnings.push(`run '${params.runId}' uses contract '${run.metricContractId}' which differs from session contract '${session.metricContractId}' (cross-contract comparison recorded)`);
+				const ts = now();
+				session.iterations.push({ index: session.iterations.length + 1, runId: params.runId, label: params.label, recordedAt: ts });
+				const memories = await latestMemories(p);
+				const memIds = new Set(memories.map((m) => m.memoryId));
+				for (const mid of params.memoryIds || []) {
+					if (!memIds.has(mid)) throw new Error(`MEMORY_NOT_FOUND: memory '${mid}' does not exist`);
+					if (!session.pinnedMemoryIds.includes(mid)) session.pinnedMemoryIds.push(mid);
+				}
+				if (params.notes) session.notes = session.notes ? `${session.notes}\n${params.notes}` : params.notes;
+				const best = computeIterationBest(session.iterations, runById, contract);
+				session.bestRunId = best.bestRunId;
+				await writeIteration(p, session);
+				return { session, best, warnings };
+			});
+			for (const w of result.warnings) await trace(p, "iteration.record.warning", { iterationId: params.iterationId, runId: params.runId, warning: w });
+			await trace(p, "iteration.record", { iterationId: params.iterationId, runId: params.runId, bestRunId: result.best.bestRunId, meaningful: result.best.meaningful });
+			return textResult(`Recorded run '${params.runId}' as iteration ${result.session.iterations.length} of '${params.iterationId}'. Best=${result.best.bestRunId || "(none)"}${result.best.improvement !== undefined ? `, improvement=${result.best.improvement}` : ""}, meaningful=${result.best.meaningful}.${result.warnings.length ? ` Warnings: ${result.warnings.join("; ")}` : ""}`, { iteration: result.session, best: result.best, warnings: result.warnings });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_iteration_status",
+		label: "Swarm Iteration Status",
+		description: "Read an iteration session plus the derived best/improvement roll-up (contract-driven, generic). Optionally include the next-iteration context bundle.",
+		promptGuidelines: ["Use `swarm_iteration_status` to inspect the best run, improvement vs baseline, and missing-metric counts for a session."],
+		parameters: Type.Object({
+			iterationId: Type.String({ description: "Iteration session id." }),
+			includeContext: Type.Optional(Type.Boolean({ description: "If true, also return the next-iteration context bundle (best/last/memories)." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const session = await readIteration(p, params.iterationId);
+			if (!session) throw new Error(`ITERATION_NOT_FOUND: session '${params.iterationId}' does not exist`);
+			const contract = await readMetricContract(p, session.metricContractId);
+			if (!contract) throw new Error(`METRIC_NOT_FOUND: contract '${session.metricContractId}' no longer exists`);
+			const runs = await latestRuns(p);
+			const runById = new Map(runs.map((r) => [r.runId, r] as const));
+			const best = computeIterationBest(session.iterations, runById, contract);
+			let contextBundle: Awaited<ReturnType<typeof buildIterationContext>> | undefined = undefined;
+			if (params.includeContext) contextBundle = await buildIterationContext(p, session, runById, contract, best, 10);
+			await trace(p, "iteration.status", { iterationId: params.iterationId, bestRunId: best.bestRunId, meaningful: best.meaningful, includeContext: Boolean(params.includeContext) });
+			return textResult(JSON.stringify({ iteration: session, derived: best, context: contextBundle }, null, 2), { iteration: session, derived: best, context: contextBundle, path: relative(ctx.cwd, iterationFile(p, params.iterationId)) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_iteration_context",
+		label: "Swarm Iteration Context",
+		description: "Next-iteration retrieval: previous best run summary plus active evidence-backed memories for the session scope (pinned or scope-matching). Feeds the next agent without duplicating run data; proposed/rejected memories are never carried forward.",
+		promptGuidelines: ["Use `swarm_iteration_context` to build the carry-forward bundle (best run + active memories) for the next iteration."],
+		parameters: Type.Object({
+			iterationId: Type.String({ description: "Iteration session id." }),
+			memoryLimit: Type.Optional(Type.Number({ description: "Max active memories to return. Default 10." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const session = await readIteration(p, params.iterationId);
+			if (!session) throw new Error(`ITERATION_NOT_FOUND: session '${params.iterationId}' does not exist`);
+			const contract = await readMetricContract(p, session.metricContractId);
+			if (!contract) throw new Error(`METRIC_NOT_FOUND: contract '${session.metricContractId}' no longer exists`);
+			const runs = await latestRuns(p);
+			const runById = new Map(runs.map((r) => [r.runId, r] as const));
+			const best = computeIterationBest(session.iterations, runById, contract);
+			const context = await buildIterationContext(p, session, runById, contract, best, Math.max(1, Math.min(100, params.memoryLimit || 10)));
+			await trace(p, "iteration.context", { iterationId: params.iterationId, bestRunId: best.bestRunId, memoryCount: context.memories.length });
+			return textResult(JSON.stringify({ iterationId: params.iterationId, metricContractId: session.metricContractId, context }, null, 2), { iterationId: params.iterationId, context });
 		},
 	}));
 

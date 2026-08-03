@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Repeatable task-graph UAT for .pi/extensions/swarm/index.ts (Commit 4/5-class flows).
+# Repeatable task-graph UAT for extensions/swarm/index.ts (packaged swarm extension).
 #
 # Exercises the task-graph tools end-to-end against throwaway task ids and asserts on the resulting
 # task.json / swarm-state.json / trace events (deterministic, model-independent), with tool stdout
@@ -34,7 +34,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="${SWARM_MODEL:-gpt-5.4-mini}"
 PROVIDER="${SWARM_PROVIDER:-openai}"
-EXT="$ROOT/.pi/extensions/swarm/index.ts"
+EXT="$ROOT/extensions/swarm/index.ts"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 SUFFIX="$(date +%s | tail -c 6)"
 RUN_ID="task-uat-${STAMP}"

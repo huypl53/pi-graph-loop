@@ -2,6 +2,10 @@
 
 This document proposes the next architecture layer for `pi-swarm`: task management and workflow orchestration. The current swarm already has agents, tmux transport, mailbox messaging, lifecycle traces, acknowledgements, reconcile/dead-letter handling, idempotency, and runtime status. What is missing is a durable model for **what work exists**, **who owns each piece**, **which node is ready next**, and **what evidence proves completion**.
 
+> **Implementation status.** This is the original design doc; the graph layer is now **implemented** as a subset of it. The implemented graph tools are `swarm_create_task`, `swarm_assign_task`, `swarm_update_task`, `swarm_task_message`, `swarm_task_status`, `swarm_validate_graph`, `swarm_print_graph`, and `swarm_next_nodes`, plus engine-enforced closure (`computeTaskStatus`), the `swarm_reconcile` task sweep, PM auto-notify, the session/read-safe orchestrator mailbox pump, and the `/swarm graph` slash command. Current runtime behavior is documented in [`docs/swarm.md`](./swarm.md) ("Task graph and closure").
+>
+> **Not implemented (still design proposals).** There is no `swarm_write_task_artifact` tool — artifacts are written by agents with their normal file tools and tracked through `swarm_update_task(artifact=...)`. There are no `swarm_claim_file_lock` / `swarm_release_file_lock` tools — advisory `editLocks` are maintained internally on `task.json` only. The destructive tools `swarm_stop_agent`, `swarm_gc_agents`, and `swarm_release_agent_task` remain **deferred** (use `swarm_reconcile` + admin `swarm_prune` meanwhile). Graph validation/printing ships as tools + `/swarm graph`, **not** as standalone `scripts/*.js`.
+
 ## Problem
 
 Current primitives answer only part of the coordination problem:
@@ -136,7 +140,7 @@ The swarm already supports spawn, mailbox, ACK, reconcile, dead-letter, idempote
 
 Allowed files:
 
-- `.pi/extensions/swarm/index.ts`
+- `extensions/swarm/index.ts`
 - `scripts/swarm_uat.sh`
 - `docs/swarm.md`
 
@@ -159,7 +163,7 @@ Out of scope:
 ## Validation Commands
 
 ```bash
-NODE_PATH=$(npm root -g) npx tsc --noEmit --module nodenext --moduleResolution nodenext --skipLibCheck --target es2022 --lib es2022 .pi/extensions/swarm/index.ts
+NODE_PATH=$(npm root -g) npx tsc --noEmit --module nodenext --moduleResolution nodenext --skipLibCheck --target es2022 --lib es2022 extensions/swarm/index.ts
 ```
 
 ## Required Evidence
@@ -189,7 +193,7 @@ Example:
   "owner": "orchestrator",
   "workflow": "feature-dev",
   "allowedFiles": [
-    ".pi/extensions/swarm/index.ts",
+    "extensions/swarm/index.ts",
     "scripts/swarm_uat.sh",
     "docs/swarm.md"
   ],
@@ -235,7 +239,7 @@ Example:
       "role": "implementer",
       "assignee": "implementer-01",
       "dependsOn": ["plan"],
-      "allowedFiles": [".pi/extensions/swarm/index.ts"],
+      "allowedFiles": ["extensions/swarm/index.ts"],
       "readArtifacts": ["artifacts/plan.md"],
       "writeArtifacts": ["artifacts/implementation-report.md"],
       "messageIds": ["msg-impl-001"],
@@ -417,6 +421,10 @@ Rules:
 3. `task.json` should remain compact; large output goes under `artifacts/`.
 4. Updates must be scoped: an agent may update its assigned node, write declared artifacts, and add evidence/risks/questions related to that node. Cross-node changes require orchestrator authority or a dedicated graph tool transition.
 5. Downstream agents should read prior node artifacts plus `sharedContext` before acting.
+
+**Metric / run / memory V1 linkage.** The file-backed metric/run/memory layer (`.pi/swarm/metrics/`, `runs/runs.jsonl`, `memory/memory.jsonl`) is separate from the task graph and changes **no graph behavior**. Run records may optionally link to a task via `taskId`/`nodeId`; when a run is tied to a graph, callers should also stamp `sharedContext`/`evidence`, but `runs.jsonl` remains the authoritative metric/evidence store. Memory promotion is evidence-gated (source run must be `pass`/`approved` with existing, readable evidence refs and a reconstructable git commit or diff) and never advances a node. See `docs/swarm.md` (Metric / run / memory V1) and the `swarm_metric_designer` skill.
+
+**Iteration loop V1 linkage.** An iteration session (`.pi/swarm/iterations/<id>.json`) is a thin coordinator over existing runs/memories and adds **no graph behavior** — no daemon, no native graph cycles, no new `rework` edges. A session links to a task transitively through its runs (which already carry `taskId`/`nodeId`); the "loop" is a sequence of explicit tool calls (`swarm_iteration_create`/`record`/`status`/`context`), not a runtime cycle. Best/improvement is derived generically from the metric contract `direction` and never hard-codes a metric. See `docs/swarm.md` (Iteration loop V1).
 
 ## Ownership and overlap prevention
 
@@ -621,7 +629,7 @@ Behavior:
 2. Update `task.json.nodes[nodeId].assignee`.
 3. Set node status to `assigned`.
 4. Add task id to assignee `activeTaskIds`.
-5. Send `swarm_send_message` with `taskId`, `nodeId`, and a shared `conversationId`.
+5. Send `swarm_send_message` with `taskId`, `nodeId`, and a shared `conversationId` (response-required: `requiresResponse=true`, so the assignee must send a result and ack `done` with `resultMessageId` before the assignment is considered satisfied).
 6. Store message id on the node.
 7. Trace `task.assign`.
 
@@ -683,7 +691,7 @@ Internal inputs:
 - `requireTmuxAlive?`
 - `includeBusy?`
 
-Internal result should still be traceable with `agent.find`, but normal agents should not have to choose peers manually.
+Internal result should still be traceable with `agent.find`, but normal agents should not have to choose peers manually. An agent owing any unverified `requiresResponse` message is `response_missing` and is skipped by reuse until it replies and acks `done` with valid result ids.
 
 ### `swarm_task_message`
 
@@ -698,7 +706,7 @@ Input fields:
 - `body`
 - `toNode?`
 - `artifactRefs?`
-- `replyExpected?`
+- `replyExpected?`: when not `false`, the message is sent `requiresResponse=true`, so the recipient must reply and ack `done` with `resultMessageId`.
 
 ### `swarm_validate_graph`
 
@@ -1082,12 +1090,13 @@ A graph should be reviewable before and during execution. Provide both a script 
 
 ### Script
 
-```bash
-node scripts/swarm_graph_validate.js .pi/swarm/tasks/<task-id>/task.json
-node scripts/swarm_graph_print.js .pi/swarm/tasks/<task-id>/task.json
-```
+Validation and printing ship as **extension tools** (`swarm_validate_graph`, `swarm_print_graph`) and the **`/swarm graph <task-id> [text|mermaid|json]`** slash command (which writes the render to `.pi/swarm/traces/graphs/`), not as standalone `scripts/*.js`. The earlier plan to add `scripts/swarm_graph_validate.js` / `swarm_graph_print.js` was superseded by those tools. You can still point the tools directly at a `task.json`:
 
-These can be one script with `--format text|mermaid|json` if simpler.
+```text
+swarm_validate_graph(path=<task-dir>/task.json, runtime=true)
+swarm_print_graph(path=<task-dir>/task.json, format=text|mermaid|json)
+/swarm graph <task-id> mermaid
+```
 
 Example text output:
 

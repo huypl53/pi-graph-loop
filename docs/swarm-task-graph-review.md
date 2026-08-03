@@ -9,6 +9,8 @@ Review agents:
 
 Both agents were instructed not to edit files.
 
+> **Status (historical notes).** These notes capture the design review that shaped `docs/swarm-task-graph.md`. The task graph has since been **implemented** (see [`docs/swarm.md`](./swarm.md)). In particular, finding #8 and the "Delivery limitation observed" below are **resolved**: `orchestrator` is now a routable mailbox-only pseudo-agent, so child agents can call `swarm_send_message(to="orchestrator")` and task assignments take an explicit `replyTarget`. Read the limitations below as design-driving evidence, not as current behavior.
+
 ## Shared verdict
 
 The proposed hybrid model is sound:
@@ -75,3 +77,5 @@ swarm_send_message failed with Unknown swarm agent: orchestrator
 ```
 
 This is valuable evidence for the task graph design: task assignment must include an explicit `replyTarget`, or the extension must create a routable orchestrator pseudo-agent.
+
+**Resolved.** The extension now lazily creates/refreshes an `orchestrator` pseudo-agent (also on the orchestrator's own `session_start`). Delivery to it is mailbox-only and surfaced by an auto-pump (`pumpOrchestratorMailbox`) plus `swarm_check_mailbox` / `swarm_agent_status`; it is not treated as a tmux-injection failure. See [`docs/swarm.md`](./swarm.md) ("Task graph and closure") and [`docs/swarm-task-graph.md`](./swarm-task-graph.md) ("Orchestrator-directed replies").

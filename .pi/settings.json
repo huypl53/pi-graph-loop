@@ -1,6 +1,6 @@
 {
   "swarm": {
-    "defaultModel": "gpt-5.4-mini",
-    "defaultProvider": "openai"
+    "defaultModel": "glm-5.1",
+    "defaultProvider": "zai-coding-cn"
   }
 }

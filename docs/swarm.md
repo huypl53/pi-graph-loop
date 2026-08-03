@@ -6,7 +6,7 @@
 
 ```text
 orchestrator pi session
-  └─ .pi/extensions/swarm/index.ts
+  └─ extensions/swarm/index.ts
        ├─ spawns child pi sessions in tmux windows
        ├─ stores shared state in .pi/swarm/swarm-state.json
        ├─ serializes writes with .pi/swarm/swarm-state.lock/
@@ -31,11 +31,13 @@ Runtime files are local to the current working directory and are ignored by git.
 
 ## Quick start
 
-Start pi with the project-local extension:
+Start pi with the packaged extension:
 
 ```bash
-pi --model glm-5.1 --provider zai-coding-cn -e .pi/extensions/swarm/index.ts
+pi --model glm-5.1 --provider zai-coding-cn -e extensions/swarm/index.ts
 ```
+
+(The source of truth is now the packaged `extensions/swarm/index.ts`. The old project-local `.pi/extensions/swarm/index.ts` dev wrapper was removed during packaging; do not recreate it, or pi would double-register swarm.)
 
 The extension defaults to `glm-5.1` / `zai-coding-cn`. It also knows the fast preset `gpt-5.4-mini`: when `swarm_spawn_agent` receives `model: "gpt-5.4-mini"` and no explicit provider/default-provider override, it auto-selects provider `openai`.
 
@@ -91,7 +93,8 @@ The extension registers `/swarm` for quick TUI use:
 | Command | Purpose |
 | --- | --- |
 | `/swarm init` | Ensure runtime directories/state exist. |
-| `/swarm status` or `/swarm list` | Show agent count and tmux session. |
+| `/swarm status` or `/swarm list` | Show agent count and tmux session. `/swarm status` emits a PM rollup (tasks/agents/closure). |
+| `/swarm graph <task-id> [text\|mermaid\|json]` | Render a task graph and write it to `.pi/swarm/traces/graphs/`. |
 | `/swarm spawn <id> [role]` | Spawn a child pi agent in tmux. |
 | `/swarm send <to> <message>` | Send a mailbox/tmux-injected message. |
 | `/swarm trace` | Show recent structured trace events. |
@@ -161,6 +164,7 @@ Parameters:
 - `conversationId?`: thread id for related messages.
 - `replyTo?`: parent message id.
 - `requiresAck?`: defaults to `true`.
+- `requiresResponse?`: defaults to `false`. When `true`, the recipient must send a result/reply message (with `replyTo` set to this message) and then ack `done` with `resultMessageId` before the message counts as fully satisfied.
 - `ttlMs?`: optional time-to-live for reconcile/dead-letter handling.
 - `idempotencyKey?`: optional dedupe key scoped by `from + to + idempotencyKey`.
 
@@ -179,12 +183,14 @@ Parameters:
 
 Records recipient progress for a message.
 
-Ack statuses are free-form strings, but the intended values are:
+Parameters:
 
-- `seen`
-- `processing`
-- `done`
-- `failed`
+- `messageId`: message id to acknowledge.
+- `status`: `seen`, `processing`, `done`, or `failed`.
+- `note?`: short note about what happened.
+- `resultMessageId?`: id of the result/reply message produced from this message. **Required when acking `done` (or `failed`) on a `requiresResponse` message.**
+
+Ack is lifecycle only — it is not the work result. For a `requiresResponse` message, the recipient must send a result first via `swarm_send_message(to=<original-from>, replyTo=<original-id>)` (or `swarm_task_message`), then ack `done` with that result message id. If `done` is acked without a valid `resultMessageId`, the ack throws `RESPONSE_REQUIRED`; the result is validated (it must exist, come from the acking agent, be addressed back to the original sender, and reply to or share the conversation of the original) and throws `INVALID_RESULT_MESSAGE` otherwise.
 
 A `failed` ack moves the lifecycle record to `failed`; other ack statuses move it to `acked`.
 
@@ -273,6 +279,19 @@ from + to + idempotencyKey
 
 This prevents duplicate task assignment when a coordinator retries a send prompt.
 
+## Response-required protocol
+
+An ACK proves the recipient processed a message; it does not prove the work was delivered back. The `requiresResponse` flag closes that gap.
+
+- **Opt-in.** `swarm_send_message` accepts `requiresResponse` (default `false`).
+- **Task traffic is response-required.** `swarm_assign_task` always sends with `requiresResponse=true`, and `swarm_task_message` sends with `requiresResponse` whenever a reply is expected (`replyExpected !== false`).
+- **Verified before done.** A recipient cannot ack `done` on a `requiresResponse` message without a `resultMessageId`. The harness validates the result message exists, was sent by the acking agent back to the original sender, and is linked by `replyTo` or `conversationId`.
+- **Response sub-state.** Each message carries a `response` object: `not_required`, `missing`, `sent`, `verified`, or `waived`. Sending a reply with `replyTo` moves it to `sent`; the verified `done` ack moves it to `verified`.
+- **Surfaced as `response_missing`.** If a `requiresResponse` message is not yet verified, `swarm_reconcile` records `response_missing`, `swarm_agent_status` reports `responseMissing`/`responsesVerified`/`blockedFromReuse`, and the agent's `runtimeStatus` becomes `response_missing`. An agent with any pending `requiresResponse` message is blocked from reuse (`findReusableAgent` skips it) until it sends replies and acks `done` with valid result ids.
+- **Settle protection.** If a worker settles (`agent_settled`) while still owing a verified response, it is marked `response_missing` and the orchestrator is notified; the task does not auto-close and the agent stays blocked from reuse.
+
+This keeps graph advancement driven by verified machine state, not by mailbox-only activity or a bare ACK.
+
 ## Liveness and status
 
 Agent liveness is partly persisted and partly observed:
@@ -280,6 +299,7 @@ Agent liveness is partly persisted and partly observed:
 - Persisted lifecycle fields are updated by pi events.
 - `tmuxAlive` is computed by checking the agent's tmux target.
 - Message health is derived from mailbox lifecycle records.
+- `runtimeStatus` is `starting`/`idle`/`busy`/`tool_running`/`response_missing`/`shutting_down`/`stopped`; `response_missing` means the agent still owes a verified result for one or more `requiresResponse` messages, which blocks reuse.
 
 This is not a distributed consensus system and does not run a heartbeat daemon. If a process dies without a `session_shutdown` event, `tmuxAlive` and stale `lastHeartbeatAt` are the primary signals.
 
@@ -293,9 +313,81 @@ Task closure is **engine-enforced**, not polled: every create/assign/update reco
 
 **Session-safe + read-safe orchestrator surfacing.** Mailbox-only notifications to `orchestrator` are surfaced to the orchestrator's TUI by an auto-pump (`pumpOrchestratorMailbox`) that fires on `session_start`/`agent_settled`/interval. The pump keys "already surfaced" **per process** (`process.pid` in `st.orchestratorPumpSessions`), so every orchestrator-context process surfaces each notification once — a second orchestrator lane or a validation `pi -p` run cannot steal a notification from the primary PM session. It deliberately does **not** key on `PI_SESSION_ID` (a child `pi -p` spawned from an agent's bash inherits the parent's `PI_SESSION_ID`, so keying on it would reintroduce starvation), and it deliberately never reads the shared `st.delivered.orchestrator` ledger — that set is written by `swarm_check_mailbox(markDelivered=true)` and `swarm_ack_message`, so a manual mailbox read or an explicit ack can no longer pre-empt a later pump surface. The pump trace event `mailbox.orchestrator_pump` carries `cid` (the process pid) and `sid` (`PI_SESSION_ID`) for attribution. The single-consumer assumption from earlier docs is therefore no longer load-bearing for visibility: every orchestrator session reliably sees its notifications without polling. The pump has two layers. The **surfacing decision** (scan the mailbox, update the per-pid set, emit `mailbox.orchestrator_pump`) runs in **every** orchestrator session — it is ctx-free file IO, so it is safe in `pi -p`/rpc/json too (this is exactly what makes the session-safe/read-safe properties repeatable in the UAT without an interactive TUI). The **TUI delivery** (`pi.sendMessage`/`ctx.isIdle()`) is mode-gated to the live interactive orchestrator session, where those session-bound APIs actually render into the PM view; in print mode they are no-ops (no TUI to deliver to). The one-shot at `session_start` is awaited (so a short-lived `pi -p` turn completes the decision before exit); the 5s polling **interval** is tui-only, because its long-lived captured ctx is the real source of the `This extension ctx is stale after session replacement or reload` error once the session is replaced/reloaded. Non-interactive callers read mailboxes via `swarm_check_mailbox`; if the pump ever hits a ctx error it stops itself cleanly (traced `mailbox.orchestrator_pump_error`) rather than retrying into a stale ctx, and the next orchestrator `session_start` restarts a fresh pump.
 
-**Reload contract (important).** Extension code is **not hot-applied** to a running orchestrator session — after editing `.pi/extensions/swarm/index.ts` the orchestrator must `/reload` (or restart) to load the updated pump. The pump is **multi-process-safe** (pid-keyed): every orchestrator process surfaces its notifications independently, so it does not assume a single live orchestrator. On `/reload` the orchestrator gets a new pid with an empty surfaced set, so the pump **re-surfaces recent un-acked notifications** (bounded by the scan window) — the desired recovery for a stale session that missed them while running old code; already-acked messages are not re-surfaced. `requiresAck:false` informational notifies (close/settle) may re-surface once after a restart; this is bounded and intentional.
+**Reload contract (important).** Extension code is **not hot-applied** to a running orchestrator session — after editing `extensions/swarm/index.ts` the orchestrator must `/reload` (or restart) to load the updated pump. The pump is **multi-process-safe** (pid-keyed): every orchestrator process surfaces its notifications independently, so it does not assume a single live orchestrator. On `/reload` the orchestrator gets a new pid with an empty surfaced set, so the pump **re-surfaces recent un-acked notifications** (bounded by the scan window) — the desired recovery for a stale session that missed them while running old code; already-acked messages are not re-surfaced. `requiresAck:false` informational notifies (close/settle) may re-surface once after a restart; this is bounded and intentional.
 
 See the closure rules, stale/nudge ladder, and deferred destructive tools in [`docs/swarm-task-graph.md`](./swarm-task-graph.md). This is still not a distributed consensus system and runs no heartbeat daemon; `tmuxAlive`, stale `lastHeartbeatAt`, `node.staleAt`, and the reconcile sweep are the primary liveness signals.
+
+## Metric / run / memory V1
+
+A minimal, file-backed metric/run/memory layer lives under `.pi/swarm/`. Swarm is the **harness**; the project defines the metric (nothing hard-codes accuracy/latency/cost). There is **no daemon, no vector DB, no optimizer loop** in V1 — everything is append-only JSONL plus atomic contract writes, gated on file-backed evidence.
+
+File layout:
+
+```text
+.pi/swarm/
+  metrics/<metric-id>.json   # authoritative project-specific metric contract
+  runs/runs.jsonl            # append-only run records (latest line per runId wins)
+  memory/memory.jsonl        # append-only memory records (status: proposed|active|rejected|expired)
+```
+
+Tools (8):
+
+- `swarm_metric_define` — create/replace a project metric contract (validates safe id, direction, value type).
+- `swarm_metric_get` — read a metric contract by id.
+- `swarm_run_record` — append a run record with best-effort `git` capture and safe evidence refs.
+- `swarm_run_get` — read the latest record for a runId.
+- `swarm_run_compare` — generic comparison of 2..N runs against an optional metric (contract `direction` wins; otherwise `higherBetter` is a hint).
+- `swarm_memory_propose` — propose a claim sourced from a run; runs the evidence gate (still appends as `rejected` with a `rejectionReason` on failure, never auto-activates).
+- `swarm_memory_search` — file-backed substring + scope filter (no vector DB/embeddings).
+- `swarm_memory_accept` — reviewer/orchestrator moves `proposed`→`active`/`rejected`, re-running the evidence gate before activating.
+
+**Evidence gate** (enforced at propose and again at accept): the source run must exist with verdict `pass`/`approved`; `evidenceRefs` must be non-empty, safe relative paths that **exist and are readable**; and a code/config-changing run must carry a git commit or a `.patch`/`.diff` ref so the change is reconstructable. Pane-only, ack-only, mailbox-only, or incomplete claims never promote.
+
+Run records can optionally link to a swarm task via `taskId`/`nodeId`; when tied to a graph, also stamp `task.json.sharedContext`/`task.json.evidence`, but `runs.jsonl` remains the authoritative metric/evidence store. See [`docs/swarm-task-graph.md`](./swarm-task-graph.md) and the `swarm_metric_designer` skill for the iteration demo flow.
+
+## Iteration loop V1
+
+A thin, file-backed **iteration session** layer sits on top of the metric/run/memory tools. A session points at a `metricContractId`, a list of `runId`s, and pinned active `memoryId`s — it stores **ids only**, never copies run/memory payloads. There is **no daemon and no native graph cycle**: each step is an explicit tool call; the "loop" is a sequence of calls driven by an agent/orchestrator.
+
+File layout:
+
+```text
+.pi/swarm/iterations/<iteration-id>.json   # mutable session state (atomicWriteFile + global lock)
+```
+
+Tools (4):
+
+- `swarm_iteration_create` — create a session over an existing metric contract (optional `baselineRunId`, pinned `memoryIds`; all ids validated to exist).
+- `swarm_iteration_record` — append an entry referencing an **existing** runId, then recompute best/improvement; optionally pin more active memories; warns (trace) on cross-contract runs.
+- `swarm_iteration_status` — session JSON + the derived best/improvement roll-up (per-run value, baseline/best, `improvement`, `meaningful`, missing-metric count); optional `includeContext`.
+- `swarm_iteration_context` — next-iteration retrieval: previous best run summary + active evidence-backed memories for the session scope (pinned or scope-matching); proposed/rejected memories are never carried forward.
+
+**Best/improvement is generic**: `computeIterationBest` is the single decision point. It reads `run.metrics[contract.primaryMetric.id]` (never a hard-coded key) and honors the contract `direction` — `maximize` (max), `minimize` (min), `target` (closest to `primaryMetric.target`, falls back to maximize if unset), `passfail` (a passing boolean run). `improvement` is signed in the favored direction (for `target`, reduction in distance); `meaningful` uses `primaryMetric.minimumMeaningfulChange` when set. Missing/non-numeric values are skipped (counted as `present:false`), never crash.
+
+Demo flow (uses only real tools): `swarm_metric_define` → `swarm_run_record` baseline → `swarm_iteration_create` → `swarm_run_record` run-001 → `swarm_iteration_record(runId=run-001)` → `swarm_memory_propose`/`swarm_memory_accept` → `swarm_iteration_context` feeds the next agent → repeat; `swarm_iteration_status` shows the trend. Success question: from the session JSON + `runs.jsonl` + `memory.jsonl` + trace lines alone, can an agent reconstruct the best run, improvement, and carry-forward memories?
+
+### Iteration loop demo
+
+A runnable UAT exercises the full metric contract → runs → memory → iteration context flow in an isolated fresh session, including the negative case (incomplete evidence must not promote memory). The 4 iteration tools (`swarm_iteration_create`, `swarm_iteration_record`, `swarm_iteration_status`, `swarm_iteration_context`) are driven end-to-end with file-backed assertions.
+
+```bash
+bash scripts/swarm_iteration_demo.sh
+```
+
+See [`docs/swarm-iteration-demo.md`](swarm-iteration-demo.md) for the scenario, assertions, review artifact paths, and cleanup notes.
+
+### Live + completed iteration reviewer
+
+A dependency-free (python3 + bash) reviewer renders `.pi/swarm` iteration state two ways: a **live watch** while a loop runs, and a **completed/historical review** of finished task graphs/iterations as a one-shot report or Markdown dashboard. Read-only; `--format text|mermaid|markdown`, `--out FILE`, `--all-tasks`, and `--task/--run/--iteration` focus flags.
+
+```bash
+scripts/swarm_iteration_watch.sh --once                              # text review report
+scripts/swarm_iteration_watch.sh --interval 2                         # live watch (Ctrl-C to stop)
+scripts/swarm_iteration_watch.sh --format markdown --out review.md    # Mermaid dashboard
+scripts/swarm_iteration_watch.sh --task <taskId> --once               # one completed task graph
+```
+
+The Markdown dashboard emits three Mermaid diagrams: a task-graph **flowchart** (nodes by status/outcome/artifact + edges), an agent **sequenceDiagram** (messages/handoffs with ack/response/result links), and an **iteration metric timeline** (per-iteration values + Δ, best highlighted). See [`docs/swarm-iteration-demo.md`](swarm-iteration-demo.md) ("Reviewing iteration state (live + completed)") for flags and usage.
 
 ## Recommended agent protocol
 
@@ -303,7 +395,7 @@ Spawned agents receive an identity card and should:
 
 1. Read `.pi/swarm/agents/<agent-id>.md` at startup.
 2. Use `swarm_check_mailbox` to inspect pending work.
-3. Use `swarm_ack_message` with `seen`/`processing`/`done`/`failed` for tasks that require acknowledgement.
+3. For `requiresResponse` messages (task assignments and reply-expected task messages), send a result first via `swarm_send_message(to=<requester>, replyTo=<original-id>)` or `swarm_task_message`, then call `swarm_ack_message` with `done` and `resultMessageId`. For plain `requiresAck` messages, ack with `seen`/`processing`/`done`/`failed`.
 4. Use `swarm_send_message` for peer coordination.
 5. Use `swarm_trace`, `swarm_agent_status`, and `swarm_capture_agent_pane` when debugging.
 6. Avoid asking the human to relay messages between agents.
@@ -336,7 +428,7 @@ It asserts on `task.json` / swarm-state / trace events (model-independent) and p
 For a fast TypeScript check:
 
 ```bash
-NODE_PATH=$(npm root -g) npx tsc --noEmit --module nodenext --moduleResolution nodenext --skipLibCheck --target es2022 --lib es2022 .pi/extensions/swarm/index.ts
+NODE_PATH=$(npm root -g) npx tsc --noEmit --module nodenext --moduleResolution nodenext --skipLibCheck --target es2022 --lib es2022 extensions/swarm/index.ts
 ```
 
 ## Troubleshooting
@@ -379,7 +471,7 @@ Stop/ignore old tmux agents if needed, then remove runtime state:
 rm -rf .pi/swarm
 ```
 
-Do not remove `.pi/extensions/swarm/index.ts` unless you intend to delete the extension.
+The extension source is `extensions/swarm/index.ts` (packaged). Do not recreate a `.pi/extensions/swarm/index.ts` copy — pi would double-register the swarm extension; `scripts/swarm_iteration_demo.sh` aborts if both exist.
 
 ## Known limitations
 

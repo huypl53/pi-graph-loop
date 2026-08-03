@@ -8,9 +8,7 @@ This repository now exposes the swarm extension as a real **pi package** via:
 - `pi.extensions = ["./extensions"]`
 - packaged extension entry at `extensions/swarm/index.ts`
 
-The project-local dev entry still works too:
-
-- `.pi/extensions/swarm/index.ts` → re-exports the packaged source from `extensions/swarm/index.ts`
+The packaged entry at `extensions/swarm/index.ts` is the **only** swarm source. The old project-local `.pi/extensions/swarm/index.ts` dev wrapper was removed when packaging landed (keeping both would double-register the extension).
 
 ## What the package provides
 
@@ -105,6 +103,24 @@ Typecheck the packaged extension source:
 NODE_PATH=$(npm root -g) npx tsc --noEmit --module nodenext --moduleResolution nodenext --skipLibCheck --target es2022 --lib es2022 extensions/swarm/index.ts
 ```
 
+### Iteration loop demo
+
+Run the metric/run/memory + iteration loop V1 demo in an isolated fresh session:
+
+```bash
+bash scripts/swarm_iteration_demo.sh
+```
+
+See [`docs/swarm-iteration-demo.md`](docs/swarm-iteration-demo.md) for the scenario, file-backed assertions, and review artifact paths.
+
+Review iteration state live **or** as a completed-task dashboard (read-only, dependency-free):
+
+```bash
+scripts/swarm_iteration_watch.sh --once                                 # text review report
+scripts/swarm_iteration_watch.sh --format markdown --out review.md      # Mermaid dashboard
+scripts/swarm_iteration_watch.sh --task <taskId> --once                 # review a completed task graph
+```
+
 ## Repository notes
 
 Runtime swarm data is intentionally not committed:
@@ -114,4 +130,4 @@ Runtime swarm data is intentionally not committed:
 .pi/swarm-uat/runs/
 ```
 
-The package source of truth is now `extensions/swarm/index.ts`. The project-local `.pi/extensions/swarm/index.ts` file is only a thin development wrapper.
+The package source of truth is `extensions/swarm/index.ts`. There is no longer a project-local `.pi/extensions/swarm/` dev wrapper — it was removed during packaging (a `scripts/swarm_iteration_demo.sh` guard aborts if both copies ever exist, since pi would double-register swarm).

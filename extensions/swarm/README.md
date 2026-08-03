@@ -1,12 +1,14 @@
 # Swarm extension
 
-Project-local pi extension for spawning and coordinating tmux-backed pi agents.
+Project-local pi package extension for spawning and coordinating tmux-backed pi agents.
 
 Main file:
 
 ```text
-.pi/extensions/swarm/index.ts
+extensions/swarm/index.ts
 ```
+
+This is the packaged extension source (see `package.json` → `pi.extensions = ["./extensions"]`). The old `.pi/extensions/swarm/index.ts` dev wrapper was removed; load the extension from `extensions/swarm/index.ts`.
 
 Full documentation:
 
@@ -17,7 +19,7 @@ docs/swarm.md
 Quick start:
 
 ```bash
-PI_SWARM_IS_ORCHESTRATOR=1 pi --model glm-5.1 --provider zai-coding-cn -e .pi/extensions/swarm/index.ts
+PI_SWARM_IS_ORCHESTRATOR=1 pi --model glm-5.1 --provider zai-coding-cn -e extensions/swarm/index.ts
 ```
 
 Project-local swarm defaults can be set in `.pi/settings.json`:
