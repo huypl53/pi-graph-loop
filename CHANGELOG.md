@@ -4,6 +4,13 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(swarm): task graph MVP (create/status/validate/print/next)
+
+- Added the first task-graph layer to `.pi/extensions/swarm/index.ts` with task state/types, atomic `task.json` writes, and `.pi/swarm/tasks/<task-id>/` runtime layout.
+- Added swarm tools: `swarm_create_task`, `swarm_task_status`, `swarm_validate_graph`, `swarm_print_graph`, and `swarm_next_nodes`.
+- Added backward-compatible structured agent metadata defaults for reuse (`roleKind`, `capabilities`, `activeTaskIds`, `maxConcurrentTasks`) plus internal reusable-agent matching.
+- Validated in dedicated tmux UAT lanes with real task creation/printing/validation/status flows; evidence kept under `.pi/swarm-uat/runs/`.
+
 ### feat(extensions): `compact-resume` — auto-continue the task after compaction
 
 - **Problem:** pi goes idle after an ordinary auto-compaction (`reason:

@@ -48,6 +48,10 @@ type MessageRecord = {
 type SwarmAgent = {
 	id: string;
 	role: string;
+	roleKind: string;
+	capabilities: string[];
+	activeTaskIds: string[];
+	maxConcurrentTasks: number;
 	status: AgentStatus;
 	runtimeStatus: RuntimeStatus;
 	health: HealthStatus;
@@ -100,12 +104,92 @@ type SwarmMessage = {
 	headers: Record<string, string>;
 };
 
+type TaskStatus = "draft" | "ready" | "in_progress" | "blocked" | "reviewing" | "validating" | "done" | "failed" | "cancelled";
+type TaskNodeStatus = "pending" | "ready" | "assigned" | "in_progress" | "blocked" | "done" | "failed" | "skipped";
+type TaskGateStatus = "open" | "passed" | "failed" | "waived";
+
+type TaskNode = {
+	status: TaskNodeStatus;
+	outcome?: string | null;
+	role: string;
+	assignee?: string;
+	assigneePolicy?: string;
+	dependsOn: string[];
+	allowedFiles?: string[];
+	allowedFilesFrom?: string;
+	readArtifacts?: string[];
+	writeArtifacts?: string[];
+	messageIds: string[];
+	attempts: number;
+	maxAttempts?: number;
+	terminal?: boolean;
+	lastActivityAt?: string;
+};
+
+type TaskEdge = {
+	from: string;
+	to: string;
+	when: string;
+	rework?: boolean;
+	parallel?: boolean;
+	handoff?: {
+		toRole?: string;
+		assigneePolicy?: string;
+		message?: string;
+	};
+};
+
+type TaskGate = {
+	status: TaskGateStatus;
+	by?: string | null;
+	artifact?: string | null;
+};
+
+type TaskState = {
+	version: number;
+	taskId: string;
+	title: string;
+	goal: string;
+	status: TaskStatus;
+	priority: string;
+	createdAt: string;
+	updatedAt: string;
+	owner: string;
+	workflow: string;
+	allowedFiles: string[];
+	acceptanceCriteria: string[];
+	validationCommands: string[];
+	start: string;
+	currentNodes: string[];
+	sharedContext: {
+		summary: string;
+		decisions: Array<{ id: string; by: string; at: string; text: string }>;
+		openQuestions: Array<{ id: string; by: string; at: string; text: string }>;
+		risks: Array<{ id: string; by: string; at: string; severity?: string; text: string; status?: string }>;
+	};
+	nodes: Record<string, TaskNode>;
+	edges: TaskEdge[];
+	handoffs: Array<Record<string, unknown>>;
+	gates: Record<string, TaskGate>;
+	editLocks: Record<string, { nodeId: string; by: string; at: string; expiresAt?: string }>;
+	evidence: Record<string, unknown>;
+};
+
+type TaskPaths = {
+	root: string;
+	taskMd: string;
+	taskJson: string;
+	events: string;
+	artifacts: string;
+};
+
 type Paths = {
 	root: string;
 	state: string;
 	lock: string;
 	mailboxes: string;
 	agentsDir: string;
+	tasksDir: string;
 	traces: string;
 	tmuxTraces: string;
 	events: string;
@@ -128,6 +212,36 @@ function projectSlug(cwd: string) {
 	return safeId(cwd.split("/").filter(Boolean).pop() || "project").slice(0, 30);
 }
 
+function inferRoleKind(id: string, role: string) {
+	const text = `${id} ${role}`.toLowerCase();
+	if (text.includes("orchestrator")) return "orchestrator";
+	if (text.includes("planner") || text.includes("plan")) return "planner";
+	if (text.includes("reviewer") || text.includes("review")) return "reviewer";
+	if (text.includes("tester") || text.includes("test") || text.includes("qa")) return "tester";
+	if (text.includes("observer")) return "observer";
+	if (text.includes("implementer") || text.includes("coder") || text.includes("developer") || text.includes("fix")) return "implementer";
+	return "worker";
+}
+
+function ensureAgentDefaults(agent: SwarmAgent): SwarmAgent {
+	agent.roleKind ||= inferRoleKind(agent.id, agent.role);
+	agent.capabilities ||= [];
+	agent.activeTaskIds ||= [];
+	agent.maxConcurrentTasks ||= agent.roleKind === "orchestrator" ? 99 : 1;
+	return agent;
+}
+
+function normalizeTaskNode(node: TaskNode): TaskNode {
+	return {
+		...node,
+		dependsOn: node.dependsOn || [],
+		readArtifacts: node.readArtifacts || [],
+		writeArtifacts: node.writeArtifacts || [],
+		messageIds: node.messageIds || [],
+		attempts: node.attempts || 0,
+	};
+}
+
 function paths(cwd: string): Paths {
 	const root = join(cwd, CONFIG_DIR_NAME, EXT);
 	return {
@@ -136,15 +250,28 @@ function paths(cwd: string): Paths {
 		lock: join(root, "swarm-state.lock"),
 		mailboxes: join(root, "mailboxes"),
 		agentsDir: join(root, "agents"),
+		tasksDir: join(root, "tasks"),
 		traces: join(root, "traces"),
 		tmuxTraces: join(root, "traces", "tmux"),
 		events: join(root, "traces", "events.jsonl"),
 	};
 }
 
+function taskPaths(p: Paths, taskId: string): TaskPaths {
+	const root = join(p.tasksDir, safeId(taskId));
+	return {
+		root,
+		taskMd: join(root, "task.md"),
+		taskJson: join(root, "task.json"),
+		events: join(root, "events.jsonl"),
+		artifacts: join(root, "artifacts"),
+	};
+}
+
 async function ensureDirs(p: Paths) {
 	await mkdir(p.mailboxes, { recursive: true });
 	await mkdir(p.agentsDir, { recursive: true });
+	await mkdir(p.tasksDir, { recursive: true });
 	await mkdir(p.tmuxTraces, { recursive: true });
 }
 
@@ -199,6 +326,8 @@ async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	st.messages ||= {};
 	st.delivered ||= {};
 	st.agents ||= {};
+	// Back-fill structured reuse metadata for agents persisted before these fields existed.
+	for (const a of Object.values(st.agents)) ensureAgentDefaults(a);
 	return st;
 }
 
@@ -217,6 +346,356 @@ async function writeState(p: Paths, state: SwarmState) {
 async function appendJsonl(file: string, value: unknown) {
 	await mkdir(dirname(file), { recursive: true });
 	await appendFile(file, `${JSON.stringify(value)}\n`, "utf8");
+}
+
+async function readTaskState(file: string): Promise<TaskState> {
+	const task = JSON.parse(await readFile(file, "utf8")) as TaskState;
+	task.nodes = Object.fromEntries(Object.entries(task.nodes || {}).map(([id, node]) => [id, normalizeTaskNode(node)]));
+	task.edges ||= [];
+	task.currentNodes ||= [];
+	task.allowedFiles ||= [];
+	task.acceptanceCriteria ||= [];
+	task.validationCommands ||= [];
+	task.handoffs ||= [];
+	task.gates ||= {};
+	task.editLocks ||= {};
+	task.evidence ||= {};
+	task.sharedContext ||= { summary: "", decisions: [], openQuestions: [], risks: [] };
+	return task;
+}
+
+async function writeTaskState(tp: TaskPaths, task: TaskState) {
+	task.updatedAt = now();
+	await atomicWriteFile(tp.taskJson, `${JSON.stringify(task, null, 2)}\n`);
+}
+
+async function traceTask(tp: TaskPaths, event: string, data: Record<string, unknown> = {}) {
+	await appendJsonl(tp.events, { ts: now(), event, ...data });
+}
+
+function isSafeRelativePath(value: string) {
+	return Boolean(value) && !value.startsWith("/") && !value.includes("..");
+}
+
+function buildDefaultGraph(allowedFiles: string[]): { start: string; nodes: Record<string, TaskNode>; edges: TaskEdge[]; gates: Record<string, TaskGate> } {
+	return {
+		start: "plan",
+		nodes: {
+			plan: { status: "ready", role: "planner", dependsOn: [], readArtifacts: [], writeArtifacts: ["artifacts/plan.md"], messageIds: [], attempts: 0, maxAttempts: 1 },
+			implement: { status: "pending", role: "implementer", dependsOn: ["plan"], allowedFiles, readArtifacts: ["artifacts/plan.md"], writeArtifacts: ["artifacts/implementation-report.md"], messageIds: [], attempts: 0, maxAttempts: 3 },
+			test: { status: "pending", role: "tester", dependsOn: ["implement"], readArtifacts: ["artifacts/implementation-report.md"], writeArtifacts: ["artifacts/test-report.md"], messageIds: [], attempts: 0, maxAttempts: 3 },
+			fix: { status: "pending", role: "implementer", dependsOn: ["test"], allowedFilesFrom: "implement", readArtifacts: ["artifacts/test-report.md"], writeArtifacts: ["artifacts/fix-report.md"], messageIds: [], attempts: 0, maxAttempts: 3 },
+			review: { status: "pending", role: "reviewer", dependsOn: ["test"], readArtifacts: ["artifacts/implementation-report.md", "artifacts/test-report.md"], writeArtifacts: ["artifacts/review.md"], messageIds: [], attempts: 0, maxAttempts: 2 },
+			commit: { status: "pending", role: "orchestrator", dependsOn: ["review"], writeArtifacts: ["artifacts/final-summary.md"], messageIds: [], attempts: 0, terminal: true },
+		},
+		edges: [
+			{ from: "plan", to: "implement", when: "planned" },
+			{ from: "implement", to: "test", when: "implemented" },
+			{ from: "test", to: "review", when: "passed" },
+			{ from: "test", to: "fix", when: "failed", rework: true },
+			{ from: "fix", to: "test", when: "implemented", rework: true },
+			{ from: "review", to: "commit", when: "approved" },
+			{ from: "review", to: "fix", when: "rejected", rework: true },
+		],
+		gates: {
+			reviewApproved: { status: "open", by: null, artifact: null },
+			testsPassed: { status: "open", by: null, artifact: null },
+		},
+	};
+}
+
+function computeReadyNodes(task: TaskState) {
+	const ready: string[] = [];
+	const current = new Set<string>();
+	const incoming = new Map<string, TaskEdge[]>();
+	for (const edge of task.edges) {
+		const arr = incoming.get(edge.to) || [];
+		arr.push(edge);
+		incoming.set(edge.to, arr);
+	}
+	for (const [nodeId, node] of Object.entries(task.nodes)) {
+		if (node.status === "ready" || node.status === "assigned" || node.status === "in_progress" || node.status === "blocked") current.add(nodeId);
+		if (node.status !== "pending") continue;
+		const depsOk = (node.dependsOn || []).every((depId) => {
+			const dep = task.nodes[depId];
+			return dep && (dep.status === "done" || dep.status === "skipped");
+		});
+		if (!depsOk) continue;
+		if (nodeId === task.start) {
+			ready.push(nodeId);
+			current.add(nodeId);
+			continue;
+		}
+		const edges = incoming.get(nodeId) || [];
+		// A node whose dependsOn are all satisfied but which has no incoming branch edges is a linear
+		// AND-join: ready as soon as dependencies are done/skipped. Nodes WITH branch edges still require
+		// a satisfied edge (from done + outcome matches when), so outcome-based branching is preserved.
+		if (!edges.length) { ready.push(nodeId); current.add(nodeId); continue; }
+		const edgeOk = edges.some((edge) => {
+			const from = task.nodes[edge.from];
+			return from && from.status === "done" && from.outcome === edge.when;
+		});
+		if (edgeOk) {
+			ready.push(nodeId);
+			current.add(nodeId);
+		}
+	}
+	return { ready, current: Array.from(current) };
+}
+
+function buildTaskMarkdown(task: TaskState) {
+	const allowed = task.allowedFiles.length ? task.allowedFiles.map((file) => `- \
+\`${file}\``).join("\n") : "- None specified";
+	const acceptance = task.acceptanceCriteria.length ? task.acceptanceCriteria.map((item) => `- ${item}`).join("\n") : "- None specified";
+	const validation = task.validationCommands.length ? task.validationCommands.map((cmd) => `\`\`\`bash\n${cmd}\n\`\`\``).join("\n\n") : "_None specified._";
+	return `# Task: ${task.title}\n\nTask ID: \`${task.taskId}\`\nWorkflow: \`${task.workflow}\`\nOwner: \`${task.owner}\`\n\n## Goal\n\n${task.goal}\n\n## Scope\n\nAllowed files:\n\n${allowed}\n\n## Acceptance Criteria\n\n${acceptance}\n\n## Validation Commands\n\n${validation}\n`;
+}
+
+// ---- Task graph validation, printing, and graph synthesis helpers ----
+
+const NODE_ICON: Record<TaskNodeStatus, string> = {
+	done: "✓", ready: "●", assigned: "●", in_progress: "●", blocked: "⚠", failed: "✗", skipped: "⊘", pending: "○",
+};
+
+const SAFE_ID_RE = /^[a-z0-9_-]+$/;
+
+function graphHasCycle(adj: Map<string, string[]>, nodes: Set<string>): boolean {
+	const WHITE = 0, GRAY = 1, BLACK = 2;
+	const color = new Map<string, number>();
+	for (const n of nodes) color.set(n, WHITE);
+	const dfs = (u: string): boolean => {
+		color.set(u, GRAY);
+		for (const v of adj.get(u) || []) {
+			const c = color.get(v) ?? WHITE;
+			if (c === GRAY) return true;
+			if (c === WHITE && dfs(v)) return true;
+		}
+		color.set(u, BLACK);
+		return false;
+	};
+	for (const n of nodes) if ((color.get(n) ?? WHITE) === WHITE && dfs(n)) return true;
+	return false;
+}
+
+type GraphValidation = { errors: string[]; warnings: string[] };
+
+function validateTaskGraph(task: TaskState): GraphValidation {
+	const errors: string[] = [];
+	const warnings: string[] = [];
+	const nodeIds = new Set(Object.keys(task.nodes));
+
+	if (!SAFE_ID_RE.test(task.taskId)) errors.push(`taskId is not a safe id: ${task.taskId}`);
+	if (!task.nodes[task.start]) errors.push(`start node does not exist: ${task.start}`);
+	for (const id of nodeIds) if (!SAFE_ID_RE.test(id)) errors.push(`node id is not a safe id: ${id}`);
+
+	for (const [id, node] of Object.entries(task.nodes)) {
+		for (const dep of node.dependsOn || []) if (!nodeIds.has(dep)) errors.push(`node ${id} dependsOn missing node: ${dep}`);
+	}
+	for (const edge of task.edges) {
+		if (!nodeIds.has(edge.from)) errors.push(`edge from missing node: ${edge.from}`);
+		if (!nodeIds.has(edge.to)) errors.push(`edge to missing node: ${edge.to}`);
+	}
+
+	// reachability from start over edges + dependsOn
+	const reachable = new Set<string>(task.nodes[task.start] ? [task.start] : []);
+	const queue = [...reachable];
+	while (queue.length) {
+		const cur = queue.shift()!;
+		const next = new Set<string>();
+		for (const edge of task.edges) if (edge.from === cur && nodeIds.has(edge.to)) next.add(edge.to);
+		for (const [id, node] of Object.entries(task.nodes)) if ((node.dependsOn || []).includes(cur)) next.add(id);
+		for (const n of next) if (!reachable.has(n)) { reachable.add(n); queue.push(n); }
+	}
+	for (const id of nodeIds) if (!reachable.has(id)) warnings.push(`node ${id} is not reachable from start ${task.start}`);
+
+	// A node also has an outgoing connection if another node depends on it (dependsOn is the reverse
+	// of the flow edge), so terminal detection stays correct for dependsOn-only custom graphs.
+	const hasOutgoing = (id: string) => task.edges.some((e) => e.from === id) || Object.values(task.nodes).some((n) => (n.dependsOn || []).includes(id));
+	const terminals = Object.keys(task.nodes).filter((id) => task.nodes[id].terminal || !hasOutgoing(id));
+	if (!terminals.some((id) => reachable.has(id))) errors.push("no terminal node is reachable from start");
+
+	// ambiguous branches: two non-parallel edges sharing from+when
+	const branchKeys = new Map<string, number>();
+	for (const edge of task.edges) {
+		if (edge.parallel) continue;
+		const key = `${edge.from}::${edge.when}`;
+		branchKeys.set(key, (branchKeys.get(key) || 0) + 1);
+	}
+	for (const [key, count] of branchKeys) if (count > 1) errors.push(`ambiguous branch: ${count} edges share from+when "${key}" without parallel=true`);
+
+	// cycles allowed only when cycle-forming edges are marked rework
+	const nonReworkAdj = new Map<string, string[]>();
+	for (const edge of task.edges) {
+		if (edge.rework) continue;
+		const arr = nonReworkAdj.get(edge.from) || [];
+		arr.push(edge.to);
+		nonReworkAdj.set(edge.from, arr);
+	}
+	if (graphHasCycle(nonReworkAdj, nodeIds)) errors.push("cycle detected among non-rework edges (mark cycle edges rework=true)");
+
+	// scope/artifact path safety
+	const checkPath = (label: string, id: string, value: string) => {
+		if (!isSafeRelativePath(value)) errors.push(`${label} for ${id} is unsafe (must be relative, no ..): ${value}`);
+	};
+	for (const f of task.allowedFiles || []) checkPath("task allowedFiles", task.taskId, f);
+	for (const [id, node] of Object.entries(task.nodes)) {
+		for (const f of node.allowedFiles || []) checkPath(`node ${id} allowedFiles`, id, f);
+		for (const a of [...(node.readArtifacts || []), ...(node.writeArtifacts || [])]) checkPath(`node ${id} artifact`, id, a);
+	}
+
+	return { errors, warnings };
+}
+
+async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task: TaskState): Promise<string[]> {
+	const warnings: string[] = [];
+	const nowMs = Date.now();
+	for (const [id, node] of Object.entries(task.nodes)) {
+		if (!node.assignee) continue;
+		if (node.status !== "ready" && node.status !== "assigned" && node.status !== "in_progress") continue;
+		const agent = st.agents[node.assignee];
+		if (!agent && node.assignee !== "orchestrator") {
+			warnings.push(`node ${id} assigned to missing agent ${node.assignee}`);
+		} else if (agent) {
+			ensureAgentDefaults(agent);
+			if (agent.status === "stopped" || agent.health === "unhealthy") warnings.push(`node ${id} assignee ${agent.id} is ${agent.status}/${agent.health}`);
+			const expectedKind = inferRoleKind(node.assignee, node.role);
+			if (agent.roleKind !== expectedKind) warnings.push(`node ${id} role "${node.role}" expects ${expectedKind} but ${agent.id} is ${agent.roleKind}`);
+			if (agent.activeTaskIds.length >= agent.maxConcurrentTasks && !agent.activeTaskIds.includes(task.taskId)) warnings.push(`node ${id} assignee ${agent.id} at capacity (${agent.activeTaskIds.length}/${agent.maxConcurrentTasks})`);
+			if (agent.tmuxTarget && agent.tmuxTarget !== "unknown" && (node.status === "assigned" || node.status === "in_progress")) {
+				const alive = await isTmuxRunning(pi, agent.tmuxTarget);
+				if (!alive) warnings.push(`node ${id} assignee ${agent.id} tmux pane not alive`);
+			}
+		}
+		for (const msgId of node.messageIds || []) {
+			const rec = st.messages[msgId];
+			if (!rec) { warnings.push(`node ${id} references missing message ${msgId}`); continue; }
+			if (rec.requiresAck && !rec.ackedAt) warnings.push(`node ${id} message ${msgId} requires ack but is ${rec.status}`);
+		}
+		if (node.status === "in_progress" && node.lastActivityAt) {
+			const age = nowMs - new Date(node.lastActivityAt).getTime();
+			if (age > 24 * 60 * 60 * 1000) warnings.push(`node ${id} in_progress for ${Math.round(age / 3_600_000)}h without update`);
+		}
+	}
+	if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
+		for (const agent of Object.values(st.agents)) {
+			ensureAgentDefaults(agent);
+			if (agent.activeTaskIds.includes(task.taskId)) warnings.push(`task ${task.taskId} is ${task.status} but still in ${agent.id}.activeTaskIds`);
+		}
+	}
+	return warnings;
+}
+
+function collectDeclaredArtifacts(task: TaskState): string[] {
+	const set = new Set<string>();
+	for (const node of Object.values(task.nodes)) {
+		for (const a of [...(node.readArtifacts || []), ...(node.writeArtifacts || [])]) set.add(a);
+	}
+	return [...set];
+}
+
+function printGraphText(task: TaskState, ready: string[], current: string[], artifactStatus?: Array<{ path: string; exists: boolean }>): string {
+	const lines: string[] = [];
+	lines.push(`Task: ${task.taskId} — ${task.title}`);
+	lines.push(`Status: ${task.status}`);
+	lines.push(`Start: ${task.start}`);
+	lines.push(`Current: ${current.length ? current.join(", ") : "(none)"}`);
+	lines.push("");
+	lines.push("Nodes:");
+	for (const [id, node] of Object.entries(task.nodes)) {
+		const icon = NODE_ICON[node.status] || "?";
+		const who = node.assignee || node.role;
+		const outcome = node.outcome ? ` outcome=${node.outcome}` : "";
+		lines.push(`  ${icon} ${id.padEnd(12)} ${String(who).padEnd(14)}${node.status.padEnd(12)}${outcome.trim()}`);
+	}
+	lines.push("");
+	lines.push("Edges:");
+	for (const edge of task.edges) {
+		const flag = edge.rework ? " [rework]" : edge.parallel ? " [parallel]" : "";
+		lines.push(`  ${edge.from.padEnd(10)} --${edge.when}--> ${edge.to}${flag}`);
+	}
+	if (artifactStatus && artifactStatus.length) {
+		lines.push("");
+		lines.push("Artifacts:");
+		for (const a of artifactStatus) lines.push(`  ${a.exists ? "✓" : "○"} ${a.path}`);
+	}
+	lines.push("");
+	lines.push(`Ready: ${ready.length ? ready.join(", ") : "(none)"}`);
+	return lines.join("\n");
+}
+
+function printGraphMermaid(task: TaskState): string {
+	const lines: string[] = ["flowchart TD"];
+	for (const [id, node] of Object.entries(task.nodes)) {
+		const icon = NODE_ICON[node.status] || "?";
+		lines.push(`  ${id}["${id} ${icon} ${node.status}"]`);
+	}
+	lines.push("");
+	for (const edge of task.edges) {
+		lines.push(`  ${edge.from} -->|${edge.when}| ${edge.to}`);
+	}
+	return lines.join("\n");
+}
+
+function graphJsonSummary(task: TaskState, ready: string[], current: string[]) {
+	return {
+		taskId: task.taskId, title: task.title, status: task.status, workflow: task.workflow, owner: task.owner,
+		start: task.start, current, ready,
+		nodes: Object.entries(task.nodes).map(([id, n]) => ({ id, role: n.role, status: n.status, assignee: n.assignee || null, outcome: n.outcome || null, terminal: Boolean(n.terminal), dependsOn: n.dependsOn })),
+		edges: task.edges, gates: task.gates,
+	};
+}
+
+type NodeInput = {
+	status?: string; role?: string; dependsOn?: string[]; allowedFiles?: string[]; allowedFilesFrom?: string;
+	readArtifacts?: string[]; writeArtifacts?: string[]; maxAttempts?: number; terminal?: boolean;
+	assignee?: string; assigneePolicy?: string; outcome?: string;
+};
+
+function buildGraphFromInput(input: { nodes?: Record<string, NodeInput>; edges?: Array<{ from: string; to: string; when?: string; rework?: boolean; parallel?: boolean }>; start?: string; gates?: Record<string, TaskGate> }, allowedFiles: string[]): { start: string; nodes: Record<string, TaskNode>; edges: TaskEdge[]; gates: Record<string, TaskGate> } {
+	if (!input.nodes || !Object.keys(input.nodes).length) return buildDefaultGraph(allowedFiles);
+	const nodes: Record<string, TaskNode> = {};
+	for (const [rawId, raw] of Object.entries(input.nodes)) {
+		const id = safeId(rawId);
+		nodes[id] = normalizeTaskNode({
+			status: (raw.status as TaskNodeStatus) || "pending",
+			role: raw.role || "worker",
+			dependsOn: (raw.dependsOn || []).map(safeId),
+			allowedFiles: raw.allowedFiles,
+			allowedFilesFrom: raw.allowedFilesFrom,
+			readArtifacts: raw.readArtifacts || [],
+			writeArtifacts: raw.writeArtifacts || [],
+			messageIds: [],
+			attempts: 0,
+			maxAttempts: raw.maxAttempts,
+			terminal: raw.terminal,
+			assignee: raw.assignee,
+			assigneePolicy: raw.assigneePolicy,
+			outcome: raw.outcome ?? null,
+		});
+	}
+	const start = input.start ? safeId(input.start) : Object.keys(nodes)[0];
+	if (nodes[start] && nodes[start].status === "pending") nodes[start].status = "ready";
+	// Edges are taken verbatim from input when provided. We intentionally do NOT synthesize edges
+	// from dependsOn: computeReadyNodes treats a dependsOn-satisfied node with no incoming branch
+	// edges as a linear AND-join (ready when deps are done), while explicit edges drive outcome-based
+	// branching. Synthesizing when:"done" edges here would force every custom graph to require an
+	// outcome:"done" on each dependency, which is only set by swarm_update_task in a later commit.
+	const edges: TaskEdge[] = (input.edges || []).map((e) => ({ from: safeId(e.from), to: safeId(e.to), when: e.when || "done", rework: e.rework, parallel: e.parallel }));
+	const gates = input.gates || {};
+	return { start, nodes, edges, gates };
+}
+
+async function readTaskByRef(p: Paths, ref: { taskId?: string; path?: string }): Promise<{ task: TaskState; tp: TaskPaths; taskId: string }> {
+	let file: string | undefined;
+	if (ref.path && existsSync(ref.path)) file = ref.path;
+	else if (ref.taskId) {
+		const candidate = taskPaths(p, safeId(ref.taskId));
+		if (existsSync(candidate.taskJson)) file = candidate.taskJson;
+	}
+	if (!file) throw new Error(`Task not found: ${ref.taskId || ref.path || "(no taskId/path)"}`);
+	const task = await readTaskState(file);
+	const tp = taskPaths(p, task.taskId);
+	return { task, tp, taskId: task.taskId };
 }
 
 async function trace(p: Paths, event: string, data: Record<string, unknown> = {}) {
@@ -294,6 +773,10 @@ function ensureOrchestrator(st: SwarmState, cwd: string, p: Paths): SwarmAgent {
 	const agent: SwarmAgent = {
 		id: "orchestrator",
 		role: "Swarm orchestrator (human-driven coordinating session). Receives messages via mailbox; no dedicated swarm tmux pane, so delivery is mailbox-only.",
+		roleKind: "orchestrator",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 99,
 		status: "running",
 		runtimeStatus: "idle",
 		health: "healthy",
@@ -556,9 +1039,14 @@ async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmS
 	}
 
 	const ts = now();
+	const roleKind = inferRoleKind(id, input.role);
 	const agent: SwarmAgent = {
 		id,
 		role: input.role,
+		roleKind,
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: roleKind === "orchestrator" ? 99 : 1,
 		status: "running",
 		runtimeStatus: "starting",
 		health: "healthy",
@@ -603,6 +1091,39 @@ function isTmuxRunning(pi: ExtensionAPI, target: string): Promise<boolean> {
 	return tmux(pi, ["display-message", "-p", "-t", target, "#{pane_id}"], 3_000)
 		.then((out) => out.trim().length > 0)
 		.catch(() => false);
+}
+
+// Internal reusable-agent lookup used by task tooling (not a public worker tool).
+// Recommends the idle, healthy, tmux-alive agent with the fewest active tasks.
+type ReusableAgentMatch = {
+	agentId: string;
+	roleKind: string;
+	runtimeStatus: string;
+	health: HealthStatus;
+	tmuxAlive: boolean;
+	activeTaskIds: string[];
+	capabilities: string[];
+};
+
+async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: { roleKind?: string; capabilities?: string[]; requireIdle?: boolean; requireTmuxAlive?: boolean; includeBusy?: boolean }): Promise<{ matches: ReusableAgentMatch[]; recommended?: string }> {
+	const wantKind = opts.roleKind;
+	const wantCaps = new Set((opts.capabilities || []).map((c) => c.toLowerCase()));
+	const matches: ReusableAgentMatch[] = [];
+	for (const agent of Object.values(st.agents)) {
+		if (agent.id === "orchestrator") continue; // never reuse the human-driven orchestrator
+		ensureAgentDefaults(agent);
+		if (wantKind && agent.roleKind !== wantKind) continue;
+		if (wantCaps.size && !agent.capabilities.map((c) => c.toLowerCase()).some((c) => wantCaps.has(c))) continue;
+		const idle = agent.runtimeStatus === "idle";
+		if (opts.requireIdle && !idle) continue;
+		if (!opts.includeBusy && !idle && agent.activeTaskIds.length >= agent.maxConcurrentTasks) continue;
+		const tmuxAlive = agent.tmuxTarget && agent.tmuxTarget !== "unknown" ? await isTmuxRunning(pi, agent.tmuxTarget) : false;
+		if (opts.requireTmuxAlive && !tmuxAlive) continue;
+		matches.push({ agentId: agent.id, roleKind: agent.roleKind, runtimeStatus: agent.runtimeStatus, health: agent.health, tmuxAlive, activeTaskIds: agent.activeTaskIds, capabilities: agent.capabilities });
+	}
+	const score = (m: ReusableAgentMatch) => (m.runtimeStatus === "idle" ? 0 : 1) + (m.health === "healthy" ? 0 : 2) + (m.tmuxAlive ? 0 : 4) + m.activeTaskIds.length;
+	matches.sort((a, b) => score(a) - score(b));
+	return { matches, recommended: matches[0]?.agentId };
 }
 
 const MAX_ATTEMPTS = 5;
@@ -735,6 +1256,7 @@ export default function (pi: ExtensionAPI) {
 			} else if (!st.agents[agentId]) {
 				st.agents[agentId] = {
 					id: agentId, role: "Externally started swarm agent", status: "running",
+					roleKind: inferRoleKind(agentId, "Externally started swarm agent"), capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
 					runtimeStatus: "starting", health: "healthy",
 					lastSessionStartAt: ts, lastAgentStartAt: ts, pid: process.pid,
 					tmuxSession: st.tmuxSession, tmuxWindow: agentId, tmuxTarget: "unknown",
@@ -1257,6 +1779,199 @@ export default function (pi: ExtensionAPI) {
 			if (params.agentId) records = records.filter((r) => r.to === safeId(params.agentId!));
 			records = records.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)).slice(-Math.max(1, Math.min(100, params.limit || 20)));
 			return textResult(JSON.stringify({ count: records.length, records }, null, 2), { records });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_create_task",
+		label: "Swarm Create Task",
+		description: "Create a task graph under .pi/swarm/tasks/<task-id>/ with task.md, task.json, events.jsonl, and artifacts/. Synthesizes the built-in feature-dev graph unless a custom nodes/edges graph is supplied.",
+		promptGuidelines: ["Use `swarm_create_task` to define a new durable task graph before assigning work."],
+		parameters: Type.Object({
+			title: Type.String({ description: "Human-readable task title." }),
+			goal: Type.String({ description: "One-paragraph goal/outcome for the task." }),
+			workflow: Type.Optional(Type.String({ description: "Workflow/template name. Defaults to feature-dev." })),
+			allowedFiles: Type.Optional(Type.Array(Type.String({ description: "Project-relative file paths the task may touch." }))),
+			acceptanceCriteria: Type.Optional(Type.Array(Type.String())),
+			validationCommands: Type.Optional(Type.Array(Type.String())),
+			priority: Type.Optional(Type.String({ description: "low, normal, high. Defaults to normal." })),
+			taskId: Type.Optional(Type.String({ description: "Optional explicit task id; otherwise generated as task-<timestamp>-<slug>." })),
+			start: Type.Optional(Type.String({ description: "Start node id when supplying a custom graph." })),
+			nodes: Type.Optional(Type.Record(Type.String(), Type.Object({
+				status: Type.Optional(Type.String()), role: Type.Optional(Type.String()), dependsOn: Type.Optional(Type.Array(Type.String())),
+				allowedFiles: Type.Optional(Type.Array(Type.String())), allowedFilesFrom: Type.Optional(Type.String()),
+				readArtifacts: Type.Optional(Type.Array(Type.String())), writeArtifacts: Type.Optional(Type.Array(Type.String())),
+				maxAttempts: Type.Optional(Type.Number()), terminal: Type.Optional(Type.Boolean()),
+				assignee: Type.Optional(Type.String()), assigneePolicy: Type.Optional(Type.String()), outcome: Type.Optional(Type.String()),
+			}))),
+			edges: Type.Optional(Type.Array(Type.Object({
+				from: Type.String(), to: Type.String(), when: Type.Optional(Type.String()),
+				rework: Type.Optional(Type.Boolean()), parallel: Type.Optional(Type.Boolean()),
+			}))),
+			gates: Type.Optional(Type.Record(Type.String(), Type.Any())),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const result = await withLock(p, async () => {
+				const ts = now();
+				const slug = safeId(params.title).slice(0, 24);
+				const taskId = safeId(params.taskId || `task-${ts.replace(/[-:.TZ]/g, "").slice(0, 12)}-${slug}`);
+				const tp = taskPaths(p, taskId);
+				if (existsSync(tp.taskJson)) throw new Error(`Task already exists: ${taskId}`);
+				const graph = buildGraphFromInput({ nodes: params.nodes as Record<string, NodeInput> | undefined, edges: params.edges, start: params.start, gates: params.gates as Record<string, TaskGate> | undefined }, params.allowedFiles || []);
+				const task: TaskState = {
+					version: 1, taskId, title: params.title, goal: params.goal, status: "ready",
+					priority: params.priority || "normal", createdAt: ts, updatedAt: ts, owner: currentAgentId(),
+					workflow: params.workflow || "feature-dev", allowedFiles: params.allowedFiles || [],
+					acceptanceCriteria: params.acceptanceCriteria || [], validationCommands: params.validationCommands || [],
+					start: graph.start, currentNodes: [],
+					sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
+					nodes: graph.nodes, edges: graph.edges, handoffs: [], gates: graph.gates, editLocks: {}, evidence: {},
+				};
+				// Reject structurally-invalid graphs at creation (hard errors only; soft warnings are still allowed)
+				// so a broken task can't be written and linger. Run swarm_validate_graph for the full report.
+				const createValidation = validateTaskGraph(task);
+				if (createValidation.errors.length) {
+					throw new Error(`Task graph is structurally invalid; refusing to create. Fix these and retry:\n${createValidation.errors.map((e) => `  ✗ ${e}`).join("\n")}`);
+				}
+				const { ready, current } = computeReadyNodes(task);
+				task.currentNodes = current;
+				// Actionable = newly-ready nodes PLUS already-ready unassigned nodes (e.g. a fresh task's start node,
+				// which is born status:"ready" and lands in `current`, not the raw `ready` set). Keeps the "Ready:"
+				// report consistent with swarm_next_nodes so orchestrators see what is assignable right now.
+				const actionable = Array.from(new Set([
+					...ready,
+					...current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
+				]));
+				await mkdir(tp.root, { recursive: true });
+				await mkdir(tp.artifacts, { recursive: true });
+				await writeTaskState(tp, task);
+				await writeFile(tp.taskMd, buildTaskMarkdown(task), "utf8");
+				await traceTask(tp, "task.create", { taskId, title: task.title, workflow: task.workflow, owner: task.owner, start: task.start, nodeCount: Object.keys(task.nodes).length, ready, actionable });
+				return { taskId, task, tp, ready, actionable };
+			});
+			return textResult(`Created task ${result.taskId} at ${relative(ctx.cwd, result.tp.root)}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}`, { taskId: result.taskId, task: result.task, taskMd: relative(ctx.cwd, result.tp.taskMd), taskJson: relative(ctx.cwd, result.tp.taskJson) });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_task_status",
+		label: "Swarm Task Status",
+		description: "Read task.json and summarize task/node/gate state. Optionally include artifact listing and runtime liveness/message warnings.",
+		promptGuidelines: ["Use `swarm_task_status` to inspect assigned task state and current/ready nodes."],
+		parameters: Type.Object({
+			taskId: Type.String({ description: "Task id." }),
+			includeArtifacts: Type.Optional(Type.Boolean({ description: "List declared artifacts and whether they exist. Defaults to false." })),
+			runtime: Type.Optional(Type.Boolean({ description: "Include agent/message/liveness warnings from swarm state. Defaults to false." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId });
+			const { ready, current } = computeReadyNodes(task);
+			const summary = graphJsonSummary(task, ready, current);
+			let artifacts: Array<{ path: string; exists: boolean }> | undefined;
+			if (params.includeArtifacts) artifacts = collectDeclaredArtifacts(task).map((path) => ({ path, exists: existsSync(join(tp.root, path)) }));
+			let runtimeWarnings: string[] | undefined;
+			if (params.runtime) {
+				const st = await readState(p, ctx.cwd);
+				runtimeWarnings = await runtimeTaskWarnings(pi, st, task);
+			}
+			await traceTask(tp, "task.status.read", { taskId, includeArtifacts: Boolean(params.includeArtifacts), runtime: Boolean(params.runtime) });
+			const text = printGraphText(task, ready, current, artifacts) + (runtimeWarnings?.length ? `\n\nRuntime warnings:\n${runtimeWarnings.map((w) => `  ⚠ ${w}`).join("\n")}` : "");
+			return textResult(text, { task: summary, taskId, artifacts, runtimeWarnings });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_validate_graph",
+		label: "Swarm Validate Graph",
+		description: "Validate task/workflow structure (ids, edges, reachability, terminals, ambiguous branches, rework cycles, path safety) and optionally runtime consistency (agents, capacity, message acks).",
+		promptGuidelines: ["Use `swarm_validate_graph` before/during execution to catch broken or inconsistent task graphs."],
+		parameters: Type.Object({
+			taskId: Type.Optional(Type.String({ description: "Task id." })),
+			path: Type.Optional(Type.String({ description: "Direct path to a task.json." })),
+			runtime: Type.Optional(Type.Boolean({ description: "Include agent/message/liveness checks. Defaults to false." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId, path: params.path });
+			const { errors, warnings } = validateTaskGraph(task);
+			let runtimeWarnings: string[] = [];
+			if (params.runtime) {
+				const st = await readState(p, ctx.cwd);
+				runtimeWarnings = await runtimeTaskWarnings(pi, st, task);
+			}
+			const ok = errors.length === 0;
+			await traceTask(tp, "task.validate", { taskId, ok, errors: errors.length, warnings: warnings.length, runtime: Boolean(params.runtime) });
+			const lines: string[] = [];
+			lines.push(`Validation: ${ok ? "PASS" : "FAIL"} (${errors.length} errors, ${warnings.length + runtimeWarnings.length} warnings)`);
+			for (const e of errors) lines.push(`  ✗ ${e}`);
+			for (const w of [...warnings, ...runtimeWarnings]) lines.push(`  ⚠ ${w}`);
+			return textResult(lines.join("\n"), { taskId, ok, errors, warnings, runtimeWarnings });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_print_graph",
+		label: "Swarm Print Graph",
+		description: "Print a task graph as text, Mermaid, or JSON summary.",
+		promptGuidelines: ["Use `swarm_print_graph` to visualize task graph state and handoffs."],
+		parameters: Type.Object({
+			taskId: Type.Optional(Type.String({ description: "Task id." })),
+			path: Type.Optional(Type.String({ description: "Direct path to a task.json." })),
+			format: Type.Optional(Type.String({ description: "text, mermaid, or json. Defaults to text." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId, path: params.path });
+			const format = (params.format || "text").toLowerCase();
+			const { ready, current } = computeReadyNodes(task);
+			await traceTask(tp, "task.print", { taskId, format });
+			if (format === "mermaid") return textResult(printGraphMermaid(task), { taskId, format });
+			if (format === "json") return textResult(JSON.stringify(graphJsonSummary(task, ready, current), null, 2), { taskId, format, summary: graphJsonSummary(task, ready, current) });
+			return textResult(printGraphText(task, ready, current), { taskId, format });
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: "swarm_next_nodes",
+		label: "Swarm Next Nodes",
+		description: "Compute ready/next nodes from task graph state and suggest a reusable agent per ready node. Read-only in V1 (assignment is handled by swarm_assign_task).",
+		promptGuidelines: ["Use `swarm_next_nodes` to decide what work is ready next and which agent could take it."],
+		parameters: Type.Object({
+			taskId: Type.String({ description: "Task id." }),
+			autoAssign: Type.Optional(Type.Boolean({ description: "Reserved for V1; suggestions are returned but assignment is not mutated." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId });
+			const result = await withLock(p, async () => {
+				const { ready, current } = computeReadyNodes(task);
+				task.currentNodes = current;
+				await writeTaskState(tp, task);
+				return { ready, current };
+			});
+			const st = await readState(p, ctx.cwd);
+			// Actionable = newly-ready nodes PLUS already-ready/assigned nodes that still have no assignee.
+			// (computeReadyNodes only flags newly-activatable pending nodes as `ready`; a freshly created
+			// task's start node is already in `ready` status and lands in `current`, so surface it here too.)
+			const actionable = Array.from(new Set([
+				...result.ready,
+				...result.current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
+			]));
+			const suggestions: Array<{ nodeId: string; role: string; suggestedAssignee?: string; candidates: ReusableAgentMatch[] }> = [];
+			for (const nodeId of actionable) {
+				const node = task.nodes[nodeId];
+				const kind = inferRoleKind(nodeId, node.role);
+				const found = await findReusableAgent(pi, st, { roleKind: kind, requireIdle: false, includeBusy: false });
+				await trace(p, "agent.find", { taskId, nodeId, roleKind: kind, recommended: found.recommended, candidates: found.matches.length });
+				suggestions.push({ nodeId, role: node.role, suggestedAssignee: found.recommended, candidates: found.matches });
+			}
+			await traceTask(tp, "task.next_nodes", { taskId, ready: result.ready, actionable, current: result.current, autoAssign: Boolean(params.autoAssign) });
+			const lines: string[] = [`Ready: ${actionable.length ? actionable.join(", ") : "(none)"}`, `Current: ${result.current.length ? result.current.join(", ") : "(none)"}`];
+			for (const s of suggestions) lines.push(`  ${s.nodeId} (${s.role}) -> ${s.suggestedAssignee || "(no reusable agent; spawn needed)"}`);
+			return textResult(lines.join("\n"), { taskId, ready: actionable, current: result.current, suggestions, autoAssign: Boolean(params.autoAssign) });
 		},
 	}));
 
