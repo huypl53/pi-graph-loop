@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, writeFile, appendFile, rm, stat, rename } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -16,11 +16,21 @@ const DEFAULT_MODEL = "glm-5.1";
 const DEFAULT_PROVIDER = "zai-coding-cn";
 const FAST_MODEL = "gpt-5.4-mini";
 const FAST_PROVIDER = "openai";
+// Identity used for an anonymous swarm session that neither sets PI_SWARM_AGENT_ID nor opts in as the
+// orchestrator. Such a session is inert for swarm coordination (no agent record, no orchestrator pump,
+// no orchestrator heartbeat refresh); it is a stable, clearly-non-orchestrator id so tool defaults
+// (e.g. swarm_check_mailbox / swarm_send_message) cannot leak or impersonate orchestrator traffic.
+const SWARM_GUEST_ID = "swarm-guest";
 
 type AgentStatus = "running" | "stopped" | "unknown";
 type RuntimeStatus = "starting" | "idle" | "busy" | "tool_running" | "shutting_down" | "stopped";
 type HealthStatus = "healthy" | "degraded" | "unhealthy";
 type MessageStatus = "queued" | "mailbox_delivered" | "injected" | "intercepted" | "acked" | "failed" | "dead_letter";
+
+type SwarmSettings = {
+	defaultModel?: string;
+	defaultProvider?: string;
+};
 
 type MessageRecord = {
 	id: string;
@@ -49,6 +59,7 @@ type SwarmAgent = {
 	id: string;
 	role: string;
 	roleKind: string;
+	roleKindExplicit?: boolean;
 	capabilities: string[];
 	activeTaskIds: string[];
 	maxConcurrentTasks: number;
@@ -59,6 +70,7 @@ type SwarmAgent = {
 	lastSessionStartAt?: string;
 	lastAgentStartAt?: string;
 	lastAgentSettledAt?: string;
+	lastSettleNotifyAt?: string; // persisted cooldown for agent_settled->orchestrator idle/open-work notify
 	lastToolAt?: string;
 	lastShutdownAt?: string;
 	pid?: number;
@@ -80,6 +92,11 @@ type SwarmState = {
 	tmuxSession: string;
 	agents: Record<string, SwarmAgent>;
 	delivered: Record<string, string[]>;
+	// Per-session surfaced-id ledgers for the orchestrator auto-pump, keyed by consumer pid. Each
+	// orchestrator-context session (the long-lived PM, a validation `pi -p` run, another PM lane) tracks
+	// the ids IT has surfaced, so one session cannot mark a notification consumed and starve a different
+	// PM session. Separate from `delivered` (the check_mailbox/ack ledger).
+	orchestratorPumpSessions?: Record<string, { ids: string[]; lastAt: string }>;
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;
@@ -214,7 +231,19 @@ function projectSlug(cwd: string) {
 }
 
 function inferRoleKind(id: string, role: string) {
+	const lid = id.toLowerCase();
 	const text = `${id} ${role}`.toLowerCase();
+	// Strong id-based signals win first: an agent named `implementer-02` is an implementer even if its
+	// role text incidentally mentions "reviewer" (e.g. "coordinate with tester/reviewer"). Then fall
+	// back to the combined id+role text so node-role matching (inferRoleKind(nodeId, nodeRole)) and
+	// ids without a role keyword still classify via the role text.
+	const idHas = (kw: string) => lid.includes(kw);
+	if (idHas("orchestrator")) return "orchestrator";
+	if (idHas("planner")) return "planner";
+	if (idHas("reviewer")) return "reviewer";
+	if (idHas("tester") || idHas("qa")) return "tester";
+	if (idHas("observer")) return "observer";
+	if (idHas("implementer") || idHas("coder") || idHas("developer")) return "implementer";
 	if (text.includes("orchestrator")) return "orchestrator";
 	if (text.includes("planner") || text.includes("plan")) return "planner";
 	if (text.includes("reviewer") || text.includes("review")) return "reviewer";
@@ -225,7 +254,9 @@ function inferRoleKind(id: string, role: string) {
 }
 
 function ensureAgentDefaults(agent: SwarmAgent): SwarmAgent {
-	agent.roleKind ||= inferRoleKind(agent.id, agent.role);
+	// roleKind is re-derived from id+role unless explicitly pinned at spawn (roleKindExplicit). This
+	// lets classification self-heal when inference improves, while preserving deliberate overrides.
+	if (!agent.roleKindExplicit) agent.roleKind = inferRoleKind(agent.id, agent.role);
 	agent.capabilities ||= [];
 	agent.activeTaskIds ||= [];
 	agent.maxConcurrentTasks ||= agent.roleKind === "orchestrator" ? 99 : 1;
@@ -326,6 +357,7 @@ async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	const st = JSON.parse(await readFile(p.state, "utf8")) as SwarmState;
 	st.messages ||= {};
 	st.delivered ||= {};
+	st.orchestratorPumpSessions ||= {};
 	st.agents ||= {};
 	// Back-fill structured reuse metadata for agents persisted before these fields existed.
 	for (const a of Object.values(st.agents)) ensureAgentDefaults(a);
@@ -768,15 +800,22 @@ function releaseNodeAssignment(st: SwarmState, task: TaskState, nodeId: string) 
 }
 
 // Derive the authoritative task status from node states. Closure is a deterministic consequence of
+// Derive the authoritative task status from node states. Closure is a deterministic consequence of
 // the last node transition: failed if any node failed; done iff every graph-terminal node is
-// done/skipped (and none failed); in_progress once any node has started; ready before that.
-// `cancelled` is orchestrator-explicit and never auto-derived here.
+// done/skipped (and none failed); blocked if every active node is blocked; in_progress once any node
+// has started; ready before that. `cancelled` is orchestrator-explicit and never auto-derived here.
+// Precedence matters: failed and done win over blocked (a task with a failed node reads "failed").
 function computeTaskStatus(task: TaskState): TaskStatus {
 	const nodes = Object.values(task.nodes);
 	if (nodes.some((n) => n.status === "failed")) return "failed";
 	const hasOutgoing = (id: string) => task.edges.some((e) => e.from === id) || Object.values(task.nodes).some((n) => (n.dependsOn || []).includes(id));
 	const terminals = Object.keys(task.nodes).filter((id) => task.nodes[id].terminal || !hasOutgoing(id)).map((id) => task.nodes[id]);
 	if (terminals.length && terminals.every((n) => n.status === "done" || n.status === "skipped")) return "done";
+	// Task-level blocked: every active (non-terminal, non-pending) node is blocked => the task cannot
+	// make progress. Pure (derived from node states, not the possibly-stale task.currentNodes); resumable
+	// (a node leaving `blocked` returns the task to in_progress/done).
+	const active = nodes.filter((n) => n.status === "ready" || n.status === "assigned" || n.status === "in_progress" || n.status === "blocked");
+	if (active.length > 0 && active.every((n) => n.status === "blocked")) return "blocked";
 	const started = nodes.some((n) => n.status === "assigned" || n.status === "in_progress" || n.status === "blocked" || n.status === "done" || n.status === "failed" || n.status === "skipped");
 	return started ? "in_progress" : "ready";
 }
@@ -941,12 +980,49 @@ function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status: Messa
 	};
 }
 
+// Explicit opt-in for the orchestrator/PM identity. Truthy PI_SWARM_IS_ORCHESTRATOR (1/true/yes)
+// asserts "this session IS the human-driven orchestrator". A bare `pi` session opened in the project
+// must NOT implicitly become the orchestrator: that would let it run the orchestrator mailbox pump
+// (surfacing PM traffic to an unintended TUI), call ensureOrchestrator (refreshing the orchestrator
+// pseudo-agent heartbeat and masking a dead/stalled PM), and default mailbox reads/sends to the
+// orchestrator. The PM opts in explicitly; an anonymous session resolves to SWARM_GUEST_ID (inert).
+function isOrchestratorSession() {
+	const v = process.env.PI_SWARM_IS_ORCHESTRATOR;
+	return Boolean(v) && !/^(0|false|no|)$/i.test(v.trim());
+}
+
 function currentAgentId() {
-	return process.env.PI_SWARM_AGENT_ID || "orchestrator";
+	// Explicit agent id always wins (spawned agents set PI_SWARM_AGENT_ID=<id>). Setting it to
+	// "orchestrator" is an affirmative orchestrator claim, not a silent default.
+	if (process.env.PI_SWARM_AGENT_ID) return process.env.PI_SWARM_AGENT_ID;
+	// Explicit orchestrator opt-in (the human PM sets PI_SWARM_IS_ORCHESTRATOR=1).
+	if (isOrchestratorSession()) return "orchestrator";
+	// No identity and no explicit orchestrator claim: anonymous/inert swarm session.
+	return SWARM_GUEST_ID;
+}
+
+function readSwarmSettings(cwd = process.cwd()): SwarmSettings {
+	const file = join(cwd, CONFIG_DIR_NAME, "settings.json");
+	if (!existsSync(file)) return {};
+	try {
+		const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, any>;
+		const fromExtensions = raw?.extensions?.[EXT];
+		const fromTopLevel = raw?.swarm;
+		const cfg = (fromExtensions && typeof fromExtensions === "object" ? fromExtensions : undefined) ||
+			(fromTopLevel && typeof fromTopLevel === "object" ? fromTopLevel : undefined);
+		if (!cfg || typeof cfg !== "object") return {};
+		return {
+			defaultModel: typeof cfg.defaultModel === "string" && cfg.defaultModel.trim() ? cfg.defaultModel.trim() : undefined,
+			defaultProvider: typeof cfg.defaultProvider === "string" && cfg.defaultProvider.trim() ? cfg.defaultProvider.trim() : undefined,
+		};
+	} catch {
+		return {};
+	}
 }
 
 function currentModel() {
-	return process.env.PI_SWARM_DEFAULT_MODEL || DEFAULT_MODEL;
+	const settings = readSwarmSettings();
+	return settings.defaultModel || process.env.PI_SWARM_DEFAULT_MODEL || DEFAULT_MODEL;
 }
 
 function providerForModel(model: string) {
@@ -955,7 +1031,8 @@ function providerForModel(model: string) {
 }
 
 function currentProvider(model = currentModel()) {
-	return process.env.PI_SWARM_DEFAULT_PROVIDER || providerForModel(model);
+	const settings = readSwarmSettings();
+	return settings.defaultProvider || process.env.PI_SWARM_DEFAULT_PROVIDER || providerForModel(model);
 }
 
 function childPiArgs() {
@@ -1068,17 +1145,61 @@ function formatSwarmMessageContent(msg: SwarmMessage) {
 	return `Inter-agent swarm message from ${msg.from} to ${msg.to}${msg.subject ? ` (${msg.subject})` : ""}:\n\n${msg.body}${ackLine}`;
 }
 
+// Returns the CURRENT orchestrator process's surfaced-id ledger (keyed by process.pid), creating it if
+// needed. Returns null when the caller is not an orchestrator session — non-orchestrator callers then
+// fall back to the shared `st.delivered[agentId]` ledger.
+//
+// WHY process.pid (NOT PI_SESSION_ID): each orchestrator-context pi PROCESS has its own pump instance
+// and its own TUI to surface into, and process.pid is guaranteed distinct per process. PI_SESSION_ID is
+// NOT a safe key: a child `pi -p` validation run spawned from an agent's bash INHERITS the parent's
+// PI_SESSION_ID (pi's bash tool strips then re-exposes the current session id), so two distinct
+// processes can share one session id — keying on it would let a validation run starve the PM. The
+// per-pid ledger is what makes the orchestrator auto-pump session-safe AND read-safe: every
+// orchestrator process surfaces each notification once, regardless of what any other orchestrator
+// process, swarm_check_mailbox, or swarm_ack_message writes to st.delivered.orchestrator (which the
+// pump never reads). PI_SESSION_ID is still recorded as `sid` in the pump trace for attribution.
+function orchSession(st: SwarmState, nowMs: number): { ids: string[]; lastAt: string } | null {
+	if (currentAgentId() !== "orchestrator") return null;
+	st.orchestratorPumpSessions ||= {};
+	const key = String(process.pid);
+	if (!st.orchestratorPumpSessions[key]) st.orchestratorPumpSessions[key] = { ids: [], lastAt: new Date(nowMs).toISOString() };
+	return st.orchestratorPumpSessions[key];
+}
+
 async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reason: string) {
 	if (currentAgentId() !== "orchestrator") return { delivered: 0, ids: [] as string[] };
 	const pending = await withLock(p, async () => {
 		const st = await readState(p, ctx.cwd);
 		ensureOrchestrator(st, ctx.cwd, p);
-		const deliveredIds = new Set(st.delivered.orchestrator || []);
-		const messages = (await readMailbox(p, "orchestrator")).filter((m) => !deliveredIds.has(m.id));
-		if (!messages.length) return [] as SwarmMessage[];
-		st.delivered.orchestrator = Array.from(new Set([...(st.delivered.orchestrator || []), ...messages.map((m) => m.id)]));
+		const nowMs = Date.now();
+		// Session-safe + read-safe surfacing: surface messages NOT yet surfaced to THIS orchestrator process
+		// (pid) and not already acked. We deliberately do NOT consult the shared st.delivered.orchestrator
+		// ledger here — that ledger is written by swarm_check_mailbox(markDelivered), swarm_ack_message, and
+		// tmux injection paths, none of which should be able to pre-empt a pump surface. Keying on the
+		// per-pid set (not PI_SESSION_ID, which child `pi -p` validation runs inherit from the parent) is
+		// what makes a validation run or a second orchestrator lane unable to starve this PM process. Scan
+		// only the recent window to bound work + re-surface blast radius on a fresh process; skip acked
+		// messages (ackedAt = "recipient processed it", correct, not a surface cursor).
+		const sess = orchSession(st, nowMs)!;
+		const surfaced = new Set(sess.ids);
+		const messages = (await readMailbox(p, "orchestrator"))
+			.slice(-PUMP_SCAN_WINDOW)
+			.filter((m) => !surfaced.has(m.id) && !(st.messages[m.id]?.ackedAt));
+		// Prune dead sessions (not pumped within TTL) to bound growth from transient validation pids.
+		for (const [k, v] of Object.entries(st.orchestratorPumpSessions!)) {
+			if (k !== String(process.pid) && nowMs - new Date(v.lastAt).getTime() > PUMP_SESSION_TTL_MS) delete st.orchestratorPumpSessions![k];
+		}
+		if (!messages.length) {
+			sess.lastAt = new Date(nowMs).toISOString(); // keep this session alive (not pruned)
+			await writeState(p, st);
+			return [] as SwarmMessage[];
+		}
+		const toSurface = messages.slice(0, 10);
+		const nextIds = [...surfaced, ...toSurface.map((m) => m.id)];
+		sess.ids = nextIds.length > PUMP_SESSION_ID_CAP ? nextIds.slice(nextIds.length - PUMP_SESSION_ID_CAP) : nextIds;
+		sess.lastAt = new Date(nowMs).toISOString();
 		await writeState(p, st);
-		return messages.slice(0, 10);
+		return toSurface;
 	});
 	if (!pending.length) return { delivered: 0, ids: [] as string[] };
 	for (let i = 0; i < pending.length; i++) {
@@ -1090,7 +1211,7 @@ async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, rea
 			details: msg,
 		}, i === 0 && ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" });
 	}
-	await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), idleAtStart: ctx.isIdle() });
+	await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart: ctx.isIdle() });
 	return { delivered: pending.length, ids: pending.map((m) => m.id) };
 }
 
@@ -1177,7 +1298,9 @@ async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg: Swarm
 	if (!agent) return { delivered: false, reason: "unknown agent" };
 	// Mailbox-only recipients (e.g. the orchestrator pseudo-agent) have no swarm tmux pane. The
 	// message is already persisted in the mailbox; treat this as successful mailbox delivery, not
-	// a tmux injection failure. The recipient picks it up via swarm_check_mailbox.
+	// a tmux injection failure. The recipient surfaces it via the orchestrator auto-pump
+	// (pumpOrchestratorMailbox, on session_start/agent_settled/interval) or swarm_check_mailbox;
+	// callers must NOT pre-mark it delivered (see deliverMessageLocked) so the pump can surface it.
 	if (!agent.tmuxTarget || agent.tmuxTarget === "unknown") {
 		return { delivered: true, mailboxOnly: true, reason: "recipient has no tmux pane (mailbox-only)" };
 	}
@@ -1236,17 +1359,21 @@ async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st:
 	await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck, idempotencyKey: m.idempotencyKey });
 	const delivery = await deliver(pi, p, st, m);
 	if (delivery?.delivered) {
-		// Injection into the recipient pane is already delivery. Mark it in state
-		// atomically with enqueue+inject so pending mailbox polling does not
-			// reprocess the same message after a restart or delayed poll.
-		st.delivered[to] = Array.from(new Set([...(st.delivered[to] || []), m.id]));
 		if (delivery.mailboxOnly) {
-			// Mailbox-only delivery (e.g. orchestrator has no swarm tmux pane): the message is
-			// safely appended to the recipient mailbox and picked up via swarm_check_mailbox.
-			// Keep status "queued" so it is not mistaken for a tmux injection failure.
+			// Mailbox-only delivery (e.g. the orchestrator has no swarm tmux pane): the message is safely
+			// appended to the recipient mailbox. Do NOT pre-mark it in st.delivered[to] — that set is the
+			// shared dedup/surfaced ledger, and pre-marking here would defeat the orchestrator auto-pump
+			// (pumpOrchestratorMailbox) and swarm_check_mailbox(pendingOnly), which surface messages NOT yet
+			// in the set. The surfacing pump / check_mailbox add to the set themselves when they surface.
+			// Message lifecycle is tracked by status "mailbox_delivered" (kept off "queued"/"failed" so it is
+			// not mistaken for a tmux injection failure).
 			upsertMessageRecord(st, m, "mailbox_delivered", { lastError: undefined });
 			await trace(p, "message.mailbox_only", { id: m.id, to: m.to, reason: delivery.reason });
 		} else {
+			// Injection into the recipient pane is already delivery. Mark it in state atomically with
+			// enqueue+inject so pending mailbox polling does not reprocess the same message after a restart
+			// or delayed poll.
+			st.delivered[to] = Array.from(new Set([...(st.delivered[to] || []), m.id]));
 			upsertMessageRecord(st, m, "injected", { injectedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1 });
 		}
 	} else {
@@ -1265,7 +1392,7 @@ async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params
 	});
 }
 
-async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; model?: string; provider?: string; initialPrompt?: string }) {
+async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string }) {
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
 	if (state.agents[id]?.status === "running") throw new Error(`Agent already exists and is running: ${id}`);
 	const model = input.model || currentModel();
@@ -1292,11 +1419,13 @@ async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmS
 	}
 
 	const ts = now();
-	const roleKind = inferRoleKind(id, input.role);
+	const roleKindExplicit = Boolean(input.roleKind);
+	const roleKind = input.roleKind || inferRoleKind(id, input.role);
 	const agent: SwarmAgent = {
 		id,
 		role: input.role,
 		roleKind,
+		roleKindExplicit,
 		capabilities: [],
 		activeTaskIds: [],
 		maxConcurrentTasks: roleKind === "orchestrator" ? 99 : 1,
@@ -1380,8 +1509,98 @@ async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: { roleK
 }
 
 const MAX_ATTEMPTS = 5;
+// Task staleness thresholds for the reconcile task sweep (advisory; never auto-fail nodes).
+const TASK_STALE_MS = 24 * 60 * 60 * 1000; // in_progress node with no activity bump -> stale
+const TASK_NUDGE_MS = 30 * 60 * 1000; // in_progress node with no activity bump -> nudge reminder
+const ACK_MISSING_MS = 300_000; // delivered-but-unacked assignment -> ack_missing (mirrors mailbox)
+// Cooldown for the agent_settled->orchestrator "settled with open work" notify, so repeated settles in
+// a window don't multiply into a message storm. Loop-safe: notify targets the mailbox-only
+// orchestrator (never the worker), and is rate-limited per agent via persisted lastSettleNotifyAt.
+const SETTLE_NOTIFY_COOLDOWN_MS = 2 * 60 * 1000;
+// Orchestrator auto-pump session-safety bounds. Each orchestrator-context session surfaces a message
+// at most once (per-session dedup); the scan window bounds work + re-surface blast radius, the id cap
+// bounds a long-lived session's ledger, and the TTL prunes dead validation-session pids.
+const PUMP_SCAN_WINDOW = 50;
+const PUMP_SESSION_ID_CAP = 200;
+const PUMP_SESSION_TTL_MS = 60 * 60 * 1000;
 
-async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { agentId?: string; dryRun?: boolean }) {
+type ReconcileAction = { messageId: string; action: string; reason: string; taskId?: string; nodeId?: string };
+
+// Sweep task.json files for closure drift and stale/nudge signals. Mark-only by default: sets
+// advisory node.staleAt, traces task.stale/task.nudge, and surfaces findings as actions. With
+// mark=true it also persists the recomputed task.status (repairing stored/derived drift). It NEVER
+// auto-fails a node or auto-sends reminder messages (keeps reconcile idempotent and storm-free);
+// the PM summary + swarm_task_status make these signals visible without re-injection.
+async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState, options: { dryRun?: boolean; mark?: boolean; nowMs: number }): Promise<ReconcileAction[]> {
+	const actions: ReconcileAction[] = [];
+	if (!existsSync(p.tasksDir)) return actions;
+	let entries: string[] = [];
+	try { entries = await readdir(p.tasksDir); } catch { return actions; }
+	for (const entry of entries) {
+		const taskId = entry;
+		const tp = taskPaths(p, taskId);
+		if (!existsSync(tp.taskJson)) continue;
+		let task: TaskState;
+		try { task = await readTaskState(tp.taskJson); } catch { actions.push({ messageId: taskId, action: "task_skip", reason: `unreadable task.json for ${taskId}`, taskId }); continue; }
+		let dirty = false;
+		const storedClosed = task.status === "done" || task.status === "failed" || task.status === "cancelled";
+		const derived = computeTaskStatus(task);
+		// Drift detection. `cancelled` is orchestrator-explicit and sticky, so never overwrite it.
+		if (!storedClosed && derived !== task.status && task.status !== "cancelled") {
+			if (options.mark && !options.dryRun) {
+				const prev = task.status;
+				task.status = derived;
+				task.updatedAt = now();
+				dirty = true;
+				actions.push({ messageId: taskId, action: "task_status_repaired", reason: `stored ${prev} -> derived ${derived}`, taskId });
+				await traceTask(tp, "task.reconcile.repair", { taskId, prev, derived });
+			} else {
+				actions.push({ messageId: taskId, action: "task_status_drift", reason: `stored ${task.status} but nodes derive ${derived} (pass mark=true to repair)`, taskId });
+			}
+		}
+		// Only non-terminal tasks can have live stale/nudge signals.
+		if (storedClosed) continue;
+		for (const [nodeId, node] of Object.entries(task.nodes)) {
+			if (node.status !== "assigned" && node.status !== "in_progress") continue;
+			const staleReasons: string[] = [];
+			const nudgeReasons: string[] = [];
+			const agent = node.assignee ? st.agents[node.assignee] : undefined;
+			if (agent) {
+				ensureAgentDefaults(agent);
+				if (agent.status === "stopped" || agent.health === "unhealthy") staleReasons.push(`assignee ${agent.id} ${agent.status}/${agent.health}`);
+				else if (agent.tmuxTarget && agent.tmuxTarget !== "unknown" && !(await isTmuxRunning(pi, agent.tmuxTarget))) staleReasons.push(`assignee ${agent.id} tmux pane not alive`);
+			} else if (node.assignee && node.assignee !== "orchestrator") {
+				staleReasons.push(`assignee ${node.assignee} missing from state`);
+			}
+			if (node.status === "in_progress" && node.lastActivityAt) {
+				const age = options.nowMs - new Date(node.lastActivityAt).getTime();
+				if (age > TASK_STALE_MS) staleReasons.push(`in_progress ${Math.round(age / 3_600_000)}h without update`);
+				else if (age > TASK_NUDGE_MS) nudgeReasons.push(`in_progress ${Math.round(age / 60_000)}min without update`);
+			}
+			for (const msgId of node.messageIds || []) {
+				const rec = st.messages[msgId];
+				if (!rec) { staleReasons.push(`references missing message ${msgId}`); continue; }
+				if (rec.status === "dead_letter") staleReasons.push(`assignment message ${msgId} dead-lettered`);
+				else if (rec.requiresAck && !rec.ackedAt) {
+					const sinceMs = Math.max(rec.injectedAt ? new Date(rec.injectedAt).getTime() : 0, rec.interceptedAt ? new Date(rec.interceptedAt).getTime() : 0, rec.createdAt ? new Date(rec.createdAt).getTime() : 0);
+					if (options.nowMs - sinceMs > ACK_MISSING_MS) nudgeReasons.push(`assignment message ${msgId} ack_missing`);
+				}
+			}
+			if (!staleReasons.length && !nudgeReasons.length) continue;
+			if (staleReasons.length) {
+				if (!options.dryRun && !node.staleAt) { node.staleAt = now(); dirty = true; await traceTask(tp, "task.stale.reconcile", { taskId, nodeId, assignee: node.assignee, reasons: staleReasons }); }
+				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_stale", reason: staleReasons.join("; "), taskId, nodeId });
+			} else {
+				if (!options.dryRun) await traceTask(tp, "task.nudge", { taskId, nodeId, assignee: node.assignee, reasons: nudgeReasons });
+				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_nudge", reason: nudgeReasons.join("; "), taskId, nodeId });
+			}
+		}
+		if (!options.dryRun && dirty) await writeTaskState(tp, task);
+	}
+	return actions;
+}
+
+async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { agentId?: string; dryRun?: boolean; mark?: boolean }) {
 	const result = await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const nowMs = Date.now();
@@ -1485,13 +1704,92 @@ async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { age
 			}
 		}
 
+		// Task sweep (WS-B.3/4): closure drift + stale/nudge signals, mark-only. Shares the lock so
+		// task.json writes are consistent with swarm state. Ignored when scoped to a single agent's mail.
+		const taskActions = options.agentId ? [] : await reconcileTasks(pi, p, st, { dryRun: options.dryRun, mark: options.mark, nowMs });
+		const allActions = [...actions, ...taskActions];
+
 		if (!options.dryRun) {
 			await writeState(p, st);
 		}
-		return { actions, count: actions.length, dryRun: Boolean(options.dryRun) };
+		return { actions: allActions, count: allActions.length, messageCount: actions.length, taskCount: taskActions.length, dryRun: Boolean(options.dryRun) };
 	});
-	await trace(p, "reconcile.complete", { agentId: options.agentId, dryRun: options.dryRun, result });
+	await trace(p, "reconcile.complete", { agentId: options.agentId, dryRun: options.dryRun, mark: options.mark, result });
 	return result;
+}
+
+const MAX_STATUS_TASKS = 100;
+
+// PM-facing swarm rollup for `/swarm status`. Bounded: scans up to MAX_STATUS_TASKS task.json
+// files, prioritizing non-terminal tasks, and emits stable prefixed lines that are grep-able so
+// the test lane can assert on tool output instead of eyeballing panes. Pane capture stays fallback.
+async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise<{ text: string; details: Record<string, unknown> }> {
+	const agents = Object.values(st.agents);
+	const byRuntime: Record<string, number> = {};
+	const byHealth: Record<string, number> = {};
+	let runningAgents = 0;
+	for (const a of agents) {
+		ensureAgentDefaults(a);
+		byRuntime[a.runtimeStatus] = (byRuntime[a.runtimeStatus] || 0) + 1;
+		byHealth[a.health] = (byHealth[a.health] || 0) + 1;
+		if (a.status === "running") runningAgents++;
+	}
+	let ackMissing = 0;
+	for (const rec of Object.values(st.messages)) {
+		if (rec.requiresAck && !rec.ackedAt && rec.status !== "dead_letter" && rec.status !== "acked") ackMissing++;
+	}
+
+	const pmStatus = (task: TaskState): string => {
+		if (task.status === "cancelled") return "cancelled";
+		if (task.status === "done") return "done";
+		if (task.status === "failed") return "failed";
+		if (task.status === "blocked") return "blocked";
+		if (Object.values(task.nodes).some((n) => n.staleAt)) return "stale";
+		if (task.status === "in_progress") return "in_progress";
+		return "open";
+	};
+
+	const taskLines: string[] = [];
+	const byTaskStatus: Record<string, number> = {};
+	let staleNodes = 0;
+	let scanned = 0;
+	if (existsSync(p.tasksDir)) {
+		let entries: string[] = [];
+		try { entries = await readdir(p.tasksDir); } catch { entries = []; }
+		// Read all (bounded), then surface non-terminal tasks first so the operator sees live work.
+		const read: Array<{ task: TaskState; pm: string }> = [];
+		for (const entry of entries) {
+			if (scanned >= MAX_STATUS_TASKS) break;
+			const tp = taskPaths(p, entry);
+			if (!existsSync(tp.taskJson)) continue;
+			scanned++;
+			try {
+				const task = await readTaskState(tp.taskJson);
+				read.push({ task, pm: pmStatus(task) });
+			} catch { /* skip unreadable */ }
+		}
+		read.sort((a, b) => (a.pm === "done" || a.pm === "failed" || a.pm === "cancelled" ? 1 : 0) - (b.pm === "done" || b.pm === "failed" || b.pm === "cancelled" ? 1 : 0));
+		for (const { task, pm } of read) {
+			byTaskStatus[pm] = (byTaskStatus[pm] || 0) + 1;
+			let unacked = 0;
+			for (const node of Object.values(task.nodes)) {
+				if (node.staleAt) staleNodes++;
+				for (const msgId of node.messageIds || []) { const rec = st.messages[msgId]; if (rec && rec.requiresAck && !rec.ackedAt) unacked++; }
+			}
+			const { ready, current } = computeReadyNodes(task);
+			taskLines.push(`task ${task.taskId} ${pm} current=[${current.join(",") || "-"}] next=[${ready.join(",") || "-"}] unacked=${unacked}`);
+		}
+	}
+	const closureLine = `closure: ${byTaskStatus["done"] || 0} done, ${byTaskStatus["in_progress"] || 0} in_progress, ${(byTaskStatus["blocked"] || 0) + (byTaskStatus["stale"] || 0)} blocked/stale, ${byTaskStatus["failed"] || 0} failed`;
+	const lines = [
+		`swarm ${st.swarmId}: ${runningAgents}/${agents.length} agents running, tmux ${st.tmuxSession}`,
+		`agents by runtime: ${Object.entries(byRuntime).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`,
+		`agents by health: ${Object.entries(byHealth).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`,
+		`tasks: ${scanned} scanned, ${Object.entries(byTaskStatus).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}; staleNodes=${staleNodes}; ackMissing=${ackMissing}`,
+		closureLine,
+		...taskLines,
+	];
+	return { text: lines.join("\n"), details: { swarmId: st.swarmId, runningAgents, totalAgents: agents.length, byRuntime, byHealth, tasksScanned: scanned, byTaskStatus, staleNodes, ackMissing, closure: closureLine, taskLines } };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -1503,12 +1801,30 @@ export default function (pi: ExtensionAPI) {
 	};
 	const startOrchestratorMailboxPump = (ctx: any) => {
 		stopOrchestratorMailboxPump();
-		if (currentAgentId() !== "orchestrator") return;
+		// The auto-pump surfaces mailbox notifications to the interactive PM via pi.sendMessage({triggerTurn})
+		// and ctx.isIdle() — both TUI-only, session-bound APIs. In print/rpc/json mode there is no
+		// interactive PM to surface to (sendMessage is a no-op in print mode), and the captured ctx is
+		// invalidated on session teardown/replacement; running the pump there reliably throws the
+		// "This extension ctx is stale after session replacement or reload" error. This is exactly why
+		// every pi -p validation/UAT run (which defaults to agentId "orchestrator" when PI_SWARM_AGENT_ID
+		// is unset) hit the stale-ctx error. Gate the pump to the interactive orchestrator TUI session
+		// (matches the single-interactive-session design); non-tui callers read mailboxes via
+		// swarm_check_mailbox, which never touches a captured ctx.
+		if (currentAgentId() !== "orchestrator" || ctx.mode !== "tui") return;
 		const p = paths(ctx.cwd);
 		const run = async (reason: string) => {
 			if (orchestratorMailboxPumpRunning) return;
 			orchestratorMailboxPumpRunning = true;
-			try { await pumpOrchestratorMailbox(pi, ctx, p, reason); } finally { orchestratorMailboxPumpRunning = false; }
+			try {
+				await pumpOrchestratorMailbox(pi, ctx, p, reason);
+			} catch (err: any) {
+				// Session-safe resilience: if the captured ctx/pi was invalidated (session replacement/reload)
+				// the pump's ctx-bound calls throw. Stop the pump cleanly instead of spamming stderr every 5s;
+				// the next interactive orchestrator session_start restarts a fresh pump with a live ctx.
+				const msg = String((err && err.message) || err);
+				stopOrchestratorMailboxPump();
+				await trace(p, "mailbox.orchestrator_pump_error", { reason, error: msg, stale: /stale after session/i.test(msg) }).catch(() => {});
+			} finally { orchestratorMailboxPumpRunning = false; }
 		};
 		void run("session_start");
 		orchestratorMailboxTimer = setInterval(() => { void run("interval"); }, 5_000);
@@ -1518,10 +1834,20 @@ export default function (pi: ExtensionAPI) {
 		const p = paths(ctx.cwd);
 		await ensureDirs(p);
 		const agentId = currentAgentId();
+		const guest = agentId === SWARM_GUEST_ID;
 		const ts = now();
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
-			await trace(p, "session.start", { agentId, mode: ctx.mode, state: relative(ctx.cwd, p.state) });
+			await trace(p, "session.start", { agentId, guest, mode: ctx.mode, state: relative(ctx.cwd, p.state) });
+			if (guest) {
+				// Anonymous swarm session (no PI_SWARM_AGENT_ID and no explicit orchestrator opt-in): stay
+				// inert. Do NOT register an agent record, do NOT call ensureOrchestrator (which would refresh
+				// the orchestrator pseudo-agent heartbeat and mask a dead/stalled PM), and do NOT start the
+				// orchestrator mailbox pump (which would surface orchestrator mail here). Tools still work via
+				// currentAgentId() returning SWARM_GUEST_ID; this session just cannot act as or consume the
+				// orchestrator. See isOrchestratorSession() for the explicit opt-in path.
+				return;
+			}
 			if (agentId === "orchestrator") {
 				ensureOrchestrator(st, ctx.cwd, p);
 				await writeState(p, st);
@@ -1616,6 +1942,33 @@ export default function (pi: ExtensionAPI) {
 			agent.lastHeartbeatAt = ts;
 			agent.updatedAt = ts;
 			ensureAgentDefaults(agent);
+			// PM auto-notify (engine behavior): a settle while still holding open assignments is a
+			// stall/idle signal the orchestrator should not have to poll for. Enqueue a mailbox notify to
+			// the mailbox-only orchestrator. Loop-safe: (a) it targets the orchestrator, never the worker
+			// (no self-re-trigger); (b) cooldown-guarded per agent via persisted lastSettleNotifyAt so
+			// repeated settles in a window don't storm; (c) mailbox-only (no tmux inject); (d) no node
+			// mutation. requiresAck=false (informational; orchestrator pump surfaces it). Done before
+			// writeState so the notify record persists atomically with the settle metadata.
+			if (agent.activeTaskIds.length) {
+				const sinceNotify = agent.lastSettleNotifyAt ? Date.now() - new Date(agent.lastSettleNotifyAt).getTime() : Number.POSITIVE_INFINITY;
+				if (sinceNotify > SETTLE_NOTIFY_COOLDOWN_MS) {
+					agent.lastSettleNotifyAt = ts;
+					let list = agent.activeTaskIds.join(", ");
+					let openCount = agent.activeTaskIds.length;
+					try {
+						const open = await scanAgentOpenAssignments(p, agentId, agent.activeTaskIds);
+						if (open.length) { list = open.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", "); openCount = open.length; }
+					} catch { /* keep activeTaskIds fallback list */ }
+					try {
+						await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject: `agent ${agentId} settled idle with open assignment(s)`, body: `Agent ${agentId} settled (agent_settled) while still holding ${openCount} open assignment(s): ${list}. It may be idle or stalled; advance via swarm_next_nodes/swarm_update_task, reassign, or reconcile as needed.`, requiresAck: false });
+						await trace(p, "task.stale.settled.notify", { agentId, open: openCount });
+					} catch (err: any) {
+						await trace(p, "task.stale.settled.notify_failed", { agentId, error: String(err?.message || err) });
+					}
+				} else {
+					await trace(p, "task.stale.settled.notify_cooldown", { agentId, cooldownMs: SETTLE_NOTIFY_COOLDOWN_MS });
+				}
+			}
 			await writeState(p, st);
 			await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health });
 			// Loop-safe observability: a settle while still holding open assignments is a stale signal
@@ -1689,12 +2042,23 @@ export default function (pi: ExtensionAPI) {
 			ensureAgentDefaults(agent);
 			if (agent.activeTaskIds.length) {
 				const open = await scanAgentOpenAssignments(p, agentId, agent.activeTaskIds);
-				for (const { task, tp, nodeId } of open) { task.nodes[nodeId].staleAt = ts; await writeTaskState(tp, task); }
+				for (const { task, tp, nodeId } of open) { task.nodes[nodeId].staleAt = ts; task.nodes[nodeId].lastActivityAt = ts; await writeTaskState(tp, task); }
 				if (open.length) {
 					await trace(p, "task.stale.shutdown", { agentId, open: open.map((o) => ({ taskId: o.task.taskId, nodeId: o.nodeId })) });
 					const list = open.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
-					try { await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject: `agent ${agentId} shut down with open task node(s)`, body: `Agent ${agentId} shut down (session_shutdown) while still assigned ${open.length} non-terminal node(s): ${list}. Those nodes were marked stale (staleAt). Reassign via swarm_assign_task or reconcile as needed.`, requiresAck: false }); }
-					catch (err: any) { await trace(p, "task.stale.shutdown.nudge_failed", { agentId, error: String(err?.message || err) }); }
+					// Nudge the reassignment authority: prefer each open node's assigner (replyTarget, from its
+					// latest `assign` handoff `by`) when registered and not this dying agent; else orchestrator
+					// (mailbox-only). Stamps node.lastActivityAt so the shutdown itself is recorded as activity.
+					const nudgeTargets = new Set<string>();
+					for (const { task, nodeId } of open) {
+						const assigner = [...task.handoffs].reverse().find((h: any) => h?.toNode === nodeId && h?.kind === "assign")?.by as string | undefined;
+						if (assigner && assigner !== agentId && st.agents[assigner]) nudgeTargets.add(assigner);
+						else nudgeTargets.add("orchestrator");
+					}
+					for (const target of nudgeTargets) {
+						try { await deliverMessageLocked(pi, ctx.cwd, p, st, { to: target, subject: `agent ${agentId} shut down with open task node(s)`, body: `Agent ${agentId} shut down (session_shutdown) while still assigned ${open.length} non-terminal node(s): ${list}. Those nodes were marked stale (staleAt) and lastActivityAt stamped. Reassign via swarm_assign_task or reconcile as needed.`, requiresAck: false }); }
+						catch (err: any) { await trace(p, "task.stale.shutdown.nudge_failed", { agentId, target, error: String(err?.message || err) }); }
+					}
 				}
 			}
 			await writeState(p, st);
@@ -1846,6 +2210,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "Stable agent id, e.g. planner or reviewer. Lowercase letters, digits, dash and underscore are safest." })),
 			role: Type.String({ description: "Role/instructions for the agent." }),
+			roleKind: Type.Optional(Type.String({ description: "Explicit role kind override (orchestrator/planner/reviewer/tester/observer/implementer/worker). Pinned so it is not re-derived from id/role. Defaults to inference (id-first, then role text)." })),
 			model: Type.Optional(Type.String({ description: "pi model id. Defaults to PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1. Supported fast preset: gpt-5.4-mini." })),
 			provider: Type.Optional(Type.String({ description: "pi provider id. Defaults to PI_SWARM_DEFAULT_PROVIDER or model preset provider (zai-coding-cn for glm-5.1, openai for gpt-5.4-mini)." })),
 			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt to send into the spawned agent after pi starts." })),
@@ -1996,14 +2361,22 @@ export default function (pi: ExtensionAPI) {
 			const limit = Math.max(1, Math.min(100, params.limit || 20));
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				const deliveredIds = new Set(st.delivered[agentId] || []);
+				// DELIBERATELY DECOUPLED from the orchestrator auto-pump: check_mailbox keys "already read" on the
+				// shared st.delivered[agentId] ledger, NOT on the pump's per-process surfaced set
+				// (st.orchestratorPumpSessions). Because pumpOrchestratorMailbox never reads
+				// st.delivered.orchestrator, a check_mailbox(markDelivered:true) here cannot pre-empt a later
+				// pump surface; an explicit swarm_ack_message cannot either (the pump only skips ackedAt
+				// messages = correct "recipient processed it" semantics, not a surface cursor). This is what
+				// makes orchestrator surfacing read-safe as well as session-safe.
+				const ledgerIds = st.delivered[agentId] || [];
+				const deliveredIds = new Set(ledgerIds);
 				let messages = await readMailbox(p, agentId);
 				if (params.pendingOnly) messages = messages.filter((m) => !deliveredIds.has(m.id));
 				const matchedCount = messages.length;
 				if (params.markDelivered) {
 					// Mark the whole matched set before applying the display limit so a small
 					// limit does not leave older pending messages to be reprocessed forever.
-					st.delivered[agentId] = Array.from(new Set([...(st.delivered[agentId] || []), ...messages.map((m) => m.id)]));
+					st.delivered[agentId] = Array.from(new Set([...ledgerIds, ...messages.map((m) => m.id)]));
 					await writeState(p, st);
 				}
 				messages = messages.slice(-limit);
@@ -2049,17 +2422,18 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "swarm_reconcile",
 		label: "Swarm Reconcile",
-		description: "Reconcile swarm mailbox state. Inspects queued/failed/injected messages requiring ack, retries failed/queued injections when recipient tmux is running, marks expired or max-attempt messages dead_letter, and traces events.",
-		promptGuidelines: ["Use `swarm_reconcile` to recover stuck messages, retry failed deliveries, and move expired/unrecoverable messages to dead_letter."],
+		description: "Reconcile swarm mailbox state AND task graph state. Mailbox: inspects queued/failed/injected messages requiring ack, retries failed/queued injections when recipient tmux is running, marks expired or max-attempt messages dead_letter. Task sweep: re-reads every task.json, reports stored-vs-derived status drift and stale/nudge signals (dead assignee, dead-lettered assignment, in_progress too long, ack_missing), and stamps advisory node.staleAt. Mark-only by default; pass mark=true to also persist the recomputed task.status. Never auto-fails a node.",
+		promptGuidelines: ["Use `swarm_reconcile` to recover stuck messages, retry failed deliveries, move expired/unrecoverable messages to dead_letter, and surface stale/stalled task nodes. Run with dryRun=true first to preview; use mark=true to repair task status drift."],
 		parameters: Type.Object({
-			agentId: Type.Optional(Type.String({ description: "Optional agent id to reconcile only that agent's messages." })),
+			agentId: Type.Optional(Type.String({ description: "Optional agent id to reconcile only that agent's messages. Task sweep is skipped when scoped to one agent." })),
 			dryRun: Type.Optional(Type.Boolean({ description: "If true, inspect and report actions without modifying state. Defaults to false." })),
+			mark: Type.Optional(Type.Boolean({ description: "Persist the recomputed task.status when stored/derived drift is detected (repairs closure). Still never auto-fails nodes. Defaults to false." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
-			const result = await reconcile(pi, ctx.cwd, p, { agentId: params.agentId, dryRun: params.dryRun });
+			const result = await reconcile(pi, ctx.cwd, p, { agentId: params.agentId, dryRun: params.dryRun, mark: params.mark });
 			const summary = result.actions.map((a) => `  ${a.messageId}: ${a.action} (${a.reason})`).join("\n");
-			return textResult(`Reconciled ${result.count} messages (${result.dryRun ? "dry run" : "applied"}):\n${summary}`, result);
+			return textResult(`Reconciled ${result.count} item(s): ${result.messageCount} message(s), ${result.taskCount} task(s) (${result.dryRun ? "dry run" : "applied"}).\n${summary}`, result);
 		},
 	}));
 
@@ -2139,6 +2513,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const { ready, current } = computeReadyNodes(task);
 				task.currentNodes = current;
+				applyTaskStatus(task); // engine-enforced closure: a fresh task derives `ready`
 				// Actionable = newly-ready nodes PLUS already-ready unassigned nodes (e.g. a fresh task's start node,
 				// which is born status:"ready" and lands in `current`, not the raw `ready` set). Keeps the "Ready:"
 				// report consistent with swarm_next_nodes so orchestrators see what is assignable right now.
@@ -2396,6 +2771,7 @@ export default function (pi: ExtensionAPI) {
 				openQuestions: Type.Optional(Type.Array(Type.Object({ text: Type.String() }))),
 			})),
 			force: Type.Optional(Type.Boolean({ description: "Orchestrator override: skip ownership + transition checks. Defaults to false." })),
+			cancelTask: Type.Optional(Type.Boolean({ description: "Orchestrator-only (requires force): mark the whole task cancelled. Sticky: a cancelled task stays cancelled and releases all assignments. Defaults to false." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
@@ -2425,16 +2801,55 @@ export default function (pi: ExtensionAPI) {
 				if (params.sharedContextUpdates) applySharedContextUpdates(task, params.sharedContextUpdates as { summary?: string; decisions?: Array<{ text: string; severity?: string }>; risks?: Array<{ text: string; severity?: string }>; openQuestions?: Array<{ text: string }> }, me);
 				if (params.artifact) node.writeArtifacts = Array.from(new Set([...(node.writeArtifacts || []), params.artifact]));
 				releaseNodeAssignment(st, task, params.nodeId);
+				const closingAssignee = node.assignee || undefined; // persisted on the node (not cleared by release)
+				// Orchestrator-explicit cancellation: sticky terminal state. applyTaskStatus preserves an
+				// existing `cancelled`, so setting it here then calling applyTaskStatus keeps it cancelled and
+				// releases every agent's active-task pointer for this task.
+				const cancelled = Boolean(params.cancelTask) && (me === "orchestrator" || Boolean(params.force));
+				if (cancelled) task.status = "cancelled";
 				const taskStatusChange = applyTaskStatus(task);
 				if (taskStatusChange.terminal) releaseTaskFromAllAgents(st, task.taskId);
-				task.currentNodes = computeReadyNodes(task).current;
+				const nextReady = computeReadyNodes(task);
+				task.currentNodes = nextReady.current;
 				await writeTaskState(tp, task);
 				await writeState(p, st);
 				await traceTask(tp, "task.update", { taskId, nodeId: params.nodeId, prevStatus, status: newStatus, outcome: params.outcome, note: Boolean(params.note), artifact: params.artifact, gateUpdates: params.gateUpdates ? Object.keys(params.gateUpdates) : [], sharedContext: Boolean(params.sharedContextUpdates), by: me });
+				if (cancelled) await traceTask(tp, "task.cancel", { taskId, nodeId: params.nodeId, by: me });
 				if (taskStatusChange.terminal) await traceTask(tp, "task.close", { taskId, status: task.status, nodeId: params.nodeId, by: me });
-				return { task, prevStatus, newStatus, taskStatus: task.status };
+				// PM auto-notify (engine behavior): when a node transitions INTO a closure-ish status
+				// (done|failed|blocked) the PM no longer has to poll — enqueue a concise mailbox report to the
+				// mailbox-only orchestrator. On task-terminal (done|failed|cancelled) emit the stronger
+				// task-close variant. Gated on the transition (not every update) so it isn't spammy;
+				// mailbox-only (no tmux inject); requiresAck=false (informational; orchestrator pump surfaces
+				// it). Best-effort: never fails the update. NB: node-status mutation already happened above;
+				// this only sends a message.
+				const closureIsh = (s: TaskNodeStatus | undefined): boolean => s === "done" || s === "failed" || s === "blocked";
+				const closedNow = !closureIsh(prevStatus) && closureIsh(newStatus);
+				if (closedNow) {
+					ensureOrchestrator(st, ctx.cwd, p);
+					const nextLabel = nextReady.ready.length ? nextReady.ready.join(", ") : "(none)";
+					const outcomeLabel = params.outcome ? ` (outcome=${params.outcome})` : "";
+					const who = closingAssignee ? ` assignee=${closingAssignee}.` : "";
+					const art = params.artifact ? ` artifact=${params.artifact}.` : "";
+					let subject: string, body: string;
+					if (taskStatusChange.terminal) {
+						subject = `task ${task.taskId} closed (${task.status})`;
+						body = `Task ${task.taskId} closed with status ${task.status}. Triggering node ${params.nodeId} moved ${prevStatus} -> ${newStatus}${outcomeLabel} by ${me}.${who}${art} Next ready: ${nextLabel}.`;
+					} else {
+						subject = `task ${task.taskId} node ${params.nodeId} -> ${newStatus}`;
+						body = `Node ${params.nodeId} of ${task.taskId} moved ${prevStatus} -> ${newStatus}${outcomeLabel} by ${me}.${who}${art} Task status=${task.status}. Next ready: ${nextLabel}.${newStatus === "blocked" ? " (blocked is resumable.)" : ""}`;
+					}
+					try {
+						await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject, body, conversationId: `task:${task.taskId}:${params.nodeId}`, requiresAck: false });
+						await traceTask(tp, "task.close.notify", { taskId, nodeId: params.nodeId, status: newStatus, taskStatus: task.status, to: "orchestrator" });
+					} catch (err: any) {
+						await traceTask(tp, "task.close.notify_failed", { taskId, nodeId: params.nodeId, error: String(err?.message || err) });
+					}
+					await writeState(p, st); // persist the notify message record + orchestrator pseudo-agent
+				}
+				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled };
 			});
-			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${params.note ? ` Note: ${params.note}` : ""}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, by: me });
+			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${result.cancelled ? " Task marked cancelled; all assignments released." : ""}${params.note ? ` Note: ${params.note}` : ""}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, taskStatus: result.taskStatus, cancelled: result.cancelled, by: me });
 		},
 	}));
 
@@ -2487,7 +2902,7 @@ export default function (pi: ExtensionAPI) {
 
 
 	pi.registerCommand("swarm", {
-		description: "Manage pi swarm agents: init | list | spawn <id> [role] | send <to> <message> | trace | capture <id>",
+		description: "Manage pi swarm agents: init | list | status (PM rollup: tasks/agents/closure) | spawn <id> [role] | send <to> <message> | trace | capture <id>",
 		handler: async (args, ctx) => {
 			const p = paths(ctx.cwd);
 			await ensureDirs(p);
@@ -2498,9 +2913,18 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Swarm ${st.swarmId} ready: ${relative(ctx.cwd, p.state)}`, "info");
 					return;
 				}
-				if (cmd === "list" || cmd === "status") {
+				if (cmd === "list") {
 					const st = await readState(p, ctx.cwd);
 					ctx.ui.notify(`Swarm ${st.swarmId}: ${Object.keys(st.agents).length} agents, tmux ${st.tmuxSession}`, "info");
+					return;
+				}
+				if (cmd === "status") {
+					// PM-facing rollup: agent counts, per-task status/current/next/unacked, closure line. Stable
+					// prefixed lines so the test lane can grep output instead of capturing panes.
+					const st = await readState(p, ctx.cwd);
+					const { text, details } = await buildSwarmStatusSummary(p, st);
+					await trace(p, "swarm.status", { by: currentAgentId(), details });
+					ctx.ui.notify(text, "info");
 					return;
 				}
 				if (cmd === "spawn") {
