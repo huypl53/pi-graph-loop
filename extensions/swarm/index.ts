@@ -2052,6 +2052,64 @@ async function reconcileLoopNudgesLocked(pi: ExtensionAPI, cwd: string, p: Paths
 	}
 }
 
+// === Graph-advance watcher: detect a READY-but-unassigned node and nudge the orchestrator to assign it. ===
+// This is the mid-graph counterpart to the loop watcher. The loop watcher drives iteration boundaries
+// (plan / reopen / execute); this drives the nodes IN BETWEEN. The observed failure: when a worker
+// completes a node and sends a result message, the message is informational (requiresAck:false), so the
+// orchestrator often DESCRIBES the next step ("implement_change now just needs to...") instead of ACTING
+// (calling swarm_assign_task), and the graph stalls with the next node ready-but-unassigned and nothing
+// prompting the orchestrator to move. This watcher is a safety net: after ~LOOP_RECONCILE_INTERVAL_MS of a
+// node being ready-but-unassigned, it nudges the orchestrator with the exact assign call. Idempotent per
+// (task,node); auto-acked once the node is assigned/terminal. The harness never assigns (the orchestrator
+// is the actor) — it only surfaces the stall and the fix. Assumes the caller holds the state lock.
+async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, nodeId: string, role: string): Promise<void> {
+	const key = `task:${taskId}:node:${nodeId}:nudge:assign`;
+	if (Object.values(st.messages || {}).some((r) => r.to === "orchestrator" && r.idempotencyKey === key)) return; // idempotent: one assign nudge per node
+	try {
+		await deliverMessageLocked(pi, cwd, p, st, {
+			to: "orchestrator",
+			subject: `Node ${nodeId} (${role}) is READY but unassigned — advance task ${taskId} now`,
+			body: `Task ${taskId} has stalled mid-graph: node \`${nodeId}\` (${role}) is READY (its dependencies are satisfied) but it is still unassigned, so no agent is working on it.\n\nAssign it now:\n  swarm_assign_task(taskId="${taskId}", nodeId="${nodeId}")\n\nThen KEEP DRIVING the graph to completion in the same turn — do not stop to summarize. After ${nodeId} completes, call swarm_next_nodes + swarm_assign_task for the next ready node, and repeat until every node is terminal. Never end a turn by merely describing the next step — ACT on it (call the tool).\n\n(Action required; this safety net auto-acknowledges once the node is assigned.)`,
+			requiresAck: true,
+			idempotencyKey: key,
+		});
+	} catch (err: any) {
+		await trace(p, "graph.advance_nudge_failed", { taskId, nodeId, error: String((err as Error)?.message || err) }).catch(() => {});
+	}
+}
+
+// Watcher entry point for mid-graph stalls. For every active (in_progress) task, find actionable nodes
+// (ready but unassigned) and nudge; ack any outstanding assign nudge whose node is no longer stalled.
+// Runs in the same throttled tick as the loop watcher. Read-only on task state (never assigns).
+async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<void> {
+	if (!existsSync(p.tasksDir)) return;
+	let entries: string[] = [];
+	try { entries = await readdir(p.tasksDir); } catch { return; }
+	for (const taskId of entries) {
+		const tp = taskPaths(p, taskId);
+		if (!existsSync(tp.taskJson)) continue;
+		let task: TaskState;
+		try { task = await readTaskState(tp.taskJson); } catch { continue; }
+		// Only drive active graphs. Done/blocked tasks have no ready work to assign.
+		if (task.status !== "in_progress") continue;
+		const cr = computeReadyNodes(task);
+		const actionable = new Set([
+			...cr.ready,
+			...cr.current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
+		]);
+		for (const nodeId of Object.keys(task.nodes)) {
+			const key = `task:${taskId}:node:${nodeId}:nudge:assign`;
+			const node = task.nodes[nodeId];
+			if (actionable.has(nodeId) && !node.assignee && !TERMINAL_NODE_STATUSES.has(node.status)) {
+				await sendGraphAdvanceNudgeLocked(pi, cwd, p, st, taskId, nodeId, node.role || "worker");
+			} else {
+				// Node assigned / terminal / not yet ready -> clear any outstanding assign nudge for it.
+				ackLoopNudgeLocked(st, key, nowMs, "auto-acked: node assigned/left ready");
+			}
+		}
+	}
+}
+
 // Shared path to the project memory policy (a committed doc; agents read it relative to repo root).
 // Declared in the memory-surface region; the identity region references this constant when appending
 // the `## Memory protocol` link to generated agent identity. The dedicated policy file defines the
@@ -2384,6 +2442,9 @@ async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, rea
 		if (!st.lastLoopReconcileAt || nowMs - new Date(st.lastLoopReconcileAt).getTime() > LOOP_RECONCILE_INTERVAL_MS) {
 			st.lastLoopReconcileAt = new Date(nowMs).toISOString();
 			try { await reconcileLoopNudgesLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "loop.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+			// Mid-graph stall safety net: nudge the orchestrator to assign any ready-but-unassigned node in an
+			// in_progress task (the loop watcher drives iteration boundaries; this drives the nodes in between).
+			try { await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		}
 		const sess = orchSession(st, nowMs)!;
 		const surfaced = new Set(sess.ids);
