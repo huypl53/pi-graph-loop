@@ -48,3 +48,4 @@ tmux-snapshots
 .agents/skills-stale/
 Session.vim
 .pi/delegate/
+.worktrees
