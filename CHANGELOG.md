@@ -4,6 +4,18 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### refactor(swarm): split the monolithic index.ts (5310 lines) into a layered module tree
+
+- `extensions/swarm/index.ts` went from **5310 lines / 310KB** (one file: types, helpers, state IO, task-graph, metrics, mailbox, loop, reconcile, 36 tool defs, 8 hooks, command) down to a **21-line entry point** that just wires the modules together and re-exports the 3 unit-tested helpers (`isDeliveryFailureRetryable`, `validateRunAgainstContract`, `computeIterationBest`).
+- New layout under `extensions/swarm/src/`:
+  - `types.ts` (all type/interface defs), `constants.ts` (all module-level consts), `utils.ts` (pure helpers), `state.ts` (paths + state/lock/trace/JSONL/evidence file IO).
+  - `taskgraph.ts` (graph algorithms + status/closure/transitions/render), `metric.ts` (run/memory/iteration validation + ranking), `delivery.ts` (message parsing + retry predicate).
+  - `session.ts` (model/orchestrator detection), `identity.ts` (identity markdown + write), `tmux.ts` (tmux wrappers), `mailbox.ts` (read/deliver/pump helpers), `agents.ts` (spawn/reuse/reload), `loop.ts` (loop state), `reconcile.ts` (mail+task sweep + status summary + pump).
+  - `hooks.ts` (8 event hooks + orchestrator mailbox pump), `command.ts` (`/swarm` slash command).
+  - `tools/{agents,messages,tasks,metrics,loop}.ts` — the 36 tool registrations grouped by domain (9/5/8/12/2).
+- Method: every function/const/type body was extracted **verbatim** via a block-splitter (behavior preserved exactly); cross-module + external imports were generated per module. Largest file is now `reconcile.ts` (526 lines); nothing exceeds ~530.
+- Verified equivalent: all existing checks stay green — `delivery.test.mjs` (7), `memory.test.mjs` (12), `loop-reconcile.validate.mjs`, `pump-retrigger.validate.mjs`, `reconcile-loop.validate.mjs` (5); plus a new smoke test (full 36-tool load via mock pi) and a functional test (12 tool execute paths). Loaded + exercised live in tmux (`pi v0.83.0`, glm-5.1/zai): `[Extensions] swarm`, `swarm:orchestrator` status line, `/swarm status`, and `.pi/swarm/` state written — all from the refactored tree.
+
 ### feat(swarm): graph-advance watcher — harness nudges the orchestrator to assign any ready-but-unassigned node so a graph never stalls mid-flight
 
 - Symptom (seen live in `vai-race-clinic`): `plan_iteration` completes and `implement_change` becomes ready, but the orchestrator only DESCRIBES the next step ("implement_change now just needs to prepare the git toggle…") and ends its turn without calling `swarm_assign_task`. The worker's result message is informational (`requiresAck:false`), so nothing compels the orchestrator to advance, and — unlike the loop boundary states — there was NO harness nudge for a node that is merely ready-but-unassigned mid-graph. The graph stalls until a human intervenes.
