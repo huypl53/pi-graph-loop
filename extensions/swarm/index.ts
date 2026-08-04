@@ -115,7 +115,8 @@ type SwarmState = {
 	// orchestrator-context session (the long-lived PM, a validation `pi -p` run, another PM lane) tracks
 	// the ids IT has surfaced, so one session cannot mark a notification consumed and starve a different
 	// PM session. Separate from `delivered` (the check_mailbox/ack ledger).
-	orchestratorPumpSessions?: Record<string, { ids: string[]; lastAt: string }>;
+	orchestratorPumpSessions?: Record<string, { ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string }>;
+	lastLoopReconcileAt?: string; // throttle for the loop-watcher reconcile (detect "plan recorded but graph still closed")
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;
@@ -195,7 +196,7 @@ type LoopConfig = {
 	maxRounds?: number;
 };
 
-type LoopPhase = "idle" | "collecting_proposals" | "awaiting_plan" | "planned" | "refreshing";
+type LoopPhase = "idle" | "collecting_proposals" | "awaiting_plan" | "planned" | "refreshing" | "executing";
 
 type LoopProposalStatus = "requested" | "received" | "skipped" | "failed";
 
@@ -1728,16 +1729,19 @@ async function kickoffLoopIfEnabled(pi: ExtensionAPI, cwd: string, p: Paths, st:
 		}
 	}
 	// Orchestrator nudge: there is no event hook for "all proposal replies received", so explicitly tell the
-	// orchestrator a round started and how to advance it. Informational, mailbox-only (requiresAck:false).
-	// Sent for loop-enabled tasks only; never sent when task.loop is absent/disabled.
+	// orchestrator a round started and how to advance it. This is ACTION-EXPECTED (requiresAck:true): the
+	// orchestrator must advance the round. The auto-pump defers delivery to idle and re-triggers it (bounded)
+	// until acked; recordLoopPlan auto-acks it (by idempotencyKey) once a plan is recorded, so reminders
+	// stop then. Sent for loop-enabled tasks only; never sent when task.loop is absent/disabled.
 	try {
 		const statusLines = proposals.map((x) => `- ${x.agentId}: ${x.status}${x.messageId ? ` (messageId=${x.messageId})` : ""}${x.error ? ` [${x.error}]` : ""}`).join("\n");
+		const workers = availableProposers(st); // Flow A: tell the orchestrator who it CAN ask, even with an empty pool
 		await deliverMessageLocked(pi, cwd, p, st, {
 			to: "orchestrator",
-			subject: `Task ${task.taskId} iteration loop: round ${round} started — proposals requested`,
-			body: `The V1.5 iteration proposal loop started for task ${task.taskId} after it reached terminal-done.\n\nRound ${round}. Proposal requests sent to ${pool.length} agent(s):\n${statusLines}\n\nTo advance this round before the next iteration:\n1. Wait for proposal replies, then inspect \`swarm_loop_status\` (or \`/swarm loop status ${task.taskId}\`). Status shows \"collecting proposals\" until replies arrive, then \"ready to plan\".\n2. Synthesize the next-iteration plan by calling \`swarm_loop_plan\` with taskId, summary, and optional nextSteps. Recording the plan also best-effort refreshes task.loop.refreshAgents (tmux /new + identity reload) when configured.\n3. This round is not post-processed until a plan is recorded.\n\n(This is an informational nudge; no acknowledgement is required.)`,
+			subject: `Task ${task.taskId} iteration loop: round ${round} started`,
+			body: `The V1.5 iteration proposal loop started for task ${task.taskId} after it reached terminal-done.\n\nRound ${round}. ${pool.length ? `Proposal requests sent to ${pool.length} agent(s):\n${statusLines}\nCheck \`swarm_loop_status\` (or \`/swarm loop status ${task.taskId}\`) — it shows "collecting proposals" until replies arrive, then "ready to plan".` : `No proposal agents are configured (task.loop.proposalAgents is empty).${workers.length ? ` Two options: (1) synthesize the plan directly from carry-forward context, OR (2) if you want diverse ideas first, send proposal requests yourself to the worker agents [${workers.join(", ")}] via \`swarm_send_message\` (requiresResponse:true) or \`swarm_task_message\`, read their replies, then plan. (Loop status does NOT auto-track ad-hoc proposals — you collect them yourself.)` : ` No other worker agents are registered either, so synthesize the plan directly from carry-forward context.`}`}\n\nCarry-forward context to plan from: call \`swarm_iteration_context\` / \`swarm_iteration_status\` for the best run, metrics vs baseline, and active memories for this task; also read the latest distill_memory artifact for what the previous iteration learned.\n\nTo advance the round:\n1. Record the next-iteration plan: \`swarm_loop_plan(taskId="${task.taskId}", summary=..., nextSteps=...)\` -> writes artifacts/next-plan.md${cfg.refreshAgents && cfg.refreshAgents.length ? " and best-effort refreshes refreshAgents" : ""}.\n2. REOPEN the graph so round ${round} executes: reset each iteration node to pending with \`swarm_update_task(taskId="${task.taskId}", nodeId=..., status="pending", force=true)\` (e.g. plan_iteration, implement_change, run_uat, distill_memory, finalize_iteration). The task derives back to in_progress and agents run the iteration; when it closes terminal-done again the loop auto-kicks off round ${round + 1}.\n\n(Action required. This nudge is auto-acknowledged once a plan is recorded; if the graph is still \`done\` after the plan, a separate bounded reminder asks you to reopen it.)`,
 			conversationId,
-			requiresAck: false,
+			requiresAck: true,
 			idempotencyKey: `loop:${task.taskId}:round:${round}:nudge:orchestrator`,
 		});
 	} catch (err: any) {
@@ -1834,7 +1838,7 @@ async function loopStatusSnapshot(p: Paths, cwd: string, taskId: string): Promis
 	const round = loop.rounds[loop.rounds.length - 1];
 	const proposals = round ? await collectLoopProposalStatus(p, st, round) : [];
 	const pending = proposals.filter((x) => x.status === "requested").length;
-	const proposalState: string = loop.phase === "planned" ? "planned" : (pending > 0 ? "collecting_proposals" : "ready_to_plan");
+	const proposalState: string = loop.phase === "planned" ? "planned" : loop.phase === "executing" ? "executing" : (pending > 0 ? "collecting_proposals" : "ready_to_plan");
 	return {
 		enabled: true, started: true, taskId, proposalState, config: loop.config, loop, round, proposals,
 		paths: {
@@ -1877,6 +1881,21 @@ async function recordLoopPlan(pi: ExtensionAPI, cwd: string, p: Paths, taskId: s
 	await writeProposalsArtifact(tp, round, proposals);
 	await appendLoopHistory(p, taskId, { type: "plan_recorded", round: round.round, summary: opts.summary, artifact: artifactRel, createdBy: me });
 	await trace(p, "loop.plan", { taskId, round: round.round, artifact: artifactRel, proposals: proposals.length, by: me });
+	// Auto-ack the round's orchestrator nudge (requiresAck:true): recording a plan IS the response, so stop
+	// the bounded re-trigger reminders. Best-effort and lock-safe: no-op if the nudge was never sent / already
+	// acked. Looked up by idempotencyKey (from+to+key) to avoid any message-id coupling.
+	await withLock(p, async () => {
+		const s = await readState(p, cwd);
+		const nudgeKey = `loop:${taskId}:round:${round.round}:nudge:orchestrator`;
+		const rec = Object.values(s.messages || {}).find((r) => r.idempotencyKey === nudgeKey && r.to === "orchestrator");
+		if (rec && rec.requiresAck && !rec.ackedAt) {
+			const at = now();
+			s.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: me, status: "done", note: "auto-acked: loop plan recorded", at } };
+			s.delivered["orchestrator"] = Array.from(new Set([...(s.delivered["orchestrator"] || []), rec.id]));
+			await writeState(p, s);
+			await trace(p, "message.ack", { id: rec.id, agentId: "orchestrator", status: "done", note: "auto-acked: loop plan recorded" });
+		}
+	});
 	const wantRefresh = opts.refresh !== undefined ? opts.refresh : Boolean(cfg.refreshAgents && cfg.refreshAgents.length);
 	const refreshResults: LoopRefreshResult[] = [];
 	if (wantRefresh && cfg.refreshAgents && cfg.refreshAgents.length) {
@@ -1896,7 +1915,141 @@ async function recordLoopPlan(pi: ExtensionAPI, cwd: string, p: Paths, taskId: s
 		await writeLoopState(p, loop);
 		await appendLoopHistory(p, taskId, { type: "refresh_done", round: round.round, refreshResults });
 	}
+	// Harness-as-watcher: the plan is now recorded but the task graph is still `done` (recordLoopPlan never
+	// reopens nodes). Nudge the orchestrator to reopen immediately, instead of waiting up to the throttled
+	// pump reconcile. Idempotent per round (the pump reconcile will re-send/ack as needed).
+	await withLock(p, async () => {
+		const s = await readState(p, cwd);
+		await sendLoopReopenNudgeLocked(pi, cwd, p, s, taskId, round.round, artifactRel);
+		await writeState(p, s);
+	});
 	return { artifact: artifactRel, phase: loop.phase, round: round.round, refreshResults, loopStateFile: relative(cwd, loopStateFile(p, taskId)), historyFile: relative(cwd, loopHistoryFile(p, taskId)) };
+}
+
+// === Loop watcher: detect states that need an orchestrator ACTION and nudge it. ===
+// Per the loop's design the harness is a state-checker + nudger; the orchestrator (an agent) performs every
+// state change (plan, reopen graph, execute). The key gap this closes: after swarm_loop_plan, loop.phase
+// becomes "planned" but recordLoopPlan does NOT reopen the task graph — so iteration N+1 never executes
+// until the orchestrator resets the nodes. We detect "plan recorded but task still done" and nudge the
+// orchestrator to reopen (idempotent per round; auto-acked once the task leaves `done`). Both helpers
+// assume the caller holds the state lock (they mutate st in place and append to the mailbox file).
+
+async function sendLoopReopenNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, round: number, planArtifact: string): Promise<void> {
+	const key = `loop:${taskId}:round:${round}:nudge:reopen`;
+	if (Object.values(st.messages || {}).some((r) => r.to === "orchestrator" && r.idempotencyKey === key)) return; // idempotent: one reopen nudge per round
+	let iterNodes = "the iteration nodes";
+	try { iterNodes = Object.keys((await readTaskState(taskPaths(p, taskId).taskJson)).nodes || {}).join(", ") || iterNodes; } catch {}
+	try {
+		await deliverMessageLocked(pi, cwd, p, st, {
+			to: "orchestrator",
+			subject: `Task ${taskId} iteration loop: plan recorded but graph still closed — reopen to run round ${round}`,
+			body: `A next-iteration plan for ${taskId} (round ${round}) was recorded at \`${planArtifact}\`, but the task is still \`done\` — round ${round} will not execute until you REOPEN the graph.\n\nReopen by resetting each iteration node to pending:\n  swarm_update_task(taskId="${taskId}", nodeId=<node>, status="pending", force=true)\nfor: ${iterNodes}.\nThe task derives back to in_progress and agents run round ${round}; when it closes terminal-done again the loop auto-kicks off round ${round + 1}.\n\n(Action required. Auto-acknowledged once the task leaves \`done\`.)`,
+			requiresAck: true,
+			idempotencyKey: key,
+		});
+	} catch (err: any) {
+		await trace(p, "loop.reopen_nudge_failed", { taskId, round, error: String((err as Error)?.message || err) }).catch(() => {});
+	}
+}
+
+// Ack a loop nudge (by idempotencyKey) if it exists, requires ack, and hasn't been acked yet. Helper for
+// reconcileLoopNudgesLocked so auto-ack logic (on plan-recorded / task-left-done) stays in one place.
+function ackLoopNudgeLocked(st: SwarmState, key: string, nowMs: number, note: string): void {
+	const rec = Object.values(st.messages || {}).find((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+	if (rec && rec.requiresAck && !rec.ackedAt) {
+		const at = new Date(nowMs).toISOString();
+		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "orchestrator", status: "done", note, at } };
+		st.delivered["orchestrator"] = Array.from(new Set([...(st.delivered["orchestrator"] || []), rec.id]));
+	}
+}
+
+// Registered swarm agents that could propose a next-iteration change (every agent except the
+// orchestrator). Used by Flow-A nudges so an EMPTY proposalAgents pool still tells the orchestrator WHO
+// it can ask for ideas, instead of silently skipping the proposal stage. The harness never auto-fans-out:
+// it only surfaces the option; the orchestrator (an agent) decides whether to solicit proposals.
+function availableProposers(st: SwarmState): string[] {
+	return Object.values(st.agents || {}).filter((a) => a.id !== "orchestrator").map((a) => a.id).sort();
+}
+
+// Watcher cell #2: "ready to plan" — the round is awaiting a plan AND there is nothing left to wait for
+// (empty proposalAgents pool, or all requested proposals replied). This is the exact dead-end an empty
+// proposalAgents pool hits: kickoff sets phase=awaiting_plan, and without this nudge the orchestrator may
+// sit on a stale kickoff nudge forever. Idempotent per round; auto-acked once a plan is recorded.
+async function sendLoopPlanNowNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, round: number, emptyPool: boolean, workers: string[]): Promise<void> {
+	const key = `loop:${taskId}:round:${round}:nudge:plan-now`;
+	if (Object.values(st.messages || {}).some((r) => r.to === "orchestrator" && r.idempotencyKey === key)) return; // idempotent: one plan-now nudge per round
+	try {
+		await deliverMessageLocked(pi, cwd, p, st, {
+			to: "orchestrator",
+			subject: `Task ${taskId} iteration loop: round ${round} ready to plan — synthesize the next plan`,
+			body: `Task ${taskId} iteration loop round ${round} is READY TO PLAN — ${emptyPool ? "no proposal agents are configured (task.loop.proposalAgents is empty)" : "all requested proposal agents have replied"}.${emptyPool && workers.length ? ` Two options: (1) synthesize the plan directly, OR (2) if you want diverse ideas first, send proposal requests yourself to [${workers.join(", ")}] (\`swarm_send_message\` requiresResponse:true / \`swarm_task_message\`), read their replies, then plan. Loop status does NOT auto-track ad-hoc proposals.` : ""} Synthesize the next-iteration plan now.\n\n1. Get carry-forward context: \`swarm_iteration_context\` / \`swarm_iteration_status\` (best run, metrics vs baseline, active memories) + the latest distill_memory artifact.\n2. Record the plan: \`swarm_loop_plan(taskId="${taskId}", summary=..., nextSteps=...)\` -> writes artifacts/next-plan.md. (A separate reminder then asks you to reopen the graph so the round executes.)\n\n(Action required. Auto-acknowledged once a plan is recorded.)`,
+			requiresAck: true,
+			idempotencyKey: key,
+		});
+	} catch (err: any) {
+		await trace(p, "loop.plan_now_nudge_failed", { taskId, round, error: String((err as Error)?.message || err) }).catch(() => {});
+	}
+}
+
+// Watcher entry point: called from the orchestrator pump (throttled) and from recordLoopPlan (immediate).
+// Never mutates task/loop state — only sends/acks orchestrator nudges. Three cells:
+//   (1) phase=planned & task done -> nudge to REOPEN the graph (the plan exists but the graph is closed).
+//   (2) not yet planned & no pending proposals (empty pool OR all replied) -> nudge to PLAN NOW.
+//   (3) task left `done` (iteration executing) -> auto-ack that round's reopen + plan-now nudges.
+async function reconcileLoopNudgesLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<void> {
+	if (!existsSync(p.tasksDir)) return;
+	let entries: string[] = [];
+	try { entries = await readdir(p.tasksDir); } catch { return; }
+	for (const taskId of entries) {
+		const tp = taskPaths(p, taskId);
+		if (!existsSync(tp.taskJson)) continue;
+		let task: TaskState;
+		try { task = await readTaskState(tp.taskJson); } catch { continue; }
+		if (!getLoopConfig(task.loop)) continue;
+		const loop = await readLoopState(p, taskId);
+		if (!loop) continue;
+		const round = loop.currentRound;
+		const reopenKey = `loop:${taskId}:round:${round}:nudge:reopen`;
+		const planNowKey = `loop:${taskId}:round:${round}:nudge:plan-now`;
+		// Task moved off `done` (reopened / in_progress): the iteration is executing. Auto-ack this round's
+		// reopen + plan-now nudges AND the kickoff nudge so reminders stop while the work runs. The kickoff
+		// nudge used to be acked ONLY by recordLoopPlan; if the orchestrator reopened WITHOUT recording a plan
+		// it stayed unacked and the pump re-triggered it (capped 3x), wasting turns on "duplicate" responses.
+		if (task.status !== "done") {
+			ackLoopNudgeLocked(st, reopenKey, nowMs, "auto-acked: task left done (graph reopened)");
+			ackLoopNudgeLocked(st, planNowKey, nowMs, "auto-acked: task left done (graph reopened)");
+			ackLoopNudgeLocked(st, `loop:${taskId}:round:${round}:nudge:orchestrator`, nowMs, "auto-acked: task left done (orchestrator reopened)");
+			// Design B: the graph IS the iteration driver (this task has its own plan_iteration node). When the
+			// orchestrator reopens the graph the round has entered execution — advance loop phase out of the
+			// mid-setup set (awaiting_plan / collecting_proposals) to "executing" so the next close-done kicks
+			// off a fresh round. kickoff's guard skips only mid-setup phases, not executing/planned, so rounds
+			// advance WITHOUT a separate swarm_loop_plan when the graph owns the planning.
+			if (loop.phase === "awaiting_plan" || loop.phase === "collecting_proposals") {
+				const rr = loop.rounds[loop.rounds.length - 1];
+				if (rr) rr.phase = "executing";
+				loop.phase = "executing";
+				loop.updatedAt = new Date(nowMs).toISOString();
+				try { await writeLoopState(p, loop); } catch {}
+				await trace(p, "loop.round_executing", { taskId, round, phase: "executing" }).catch(() => {});
+			}
+			continue;
+		}
+		// task.status === "done" (graph closed)
+		if (loop.phase === "planned") {
+			// Plan recorded but graph still closed -> nudge to reopen. The plan-now ask is satisfied -> ack it.
+			ackLoopNudgeLocked(st, planNowKey, nowMs, "auto-acked: loop plan recorded");
+			const planArtifact = loop.rounds[loop.rounds.length - 1]?.plan?.artifact || "artifacts/next-plan.md";
+			await sendLoopReopenNudgeLocked(pi, cwd, p, st, taskId, round, planArtifact);
+		} else if (loop.phase !== "executing") {
+			// Not yet planned (awaiting_plan / collecting_proposals). If all proposals are in (or the pool is
+			// empty) -> ready_to_plan -> nudge synthesize now. (Skip the executing phase: that round already ran;
+			// kickoff will create the next round on this close-done, briefly racing before it resets the phase.)
+			const roundRec = loop.rounds[loop.rounds.length - 1];
+			const proposals = roundRec ? await collectLoopProposalStatus(p, st, roundRec) : [];
+			const pending = proposals.filter((x) => x.status === "requested").length;
+			if (pending === 0) { const workers = availableProposers(st); await sendLoopPlanNowNudgeLocked(pi, cwd, p, st, taskId, round, proposals.length === 0, workers); }
+		}
+	}
 }
 
 // Shared path to the project memory policy (a committed doc; agents read it relative to repo root).
@@ -2193,7 +2346,16 @@ function formatSwarmMessageContent(msg: SwarmMessage) {
 // orchestrator process surfaces each notification once, regardless of what any other orchestrator
 // process, swarm_check_mailbox, or swarm_ack_message writes to st.delivered.orchestrator (which the
 // pump never reads). PI_SESSION_ID is still recorded as `sid` in the pump trace for attribution.
-function orchSession(st: SwarmState, nowMs: number): { ids: string[]; lastAt: string } | null {
+function capMap<T>(map: Record<string, T>, cap: number): Record<string, T> {
+	const keys = Object.keys(map);
+	if (keys.length <= cap) return map;
+	const keep = new Set(keys.slice(keys.length - cap));
+	const out: Record<string, T> = {};
+	for (const k of keys) if (keep.has(k)) out[k] = map[k];
+	return out;
+}
+
+function orchSession(st: SwarmState, nowMs: number): { ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string } | null {
 	if (currentAgentId() !== "orchestrator") return null;
 	st.orchestratorPumpSessions ||= {};
 	const key = String(process.pid);
@@ -2203,40 +2365,97 @@ function orchSession(st: SwarmState, nowMs: number): { ids: string[]; lastAt: st
 
 async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reason: string) {
 	if (currentAgentId() !== "orchestrator") return { delivered: 0, ids: [] as string[] };
-	const pending = await withLock(p, async () => {
+	// Read idle once, up front. Non-TUI modes have no live agent loop to trigger, so they are treated as
+	// "busy" — the file-IO surfacing decision still runs (for trace visibility) but no ctx-bound call is made.
+	const idleAtStart = ctx.mode === "tui" ? ctx.isIdle() : false;
+	const result = await withLock(p, async () => {
 		const st = await readState(p, ctx.cwd);
 		ensureOrchestrator(st, ctx.cwd, p);
 		const nowMs = Date.now();
-		// Session-safe + read-safe surfacing: surface messages NOT yet surfaced to THIS orchestrator process
-		// (pid) and not already acked. We deliberately do NOT consult the shared st.delivered.orchestrator
-		// ledger here — that ledger is written by swarm_check_mailbox(markDelivered), swarm_ack_message, and
-		// tmux injection paths, none of which should be able to pre-empt a pump surface. Keying on the
-		// per-pid set (not PI_SESSION_ID, which child `pi -p` validation runs inherit from the parent) is
-		// what makes a validation run or a second orchestrator lane unable to starve this PM process. Scan
-		// only the recent window to bound work + re-surface blast radius on a fresh process; skip acked
-		// messages (ackedAt = "recipient processed it", correct, not a surface cursor).
-		const sess = orchSession(st, nowMs)!;
-		const surfaced = new Set(sess.ids);
-		const messages = (await readMailbox(p, "orchestrator"))
-			.slice(-PUMP_SCAN_WINDOW)
-			.filter((m) => !surfaced.has(m.id) && !(st.messages[m.id]?.ackedAt));
 		// Prune dead sessions (not pumped within TTL) to bound growth from transient validation pids.
 		for (const [k, v] of Object.entries(st.orchestratorPumpSessions!)) {
 			if (k !== String(process.pid) && nowMs - new Date(v.lastAt).getTime() > PUMP_SESSION_TTL_MS) delete st.orchestratorPumpSessions![k];
 		}
-		if (!messages.length) {
-			sess.lastAt = new Date(nowMs).toISOString(); // keep this session alive (not pruned)
-			await writeState(p, st);
-			return [] as SwarmMessage[];
+		// Harness-as-watcher: throttled loop reconcile — detect "plan recorded but task graph still closed"
+		// (and auto-ack once reopened). Runs every tick but scans task.json files at most every
+		// LOOP_RECONCILE_INTERVAL_MS. The harness never changes task/loop state; it only nudges the
+		// orchestrator (an agent) to act. Placed before the mailbox read so freshly-created nudges surface
+		// in the same tick.
+		if (!st.lastLoopReconcileAt || nowMs - new Date(st.lastLoopReconcileAt).getTime() > LOOP_RECONCILE_INTERVAL_MS) {
+			st.lastLoopReconcileAt = new Date(nowMs).toISOString();
+			try { await reconcileLoopNudgesLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "loop.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		}
-		const toSurface = messages.slice(0, 10);
-		const nextIds = [...surfaced, ...toSurface.map((m) => m.id)];
+		const sess = orchSession(st, nowMs)!;
+		const surfaced = new Set(sess.ids);
+		const triggeredAt = { ...(sess.triggeredAt ?? {}) };
+		const retriggerCount = { ...(sess.retriggerCount ?? {}) };
+		const keepalive = () => { sess.lastAt = new Date(nowMs).toISOString(); };
+		// Session-safe surfacing keying is unchanged (per-pid, not PI_SESSION_ID, so a validation run or a
+		// second orchestrator lane cannot starve this PM process). Recent window bounds work; acked messages
+		// (ackedAt = "recipient processed it") are skipped. We no longer pre-filter surfaced here: surfaced
+		// vs triggered vs re-trigger is decided below, because surfacing must be gated on idle.
+		const windowMsgs = (await readMailbox(p, "orchestrator"))
+			.slice(-PUMP_SCAN_WINDOW)
+			.filter((m) => !(st.messages[m.id]?.ackedAt));
+
+		// BUSY: defer entirely. Do NOT surface, do NOT mark surfaced, do NOT deliver a dead followUp. A
+		// followUp delivered while busy carries no triggerTurn, so it lands in context without prompting the
+		// LLM to act; the old code still marked it "surfaced", which made every later idle pump (incl.
+		// agent_settled) skip it forever — the loop-nudge-stuck-at-awaiting_plan bug. Deferring keeps the
+		// message un-marked so the next idle pump (session_start / agent_settled / 5s interval) re-reads it
+		// and delivers it WITH a real triggerTurn. It also stops queuing followUps that can themselves keep
+		// isIdle() false (a secondary cause of the orchestrator never waking).
+		if (!idleAtStart) {
+			keepalive();
+			await writeState(p, st);
+			return { toSurface: [] as SwarmMessage[], retriggered: 0 };
+		}
+
+		// IDLE: we can fire a real turn.
+		// (1) Messages never displayed to this pid (highest priority — fresh work).
+		// (2) Action-expected (requiresAck) messages already surfaced+triggered but still unacked and overdue
+		//     (bounded re-trigger). Informational (requiresAck:false) messages are NOT re-triggered: a single
+		//     triggered delivery already prompted the orchestrator once, which is sufficient.
+		const neverDisplayed = windowMsgs.filter((m) => !surfaced.has(m.id));
+		const overdueRetrigger = windowMsgs.filter((m) => {
+			if (!surfaced.has(m.id)) return false;
+			const rec = st.messages[m.id];
+			if (!rec?.requiresAck || rec.ackedAt) return false;
+			const last = triggeredAt[m.id];
+			if (!last) return false;
+			if (nowMs - new Date(last).getTime() < PUMP_RETRIGGER_DELAY_MS) return false;
+			return (retriggerCount[m.id] ?? 0) < PUMP_RETRIGGER_MAX;
+		});
+		const toSurface = [...neverDisplayed, ...overdueRetrigger].slice(0, 10);
+		if (!toSurface.length) {
+			keepalive();
+			await writeState(p, st);
+			return { toSurface: [] as SwarmMessage[], retriggered: 0 };
+		}
+		// Mark all surfaced now; stamp triggeredAt for every delivered message (the first gets triggerTurn,
+		// the rest ride that turn's wake as followUp — both count as "triggered"). Increment retriggerCount
+		// only for the overdue ones (a genuine re-prompt); first-time triggers stay at 0.
+		const retriggerSet = new Set(overdueRetrigger.map((m) => m.id));
+		for (const m of toSurface) {
+			surfaced.add(m.id);
+			triggeredAt[m.id] = new Date(nowMs).toISOString();
+			if (retriggerSet.has(m.id)) retriggerCount[m.id] = (retriggerCount[m.id] ?? 0) + 1;
+		}
+		const nextIds = [...surfaced];
 		sess.ids = nextIds.length > PUMP_SESSION_ID_CAP ? nextIds.slice(nextIds.length - PUMP_SESSION_ID_CAP) : nextIds;
-		sess.lastAt = new Date(nowMs).toISOString();
+		// Bound the maps the same way as ids (drop oldest beyond the cap) so a long-lived session cannot
+		// grow unbounded.
+		sess.triggeredAt = capMap(triggeredAt, PUMP_SESSION_ID_CAP);
+		sess.retriggerCount = capMap(retriggerCount, PUMP_SESSION_ID_CAP);
+		keepalive();
 		await writeState(p, st);
-		return toSurface;
+		return { toSurface, retriggered: toSurface.filter((m) => retriggerSet.has(m.id)).length };
 	});
-	if (!pending.length) return { delivered: 0, ids: [] as string[] };
+	const pending = result.toSurface;
+	if (!pending.length) {
+		if (ctx.mode === "tui") await trace(p, "mailbox.orchestrator_pump", { reason, count: 0, deferred: !idleAtStart ? 1 : 0, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart });
+		return { delivered: 0, ids: [] as string[] };
+	}
 	// Delivery is TUI-only (session-bound APIs: pi.sendMessage/ctx.isIdle). In print/rpc/json mode,
 	// the captured ctx is invalidated on session teardown and these throw "ctx is stale" errors.
 	// The decision block above (readState/writeState/trace) runs in all modes to record surfacing
@@ -2249,9 +2468,9 @@ async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, rea
 				content: formatSwarmMessageContent(msg),
 				display: true,
 				details: msg,
-			}, i === 0 && ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" });
+			}, i === 0 ? { triggerTurn: true } : { deliverAs: "followUp" });
 		}
-		await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart: ctx.isIdle() });
+		await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), retriggered: result.retriggered, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart });
 	} else {
 		// In non-TUI mode, still trace pump activity (without ctx.isIdle) for visibility.
 		await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, mode: ctx.mode });
@@ -2656,6 +2875,19 @@ const SETTLE_NOTIFY_COOLDOWN_MS = 2 * 60 * 1000;
 const PUMP_SCAN_WINDOW = 50;
 const PUMP_SESSION_ID_CAP = 200;
 const PUMP_SESSION_TTL_MS = 60 * 60 * 1000;
+// Bounded re-trigger of action-expected (requiresAck) orchestrator notifications. A message surfaced +
+// triggered once but still unacked is re-delivered with a fresh triggerTurn after this delay, up to MAX
+// times, so a nudge that landed while the orchestrator was busy (and thus only ever followUp-delivered,
+// or triggered once and then ignored) is not silently lost. Informational (requiresAck:false) messages
+// get exactly one triggered delivery — sufficient, since the orchestrator was already prompted. Caps
+// prevent spam; the per-tick pump + agent_settled hook supply the retry cadence.
+const PUMP_RETRIGGER_DELAY_MS = 60 * 1000;
+const PUMP_RETRIGGER_MAX = 3;
+// Loop-watcher reconcile cadence. The orchestrator pump runs reconcileLoopNudgesLocked at most this often:
+// it scans loop-enabled tasks and nudges the orchestrator when a plan is recorded but the task graph is still
+// closed (the harness never reopens the graph — the orchestrator does). Bounded so a busy pump doesn't
+// re-scan task.json files every tick.
+const LOOP_RECONCILE_INTERVAL_MS = 30 * 1000;
 
 type ReconcileAction = { messageId: string; action: string; reason: string; taskId?: string; nodeId?: string };
 
@@ -4786,7 +5018,7 @@ export default function (pi: ExtensionAPI) {
 				planArtifact: snap.paths.planArtifact,
 			};
 			await trace(p, "loop.status", { taskId: params.taskId, phase: snap.loop.phase, proposalState: snap.proposalState, round: snap.loop.currentRound, proposals: snap.proposals?.length || 0 });
-			const stateLabel = snap.proposalState === "collecting_proposals" ? "collecting proposals" : snap.proposalState === "ready_to_plan" ? "ready to plan — call swarm_loop_plan to synthesize the next plan" : snap.proposalState === "planned" ? "plan recorded" : snap.proposalState || "unknown";
+			const stateLabel = snap.proposalState === "collecting_proposals" ? "collecting proposals" : snap.proposalState === "ready_to_plan" ? "ready to plan — call swarm_loop_plan to synthesize the next plan" : snap.proposalState === "planned" ? "plan recorded" : snap.proposalState === "executing" ? "round executing (graph reopened — let it run)" : snap.proposalState || "unknown";
 			return textResult(`Task ${params.taskId} loop — round ${snap.loop.currentRound}, phase=${snap.loop.phase}, state=${stateLabel}.\n\n${JSON.stringify(summary, null, 2)}`, summary);
 		},
 	}));
