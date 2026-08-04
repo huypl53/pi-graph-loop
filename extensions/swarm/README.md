@@ -8,6 +8,35 @@ Main file:
 extensions/swarm/index.ts
 ```
 
+This is the entry point (a thin wiring file). The implementation lives under
+`extensions/swarm/src/`:
+
+```text
+src/types.ts         type/interface definitions
+src/constants.ts     module-level constants
+src/utils.ts         pure helpers (now, safeId, inferRoleKind, ...)
+src/state.ts         paths + state/lock/trace/JSONL/evidence file IO
+src/taskgraph.ts     graph algorithms, status/closure/transitions, rendering
+src/metric.ts        run/memory/iteration validation + ranking
+src/delivery.ts      message parsing + retry predicate
+src/session.ts       model/orchestrator detection
+src/identity.ts      identity markdown generation + write
+src/tmux.ts          tmux wrappers
+src/mailbox.ts       mailbox read/deliver helpers
+src/agents.ts        spawn/reuse/reload
+src/loop.ts          V1.5 loop state
+src/reconcile.ts     mail+task sweep, status summary, orchestrator pump
+src/hooks.ts         event hooks + orchestrator mailbox pump
+src/command.ts       /swarm slash command
+src/tools/*.ts       the tool registrations, grouped by domain
+                     (agents / messages / tasks / metrics / loop)
+```
+
+`index.ts` re-exports `isDeliveryFailureRetryable`, `validateRunAgainstContract`,
+and `computeIterationBest` (used by the `.test.mjs` regression suites) and calls
+`registerSwarmHooks` + the five `register<Domain>Tools` functions +
+`registerSwarmCommand`.
+
 This is the packaged extension source (see `package.json` → `pi.extensions = ["./extensions"]`). The old `.pi/extensions/swarm/index.ts` dev wrapper was removed; load the extension from `extensions/swarm/index.ts`.
 
 Full documentation:

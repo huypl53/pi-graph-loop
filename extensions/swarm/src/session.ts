@@ -1,0 +1,68 @@
+// === swarm/session.ts — auto-extracted from index.ts (verbatim bodies) ===
+import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync } from "node:fs";
+import { join, dirname, relative, sep } from "node:path";
+import type { SwarmSettings } from "./types.ts";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, EXT, FAST_MODEL, FAST_PROVIDER, SWARM_GUEST_ID } from "./constants.ts";
+import { ensureOrchestrator } from "./identity.ts";
+
+// Explicit opt-in for the orchestrator/PM identity. Truthy PI_SWARM_IS_ORCHESTRATOR (1/true/yes)
+// asserts "this session IS the human-driven orchestrator". A bare `pi` session opened in the project
+// must NOT implicitly become the orchestrator: that would let it run the orchestrator mailbox pump
+// (surfacing PM traffic to an unintended TUI), call ensureOrchestrator (refreshing the orchestrator
+// pseudo-agent heartbeat and masking a dead/stalled PM), and default mailbox reads/sends to the
+// orchestrator. The PM opts in explicitly; an anonymous session resolves to SWARM_GUEST_ID (inert).
+export function isOrchestratorSession() {
+	const v = process.env.PI_SWARM_IS_ORCHESTRATOR;
+	return Boolean(v) && !/^(0|false|no|)$/i.test(v.trim());
+}
+
+export function currentAgentId() {
+	// Explicit agent id always wins (spawned agents set PI_SWARM_AGENT_ID=<id>). Setting it to
+	// "orchestrator" is an affirmative orchestrator claim, not a silent default.
+	if (process.env.PI_SWARM_AGENT_ID) return process.env.PI_SWARM_AGENT_ID;
+	// Explicit orchestrator opt-in (the human PM sets PI_SWARM_IS_ORCHESTRATOR=1).
+	if (isOrchestratorSession()) return "orchestrator";
+	// No identity and no explicit orchestrator claim: anonymous/inert swarm session.
+	return SWARM_GUEST_ID;
+}
+
+export function readSwarmSettings(cwd = process.cwd()): SwarmSettings {
+	const file = join(cwd, CONFIG_DIR_NAME, "settings.json");
+	if (!existsSync(file)) return {};
+	try {
+		const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, any>;
+		const fromExtensions = raw?.extensions?.[EXT];
+		const fromTopLevel = raw?.swarm;
+		const cfg = (fromExtensions && typeof fromExtensions === "object" ? fromExtensions : undefined) ||
+			(fromTopLevel && typeof fromTopLevel === "object" ? fromTopLevel : undefined);
+		if (!cfg || typeof cfg !== "object") return {};
+		return {
+			defaultModel: typeof cfg.defaultModel === "string" && cfg.defaultModel.trim() ? cfg.defaultModel.trim() : undefined,
+			defaultProvider: typeof cfg.defaultProvider === "string" && cfg.defaultProvider.trim() ? cfg.defaultProvider.trim() : undefined,
+		};
+	} catch {
+		return {};
+	}
+}
+
+export function currentModel() {
+	const settings = readSwarmSettings();
+	return settings.defaultModel || process.env.PI_SWARM_DEFAULT_MODEL || DEFAULT_MODEL;
+}
+
+export function providerForModel(model: string) {
+	if (model === FAST_MODEL) return FAST_PROVIDER;
+	return DEFAULT_PROVIDER;
+}
+
+export function currentProvider(model = currentModel()) {
+	const settings = readSwarmSettings();
+	return settings.defaultProvider || process.env.PI_SWARM_DEFAULT_PROVIDER || providerForModel(model);
+}
+
+export function childPiArgs() {
+	// Default keeps spawned agents in the same trusted project so they discover project extensions/skills.
+	// Tests or unusual projects can override, e.g. PI_SWARM_CHILD_ARGS="--approve --no-extensions -e extensions/swarm/index.ts".
+	return process.env.PI_SWARM_CHILD_ARGS || "--approve";
+}
