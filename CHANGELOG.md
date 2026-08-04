@@ -4,6 +4,22 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(swarm): pick tasks by `#`, uuid, or substring in graph/task/next/validate; `/swarm graph` now lists tasks with age
+
+- Operators had to know a task-id verbatim to use `/swarm graph <id>`. Now every graph-flow command (`graph`, `task`, `next`, `validate`) accepts a **list index** (`1`, `2`, …), a **full task-id/uuid**, or a **distinctive substring** (e.g. `dashboard`, `iteration-demo`, `uat-clean`) — multiple substring hits return an `Ambiguous …` hint plus the list instead of guessing.
+- `/swarm graph` (and `task`/`next`/`validate`) with **no argument now prints the indexed task list** so you can discover the `#`/id before re-running. `/swarm tasks` was rebuilt on the same renderer.
+- The list is **sorted deterministically** (createdAt asc, task-id tiebreak) so a number you just saw maps to the same task on the next call, and now shows **age** (`17h`, `2d`, …) and an **updated** timestamp per task, plus node completion and `current → next`.
+- Shared helpers added: `humanAge`, `listTasksIndexed`, `renderTasksIndexedList`, `resolveTaskArg`. Validated end-to-end in a fresh pi run: `/swarm graph` → `swarm.tasks via:graph-noarg` count=15; `/swarm graph 1` → `task.print` resolved to the oldest task and wrote its graph file; `validate 1`/`next 1` resolve consistently; substring `iteration-demo` resolves uniquely while `dashboard` reports ambiguous — all exit 0 with no crashes.
+
+### feat(swarm): human-facing graph-flow viewing commands (`/swarm tasks|task|next|validate`)
+
+- The agent has rich tools to inspect swarm graph flow (`swarm_task_status`, `swarm_print_graph`, `swarm_next_nodes`, `swarm_validate_graph`), but human operators only had `/swarm graph` and the `/swarm status` rollup. Added four `/swarm` subcommands so a user can see the same graph-flow state from the prompt without asking the model to call a tool:
+  - `/swarm tasks` — lists every task graph with status, node completion count, and current/next nodes (so operators can discover task-ids before running the per-task commands).
+  - `/swarm task <task-id> [runtime]` — full node/gate table + artifact existence; with `runtime` it also shows the closure roll-up (stored vs derived status, closed/open/stale counts) and agent/message/liveness warnings. Mirrors `swarm_task_status`.
+  - `/swarm next <task-id>` — ready/next nodes plus a suggested reusable agent per ready node. Mirrors `swarm_next_nodes`.
+  - `/swarm validate <task-id> [runtime]` — structural graph validation (ids, edges, reachability, terminals, ambiguous branches, rework cycles, path safety) plus optional runtime warnings. Mirrors `swarm_validate_graph`.
+- All four reuse the existing module-level helpers the agent tools already use, so behavior is identical to the tool path. Validated end-to-end in a fresh pi session: each command fired its `via: "command"` trace (`swarm.tasks` count=15, `task.status.read` runtime=true, `task.next_nodes`, `task.validate` ok=true) and `/swarm task ... runtime` wrote the full graph + closure render to `.pi/swarm/traces/graphs/<id>.task.txt`.
+
 ### fix(swarm): stop the "ack then re-deliver" loop for acked-failed messages
 
 - `swarm_ack_message(status="failed")` set the message record `status = "failed"`, which is the SAME status `swarm_reconcile` uses for retryable DELIVERY failures. So reconcile re-injected messages the recipient had already received and acknowledged as failed -> the agent saw the same message again, acked-failed again, looping until `MAX_ATTEMPTS`/TTL -> `dead_letter`.

@@ -2939,6 +2939,98 @@ async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise<{ text
 	return { text: lines.join("\n"), details: { swarmId: st.swarmId, runningAgents, totalAgents: agents.length, byRuntime, byHealth, tasksScanned: scanned, byTaskStatus, staleNodes, ackMissing, closure: closureLine, taskLines } };
 }
 
+// Human-readable age from an ISO timestamp (e.g. "3d", "5h", "2m", "45s", "now", "?").
+function humanAge(iso?: string | null): string {
+	if (!iso) return "?";
+	const ms = Date.now() - new Date(iso).getTime();
+	if (!Number.isFinite(ms)) return "?";
+	if (ms < 0) return "now";
+	const s = Math.floor(ms / 1000);
+	if (s < 60) return `${s}s`;
+	const m = Math.floor(s / 60);
+	if (m < 60) return `${m}m`;
+	const h = Math.floor(m / 60);
+	if (h < 24) return `${h}h`;
+	return `${Math.floor(h / 24)}d`;
+}
+
+type IndexedTask = {
+	index: number;
+	taskId: string;
+	task: TaskState;
+	tp: TaskPaths;
+	status: string;
+	title: string;
+	createdAt: string;
+	updatedAt: string;
+	ready: string[];
+	current: string[];
+	done: number;
+	total: number;
+};
+
+// Deterministic, indexed task list shared by `/swarm tasks` and the no-arg / number forms of
+// `/swarm graph|task|next|validate`. Sort is stable (createdAt asc, taskId tiebreak) so a number
+// the operator just saw in the list resolves to the SAME task on the next call. Bounded by
+// MAX_STATUS_TASKS so a huge task dir can't stall the command.
+async function listTasksIndexed(p: Paths): Promise<IndexedTask[]> {
+	if (!existsSync(p.tasksDir)) return [];
+	let entries: string[] = [];
+	try { entries = await readdir(p.tasksDir); } catch { return []; }
+	const out: IndexedTask[] = [];
+	for (const entry of entries) {
+		if (out.length >= MAX_STATUS_TASKS) break;
+		const tp = taskPaths(p, entry);
+		if (!existsSync(tp.taskJson)) continue;
+		let task: TaskState;
+		try { task = await readTaskState(tp.taskJson); } catch { continue; }
+		const { ready, current } = computeReadyNodes(task);
+		const total = Object.keys(task.nodes).length;
+		const done = Object.values(task.nodes).filter((n) => n.status === "done").length;
+		out.push({ index: 0, taskId: task.taskId, task, tp, status: task.status, title: task.title, createdAt: task.createdAt, updatedAt: task.updatedAt, ready, current, done, total });
+	}
+	out.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.taskId < b.taskId ? -1 : 1));
+	out.forEach((t, i) => (t.index = i + 1));
+	return out;
+}
+
+function renderTasksIndexedList(list: IndexedTask[]): string {
+	if (!list.length) return "No tasks found. Create one with swarm_create_task (or have the orchestrator plan one).";
+	const lines: string[] = [`Tasks (${list.length}) — pick by # or task-id:  /swarm graph|task|next|validate <#|task-id>`];
+	lines.push("  #  task-id                                 status       age   updated          nodes    current → next");
+	for (const t of list) {
+		const cur = t.current.join(",") || "-";
+		const nxt = t.ready.join(",") || "-";
+		const updated = t.updatedAt ? t.updatedAt.slice(5, 16).replace("T", " ") : "?          ";
+		lines.push(`  ${String(t.index).padStart(2)}  ${t.taskId.padEnd(40)} ${t.status.padEnd(12)} ${humanAge(t.updatedAt).padStart(4)}  ${updated}  ${String(t.done)}/${String(t.total).padEnd(3)}    ${cur} → ${nxt}`);
+	}
+	return lines.join("\n");
+}
+
+// Resolve a user-supplied task reference: a bare number = list index; otherwise exact then prefix
+// task-id match (so uuid, full id, or a unique prefix all work). Returns the matched task plus the
+// full list so callers can re-render the list with a hint on miss/ambiguity.
+async function resolveTaskArg(p: Paths, arg?: string): Promise<{ hit?: IndexedTask; list: IndexedTask[]; missReason?: string; ambiguous?: string[] }> {
+	const list = await listTasksIndexed(p);
+	const trim = (arg || "").trim();
+	if (!trim) return { list, missReason: "no task reference given" };
+	if (/^\d+$/.test(trim)) {
+		const idx = parseInt(trim, 10);
+		const hit = list[idx - 1];
+		if (hit) return { hit, list };
+		return { list, missReason: `no task at index ${idx} (have 1..${list.length})` };
+	}
+	const norm = safeId(trim);
+	const exact = list.find((t) => t.taskId === trim || safeId(t.taskId) === norm);
+	if (exact) return { hit: exact, list };
+	// Substring (not just prefix): task-ids share a long "task-swarm-..." stem, so a distinctive
+	// fragment like "dashboard", "iteration-demo", or "uat" should match. Multiple hits -> ambiguous.
+	const sub = list.filter((t) => t.taskId.includes(trim) || safeId(t.taskId).includes(norm));
+	if (sub.length === 1) return { hit: sub[0], list };
+	if (sub.length > 1) return { list, ambiguous: sub.map((t) => t.taskId) };
+	return { list, missReason: `no task matches "${trim}"` };
+}
+
 export default function (pi: ExtensionAPI) {
 	let orchestratorMailboxTimer: NodeJS.Timeout | undefined;
 	let orchestratorMailboxPumpRunning = false;
@@ -4722,7 +4814,7 @@ export default function (pi: ExtensionAPI) {
 	}));
 
 	pi.registerCommand("swarm", {
-		description: "Manage pi swarm agents: init | list | status (PM rollup: tasks/agents/closure) | graph <task-id> [text|mermaid|json] | spawn <id> [role] | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>",
+		description: "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|id> [runtime] | next <#|id> (ready nodes + suggested agent) | validate <#|id> [runtime] | spawn <id> [role] | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>",
 		handler: async (args, ctx) => {
 			const p = paths(ctx.cwd);
 			await ensureDirs(p);
@@ -4748,12 +4840,25 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				if (cmd === "graph") {
-					const taskId = rest.shift();
+					// No arg -> list tasks (indexed, with age) so the operator can pick by # or task-id.
+					// Arg accepts a list index (1,2,3...), a full task-id/uuid, or a unique prefix.
+					const arg = rest.shift();
 					const format = (rest.shift() || "text").toLowerCase();
-					if (!taskId) { ctx.ui.notify("Usage: /swarm graph <task-id> [text|mermaid|json]", "warning"); return; }
 					if (!["text", "mermaid", "json"].includes(format)) { ctx.ui.notify("Graph format must be text, mermaid, or json", "warning"); return; }
-					const tp = taskPaths(p, taskId);
-					const task = await readTaskState(tp.taskJson);
+					if (!arg) {
+						const list = await listTasksIndexed(p);
+						await trace(p, "swarm.tasks", { by: currentAgentId(), count: list.length, via: "graph-noarg" });
+						ctx.ui.notify(`${renderTasksIndexedList(list)}\n\nUsage: /swarm graph <#|task-id> [text|mermaid|json]`, "info");
+						return;
+					}
+					const { hit, list, missReason, ambiguous } = await resolveTaskArg(p, arg);
+					if (!hit) {
+						const hint = ambiguous ? `Ambiguous "${arg}" matches: ${ambiguous.join(", ")}` : (missReason || "task not found");
+						ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
+						return;
+					}
+					const task = hit.task;
+					const tp = hit.tp;
 					const { ready, current } = computeReadyNodes(task);
 					const out = format === "mermaid"
 						? printGraphMermaid(task)
@@ -4763,9 +4868,122 @@ export default function (pi: ExtensionAPI) {
 					const graphsDir = join(p.traces, "graphs");
 					await mkdir(graphsDir, { recursive: true });
 					const ext = format === "mermaid" ? "mmd" : format === "json" ? "json" : "txt";
-					const outFile = join(graphsDir, `${safeId(taskId)}.${ext}`);
+					const outFile = join(graphsDir, `${safeId(task.taskId)}.${ext}`);
 					await writeFile(outFile, `${out}\n`, "utf8");
-					ctx.ui.notify(`Wrote ${format} graph for ${taskId} to ${relative(ctx.cwd, outFile)}`, "info");
+					await traceTask(tp, "task.print", { taskId: task.taskId, format });
+					ctx.ui.notify(`Wrote ${format} graph for #${hit.index} ${task.taskId} to ${relative(ctx.cwd, outFile)}`, "info");
+					return;
+				}
+				if (cmd === "tasks") {
+					// Indexed task list (status, age, node completion, current/next) so the operator can pick by
+					// # or task-id for graph|task|next|validate.
+					const list = await listTasksIndexed(p);
+					await trace(p, "swarm.tasks", { by: currentAgentId(), count: list.length });
+					ctx.ui.notify(renderTasksIndexedList(list), "info");
+					return;
+				}
+				if (cmd === "task") {
+					// Detailed per-task status: node/gate table + artifacts + optional runtime liveness & closure.
+					// Mirrors the swarm_task_status agent tool. Arg = list index | task-id | unique prefix.
+					const arg = rest.shift();
+					if (!arg) {
+						const list = await listTasksIndexed(p);
+						ctx.ui.notify(`${renderTasksIndexedList(list)}\n\nUsage: /swarm task <#|task-id> [runtime]`, "info");
+						return;
+					}
+					const withRuntime = rest.some((t) => t === "runtime" || t === "--runtime" || t === "-r");
+					const { hit, list, missReason, ambiguous } = await resolveTaskArg(p, arg);
+					if (!hit) {
+						const hint = ambiguous ? `Ambiguous "${arg}" matches: ${ambiguous.join(", ")}` : (missReason || "task not found");
+						ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
+						return;
+					}
+					const task = hit.task;
+					const tp = hit.tp;
+					const { ready, current } = computeReadyNodes(task);
+					const artifacts = collectDeclaredArtifacts(task).map((path) => ({ path, exists: existsSync(join(tp.root, path)) }));
+					const blocks: string[] = [printGraphText(task, ready, current, artifacts)];
+					if (withRuntime) {
+						const st = await readState(p, ctx.cwd);
+						const warnings = await runtimeTaskWarnings(pi, st, task);
+						const closure = computeTaskClosure(st, task, tp);
+						blocks.push(`Closure: stored=${closure.storedStatus} derived=${closure.derivedStatus} closed=${closure.closedNodes}/${closure.nodeClosure.length} open=${closure.openNodes} stale=${closure.staleNodes}`);
+						if (closure.openAssignments.length) blocks.push(`  Open: ${closure.openAssignments.map((a) => `${a.nodeId}->${a.assignee}(${a.status})`).join(", ")}`);
+						if (closure.staleAssignments.length) blocks.push(`  Stale: ${closure.staleAssignments.map((a) => `${a.nodeId}->${a.assignee} (${a.reason})`).join(", ")}`);
+						if (closure.blocking.length) blocks.push(`  Blockers: ${closure.blocking.join("; ")}`);
+						if (warnings.length) blocks.push(`Runtime warnings:\n${warnings.map((w) => `  \u26a0 ${w}`).join("\n")}`);
+					}
+					const out = blocks.join("\n\n");
+					const graphsDir = join(p.traces, "graphs");
+					await mkdir(graphsDir, { recursive: true });
+					const outFile = join(graphsDir, `${safeId(task.taskId)}.task.txt`);
+					await writeFile(outFile, `${out}\n`, "utf8");
+					await traceTask(tp, "task.status.read", { taskId: task.taskId, via: "command", runtime: withRuntime });
+					ctx.ui.notify(`${out}\n\n#${hit.index} ${task.taskId} (written to ${relative(ctx.cwd, outFile)})`.slice(0, 4000), "info");
+					return;
+				}
+				if (cmd === "next") {
+					// Ready/next nodes + a suggested reusable agent per ready node. Mirrors swarm_next_nodes.
+					// Arg = list index | task-id | unique prefix.
+					const arg = rest.shift();
+					if (!arg) {
+						const list = await listTasksIndexed(p);
+						ctx.ui.notify(`${renderTasksIndexedList(list)}\n\nUsage: /swarm next <#|task-id>`, "info");
+						return;
+					}
+					const { hit, list, missReason, ambiguous } = await resolveTaskArg(p, arg);
+					if (!hit) {
+						const hint = ambiguous ? `Ambiguous "${arg}" matches: ${ambiguous.join(", ")}` : (missReason || "task not found");
+						ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
+						return;
+					}
+					const task = hit.task;
+					const tp = hit.tp;
+					const { ready, current } = computeReadyNodes(task);
+					const actionable = Array.from(new Set([
+						...ready,
+						...current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
+					]));
+					const st = await readState(p, ctx.cwd);
+					const lines: string[] = [`Task #${hit.index} ${task.taskId} (${task.status})`, `Ready: ${actionable.length ? actionable.join(", ") : "(none)"}`, `Current: ${current.length ? current.join(", ") : "(none)"}`];
+					for (const nodeId of actionable) {
+						const node = task.nodes[nodeId];
+						const kind = inferRoleKind(nodeId, node.role);
+						const found = await findReusableAgent(pi, st, { roleKind: kind, requireIdle: false, includeBusy: false });
+						await trace(p, "agent.find", { taskId: task.taskId, nodeId, roleKind: kind, recommended: found.recommended });
+						lines.push(`  ${nodeId} (${node.role}) -> ${found.recommended || "(no reusable agent; spawn needed)"}`);
+					}
+					await traceTask(tp, "task.next_nodes", { taskId: task.taskId, ready: actionable, current, via: "command" });
+					ctx.ui.notify(lines.join("\n"), "info");
+					return;
+				}
+				if (cmd === "validate") {
+					// Structural + optional runtime validation. Mirrors swarm_validate_graph.
+					// Arg = list index | task-id | unique prefix.
+					const arg = rest.shift();
+					if (!arg) {
+						const list = await listTasksIndexed(p);
+						ctx.ui.notify(`${renderTasksIndexedList(list)}\n\nUsage: /swarm validate <#|task-id> [runtime]`, "info");
+						return;
+					}
+					const withRuntime = rest.some((t) => t === "runtime" || t === "--runtime" || t === "-r");
+					const { hit, list, missReason, ambiguous } = await resolveTaskArg(p, arg);
+					if (!hit) {
+						const hint = ambiguous ? `Ambiguous "${arg}" matches: ${ambiguous.join(", ")}` : (missReason || "task not found");
+						ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
+						return;
+					}
+					const task = hit.task;
+					const tp = hit.tp;
+					const { errors, warnings } = validateTaskGraph(task);
+					let runtimeWarnings: string[] = [];
+					if (withRuntime) { const st = await readState(p, ctx.cwd); runtimeWarnings = await runtimeTaskWarnings(pi, st, task); }
+					const ok = errors.length === 0;
+					const lines: string[] = [`Validation #${hit.index} ${task.taskId}: ${ok ? "PASS" : "FAIL"} (${errors.length} errors, ${warnings.length + runtimeWarnings.length} warnings)`];
+					for (const e of errors) lines.push(`  \u2717 ${e}`);
+					for (const w of [...warnings, ...runtimeWarnings]) lines.push(`  \u26a0 ${w}`);
+					await traceTask(tp, "task.validate", { taskId: task.taskId, ok, via: "command", runtime: withRuntime });
+					ctx.ui.notify(lines.join("\n"), ok ? "info" : "warning");
 					return;
 				}
 				if (cmd === "spawn") {
