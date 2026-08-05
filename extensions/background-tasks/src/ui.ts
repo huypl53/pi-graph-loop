@@ -1,12 +1,13 @@
 // background-tasks/ui.ts — live user-facing TUI (design §11).
-// Below-editor widget + footer status line + finish/fail notifications. Every ctx.ui.* call is
-// guarded by the caller (hooks.ts) on ctx.hasUI / ctx.mode === "tui".
+// Below-editor widget + footer status line + finish/fail notifications + AGENT NUDGE on completion.
+// Every ctx.ui.* call is guarded by the caller (hooks.ts) on ctx.hasUI / ctx.mode === "tui".
 import { Container, Text } from "@earendil-works/pi-tui";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { paths, readState } from "./state.ts";
-import { elapsedMmSs, truncateToWidth, visibleWidth } from "./utils.ts";
+import { belongsToSession, currentSessionId, elapsedMmSs, trace, truncateToWidth, visibleWidth } from "./utils.ts";
 import type { BackgroundSettings, BackgroundState, BackgroundTask, BgStatus } from "./types.ts";
 
 const ICON: Record<BgStatus, string> = {
@@ -63,18 +64,46 @@ interface RowSpec {
 	dim: string;
 }
 
-export async function renderUi(ctx: any, settings: BackgroundSettings, cwd: string): Promise<void> {
+function isTerminal(s: BgStatus): boolean {
+	return s === "done" || s === "failed" || s === "killed" || s === "unknown";
+}
+
+// Build the agent-facing nudge body for one or more newly-terminal tasks. Combined into a single
+// message per tick so we only wake the agent once (one triggerTurn) for a batch of completions.
+function formatNudge(tasks: BackgroundTask[]): string {
+	const lines = tasks.map((t) => {
+		const name = t.label || t.taskId;
+		const ec = t.exitCode === null || t.exitCode === undefined ? "?" : String(t.exitCode);
+		return `- "${name}" (${t.taskId}): ${t.status} (exit ${ec})`;
+	});
+	const header =
+		tasks.length === 1
+			? `[background-tasks] Background task finished: ${tasks[0].label || tasks[0].taskId} — ${tasks[0].status} (exit ${tasks[0].exitCode ?? "?"}).`
+			: `[background-tasks] ${tasks.length} background tasks finished:`;
+	const hint =
+		tasks.length === 1
+			? `Inspect output with background_output(taskId="${tasks[0].taskId}") or read ${tasks[0].logOut}. Act on the result if needed.`
+			: `Inspect each with background_output(taskId=...) or read its logOut path. Act on the results if needed.`;
+	return tasks.length === 1 ? [header, "", hint].join("\n") : [header, ...lines, "", hint].join("\n");
+}
+
+export async function renderUi(pi: ExtensionAPI, ctx: any, settings: BackgroundSettings, cwd: string): Promise<void> {
 	const p = paths(cwd);
 	// Lock-free read: state.json is atomic-written (temp+rename), so this always returns a complete snapshot.
 	const st = await readState(p, cwd);
-	const tasks = Object.values(st.tasks).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)); // newest first
-	const running = tasks.filter((t) => t.status === "running" || t.status === "pending");
+	const sid = currentSessionId(ctx);
+	const scope = settings.scopeBySession;
+	// Session-scoped view: only this chat session's tasks are rendered/notified/nudged. Legacy tasks
+	// with no spawnedBySession stay visible everywhere (belongsToSession fallback) so nothing vanishes.
+	const tasks = (scope ? Object.values(st.tasks).filter((t) => belongsToSession(t, sid, true)) : Object.values(st.tasks)).sort(
+		(a, b) => (a.createdAt < b.createdAt ? 1 : -1),
+	); // newest first
 
-	// --- notifications: one notify per running->terminal transition (deduped via persisted lastNotifiedStatus) ---
 	let stChanged = false;
+
+	// --- human toast: one notify per running->terminal transition (this session only; deduped via persisted lastNotifiedStatus) ---
 	for (const t of tasks) {
-		const terminal = t.status === "done" || t.status === "failed" || t.status === "killed" || t.status === "unknown";
-		if (terminal && t.lastNotifiedStatus !== t.status) {
+		if (isTerminal(t.status) && t.lastNotifiedStatus !== t.status) {
 			const name = t.label || t.taskId;
 			if (t.status === "done") ctx.ui.notify(`bg: ${name} finished (exit 0)`, "info");
 			else if (t.status === "failed") ctx.ui.notify(`bg: ${name} FAILED (exit ${t.exitCode ?? "?"})`, "warning");
@@ -84,6 +113,32 @@ export async function renderUi(ctx: any, settings: BackgroundSettings, cwd: stri
 			stChanged = true;
 		}
 	}
+
+	// --- AGENT NUDGE: wake the agent once when its tasks finish (the async counterpart to background_wait).
+	// Mirrors the swarm orchestrator pump: TUI-only (no live agent loop in print/rpc/json), gated on idle
+	// so we never interrupt a streaming turn, deferred (not marked nudged) while busy so the next tick retries.
+	const toNudge = tasks.filter((t) => isTerminal(t.status) && t.agentNudgedStatus !== t.status);
+	if (toNudge.length > 0) {
+		let idle = false;
+		try {
+			idle = ctx.mode === "tui" && ctx.isIdle();
+		} catch {}
+		if (idle) {
+			try {
+				pi.sendUserMessage(formatNudge(toNudge));
+				for (const t of toNudge) t.agentNudgedStatus = t.status;
+				stChanged = true;
+				await trace(p.events, "task.nudge.sent", { ids: toNudge.map((t) => t.taskId), sid }).catch(() => {});
+			} catch (err: any) {
+				const msg = String((err && err.message) || err);
+				await trace(p.events, "task.nudge.send_error", { error: msg, ids: toNudge.map((t) => t.taskId) }).catch(() => {});
+			}
+		} else {
+			// busy (or non-TUI): defer — leave agentNudgedStatus unset so a later idle tick retries.
+			await trace(p.events, "task.nudge.deferred", { count: toNudge.length, idle, mode: ctx.mode }).catch(() => {});
+		}
+	}
+
 	if (stChanged) {
 		// Persist dedup flags best-effort (separate lock; never block the tick on it).
 		try {
@@ -91,15 +146,18 @@ export async function renderUi(ctx: any, settings: BackgroundSettings, cwd: stri
 			await withLock(p, async () => {
 				const cur = await readState(p, cwd);
 				for (const t of tasks) {
-					if (cur.tasks[t.taskId]) cur.tasks[t.taskId].lastNotifiedStatus = t.lastNotifiedStatus;
+					if (!cur.tasks[t.taskId]) continue;
+					if (t.lastNotifiedStatus !== undefined) cur.tasks[t.taskId].lastNotifiedStatus = t.lastNotifiedStatus;
+					if (t.agentNudgedStatus !== undefined) cur.tasks[t.taskId].agentNudgedStatus = t.agentNudgedStatus;
 				}
 				await writeState(p, cur);
 			});
 		} catch {}
 	}
 
-	// --- footer status line ---
-	const summary = summaryLine(st);
+	// --- footer status line (session-scoped counts) ---
+	const scopedState: BackgroundState = { ...st, tasks: Object.fromEntries(tasks.map((t) => [t.taskId, t])) };
+	const summary = summaryLine(scopedState);
 	ctx.ui.setStatus("bg-tasks", summary || undefined);
 
 	// --- below-editor widget ---

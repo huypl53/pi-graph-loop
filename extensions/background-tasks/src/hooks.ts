@@ -37,7 +37,7 @@ export function registerHooks(pi: ExtensionAPI, settings: BackgroundSettings) {
 
 		const tick = async () => {
 			try {
-				await renderUi(ctx, settings, cwd);
+				await renderUi(pi, ctx, settings, cwd);
 			} catch (err: any) {
 				// Stale-ctx after /reload or session replacement: stop the interval cleanly rather than
 				// spamming stderr every second. The next session_start restarts a fresh interval.

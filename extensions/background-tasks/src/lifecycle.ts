@@ -161,7 +161,7 @@ export interface StartInput {
 	env?: Record<string, string>;
 	shell?: boolean; // default true
 	timeoutMs?: number;
-	spawnedBySession?: string;
+	sessionId?: string; // STABLE chat session id (ctx.sessionManager.getSessionId()); scopes visibility + nudges
 }
 
 export async function spawnTask(
@@ -221,7 +221,8 @@ export async function spawnTask(
 			pid: task.pid,
 			label: task.label,
 			timeoutMs: task.timeoutMs,
-			requestedBy: input.spawnedBySession,
+			sessionId: task.spawnedBySession,
+			requestedBy: task.spawnedBySession,
 		});
 
 		// Live exit listener -> finalize via its OWN locked re-read (case 2). Fires only while this
@@ -263,7 +264,7 @@ function buildRecord(
 		startedAt: ts,
 		timeoutMs: input.timeoutMs,
 		spawnedByPid: process.pid,
-		spawnedBySession: input.spawnedBySession,
+		spawnedBySession: input.sessionId,
 		kind: "shell",
 		startedAtBoot: boot.bootId,
 		startedAtEpoch: boot.bootMs ? Date.now() - boot.bootMs : undefined,

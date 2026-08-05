@@ -17,10 +17,11 @@ export interface BackgroundTask {
 	exitCode?: number | null; // null when reaped externally / unknown
 	signal?: string | null; // e.g. "SIGTERM"
 	reapedByExternal?: boolean; // true if finalize came from marker/liveness, not our exit listener
-	lastNotifiedStatus?: BgStatus; // persisted UI dedup (survives /reload)
+	lastNotifiedStatus?: BgStatus; // persisted UI toast dedup (survives /reload)
+	agentNudgedStatus?: BgStatus; // persisted agent-nudge dedup (survives /reload; one nudge per terminal status)
 	timeoutMs?: number; // optional auto-kill timer (from background_start)
 	spawnedByPid: number; // process.pid of the pi that started it (killOnShutdown scoping)
-	spawnedBySession?: string; // PI_SESSION_ID (attribution only)
+	spawnedBySession?: string; // STABLE chat session id (ctx.sessionManager.getSessionId()) — scopes visibility + nudges
 	kind: "shell"; // reserves a seam for a future "pi" mode
 	startedAtEpoch?: number; // child start time, ms since boot (PID-reuse disambiguation)
 	startedAtBoot?: string; // kernel boot time id; mismatch => pid reused after reboot => unknown
@@ -48,6 +49,7 @@ export interface BackgroundSettings {
 	waitPollMs: number;
 	stopGraceMs: number;
 	killOnShutdown: boolean;
+	scopeBySession: boolean; // hide other chat sessions' tasks in list/widget/nudge (default true)
 	ui: {
 		enabled: boolean;
 		refreshMs: number;

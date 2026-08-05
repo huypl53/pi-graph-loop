@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
 	DEFAULT_LOG_MAX_BYTES,
 	DEFAULT_MAX_CONCURRENT,
+	DEFAULT_SCOPE_BY_SESSION,
 	DEFAULT_STOP_GRACE_MS,
 	DEFAULT_UI_MAX_ROWS,
 	DEFAULT_UI_REFRESH_MS,
@@ -37,6 +38,7 @@ type RawSettings = {
 	waitPollMs?: number;
 	stopGraceMs?: number;
 	killOnShutdown?: boolean;
+	scopeBySession?: boolean;
 	ui?: { enabled?: boolean; refreshMs?: number; maxRows?: number };
 };
 
@@ -58,6 +60,7 @@ export function readSettings(): BackgroundSettings {
 
 	const enabled = envBool("PI_BG_TASKS") ?? raw.enabled ?? true;
 	const killOnShutdown = envBool("PI_BG_TASKS_KILL_ON_SHUTDOWN") ?? raw.killOnShutdown ?? false;
+	const scopeBySession = envBool("PI_BG_TASKS_SCOPE_BY_SESSION") ?? raw.scopeBySession ?? DEFAULT_SCOPE_BY_SESSION;
 	const maxConcurrent = envInt("PI_BG_TASKS_MAX") ?? raw.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
 	const logMaxBytes = envInt("PI_BG_TASKS_LOG_MAX_BYTES") ?? raw.logMaxBytes ?? DEFAULT_LOG_MAX_BYTES;
 	const waitMaxMs = envInt("PI_BG_TASKS_WAIT_MAX_MS") ?? raw.waitMaxMs ?? DEFAULT_WAIT_MAX_MS;
@@ -76,6 +79,7 @@ export function readSettings(): BackgroundSettings {
 		waitPollMs,
 		stopGraceMs,
 		killOnShutdown,
+		scopeBySession,
 		ui: { enabled: uiEnabled, refreshMs: uiRefreshMs, maxRows: uiMaxRows },
 	};
 }

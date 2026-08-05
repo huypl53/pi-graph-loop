@@ -7,13 +7,15 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { paths, readState } from "../state.ts";
 import { assertCwdContained, killTask, reconcile, scheduleKillEscalation, spawnTask } from "../lifecycle.ts";
-import { sleep, textResult, trace } from "../utils.ts";
+import { belongsToSession, currentSessionId, sleep, textResult, trace } from "../utils.ts";
 import type { BackgroundSettings, BackgroundTask, BgStatus } from "../types.ts";
 
 const ICON: Record<BgStatus, string> = { pending: "…", running: "⏳", done: "✓", failed: "✗", killed: "◔", unknown: "?" };
 
-function sessionId(): string | undefined {
-	return process.env.PI_SESSION_ID;
+// Session-scoped filter for list views. `sid` is the current chat session id; legacy tasks without a
+// session stay visible so nothing vanishes silently after upgrade.
+function visibleToSession<T extends { spawnedBySession?: string }>(tasks: T[], sid: string | undefined, scope: boolean): T[] {
+	return scope ? tasks.filter((t) => belongsToSession(t, sid, true)) : tasks;
 }
 
 function rowOf(t: BackgroundTask) {
@@ -39,9 +41,9 @@ export function registerTools(pi: ExtensionAPI, settings: BackgroundSettings) {
 			name: "background_start",
 			label: "Background Start",
 			description:
-				"Start a long-running shell command in the background. Returns immediately; the command keeps running (detached) while you continue working. Check it later with background_status / background_output.",
+				"Start a long-running shell command in the background. Returns immediately; the command keeps running (detached) while you continue working. You will be nudged automatically when it finishes, so do NOT block on background_wait. The task is scoped to THIS chat session.",
 			promptGuidelines: [
-				"Use `background_start` to launch a long-running command that keeps running while you continue working; check it later with `background_status`/`background_output`.",
+				"Use `background_start` to launch a long-running command that keeps running while you continue working. It returns immediately with a taskId and log paths — do NOT call `background_wait`; you will be nudged when it finishes. View live output anytime with `background_output` or by reading the returned log path.",
 			],
 			parameters: Type.Object({
 				command: Type.String({ description: "Shell command to run (used when shell:true, default true)." }),
@@ -66,13 +68,14 @@ export function registerTools(pi: ExtensionAPI, settings: BackgroundSettings) {
 						env: params.env as Record<string, string> | undefined,
 						shell: params.shell,
 						timeoutMs: params.timeoutMs,
-						spawnedBySession: sessionId(),
+						sessionId: currentSessionId(ctx),
 					},
 					() => {},
 				);
 				return textResult(
-					`Started background task ${task.taskId} (pid ${task.pid}, status ${task.status}). ` +
-						`stdout: ${task.logOut} | stderr: ${task.logErr}. Check with background_status/background_output.`,
+					`Started background task ${task.taskId} (pid ${task.pid}, status ${task.status}). This returned immediately — the command is detached and keeps running while you continue. Do NOT call background_wait; you will be nudged when it finishes. ` +
+						`stdout: ${task.logOut} | stderr: ${task.logErr}. ` +
+						`Live output: background_output(taskId="${task.taskId}") or read ${task.logOut}. Check any time: background_status.`,
 					{ task: rowOf(task) },
 				);
 			},
@@ -85,17 +88,20 @@ export function registerTools(pi: ExtensionAPI, settings: BackgroundSettings) {
 			name: "background_status",
 			label: "Background Status",
 			description:
-				"Status of one background task (by taskId) or all tasks when taskId is omitted. Optional status filter (running/done/failed/killed/pending/unknown) when listing. Lazily reconciles (reads exit markers, checks liveness) before returning.",
+				"Status of one background task (by taskId) or all tasks VISIBLE TO THIS SESSION when taskId is omitted. Pass allSessions:true to include other chat sessions' tasks. Lazily reconciles (reads exit markers, checks liveness) before returning.",
 			promptGuidelines: [
 				"Use `background_status` to check background tasks: one task by taskId, or all tasks when taskId is omitted (optional status filter).",
 			],
 			parameters: Type.Object({
-				taskId: Type.Optional(Type.String({ description: "A specific task id. If omitted, lists all tasks." })),
+				taskId: Type.Optional(Type.String({ description: "A specific task id. If omitted, lists all tasks visible to THIS session." })),
 				status: Type.Optional(
 					StringEnum(["running", "done", "failed", "killed", "pending", "unknown"] as const, {
 						description: "Filter; only valid when taskId is omitted.",
 					}),
 				),
+				allSessions: Type.Optional(Type.Boolean({
+					description: "Include tasks from OTHER chat sessions too (default: only this session). Use to inspect tasks started elsewhere in the project.",
+				})),
 			}),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				const cwd = ctx.cwd;
@@ -107,10 +113,14 @@ export function registerTools(pi: ExtensionAPI, settings: BackgroundSettings) {
 					if (!t) throw new Error(`background task not found: ${params.taskId}`);
 					return textResult(JSON.stringify({ task: rowOf(t) }, null, 2), { tasks: [rowOf(t)] });
 				}
+				const sid = currentSessionId(ctx);
+				const scope = settings.scopeBySession && !params.allSessions;
 				let tasks = Object.values(st.tasks).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+				tasks = visibleToSession(tasks, sid, scope);
 				if (params.status) tasks = tasks.filter((t) => t.status === params.status);
 				const rows = tasks.map(rowOf);
-				return textResult(JSON.stringify({ count: rows.length, tasks: rows }, null, 2), { tasks: rows });
+				const scopeNote = scope ? `(session ${sid ?? "?"})` : "(all sessions)";
+				return textResult(JSON.stringify({ count: rows.length, scope: scopeNote, tasks: rows }, null, 2), { tasks: rows });
 			},
 		}),
 	);

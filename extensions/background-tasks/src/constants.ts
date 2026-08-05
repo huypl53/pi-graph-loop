@@ -16,6 +16,7 @@ export const DEFAULT_WAIT_POLL_MS = 250;
 export const DEFAULT_STOP_GRACE_MS = 5_000;
 export const DEFAULT_UI_REFRESH_MS = 1_000;
 export const DEFAULT_UI_MAX_ROWS = 8;
+export const DEFAULT_SCOPE_BY_SESSION = true;
 
 // The detached `sh` wrapper. Run as:
 //   spawn("sh", ["-c", WRAPPER, "<sh>", <user command>, <exit-marker abs path>, <timeoutMs|"">], { detached: true, ... })

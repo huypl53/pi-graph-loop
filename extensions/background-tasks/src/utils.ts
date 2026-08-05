@@ -7,6 +7,32 @@ export function now(): string {
 	return new Date().toISOString();
 }
 
+/**
+ * Stable chat-session identity. Reads ctx.sessionManager.getSessionId() (survives /reload because it
+ * comes from the session file header). Falls back to process.env.PI_SESSION_ID (set for bash-tool
+ * children, but NOT for the extension process itself — so the ctx path is authoritative).
+ */
+export function currentSessionId(ctx: any): string | undefined {
+	try {
+		const id = ctx?.sessionManager?.getSessionId?.();
+		if (typeof id === "string" && id) return id;
+	} catch {}
+	const env = process.env.PI_SESSION_ID;
+	return env || undefined;
+}
+
+/**
+ * Whether a task is visible to the current session. When scoping is on, a task belongs to the
+ * current session iff its spawnedBySession matches (or either side is unknown — legacy/anonymous
+ * tasks stay visible everywhere rather than vanishing).
+ */
+export function belongsToSession(task: { spawnedBySession?: string }, sid: string | undefined, scope: boolean): boolean {
+	if (!scope) return true;
+	if (!sid) return true; // cannot resolve current session -> show everything (safe default)
+	if (!task.spawnedBySession) return true; // legacy/anonymous task -> visible everywhere
+	return task.spawnedBySession === sid;
+}
+
 export function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
