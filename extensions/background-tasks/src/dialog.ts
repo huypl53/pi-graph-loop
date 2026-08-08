@@ -24,7 +24,7 @@ function statusColor(s: BgStatus): string {
 }
 
 const MAX_ROWS = 14;
-const FOOTER = "↑↓/jk navigate · enter/o output · s stop · K kill · r refresh · a all · / filter · ? help · esc/q close";
+const FOOTER = "↑↓/jk nav · o output · s stop · K kill · a all · e exited · / filter · r refresh · ? help · esc";
 
 export interface BgDialogOpts {
 	settings: BackgroundSettings;
@@ -42,6 +42,7 @@ export class BgDialog implements Component {
 	private all: BackgroundTask[] = [];
 	private selected = 0;
 	private showAll: boolean;
+	private showExited = false; // default view = LIVE tasks only; press 'e' to reveal finished/killed tasks
 	private filter = "";
 	private filterMode = false;
 	private msg = "";
@@ -52,6 +53,7 @@ export class BgDialog implements Component {
 	private detailId: string | null = null;
 	private detailLines: string[] = [];
 	private detailScroll = 0;
+	private detailFollow = true; // tail the LATEST output; cleared on scroll-up, re-armed when back at the bottom
 	private lastLines: Record<string, string> = {};
 
 	private timer: ReturnType<typeof setInterval> | undefined;
@@ -73,11 +75,21 @@ export class BgDialog implements Component {
 	private get scopeOn(): boolean { return this.opts.settings.scopeBySession && !this.showAll; }
 
 	private visible(): BackgroundTask[] {
-		const sid = this.sid;
-		let v = this.all.filter((t) => belongsToSession(t, sid, this.scopeOn));
+		let v = this.scoped();
+		// Default view hides finished/killed/exited tasks (they linger forever otherwise); press 'e'.
+		if (!this.showExited) v = v.filter((t) => t.status === "running" || t.status === "pending");
 		const f = this.filter.trim().toLowerCase();
 		if (f) v = v.filter((t) => (t.label || t.taskId || t.command).toLowerCase().includes(f) || t.taskId.toLowerCase().includes(f) || t.status.includes(f));
-		return v.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+		return v;
+	}
+
+	// All tasks in scope (session or all-sessions), before the live/exited status filter. Used for the
+	// title counts and the "N exited hidden" hint so the totals always reflect the real scoped set.
+	private scoped(): BackgroundTask[] {
+		const sid = this.sid;
+		return this.all
+			.filter((t) => belongsToSession(t, sid, this.scopeOn))
+			.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 	}
 
 	private flash(m: string) { this.msg = m; this.msgAt = Date.now(); }
@@ -112,7 +124,20 @@ export class BgDialog implements Component {
 		const readLog = async (rel: string) => { const f = join(this.opts.cwd, rel); if (!existsSync(f)) return ""; return readFile(f, "utf8").catch(() => ""); };
 		const text = (await readLog(t.logOut)) + (await readLog(t.logErr));
 		this.detailLines = text.split("\n").filter((l) => !l.startsWith("[bg-task exited"));
-		if (this.detailScroll > this.detailLines.length - 1) this.detailScroll = Math.max(0, this.detailLines.length - 1);
+		// `detailFollow` is the single source of truth for tailing. On (scrolling up pauses it; reaching
+		// the bottom or pressing G re-arms it). When following, pin to the latest; otherwise hold the
+		// user's position and only clamp if the content shrank.
+		if (this.detailFollow) {
+			this.detailScroll = this.detailLines.length;
+		} else if (this.detailScroll > this.detailLines.length - 1) {
+			this.detailScroll = Math.max(0, this.detailLines.length - 1);
+		}
+	}
+
+	// True when the viewport already shows the last line, so newly-streamed output should scroll in.
+	private detailAtBottom(): boolean {
+		const maxStart = Math.max(0, this.detailLines.length - MAX_ROWS);
+		return this.detailLines.length <= MAX_ROWS || this.detailScroll >= maxStart;
 	}
 
 	// ---------- input ----------
@@ -123,15 +148,19 @@ export class BgDialog implements Component {
 
 		if (this.help) { this.help = false; this.tui.requestRender(); return; }
 
-		// Detail (output) view: esc/b/o/q back to list; j/k/d/u scroll.
+		// Detail (output) view: opens at the LATEST line (tail). esc/b/o/q back to list; j/k/d/u scroll;
+		// g/G jump top/bottom. Scrolling up PAUSES auto-follow; reaching the bottom RESUMES it.
 		if (this.detailId) {
 			if (matchesKey(data, Key.escape) || data === "q" || data === "o" || data === "O" || matchesKey(data, Key.enter) || matchesKey(data, Key.backspace)) {
 				this.detailId = null; this.detailLines = []; this.detailScroll = 0; this.tui.requestRender(); return;
 			}
-			if (matchesKey(data, Key.down) || data === "j") { this.detailScroll = Math.min(this.detailLines.length - 1, this.detailScroll + 1); this.tui.requestRender(); return; }
-			if (matchesKey(data, Key.up) || data === "k") { this.detailScroll = Math.max(0, this.detailScroll - 1); this.tui.requestRender(); return; }
-			if (matchesKey(data, Key.pageDown) || data === " ") { this.detailScroll = Math.min(this.detailLines.length - 1, this.detailScroll + 10); this.tui.requestRender(); return; }
-			if (matchesKey(data, Key.pageUp)) { this.detailScroll = Math.max(0, this.detailScroll - 10); this.tui.requestRender(); return; }
+			const len = this.detailLines.length;
+			if (data === "g") { this.detailScroll = 0; this.detailFollow = false; this.tui.requestRender(); return; }
+			if (data === "G") { this.detailScroll = len; this.detailFollow = true; this.tui.requestRender(); return; }
+			if (matchesKey(data, Key.down) || data === "j") { this.detailScroll = Math.min(len, this.detailScroll + 1); if (this.detailAtBottom()) this.detailFollow = true; this.tui.requestRender(); return; }
+			if (matchesKey(data, Key.up) || data === "k") { this.detailScroll = Math.max(0, this.detailScroll - 1); this.detailFollow = false; this.tui.requestRender(); return; }
+			if (matchesKey(data, Key.pageDown) || data === " ") { this.detailScroll = Math.min(len, this.detailScroll + MAX_ROWS); if (this.detailAtBottom()) this.detailFollow = true; this.tui.requestRender(); return; }
+			if (matchesKey(data, Key.pageUp)) { this.detailScroll = Math.max(0, this.detailScroll - MAX_ROWS); this.detailFollow = false; this.tui.requestRender(); return; }
 			return;
 		}
 
@@ -154,6 +183,7 @@ export class BgDialog implements Component {
 		if (data === "K" || data === "x") { void this.actStop(vis[this.selected], "SIGKILL"); return; }
 		if (data === "r") { this.flash("refreshing…"); void this.refresh(); return; }
 		if (data === "a") { this.showAll = !this.showAll; this.selected = 0; this.flash(this.showAll ? "showing all sessions" : "scoped to this session"); void this.refresh(); return; }
+		if (data === "e") { this.showExited = !this.showExited; this.selected = 0; this.flash(this.showExited ? "showing exited tasks" : "live tasks only"); this.tui.requestRender(); return; }
 		if (data === "/") { this.filterMode = true; this.filter = ""; this.tui.requestRender(); return; }
 		if (data === "?") { this.help = true; this.tui.requestRender(); return; }
 		if (data === "g") { this.selected = 0; this.tui.requestRender(); return; }
@@ -162,7 +192,9 @@ export class BgDialog implements Component {
 
 	private openDetail(t?: BackgroundTask) {
 		if (!t) return;
-		this.detailId = t.taskId; this.detailScroll = 0;
+		this.detailId = t.taskId;
+		this.detailScroll = 0;
+		this.detailFollow = true; // open at the LATEST output (tail), not the top
 		void this.loadDetail().then(() => this.tui.requestRender());
 	}
 
@@ -222,9 +254,12 @@ export class BgDialog implements Component {
 			out.push(this.fg("border", "╭─") + this.fg("accent", title) + this.fg("border", "─".repeat(titleGap)) + this.fg("dim", tag) + this.fg("border", "╮"));
 		}
 
-		// header line: scope + filter + transient msg
+		// header line: scope + live/exited tag + filter + transient msg
 		const scopeTxt = this.scopeOn ? `session ${this.shortSid()}` : "all sessions";
 		let header = this.fg("dim", scopeTxt);
+		const hiddenExited = this.scoped().filter((t) => t.status !== "running" && t.status !== "pending").length;
+		if (!this.showExited && hiddenExited > 0) header += this.fg("dim", `  ·  ${hiddenExited} exited hidden (e)`);
+		else if (this.showExited) header += this.fg("dim", "  ·  showing exited (e)");
 		if (this.filterMode || this.filter) header += this.fg("dim", "  ·  /") + this.fg("accent", this.filter) + (this.filterMode ? this.fg("dim", "▏") : "");
 		const age = Date.now() - this.msgAt;
 		if (this.msg && age < 4000) header += this.fg("accent", `  ·  ${this.msg}`);
@@ -232,9 +267,17 @@ export class BgDialog implements Component {
 
 		const vis = this.visible();
 		if (vis.length === 0) {
-			const empty = this.filter
-				? this.fg("muted", `no tasks match "${this.filter}"`)
-				: this.fg("muted", `no background tasks ${this.scopeOn ? "in this session" : ""} — start one with background_start${this.scopeOn ? " (press 'a' for all sessions)" : ""}`);
+			let empty: string;
+			if (this.filter) {
+				empty = this.fg("muted", `no tasks match "${this.filter}"`);
+			} else {
+				const hidden = this.scoped().filter((t) => t.status !== "running" && t.status !== "pending").length;
+				if (hidden > 0) {
+					empty = this.fg("muted", `no live tasks ${this.scopeOn ? "in this session " : ""}— ${hidden} exited hidden (press 'e' to show)`);
+				} else {
+					empty = this.fg("muted", `no background tasks ${this.scopeOn ? "in this session" : ""} — start one with background_start${this.scopeOn ? " (press 'a' for all sessions)" : ""}`);
+				}
+			}
 			out.push(this.row(this.pad(empty, innerW)));
 		} else {
 			const shown = vis.slice(0, MAX_ROWS);
@@ -305,7 +348,7 @@ export class BgDialog implements Component {
 			const slice = this.detailLines.slice(start, start + bodyH);
 			if (slice.length === 0) out.push(this.row(this.pad(this.fg("muted", "(no output yet)"), innerW)));
 			for (const ln of slice) out.push(this.row(this.pad(this.fg("toolOutput", truncateToWidth(ln, innerW)), innerW)));
-			out.push(this.row(this.pad(this.fg("dim", `line ${start + slice.length}/${this.detailLines.length}  ·  j/k scroll  ·  esc back`), innerW)));
+			out.push(this.row(this.pad(this.fg("dim", `line ${start + slice.length}/${this.detailLines.length}  ·  j/k scroll · g/G top/bot · ${this.detailFollow ? "following" : "paused"} · esc back`), innerW)));
 		}
 		out.push(border("╰", "╯"));
 		return out;
@@ -316,11 +359,12 @@ export class BgDialog implements Component {
 		const lines = [
 			["navigate", "↑↓ or j / k"],
 			["top / bottom", "g / G"],
-			["view output", "enter or o"],
+			["view output", "enter or o (opens at latest)"],
 			["stop (SIGTERM)", "s"],
 			["kill (SIGKILL)", "K"],
 			["refresh now", "r"],
 			["toggle all sessions", "a"],
+			["show exited tasks", "e"],
 			["filter", "/  (type; backspace; esc to clear)"],
 			["close dialog", "esc or q"],
 		];
@@ -338,11 +382,11 @@ export class BgDialog implements Component {
 	// ---------- small helpers ----------
 
 	private counts(): string {
-		const vis = this.visible();
-		const r = vis.filter((t) => t.status === "running" || t.status === "pending").length;
-		const d = vis.filter((t) => t.status === "done").length;
-		const f = vis.filter((t) => t.status === "failed").length;
-		const k = vis.filter((t) => t.status === "killed").length;
+		const all = this.scoped();
+		const r = all.filter((t) => t.status === "running" || t.status === "pending").length;
+		const d = all.filter((t) => t.status === "done").length;
+		const f = all.filter((t) => t.status === "failed").length;
+		const k = all.filter((t) => t.status === "killed").length;
 		const parts = [`${r} running`];
 		if (d) parts.push(`${d} done`);
 		if (f) parts.push(`${f} failed`);

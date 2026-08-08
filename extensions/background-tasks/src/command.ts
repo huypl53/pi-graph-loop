@@ -2,12 +2,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readState, paths } from "./state.ts";
 import { belongsToSession, currentSessionId, elapsedMmSs, humanAge, safeId } from "./utils.ts";
-import { killTask, reconcile } from "./lifecycle.ts";
+import { killTask, pruneTerminal, reconcile } from "./lifecycle.ts";
 import { openBgDialog } from "./dialog.ts";
 import type { BackgroundSettings, BackgroundTask, BgStatus } from "./types.ts";
 
 const ICON: Record<BgStatus, string> = { pending: "…", running: "⏳", done: "✓", failed: "✗", killed: "◔", unknown: "?" };
-const FILTERS = ["running", "done", "failed", "killed", "pending", "unknown", "all", "on", "off", "stop", "kill"];
+const FILTERS = ["running", "done", "failed", "killed", "pending", "unknown", "all", "on", "off", "stop", "kill", "prune"];
 
 // Resolve a task by exact id, label (case-insensitive), safeId(label), or id prefix.
 function resolveTask(tasks: BackgroundTask[], target: string): BackgroundTask | undefined {
@@ -92,6 +92,24 @@ export function registerCommand(pi: ExtensionAPI, settings: BackgroundSettings) 
 				return;
 			}
 
+			// /bg prune [all] — EXPLICIT, opt-in reclamation of finished/killed tasks.
+			// Removes terminal tasks (and their log/marker files) from state. Live tasks are untouched.
+			// This is the ONLY path that deletes exited tasks; default views just hide them, never reclaim.
+			if (sub === "prune") {
+				const allSessions = (parts[1] || "").toLowerCase() === "all";
+				const sid = currentSessionId(ctx);
+				await reconcile(cwd, settings);
+				const res = await pruneTerminal(cwd, { allSessions, sid, scopeBySession: settings.scopeBySession });
+				if (res.removed === 0) {
+					ctx.ui.notify(`background-tasks: nothing to prune${allSessions ? " (all sessions)" : ` (session ${sid ?? "?"})`}.`, "info");
+				} else {
+					ctx.ui.notify(
+						`background-tasks: pruned ${res.removed} terminal task(s)${allSessions ? " (all sessions)" : ` (session ${sid ?? "?"})`} — freed ${res.filesRemoved} file(s).`,
+						"info",
+					);
+				}
+				return;
+			}
 			const showAllSessions = sub === "all";
 			const sid = currentSessionId(ctx);
 			await reconcile(cwd, settings);

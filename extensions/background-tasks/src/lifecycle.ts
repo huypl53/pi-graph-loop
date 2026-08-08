@@ -1,14 +1,14 @@
 // background-tasks/lifecycle.ts — spawn / kill / reconcile (design §2, §3, §6).
 import { spawn } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
-import { readFile, mkdir } from "node:fs/promises";
+import { readFile, mkdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { WRAPPER } from "./constants.ts";
 import { ensureDirs, paths, readState, withLock, writeState } from "./state.ts";
-import { genTaskId, now, trace } from "./utils.ts";
+import { belongsToSession, genTaskId, now, trace } from "./utils.ts";
 import type { BackgroundSettings, BackgroundState, BackgroundTask, BgStatus, ExitMarker } from "./types.ts";
 
 // ---------- helpers ----------
@@ -430,4 +430,44 @@ export function scheduleKillEscalation(pgid: number | undefined, graceMs: number
 			if (isAlive(pgid)) process.kill(-pgid, "SIGKILL");
 		} catch {}
 	}, graceMs).unref();
+}
+
+// ---------- prune (explicit, opt-in reclamation of terminal tasks) ----------
+// Removes finished/failed/killed/unknown tasks from state (and best-effort their log + exit-marker
+// files). NEVER called by default paths — only via the explicit `/bg prune` command. Live/pending
+// tasks are always retained. This is the ONLY mechanism that deletes exited tasks; default views
+// merely HIDE them, so nothing is reclaimed unless the user asks. Session-scoped by default; pass
+// allSessions:true to reclaim across every session. Returns counts for the caller to report.
+export async function pruneTerminal(
+	cwd: string,
+	opts: { allSessions?: boolean; sid?: string; scopeBySession?: boolean; deleteLogs?: boolean } = {},
+): Promise<{ removed: number; filesRemoved: number }> {
+	const p = paths(cwd);
+	let removed = 0;
+	let filesRemoved = 0;
+	await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		const scope = opts.scopeBySession !== false;
+		const toRemove: string[] = [];
+		for (const [id, t] of Object.entries(st.tasks)) {
+			const terminal = t.status === "done" || t.status === "failed" || t.status === "killed" || t.status === "unknown";
+			if (!terminal) continue; // never reclaim a live/pending task
+			if (!opts.allSessions && !belongsToSession(t, opts.sid, scope)) continue; // respect session scope
+			toRemove.push(id);
+		}
+		for (const id of toRemove) {
+			const t = st.tasks[id];
+			delete st.tasks[id];
+			removed++;
+			if (opts.deleteLogs !== false) {
+				for (const rel of [t.logOut, t.logErr, t.exitMarker]) {
+					if (!rel) continue;
+					try { await rm(join(cwd, rel), { force: true }); filesRemoved++; } catch {}
+				}
+			}
+		}
+		if (removed > 0) await writeState(p, st);
+		await trace(p.events, "task.prune", { removed, filesRemoved, allSessions: !!opts.allSessions, sid: opts.sid }).catch(() => {});
+	});
+	return { removed, filesRemoved };
 }

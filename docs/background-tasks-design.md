@@ -569,12 +569,18 @@ Two complementary, always-guarded surfaces:
    `status-line.ts`). A glanceable one-line summary that is always present while tasks exist.
 
 Rendering rules:
-- **0 tasks** → clear the widget (`setWidget("bg-tasks", undefined)`) and clear the status
-  (`setStatus("bg-tasks", undefined)`). No empty panel, no wasted screen. *(Deviation from review
-  addendum T3, which suggested a dim "no background tasks" empty state — we clear instead so the
-  feature leaves zero footprint when idle; flag for confirmation.)*
-- **1…N (N ≤ `PI_BG_TASKS_UI_MAX_ROWS`, default 8)** → one row per task.
-- **> N** → render the **newest** N rows, then a footer row `… +k more  (/bg for all)`.
+- **Live-only by default (shipped behavior).** The widget renders only `running`/`pending` tasks;
+  finished/killed/exited tasks are **hidden** (they would linger forever otherwise), **not deleted**.
+  They remain in state for inspection via the `/bg` dialog (which also defaults to live-only — press
+  `e` to reveal exited tasks) and the footer summary, and are reclaimable **explicitly** with
+  `/bg prune` (§11.4). Reclaim is opt-in — never tied to a default flag or this default UI.
+- **0 live tasks** → clear the widget (`setWidget("bg-tasks", undefined)`). The footer status is
+  kept if terminal history exists (e.g. `bg: 2 done`); it clears only when there is nothing to
+  summarise. *(Deviation from review addendum T3, which suggested a dim "no background tasks"
+  empty state — we clear instead so the feature leaves zero footprint when idle; flag for
+  confirmation.)*
+- **1…N live (N ≤ `PI_BG_TASKS_UI_MAX_ROWS`, default 8)** → one row per live task.
+- **> N live** → render the **newest** N live rows, then a footer row `… +k more  (/bg for all)`.
 - Each row: `{icon} {labelOrCmd}  {mm:ss elapsed}  {pid}  {lastCombinedLine}`. Icon map:
   `⏳` running · `✓` done · `✗` failed · `◔` killed · `?` unknown. Label falls back to the command
   string if no `label`. `labelOrCmd` and `lastCombinedLine` are width-truncated with
@@ -667,10 +673,16 @@ possibly-stale captured `ctx`.)
 ### 11.4 `/bg` slash command
 
 `pi.registerCommand("bg", { description, getArgumentCompletions, handler })` (API: `commands.ts`):
-- `/bg` → a scrollable `ctx.ui.select("Background tasks", rows)` of **all** tasks (full columns:
-  id, label, status, elapsed/ended, exitCode, pid). Reuses the `commands.ts` select-list pattern.
-- `/bg running|done|failed|killed` → same list filtered by status (autocomplete via
-  `getArgumentCompletions`).
+- `/bg` → opens the overlay **dialog** (`Shift+Ctrl+B` too). The dialog **defaults to LIVE tasks
+  only**; press `e` to reveal finished/killed/exited tasks, `a` to cross sessions, `/` to text-filter.
+  The title counts always reflect the full scoped set (running/done/failed/killed).
+- `/bg running|done|failed|killed|pending|unknown` → a `ctx.ui.select` list filtered by status
+  (autocomplete via `getArgumentCompletions`) — the explicit way to enumerate exited tasks.
+- `/bg all` → the same list across **every** session (all statuses).
+- `/bg prune [all]` → **explicit, opt-in** reclamation: removes finished/failed/killed/unknown
+  tasks (and best-effort their log + exit-marker files) from state. Live/pending tasks are never
+  pruned. Session-scoped by default; `all` reclaims across sessions. This is the ONLY path that
+  deletes exited tasks — default views merely hide them.
 - `/bg off` → hides the widget for the session (re-enable with `/bg on`).
 
 ### 11.5 Guards (non-negotiable)

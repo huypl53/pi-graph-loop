@@ -4,6 +4,26 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(background-tasks): output detail view opens at the latest line and auto-follows new output (`tail -f` behavior)
+
+- **Symptom:** opening a task's output in the `/bg` dialog always started at the **top** of the captured stdout/stderr, so for a still-running task you immediately had to scroll down (or wait and re-scroll) to see what it just produced.
+- **Fix (`src/dialog.ts` `BgDialog`):** the detail (output) sub-view now opens at the **latest** line and **tails** new output as it streams in.
+  - New `detailFollow` flag (single source of truth) drives it: **on** by default when a task is opened → the viewport is pinned to the newest line and re-reads on the 1 s refresh tick keep it there.
+  - **Scrolling up** (`k`/`↑`/`pageup`) **pauses** auto-follow so you can read history without being yanked down; **reaching the bottom** (via `j`/`↓`/`pagedown`) or pressing **`G`** **resumes** following. `g` jumps to the top.
+  - `loadDetail` pins to `detailLines.length` while following; when paused it holds the user's line and only clamps if the log shrank. (An earlier draft also followed when the viewport merely *showed* the last line — that re-armed follow even after a small scroll-up; dropped in favor of the explicit flag.)
+  - Detail footer now reads `line X/Y · j/k scroll · g/G top/bot · following|paused · esc back`; the list-view help notes output "opens at latest".
+- Verified live in an isolated tmux pi session (`pi -ne -e <ext>`, seeded running task with a 45-line log): detail opened at the latest (`output-line-33..45`); appending `46..50` auto-scrolled into view; scrolling up paused (stayed at `22..34` through further appends); `G` jumped to the bottom and re-armed follow (subsequent appends tailed to `54`). `tsc --strict` clean; existing suites green (50 assertions). The dialog is TUI-only (no prior unit tests), so the scroll behavior is covered by this live run rather than a unit test.
+
+### fix(background-tasks): default UI shows LIVE tasks only; killed/exited tasks hidden (not deleted) and reclaimable explicitly via `/bg prune`
+
+- **Symptom:** the background-tasks widget and `/bg` dialog listed **every** task including `done`/`failed`/`killed`/`unknown`, so finished/killed tasks piled up and crowded out (or pushed past `maxRows`) the actually-running work. The persistent below-editor widget showed "all killed tasks, not just the live ones".
+- **Fix — default views surface in-flight work only; exited tasks are hidden, never auto-deleted:**
+  - **Below-editor widget** (`src/ui.ts` `renderUi`) now renders only `running`/`pending` tasks. When no task is live the widget is cleared (so killed/done tasks no longer linger); the footer status line still summarises finished counts (`bg: 2 done, 1 failed`) for awareness. `summaryLine` no longer prints a stale `0 running` once everything is terminal.
+  - **`/bg` overlay dialog** (`src/dialog.ts` `BgDialog`) defaults to **live-only** too. New `e` key toggles "show exited" (reveals finished/killed/unknown); the header shows an `N exited hidden (e)` hint and the title counts always reflect the full scoped set. Added `e` to the footer + help.
+  - **`/bg <status>`** and **`/bg all`** are unchanged — they remain the explicit ways to enumerate exited tasks.
+- **Reclaim is opt-in, by request:** killed/exited tasks are acceptable to reclaim, but NOT via a default flag or the default UI. New **`/bg prune [all]`** is the single explicit path that deletes terminal tasks (and best-effort their log + exit-marker files) from `state.json`. New `pruneTerminal(cwd, opts)` in `src/lifecycle.ts` (locked, traced as `task.prune`): never touches `running`/`pending` tasks, respects session scope by default, and reclaims across sessions with `all`. Added `prune` to `/bg` tab-completion.
+- Verified: `prune.test.mjs` (11: terminal-removed/live-retained/file-deletion, session scope, `all`, no-op, live-never-reclaimed) and `ui-live.test.mjs` (5: widget renders only the live row, terminal-only clears the widget, footer keeps counts, new live re-shows it); existing `lifecycle`/`nudge`/`session` suites stay green (34 assertions); `tsc --strict` clean. Not exercised live in tmux in this pass (TUI-render fix is covered deterministically by the widget-factory assertions; `/bg prune` is a state-only path validated by `prune.test.mjs`).
+
 ### feat(swarm): agent lifecycle manipulation — register / stop / restart / set_role / pause / send_keys / attach / release
 
 - The swarm extension could **spawn** and **inspect** agents but had no surface to *manipulate* a live agent: there was no way to adopt an already-running pi pane into a role, stop/restart an agent, repurpose its role, or park it without killing it. `spawnAgent` was the only writer of agent records and always created a fresh tmux window + pi process; externally-started agents also landed as ghosts with `tmuxTarget: "unknown"` (uninjectable, uncapturable, liveness-blind).

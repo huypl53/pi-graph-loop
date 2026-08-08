@@ -38,10 +38,13 @@ export function summaryLine(st: BackgroundState): string {
 	const done = tasks.filter((t) => t.status === "done").length;
 	const failed = tasks.filter((t) => t.status === "failed").length;
 	if (tasks.length === 0) return "";
-	const parts = [`bg: ${running} running`];
+	// Only show "N running" while any are live; once everything is terminal the footer leads with
+	// the finished counts instead of a stale "0 running" (killed/unknown-only states clear it).
+	const parts: string[] = [];
+	if (running) parts.push(`${running} running`);
 	if (done) parts.push(`${done} done`);
 	if (failed) parts.push(`${failed} failed`);
-	return parts.join(", ");
+	return parts.length ? `bg: ${parts.join(", ")}` : "";
 }
 
 // Best-effort last line of the combined output (cheap tail of the out log).
@@ -155,23 +158,28 @@ export async function renderUi(pi: ExtensionAPI, ctx: any, settings: BackgroundS
 		} catch {}
 	}
 
-	// --- footer status line (session-scoped counts) ---
+	// --- footer status line (session-scoped counts; reflects live + recently-finished) ---
 	const scopedState: BackgroundState = { ...st, tasks: Object.fromEntries(tasks.map((t) => [t.taskId, t])) };
 	const summary = summaryLine(scopedState);
 	ctx.ui.setStatus("bg-tasks", summary || undefined);
 
-	// --- below-editor widget ---
-	if (tasks.length === 0) {
+	// --- below-editor widget: LIVE tasks only ---
+	// The persistent widget surfaces in-flight work. Finished/killed/exited tasks are deliberately
+	// hidden from this DEFAULT view (they would otherwise linger forever); they remain in state for
+	// inspection via the dialog (`/bg`), the footer counts, and are reclaimable explicitly with
+	// `/bg prune`. Reclaim is opt-in — NEVER tied to a default flag or this default UI.
+	const liveTasks = tasks.filter((t) => t.status === "running" || t.status === "pending");
+	if (liveTasks.length === 0) {
 		ctx.ui.setWidget("bg-tasks", undefined);
 		return;
 	}
 
 	const maxRows = settings.ui.maxRows;
-	const shown = tasks.slice(0, maxRows);
+	const shown = liveTasks.slice(0, maxRows);
 	const specs: RowSpec[] = [];
 	for (const t of shown) {
 		const name = t.label || t.command;
-		const tail = t.status === "running" ? await lastLine(cwd, t) : "";
+		const tail = await lastLine(cwd, t); // shown is live-only (running/pending); pending -> empty tail
 		specs.push({ text: name, color: colorFor(t.status), dim: tail });
 	}
 
@@ -193,8 +201,8 @@ export async function renderUi(pi: ExtensionAPI, ctx: any, settings: BackgroundS
 				if (s.dim) line += `  ${fg("dim", truncateToWidth(s.dim, 40))}`;
 				c.addChild(new Text(line, 0, 0));
 			}
-			if (tasks.length > maxRows) {
-				c.addChild(new Text(fg("muted", `… +${tasks.length - maxRows} more  (/bg for all)`), 0, 0));
+			if (liveTasks.length > maxRows) {
+				c.addChild(new Text(fg("muted", `… +${liveTasks.length - maxRows} more  (/bg for all)`), 0, 0));
 			}
 			return c;
 		},
