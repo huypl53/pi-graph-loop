@@ -1,4 +1,4 @@
-// background-tasks/command.ts — `/bg` (live task list + stop/kill) + `/background-tasks` (status) (design §11.4, §6).
+// background-tasks/command.ts — the `/bg` slash command (live task list + stop/kill + prune) (design §11.4, §6).
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readState, paths } from "./state.ts";
 import { belongsToSession, currentSessionId, elapsedMmSs, humanAge, safeId } from "./utils.ts";
@@ -146,29 +146,6 @@ export function registerCommand(pi: ExtensionAPI, settings: BackgroundSettings) 
 					);
 				}
 			}
-		},
-	});
-
-	pi.registerCommand("background-tasks", {
-		description: "Show background-tasks config and counts",
-		handler: async (_args: string, ctx: any) => {
-			if (!ctx.hasUI) return;
-			const cwd = ctx.cwd;
-			const p = paths(cwd);
-			const st = await readState(p, cwd);
-			const tasks = Object.values(st.tasks);
-			const running = tasks.filter((t) => t.status === "running" || t.status === "pending").length;
-			ctx.ui.notify(
-				[
-					`background-tasks: ${settings.enabled ? "enabled" : "disabled"}`,
-					`max concurrent: ${settings.maxConcurrent} | log cap: ${settings.logMaxBytes} bytes`,
-					`kill on shutdown: ${settings.killOnShutdown ? "on" : "off"} | stop grace: ${settings.stopGraceMs}ms`,
-					`scope by session: ${settings.scopeBySession ? "on" : "off"} | ui: ${settings.ui.enabled ? "on" : "off"} (refresh ${settings.ui.refreshMs}ms, max ${settings.ui.maxRows} rows)`,
-					`tasks: ${tasks.length} total, ${running} running`,
-					`config: env PI_BG_TASKS* > .pi/settings.json extensions["background-tasks"] > defaults`,
-				].join("\n"),
-				"info",
-			);
 		},
 	});
 }

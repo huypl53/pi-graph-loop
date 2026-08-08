@@ -400,10 +400,6 @@ promptGuidelines: ["Use `background_stop` to terminate a running background task
 | **config (settings.json + env)** | Same precedence as `compact-resume`: **env > `.pi/settings.json` extensions block > defaults.** Knobs: `PI_BG_TASKS` (enable/disable), `PI_BG_TASKS_KILL_ON_SHUTDOWN`, `PI_BG_TASKS_MAX` (max concurrent, default 8), `PI_BG_TASKS_LOG_MAX_BYTES` (default 5MB), `PI_BG_TASKS_WAIT_MAX_MS` (default 120000), `PI_BG_TASKS_STOP_GRACE_MS` (default 5000), `PI_BG_TASKS_WAIT_POLL_MS` (default 250), **UI:** `PI_BG_TASKS_UI` (default on in TUI), `PI_BG_TASKS_UI_REFRESH_MS` (default 1000), `PI_BG_TASKS_UI_MAX_ROWS` (default 8). Settings shape under `extensions["background-tasks"]` (with optional `.ui = { enabled, refreshMs, maxRows }`). |
 | **zombie detection** | `process.kill(pid, 0)` in reconcile; ESRCH ⇒ dead. Marker file ⇒ finalized with code. |
 
-A `/background-tasks` slash command (mirrors `compact-resume`'s status command) prints config +
-counts for the user. Its handler begins `if (!ctx.hasUI) return;` so print/json sessions are no-ops
-(same guard as compact-resume's `/compact-resume`).
-
 ### Reconcile correctness note
 Reconcile is **idempotent** and only ever moves a task *forward* toward a terminal state; it never
 restarts or kills anything. So running it on every status call is safe.

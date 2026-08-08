@@ -4,6 +4,14 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### chore(background-tasks): remove the redundant `/background-tasks` command; `/bg` is the sole command
+
+- The extension registered **two** slash commands that did different things and invited confusion:
+  `/bg` (the full-featured primary command — overlay dialog, `stop|kill`, `prune`, status filter, `all`, `on|off`) and `/background-tasks` (a thin config + counts dump). Worse, the *long* name did *less* than the short one.
+- **Removed** the `pi.registerCommand("background-tasks", …)` block from `src/command.ts`; **`/bg` is now the sole command** (`Shift+Ctrl+B` shortcut unchanged). This also drops the config dump that lived only in that handler (max concurrent / log cap / kill-on-shutdown / scope / ui settings); those remain settable via env `PI_BG_TASKS*` / `.pi/settings.json`.
+- Safe to remove: only that one registration block referenced it; no tests depend on the command; the design-doc §6 paragraph describing it was removed.
+- Verified: `tsc --strict` clean; all 6 suites green (56 assertions); live tmux `pi -ne -e <ext>` load confirms the extension loads and `/bg` still opens the dialog, while `/background-tasks` is no longer a registered command.
+
 ### feat(background-tasks): tasks die with their spawning pi by default (parent-death watchdog); opt-in `survive:true` for long-lived daemons
 
 - **Symptom:** background tasks were detached/unref'd and **outlived** the pi that started them. That was the old intentional default, but orphaned tasks surviving a pi **crash / kill-9** (where no `session_shutdown` hook can run) was treated as a critical bug — processes keep running with no owner.
