@@ -6,11 +6,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { capturePane, isTmuxRunning, tmux } from "../tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "../session.ts";
-import { ensureDirs, identityPath, paths, readState, trace, withLock, writeState } from "../state.ts";
+import { ensureDirs, identityPath, paths, readState, taskPaths, readTaskState, trace, withLock, writeState } from "../state.ts";
 import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
 import { overridePath, writeEffectiveIdentity } from "../identity.ts";
-import { reloadIdentity, spawnAgent } from "../agents.ts";
+import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
 import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 
 export function registerAgentsTools(pi: ExtensionAPI) {
@@ -47,6 +47,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 					status: agent.status,
 					runtimeStatus: agent.runtimeStatus || "idle",
 					health: agent.health || (tmuxAlive ? "healthy" : "degraded"),
+					paused: Boolean(agent.paused),
 					tmuxAlive,
 					pid: agent.pid,
 					lastHeartbeatAt: agent.lastHeartbeatAt,
@@ -269,6 +270,206 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			if (params.agentId) records = records.filter((r) => r.to === safeId(params.agentId!));
 			records = records.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)).slice(-Math.max(1, Math.min(100, params.limit || 20)));
 			return textResult(JSON.stringify({ count: records.length, records }, null, 2), { records });
+		},
+	}))
+
+	// === Agent lifecycle manipulation tools (register / stop / restart / set_role / pause / send_keys / attach / release) ===
+
+	pi.registerTool(defineTool({
+		name: "swarm_register_agent",
+		label: "Swarm Register",
+		description: "Adopt an EXISTING tmux pane into the swarm under a role WITHOUT spawning a new pi. Upsert by id: re-registering with a different tmuxTarget retargets the agent (fixes the 'tmuxTarget: unknown' ghost-agent case for externally-started agents). The operator asserts the pane is available for the role.",
+		promptGuidelines: ["Use `swarm_register_agent` to bring an already-running pi pane (or shell pane you will start pi in) into the swarm as a role, instead of spawning a fresh agent. Prefer `swarm_spawn_agent` when you need a brand new pi."],
+		parameters: Type.Object({
+			tmuxTarget: Type.String({ description: "Tmux target of the pane to adopt, e.g. session:window.pane, session:window, %paneid, or =session." }),
+			id: Type.Optional(Type.String({ description: "Stable agent id. If the pane already runs pi with PI_SWARM_AGENT_ID set, pass that same id so the record matches." })),
+			role: Type.String({ description: "Role/instructions for the agent." }),
+			roleKind: Type.Optional(Type.String({ description: "Explicit role kind override (orchestrator/planner/reviewer/tester/observer/implementer/worker). Pinned; otherwise derived from id+role, or preserved from an existing pin." })),
+			model: Type.Optional(Type.String({ description: "pi model id. Defaults to the existing agent's model, then session default." })),
+			provider: Type.Optional(Type.String({ description: "pi provider id." })),
+			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt injected into the adopted pane (defaults to a role/identity kickoff)." })),
+			inject: Type.Optional(Type.Boolean({ description: "Inject the identity kickoff into the pane. Defaults to true; set false to register bookkeeping only." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				await trace(p, "agent.register.request", { requestedBy: currentAgentId(), ...params });
+				const r = await registerAgent(pi, ctx.cwd, p, st, params);
+				await writeState(p, st);
+				return r;
+			});
+			const a = result.agent;
+			return textResult(
+				`Registered ${a.id} at ${a.tmuxTarget} (alive=${result.tmuxAlive} piRunning=${result.piRunning} injected=${result.injected}). Identity: ${relative(ctx.cwd, result.identity)}`,
+				{ ...result }
+			);
+		},
+	}))
+
+	pi.registerTool(defineTool({
+		name: "swarm_stop_agent",
+		label: "Swarm Stop",
+		description: "Stop a swarm agent: kill its tmux pane/window and mark it stopped. Refuses if the agent has active tasks unless force=true. Mailbox, identity, and history persist via the stable id.",
+		promptGuidelines: ["Use `swarm_stop_agent` to retire an agent. For a non-destructive park that keeps the pane alive, use `swarm_set_agent_paused` instead."],
+		parameters: Type.Object({
+			agentId: Type.String({ description: "Agent id to stop." }),
+			force: Type.Optional(Type.Boolean({ description: "Stop even if the agent has active tasks. Defaults to false." })),
+			killPane: Type.Optional(Type.Boolean({ description: "Kill the tmux pane/window. Defaults to true; set false to mark stopped without touching tmux." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const r = await stopAgent(pi, p, st, safeId(params.agentId), { force: params.force, killPane: params.killPane });
+				await writeState(p, st);
+				return r;
+			});
+			return textResult(`Stopped ${result.agent.id}: killed=${result.killed} method=${result.method}.`, result);
+		},
+	}))
+
+	pi.registerTool(defineTool({
+		name: "swarm_restart_agent",
+		label: "Swarm Restart",
+		description: "Stop and respawn a fresh pi at the SAME id so mailbox, identity, and history persist. Reuses the recorded role/model/provider. Useful after a crash or to clear context.",
+		promptGuidelines: ["Use `swarm_restart_agent` to reset an agent's pi process without losing its swarm identity/mailbox. This force-stops first (any active tasks are released to the fresh process)."],
+		parameters: Type.Object({
+			agentId: Type.String({ description: "Agent id to restart." }),
+			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt sent into the respawned pi." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			await ensureDirs(p);
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const r = await restartAgent(pi, ctx.cwd, p, st, safeId(params.agentId), { initialPrompt: params.initialPrompt });
+				await writeState(p, st);
+				return r;
+			});
+			return textResult(`Restarted ${result.agent.id} at ${result.agent.tmuxTarget} (kill=${result.kill.method}). Snapshot: ${relative(ctx.cwd, result.snapshot)}`, result);
+		},
+	}))
+
+	pi.registerTool(defineTool({
+		name: "swarm_set_role",
+		label: "Swarm Set Role",
+		description: "Change an agent's role/roleKind/capabilities at runtime and regenerate + inject its identity, WITHOUT respawning. roleKind is re-derived from the new role unless roleKind is explicitly passed (then pinned).",
+		promptGuidelines: ["Use `swarm_set_role` to repurpose an idle agent for a different role instead of spawning a new one."],
+		parameters: Type.Object({
+			agentId: Type.String({ description: "Agent id to repurpose." }),
+			role: Type.Optional(Type.String({ description: "New role/instructions text." })),
+			roleKind: Type.Optional(Type.String({ description: "New role kind (pinned)." })),
+			capabilities: Type.Optional(Type.Array(Type.String(), { description: "New capabilities list (replaces existing)." })),
+			note: Type.Optional(Type.String({ description: "Optional note appended to the injected identity reload prompt." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const r = await setAgentRole(pi, ctx.cwd, p, st, safeId(params.agentId), params);
+				await writeState(p, st);
+				return r;
+			});
+			const a = result.agent;
+			return textResult(`Set role for ${a.id}: role=${a.role} roleKind=${a.roleKind} caps=[${a.capabilities.join(",")}] (v${result.provenance.version} injected=${result.injected}).`, result);
+		},
+	}))
+
+	pi.registerTool(defineTool({
+		name: "swarm_set_agent_paused",
+		label: "Swarm Pause/Resume",
+		description: "Park (paused=true) or resume (paused=false) an agent in the reuse pool WITHOUT killing its pane. Paused agents are skipped by reuse/assignment suggestions but still appear in status/list and keep running.",
+		promptGuidelines: ["Use `swarm_set_agent_paused` with paused=true to drain an agent from new assignments while keeping its pane alive; use paused=false to resume."],
+		parameters: Type.Object({
+			agentId: Type.String({ description: "Agent id to pause/resume." }),
+			paused: Type.Boolean({ description: "true to pause (drain from reuse), false to resume." }),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const agent = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const a = setAgentPaused(st, safeId(params.agentId), params.paused);
+				await trace(p, "agent.set_paused", { agentId: a.id, paused: Boolean(a.paused) });
+				await writeState(p, st);
+				return a;
+			});
+			return textResult(`${agent.id} ${agent.paused ? "paused" : "resumed"}.`, { agent });
+		},
+	}))
+
+	pi.registerTool(defineTool({
+		name: "swarm_send_keys",
+		label: "Swarm Send Keys",
+		description: "Send raw tmux keys to an agent's pane: interrupt (C-c), dismiss, navigate, or type text. Non-literal mode interprets tmux key names; literal mode sends exact text. Powerful/destructive — use to unstick a runaway agent.",
+		promptGuidelines: ["Use `swarm_send_keys` to send raw tmux input to an agent pane, e.g. C-c to interrupt. Prefer the normal mailbox/identity tools for coordination; this is an escape hatch."],
+		parameters: Type.Object({
+			agentId: Type.String({ description: "Agent id whose pane to send keys to." }),
+			keys: Type.String({ description: "Keys to send. Non-literal: space-separated tmux key names (C-c, Up, Enter). Literal: exact text." }),
+			literal: Type.Optional(Type.Boolean({ description: "Send keys as literal text via send-keys -l. Defaults to false (interpret tmux key names)." })),
+			enter: Type.Optional(Type.Boolean({ description: "Append an Enter after the keys. Defaults to false." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const st = await readState(p, ctx.cwd);
+			const agent = st.agents[safeId(params.agentId)];
+			if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
+			await sendKeys(pi, p, agent.tmuxTarget, params.keys, { literal: params.literal, enter: params.enter });
+			await trace(p, "agent.send_keys", { agentId: agent.id, target: agent.tmuxTarget, literal: Boolean(params.literal), enter: Boolean(params.enter) });
+			return textResult(`Sent keys to ${agent.id} (${agent.tmuxTarget}).`, { agent });
+		},
+	}))
+
+	pi.registerTool(defineTool({
+		name: "swarm_attach_agent",
+		label: "Swarm Attach",
+		description: "Return the tmux commands to attach to / select an agent's pane so a human can jump into it. Read-only convenience; does not run tmux.",
+		promptGuidelines: ["Use `swarm_attach_agent` to get the tmux attach/select commands for an agent's pane when the user wants to observe or interact with it directly."],
+		parameters: Type.Object({ agentId: Type.String({ description: "Agent id." }) }),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const st = await readState(p, ctx.cwd);
+			const agent = st.agents[safeId(params.agentId)];
+			if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
+			const cmds = attachTarget(agent);
+			return textResult(`${cmds.attach}\n${cmds.selectWindow}\n${cmds.selectPane}`, cmds);
+		},
+	}))
+
+	pi.registerTool(defineTool({
+		name: "swarm_release_agent_task",
+		label: "Swarm Release Task",
+		description: "Remove an active-task pointer from an agent when automatic release needs repair. By default only releases pointers whose task is terminal (done/failed/cancelled) or missing; pass force=true to release any. Does not change task/node state.",
+		promptGuidelines: ["Use `swarm_release_agent_task` to clear a stale activeTaskIds pointer left after a task closed, when reconcile Swarm_update_task did not self-heal. Prefer `swarm_reconcile` first."],
+		parameters: Type.Object({
+			agentId: Type.String({ description: "Agent id whose active-task pointer to release." }),
+			taskId: Type.Optional(Type.String({ description: "Specific task id to release. If omitted, all of the agent's active tasks are considered." })),
+			force: Type.Optional(Type.Boolean({ description: "Release even non-terminal tasks. Defaults to false." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const agent = st.agents[safeId(params.agentId)];
+				if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
+				const candidate = (agent.activeTaskIds || []).slice().filter((tid) => !params.taskId || tid === safeId(params.taskId));
+				const removed: string[] = [];
+				const refused: { taskId: string; status: string }[] = [];
+				for (const tid of candidate) {
+					let status = "unknown";
+					const tp = taskPaths(p, tid);
+					if (existsSync(tp.taskJson)) { try { status = (await readTaskState(tp.taskJson)).status; } catch { /* unknown */ } }
+					const terminal = status === "done" || status === "failed" || status === "cancelled" || status === "unknown";
+					if (terminal || params.force) { agent.activeTaskIds = agent.activeTaskIds.filter((t) => t !== tid); removed.push(tid); }
+					else refused.push({ taskId: tid, status });
+				}
+				agent.updatedAt = now();
+				await trace(p, "agent.release_task", { agentId: agent.id, removed, refused, force: Boolean(params.force) });
+				await writeState(p, st);
+				return { removed, refused };
+			});
+			return textResult(JSON.stringify({ agentId: safeId(params.agentId), ...result }, null, 2), result);
 		},
 	}))
 }

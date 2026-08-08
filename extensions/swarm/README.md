@@ -71,12 +71,25 @@ Inside pi:
 ```text
 /swarm init
 /swarm spawn reviewer Review the current diff and report risks. Do not edit files.
+/swarm register mysession:research.1 researcher Research planner   # adopt an existing pane
+/swarm role reviewer Senior reviewer --kind reviewer                # repurpose without respawn
+/swarm pause reviewer                                              # drain from reuse (pane stays alive)
+/swarm resume reviewer
+/swarm stop reviewer                                               # refuse if active tasks; --force to override
 /swarm status
 ```
 
 Useful tools:
 
 - `swarm_spawn_agent`
+- `swarm_register_agent` (adopt an existing tmux pane into a role; upsert/retarget)
+- `swarm_stop_agent` (refuses active tasks unless `force`; `killPane=false` to mark stopped only)
+- `swarm_restart_agent` (stop + respawn at the same id; mailbox/identity persist)
+- `swarm_set_role` (repurpose role/roleKind/capabilities + identity reload, no respawn)
+- `swarm_set_agent_paused` (drain from reuse without killing the pane)
+- `swarm_send_keys` (raw tmux keys to a pane — interrupt/dismiss/type)
+- `swarm_attach_agent` (tmux attach/select commands for a pane)
+- `swarm_release_agent_task` (clear a stale active-task pointer)
 - `swarm_list_agents`
 - `swarm_agent_status`
 - `swarm_send_message`
@@ -108,11 +121,17 @@ auto-notify** (node-close → orchestrator mailbox on a closure-ish transition; 
 open work → orchestrator mailbox; settle nudge cooldown-guarded per agent) surfaced by a **session-safe
 + read-safe orchestrator auto-pump** (per-process surfaced set; `check_mailbox(markDelivered)`/ack
 cannot pre-empt a pump surface; a second orchestrator lane or validation `pi -p` run cannot starve the
-PM); and a repeatable
-task-graph UAT entrypoint at `scripts/swarm_task_uat.sh`.
+PM); a repeatable
+task-graph UAT entrypoint at `scripts/swarm_task_uat.sh`; and a full **agent lifecycle** surface —
+`swarm_register_agent` (adopt/retarget an existing tmux pane), `swarm_stop_agent` (refuses active
+tasks unless `force`), `swarm_restart_agent` (respawn at the same id, preserving mailbox/identity),
+`swarm_set_role` (repurpose + identity reload), `swarm_set_agent_paused` (drain from reuse without
+killing), `swarm_send_keys`/`swarm_attach_agent`, and `swarm_release_agent_task` (clear stale
+active-task pointers) — each mirrored as a `/swarm` subcommand (`register | stop | restart | role |
+pause | resume | sendkey | attach | release`).
 
-**Deferred (not first-class V1 tools):** `swarm_stop_agent`, `swarm_gc_agents`,
-`swarm_release_agent_task` (use `swarm_reconcile` + admin `swarm_prune` meanwhile); destructive
+**Deferred (not first-class V1 tools):** `swarm_gc_agents` (use batch `swarm_stop_agent` + admin
+`swarm_prune` meanwhile); destructive
 auto-cleanup (auto-kill tmux windows, auto-remove agents); reminder-message re-injection from
 reconcile (kept idempotent/storm-free); cross-host support, cryptographic mailbox auth, and a
 consensus/heartbeat daemon. Advisory file edit locks stay advisory (not hard-enforced).

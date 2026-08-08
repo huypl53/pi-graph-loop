@@ -7,15 +7,39 @@ import { capturePane, tmux } from "./tmux.ts";
 import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { enqueueAndDeliver } from "./mailbox.ts";
-import { ensureDirs, identityPath, loopStateFile, paths, readState, trace, traceTask, withLock, writeState } from "./state.ts";
-import { findReusableAgent, reloadIdentity, spawnAgent } from "./agents.ts";
+import { ensureDirs, identityPath, loopStateFile, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "./state.ts";
+import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
 import { loopStatusSnapshot, recordLoopPlan } from "./loop.ts";
 import { overridePath } from "./identity.ts";
+import { registerCwdTracking, swarmArgumentCompletions } from "./completion.ts";
+
+// Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
+// --inject/--no-inject --kind <v> --model <v> --provider <v> --caps <v>; everything else goes to `rest`.
+function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string } {
+	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string } = { rest: [], force: false, kill: true, literal: false, enter: false };
+	for (let i = 0; i < tokens.length; i++) {
+		const t = tokens[i];
+		if (t === "--force") out.force = true;
+		else if (t === "--no-kill") out.kill = false;
+		else if (t === "--literal") out.literal = true;
+		else if (t === "--enter") out.enter = true;
+		else if (t === "--inject") out.inject = true;
+		else if (t === "--no-inject") out.inject = false;
+		else if (t === "--kind") out.kind = tokens[++i];
+		else if (t === "--model") out.model = tokens[++i];
+		else if (t === "--provider") out.provider = tokens[++i];
+		else if (t === "--caps") out.caps = tokens[++i];
+		else out.rest.push(t);
+	}
+	return out;
+}
 
 export function registerSwarmCommand(pi: ExtensionAPI) {
+	registerCwdTracking(pi);
 	pi.registerCommand("swarm", {
-		description: "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|id> [runtime] | next <#|id> (ready nodes + suggested agent) | validate <#|id> [runtime] | spawn <id> [role] | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>",
+		description: "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|id> [runtime] | next <#|id> (ready nodes + suggested agent) | validate <#|id> [runtime] | spawn <id> [role] | register <tmux-target> <id> [role...] (adopt a pane) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>",
+		getArgumentCompletions: (argumentPrefix) => swarmArgumentCompletions(argumentPrefix),
 		handler: async (args, ctx) => {
 			const p = paths(ctx.cwd);
 			await ensureDirs(p);
@@ -193,6 +217,111 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const role = rest.join(" ") || id;
 					const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const model = currentModel(); const r = await spawnAgent(pi, ctx.cwd, p, st, { id, role, model, provider: currentProvider(model) }); await writeState(p, st); return r; });
 					ctx.ui.notify(`Spawned ${result.agent.id} at ${result.agent.tmuxTarget}`, "info");
+					return;
+				}
+				if (cmd === "register") {
+					// Adopt an EXISTING tmux pane into the swarm under a role without spawning. Upsert by id.
+					// Usage: /swarm register <tmux-target> <id> [role...] [--kind K] [--model M] [--provider P] [--no-inject]
+					const tmuxTarget = rest.shift();
+					const id = rest.shift();
+					if (!tmuxTarget || !id) { ctx.ui.notify("Usage: /swarm register <tmux-target> <id> [role...] [--kind K] [--model M] [--provider P] [--no-inject]", "warning"); return; }
+					const flags = parseFlags(rest);
+					const roleText = flags.rest.join(" ");
+					const result = await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const r = await registerAgent(pi, ctx.cwd, p, st, { tmuxTarget, id, role: roleText || id, roleKind: flags.kind, model: flags.model, provider: flags.provider, inject: flags.inject });
+						await writeState(p, st);
+						return r;
+					});
+					ctx.ui.notify(`Registered ${result.agent.id} at ${result.agent.tmuxTarget} (alive=${result.tmuxAlive} piRunning=${result.piRunning} injected=${result.injected})`, "info");
+					return;
+				}
+				if (cmd === "stop") {
+					const id = rest.shift();
+					if (!id) { ctx.ui.notify("Usage: /swarm stop <id> [--force] [--no-kill]", "warning"); return; }
+					const flags = parseFlags(rest);
+					try {
+						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await stopAgent(pi, p, st, safeId(id), { force: flags.force, killPane: flags.kill }); await writeState(p, st); return r; });
+						ctx.ui.notify(`Stopped ${result.agent.id}: killed=${result.killed} method=${result.method}`, "info");
+					} catch (err: any) { ctx.ui.notify(`Stop failed: ${err?.message || err}`, "warning"); }
+					return;
+				}
+				if (cmd === "restart") {
+					const id = rest.shift();
+					if (!id) { ctx.ui.notify("Usage: /swarm restart <id>", "warning"); return; }
+					try {
+						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await restartAgent(pi, ctx.cwd, p, st, safeId(id)); await writeState(p, st); return r; });
+						ctx.ui.notify(`Restarted ${result.agent.id} at ${result.agent.tmuxTarget} (kill=${result.kill.method})`, "info");
+					} catch (err: any) { ctx.ui.notify(`Restart failed: ${err?.message || err}`, "warning"); }
+					return;
+				}
+				if (cmd === "role") {
+					const id = rest.shift();
+					if (!id) { ctx.ui.notify("Usage: /swarm role <id> <role...> [--kind K] [--caps a,b]", "warning"); return; }
+					const flags = parseFlags(rest);
+					const caps = flags.caps ? String(flags.caps).split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+					try {
+						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await setAgentRole(pi, ctx.cwd, p, st, safeId(id), { role: flags.rest.join(" ") || undefined, roleKind: flags.kind, capabilities: caps }); await writeState(p, st); return r; });
+						ctx.ui.notify(`Set role for ${result.agent.id}: roleKind=${result.agent.roleKind} v${result.provenance.version} injected=${result.injected}`, "info");
+					} catch (err: any) { ctx.ui.notify(`Role change failed: ${err?.message || err}`, "warning"); }
+					return;
+				}
+				if (cmd === "pause" || cmd === "resume") {
+					const id = rest.shift();
+					if (!id) { ctx.ui.notify(`Usage: /swarm ${cmd} <id>`, "warning"); return; }
+					const paused = cmd === "pause";
+					const agent = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const a = setAgentPaused(st, safeId(id), paused); await writeState(p, st); return a; });
+					ctx.ui.notify(`${agent.id} ${paused ? "paused" : "resumed"}`, "info");
+					return;
+				}
+				if (cmd === "sendkey") {
+					const id = rest.shift();
+					if (!id) { ctx.ui.notify("Usage: /swarm sendkey <id> <keys...> [--literal] [--enter]", "warning"); return; }
+					const flags = parseFlags(rest);
+					const keys = flags.rest.join(" ");
+					if (!keys) { ctx.ui.notify("No keys given", "warning"); return; }
+					const st = await readState(p, ctx.cwd);
+					const agent = st.agents[safeId(id)];
+					if (!agent) { ctx.ui.notify(`Unknown agent ${id}`, "warning"); return; }
+					try { await sendKeys(pi, p, agent.tmuxTarget, keys, { literal: flags.literal, enter: flags.enter }); ctx.ui.notify(`Sent keys to ${agent.id}`, "info"); }
+					catch (err: any) { ctx.ui.notify(`sendkey failed: ${err?.message || err}`, "warning"); }
+					return;
+				}
+				if (cmd === "attach") {
+					const id = rest.shift();
+					if (!id) { ctx.ui.notify("Usage: /swarm attach <id>", "warning"); return; }
+					const st = await readState(p, ctx.cwd);
+					const agent = st.agents[safeId(id)];
+					if (!agent) { ctx.ui.notify(`Unknown agent ${id}`, "warning"); return; }
+					const cmds = attachTarget(agent);
+					ctx.ui.notify(`${cmds.attach}\n${cmds.selectWindow}\n${cmds.selectPane}`, "info");
+					return;
+				}
+				if (cmd === "release") {
+					const id = rest.shift();
+					if (!id) { ctx.ui.notify("Usage: /swarm release <id> [<task-id>] [--force]", "warning"); return; }
+					const flags = parseFlags(rest);
+					const taskId = flags.rest[0];
+					let failed: string | null = null;
+					const result = await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const agent = st.agents[safeId(id)];
+						if (!agent) throw new Error(`Unknown agent ${id}`);
+						const candidate = (agent.activeTaskIds || []).slice().filter((tid) => !taskId || tid === safeId(taskId));
+						const removed: string[] = []; const refused: { taskId: string; status: string }[] = [];
+						for (const tid of candidate) {
+							let status = "unknown"; const tp = taskPaths(p, tid);
+							if (existsSync(tp.taskJson)) { try { status = (await readTaskState(tp.taskJson)).status; } catch {} }
+							const terminal = status === "done" || status === "failed" || status === "cancelled" || status === "unknown";
+							if (terminal || flags.force) { agent.activeTaskIds = agent.activeTaskIds.filter((t) => t !== tid); removed.push(tid); } else refused.push({ taskId: tid, status });
+						}
+						agent.updatedAt = now();
+						await trace(p, "agent.release_task", { agentId: agent.id, via: "command", removed, refused, force: flags.force });
+						await writeState(p, st);
+						return { removed, refused };
+					}).catch((err: any) => { failed = err?.message || String(err); return null; });
+					if (failed) ctx.ui.notify(`Release failed: ${failed}`, "warning");
+					else if (result) ctx.ui.notify(`Released [${result.removed.join(",")}] from ${safeId(id)}; refused [${result.refused.map((r) => `${r.taskId}:${r.status}`).join(",")}]`, "info");
 					return;
 				}
 				if (cmd === "send") {

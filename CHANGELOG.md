@@ -4,6 +4,22 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(swarm): agent lifecycle manipulation — register / stop / restart / set_role / pause / send_keys / attach / release
+
+- The swarm extension could **spawn** and **inspect** agents but had no surface to *manipulate* a live agent: there was no way to adopt an already-running pi pane into a role, stop/restart an agent, repurpose its role, or park it without killing it. `spawnAgent` was the only writer of agent records and always created a fresh tmux window + pi process; externally-started agents also landed as ghosts with `tmuxTarget: "unknown"` (uninjectable, uncapturable, liveness-blind).
+- Added a full **agent lifecycle** surface, each exposed as BOTH an agent tool (`pi.registerTool`, the primary coordination interface — agents self-organize via tool calls) and a human `/swarm` subcommand, both wrapping the SAME lock-free cores in `src/agents.ts`:
+  - `swarm_register_agent` / `/swarm register <target> <id> [role…]` — adopt an **existing** tmux pane into a role without spawning; upsert by id, so re-registering with a different target **retargets** (fixes the `unknown`-target ghost case). Probes the pane, writes the record with the correct `tmuxTarget`, regenerates the identity, and injects a role/identity kickoff.
+  - `swarm_stop_agent` / `/swarm stop <id> [--force] [--no-kill]` — kill the pane + mark stopped; **refuses active tasks unless `force`** (mailbox/identity/history persist via the stable id).
+  - `swarm_restart_agent` / `/swarm restart <id>` — stop + respawn a fresh pi at the SAME id (recorded role/model/provider), so mailbox + identity persist. Respawns into the swarm's canonical `tmuxSession`.
+  - `swarm_set_role` / `/swarm role <id> <role…> [--kind K] [--caps a,b]` — mutate role/roleKind/capabilities at runtime and regenerate + inject the identity, WITHOUT respawning (roleKind re-derived unless `--kind` pins it).
+  - `swarm_set_agent_paused` / `/swarm pause|resume <id>` — drain an agent from the reuse pool WITHOUT killing its pane; `findReusableAgent` now skips `paused` agents.
+  - `swarm_send_keys` / `/swarm sendkey <id> <keys> [--literal] [--enter]` — raw tmux keys to a pane (interrupt/dismiss/type); escape hatch.
+  - `swarm_attach_agent` / `/swarm attach <id>` — print the tmux attach/select commands for a pane.
+  - `swarm_release_agent_task` / `/swarm release <id> [<task-id>] [--force]` — clear a stale `activeTaskIds` pointer after a task is terminal/missing; **refuses non-terminal tasks unless `force`**.
+- Supporting changes: `paused?: boolean` on `SwarmAgent`; refactored `reloadIdentity` to share a new `injectReloadIfAlive` helper with `setAgentRole` (consistent reload prompt); `paused` surfaced in `swarm_agent_status` rows; `parseTmuxTarget` best-effort session/window parse. Tab-completion (`src/completion.ts`) already covered all new subcommands.
+- Only `swarm_gc_agents` remains deferred (use batch `swarm_stop_agent` + admin `swarm_prune`); the prior "deferred" notes on `swarm_stop_agent`/`swarm_release_agent_task` in `README.md`, `docs/swarm.md`, and `docs/swarm-task-graph.md` were updated to reflect they now ship.
+- Verified: new `agent-lifecycle.test.mjs` (37 assertions: register/retarget, set_role version-bump+injection, pause/resume + reuse-skip via direct `findReusableAgent`, stop refuse/force, release stale pointer, restart id/mailbox preservation, send_keys, attach, error paths); fixed comparison bugs in the pre-staged `completion.test.mjs` (raw-item vs value-string; stale `'st'` collision now that `stop` also matches); updated `smoke.test.mjs` (44 tools). Full safety net `ALL GREEN`. Loaded + exercised live in an isolated tmux pi session (`pi v0.83.0`, glm-5.1/zai, clean temp cwd): `register`→`role`(`injected=true`)→`pause`/`resume`→`attach`→`stop`(`kill-window`)→`restart`(live `swarm:demo` pane with persisted role) all confirmed against real tmux + real state. Snapshots under `./tmux-snapshots/20260808-174*/`.
+
 ### refactor(swarm): split the monolithic index.ts (5310 lines) into a layered module tree
 
 - `extensions/swarm/index.ts` went from **5310 lines / 310KB** (one file: types, helpers, state IO, task-graph, metrics, mailbox, loop, reconcile, 36 tool defs, 8 hooks, command) down to a **21-line entry point** that just wires the modules together and re-exports the 3 unit-tested helpers (`isDeliveryFailureRetryable`, `validateRunAgainstContract`, `computeIterationBest`).

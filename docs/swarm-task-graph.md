@@ -4,7 +4,7 @@ This document proposes the next architecture layer for `pi-swarm`: task manageme
 
 > **Implementation status.** This is the original design doc; the graph layer is now **implemented** as a subset of it. The implemented graph tools are `swarm_create_task`, `swarm_assign_task`, `swarm_update_task`, `swarm_task_message`, `swarm_task_status`, `swarm_validate_graph`, `swarm_print_graph`, and `swarm_next_nodes`, plus engine-enforced closure (`computeTaskStatus`), the `swarm_reconcile` task sweep, PM auto-notify, the session/read-safe orchestrator mailbox pump, and the `/swarm graph` slash command. Current runtime behavior is documented in [`docs/swarm.md`](./swarm.md) ("Task graph and closure").
 >
-> **Not implemented (still design proposals).** There is no `swarm_write_task_artifact` tool — artifacts are written by agents with their normal file tools and tracked through `swarm_update_task(artifact=...)`. There are no `swarm_claim_file_lock` / `swarm_release_file_lock` tools — advisory `editLocks` are maintained internally on `task.json` only. The destructive tools `swarm_stop_agent`, `swarm_gc_agents`, and `swarm_release_agent_task` remain **deferred** (use `swarm_reconcile` + admin `swarm_prune` meanwhile). Graph validation/printing ships as tools + `/swarm graph`, **not** as standalone `scripts/*.js`.
+> **Not implemented (still design proposals).** There is no `swarm_write_task_artifact` tool — artifacts are written by agents with their normal file tools and tracked through `swarm_update_task(artifact=...)`. There are no `swarm_claim_file_lock` / `swarm_release_file_lock` tools — advisory `editLocks` are maintained internally on `task.json` only. The agent lifecycle tools `swarm_stop_agent`, `swarm_release_agent_task`, `swarm_register_agent`, `swarm_restart_agent`, `swarm_set_role`, `swarm_set_agent_paused`, `swarm_send_keys`, and `swarm_attach_agent` are now **implemented** (mirrored as `/swarm stop|release|register|restart|role|pause|resume|sendkey|attach`); only `swarm_gc_agents` remains deferred (use batch `swarm_stop_agent` + admin `swarm_prune`). Graph validation/printing ships as tools + `/swarm graph`, **not** as standalone `scripts/*.js`.
 
 ## Problem
 
@@ -593,7 +593,7 @@ swarm_capture_agent_pane
 
 `swarm_reconcile` is the recovery entrypoint for both mail and tasks: it retries failed/queued message injections, dead-letters expired/max-attempt messages, surfaces `ack_missing`, AND sweeps every `task.json` for closure drift + stale/nudge signals (mark-only; `mark=true` repairs status drift). It never auto-fails a node.
 
-Destructive controls such as `swarm_stop_agent` and `swarm_gc_agents` are **deferred** (see [Validation and cleanup implications](#validation-and-cleanup-implications)); use `swarm_reconcile` and the admin `swarm_prune` (dry-run first) until they ship.
+`swarm_stop_agent` and `swarm_release_agent_task` are now **implemented** (along with the rest of the agent lifecycle surface: `swarm_register_agent`, `swarm_restart_agent`, `swarm_set_role`, `swarm_set_agent_paused`, `swarm_send_keys`, `swarm_attach_agent`). Only `swarm_gc_agents` remains **deferred** (see [Validation and cleanup implications](#validation-and-cleanup-implications)); use batch `swarm_stop_agent` and the admin `swarm_prune` (dry-run first) until it ships.
 
 ## New high-level tools
 
@@ -985,13 +985,17 @@ Agent reuse adds validation checks:
 - ensure an existing agent's tmux target is alive before assignment;
 - warn when `task.status` is terminal but the task still appears in some agent's `activeTaskIds`.
 
-The following destructive/resource tools are **deferred** (referenced today only as warnings / manual reconcile). They are intentionally not first-class worker tools in V1:
+The agent lifecycle surface is now **implemented** (not deferred). These first-class tools ship with safe defaults:
 
-- `swarm_stop_agent`: stop one long-lived or ephemeral agent safely; default should refuse active tasks unless `force=true`.
-- `swarm_gc_agents`: list/stop stale ephemeral agents and clean stale active-task pointers; default should be `dryRun=true`.
-- `swarm_release_agent_task`: remove an active task assignment after done/failed/cancelled when automatic release needs repair.
+- `swarm_register_agent`: adopt an existing tmux pane into a role without spawning; upsert by id (retarget).
+- `swarm_stop_agent`: stop one agent safely; **refuses active tasks unless `force=true`**; `killPane=false` marks stopped without touching tmux.
+- `swarm_restart_agent`: stop + respawn a fresh pi at the same id (mailbox/identity/history persist).
+- `swarm_set_role`: repurpose role/roleKind/capabilities + identity reload, without respawning.
+- `swarm_set_agent_paused`: drain an agent from the reuse pool without killing its pane (resumes on `paused=false`).
+- `swarm_send_keys` / `swarm_attach_agent`: raw tmux keys / attach commands for a pane.
+- `swarm_release_agent_task`: remove an active-task pointer after done/failed/cancelled when automatic release needs repair; **refuses non-terminal tasks unless `force=true`**.
 
-Until those land, use `swarm_reconcile` (mark-only, or `mark=true` to repair drift) plus `swarm_prune` (admin/orchestrator dry-run-first cleanup) to surface and recover these conditions.
+Only `swarm_gc_agents` (batch list/stop stale agents + clean stale active-task pointers) remains **deferred**; use batch `swarm_stop_agent` plus `swarm_reconcile` (mark-only, or `mark=true` to repair drift) and `swarm_prune` (admin/orchestrator dry-run-first cleanup) meanwhile.
 
 ## Graph start, edges, and branching
 

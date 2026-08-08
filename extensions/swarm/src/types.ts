@@ -73,6 +73,9 @@ export type SwarmAgent = {
 	lastToolAt?: string;
 	lastShutdownAt?: string;
 	pid?: number;
+	// Park/drain flag: a paused agent is skipped by the reuse pool (findReusableAgent) but is NOT killed
+	// and still appears in status/list. Cleared by resume (delete) so absent == not paused.
+	paused?: boolean;
 	tmuxSession: string;
 	tmuxWindow: string;
 	tmuxTarget: string;

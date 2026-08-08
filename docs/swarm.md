@@ -96,6 +96,14 @@ The extension registers `/swarm` for quick TUI use:
 | `/swarm status` or `/swarm list` | Show agent count and tmux session. `/swarm status` emits a PM rollup (tasks/agents/closure). |
 | `/swarm graph <task-id> [text\|mermaid\|json]` | Render a task graph and write it to `.pi/swarm/traces/graphs/`. |
 | `/swarm spawn <id> [role]` | Spawn a child pi agent in tmux. |
+| `/swarm register <tmux-target> <id> [role…] [flags]` | Adopt an **existing** tmux pane into a role without spawning (upsert/retarget). |
+| `/swarm stop <id> [--force] [--no-kill]` | Stop an agent (refuses active tasks unless `--force`). |
+| `/swarm restart <id>` | Stop + respawn a fresh pi at the same id (mailbox/identity persist). |
+| `/swarm role <id> <role…> [--kind K] [--caps a,b]` | Repurpose role/roleKind/capabilities + identity reload, no respawn. |
+| `/swarm pause <id>` / `/swarm resume <id>` | Drain an agent from the reuse pool without killing its pane (and resume). |
+| `/swarm sendkey <id> <keys…> [--literal] [--enter]` | Send raw tmux keys to an agent pane. |
+| `/swarm attach <id>` | Print tmux attach/select commands for an agent pane. |
+| `/swarm release <id> [<task-id>] [--force]` | Clear a stale active-task pointer (refuses non-terminal tasks unless `--force`). |
 | `/swarm send <to> <message>` | Send a mailbox/tmux-injected message. |
 | `/swarm trace` | Show recent structured trace events. |
 | `/swarm capture <id>` | Capture an agent pane to `.pi/swarm/traces/tmux/`. |

@@ -83,8 +83,54 @@ export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state:
 // injection failure (dead pane, transient error) never fails the reload — the new identity still
 // takes effect on the next session_start/identity read. Shared by the `swarm_reload_identity` tool
 // and the `/swarm identity reload` command.
+// === Agent lifecycle manipulation (register / stop / restart / set_role / pause / send_keys / attach) ===
+// These are lock-free cores: the caller (tool or command) holds the swarm lock, reads state, calls the
+// core with the live `state` object, and writeState once afterward. The cores may do tmux IO and file
+// writes (identity/mailbox) but never acquire the lock themselves, mirroring spawnAgent/deliver.
+
+// Best-effort parse of a tmux target into session + window for cosmetic/derivable fields. The
+// authoritative routing field is always `tmuxTarget` itself (used for injection/capture/liveness).
+export function parseTmuxTarget(target: string, fallbackSession: string): { session: string; window: string } {
+	const t = (target || "").trim();
+	if (!t) return { session: fallbackSession, window: "unknown" };
+	if (t.startsWith("%")) return { session: fallbackSession, window: t };          // pane id (%5)
+	if (t.startsWith("=")) { const s = t.slice(1); return { session: s, window: s }; } // =session
+	const colon = t.lastIndexOf(":");
+	if (colon >= 0) {
+		const session = t.slice(0, colon) || fallbackSession;
+		const rest = t.slice(colon + 1);
+		const window = rest.includes(".") ? rest.slice(0, rest.lastIndexOf(".")) : rest;
+		return { session, window: window || rest || "unknown" };
+	}
+	const window = t.includes(".") ? t.slice(0, t.lastIndexOf(".")) : t;
+	return { session: fallbackSession, window };
+}
+
+// Build + inject the [PI-SWARM IDENTITY RELOAD] prompt into an agent pane if it is alive. Best-effort:
+// a dead pane or transient tmux error never throws (the new identity still applies on next read).
+// Shared by swarm_reload_identity and setAgentRole so the reload prompt stays consistent.
+export async function injectReloadIfAlive(pi: ExtensionAPI, p: Paths, agent: SwarmAgent, provenance: { version: number; shortHash: string }, note?: string, source?: string) {
+	const file = identityPath(p, agent.id);
+	let injected = false;
+	let tmuxAlive = false;
+	if (agent.tmuxTarget && agent.tmuxTarget !== "unknown") {
+		tmuxAlive = await isTmuxRunning(pi, agent.tmuxTarget);
+		if (tmuxAlive) {
+			const rel = relative(agent.cwd, file);
+			const noteLine = note ? ` ${note}` : "";
+			try {
+				await sendToPane(pi, agent.tmuxTarget, `\n[PI-SWARM IDENTITY RELOAD] Your identity was regenerated (v${provenance.version}, hash ${provenance.shortHash}). Re-read ${rel} now and follow any new instructions.${noteLine}\n`);
+				injected = true;
+			} catch (err: any) {
+				await trace(p, "agent.identity.reload_inject_failed", { agentId: agent.id, source, error: String((err as Error)?.message || err) });
+			}
+		}
+	}
+	return { file, tmuxAlive, injected };
+}
+
 export async function reloadIdentity(pi: ExtensionAPI, cwd: string, p: Paths, agentId: string, opts?: { note?: string; source?: string }) {
-	const result = await withLock(p, async () => {
+	const { agent, provenance } = await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const agent = st.agents[agentId];
 		if (!agent) throw new Error(`Unknown swarm agent: ${agentId}`);
@@ -92,25 +138,201 @@ export async function reloadIdentity(pi: ExtensionAPI, cwd: string, p: Paths, ag
 		await writeState(p, st);
 		return { agent, provenance };
 	});
-	const { agent, provenance } = result;
-	const file = identityPath(p, agentId);
-	let injected = false;
-	let tmuxAlive = false;
-	if (agent.tmuxTarget && agent.tmuxTarget !== "unknown") {
-		tmuxAlive = await isTmuxRunning(pi, agent.tmuxTarget);
-		if (tmuxAlive) {
-			const rel = relative(agent.cwd, file);
-			const noteLine = opts?.note ? ` ${opts.note}` : "";
+	const inj = await injectReloadIfAlive(pi, p, agent, provenance, opts?.note, opts?.source);
+	await trace(p, "agent.identity.reload", { agentId, source: opts?.source || "tool", version: provenance.version, hash: provenance.shortHash, overridePresent: provenance.overridePresent, tmuxAlive: inj.tmuxAlive, injected: inj.injected });
+	return { agent, provenance, file: inj.file, tmuxAlive: inj.tmuxAlive, injected: inj.injected };
+}
+
+// Adopt an EXISTING tmux pane into the swarm under a role WITHOUT spawning a new pi. Upsert by id: a
+// re-register with a different target retargets the agent (fixing the "tmuxTarget: unknown" ghost-agent
+// case produced by session_start for externally-started agents). The operator asserts the pane is
+// available for the role; runtimeStatus defaults to "idle" for a fresh adoption.
+export async function registerAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { tmuxTarget: string; id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string; inject?: boolean }) {
+	const target = (input.tmuxTarget || "").trim();
+	if (!target) throw new Error("tmuxTarget is required (e.g. session:window.pane)");
+	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
+	const existing = state.agents[id];
+	const tmuxAlive = await isTmuxRunning(pi, target);
+	const parsed = parseTmuxTarget(target, state.tmuxSession);
+	const model = input.model || existing?.model || currentModel();
+	const provider = input.provider || existing?.provider || currentProvider(model);
+	const ts = now();
+	const roleKindExplicit = input.roleKind !== undefined ? true : (existing?.roleKindExplicit ?? false);
+	const roleKind = input.roleKind !== undefined
+		? input.roleKind
+		: (existing?.roleKindExplicit ? existing.roleKind : inferRoleKind(id, input.role));
+	let probeFile: string | null = null;
+	let piRunning = false;
+	if (tmuxAlive) {
+		try { probeFile = await capturePane(pi, p, id, target, "register-probe"); } catch { probeFile = null; }
+		if (probeFile) {
 			try {
-				await sendToPane(pi, agent.tmuxTarget, `\n[PI-SWARM IDENTITY RELOAD] Your identity was regenerated (v${provenance.version}, hash ${provenance.shortHash}). Re-read ${rel} now and follow any new instructions.${noteLine}\n`);
-				injected = true;
-			} catch (err: any) {
-				await trace(p, "agent.identity.reload_inject_failed", { agentId, source: opts?.source, error: String((err as Error)?.message || err) });
-			}
+				const txt = await readFile(probeFile, "utf8");
+				// Heuristic: look for common pi TUI / swarm markers. Best-effort, never gating.
+				piRunning = /\bswarm:|PI[-_ ]?SWARM|\bpi\b.*[\$>#]|\bYou are\b|identity/i.test(txt);
+			} catch { /* ignore */ }
 		}
 	}
-	await trace(p, "agent.identity.reload", { agentId, source: opts?.source || "tool", version: provenance.version, hash: provenance.shortHash, overridePresent: provenance.overridePresent, tmuxAlive, injected });
-	return { agent, provenance, file, tmuxAlive, injected };
+	const agent: SwarmAgent = existing ?? {
+		id,
+		role: input.role,
+		roleKind,
+		roleKindExplicit,
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: roleKind === "orchestrator" ? 99 : 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: parsed.session,
+		tmuxWindow: parsed.window,
+		tmuxTarget: target,
+		model,
+		provider,
+		cwd,
+		mailbox: relative(cwd, mailboxPath(p, id)),
+		createdAt: ts,
+		updatedAt: ts,
+	};
+	agent.id = id;
+	agent.role = input.role;
+	agent.roleKind = roleKind;
+	agent.roleKindExplicit = roleKindExplicit;
+	agent.tmuxSession = parsed.session;
+	agent.tmuxWindow = parsed.window;
+	agent.tmuxTarget = target;
+	agent.model = model;
+	agent.provider = provider;
+	agent.cwd = cwd;
+	agent.mailbox = relative(cwd, mailboxPath(p, id));
+	agent.status = "running";
+	if (existing) {
+		// Retarget/refresh: preserve known runtime state, only clear stale stopped/starting markers.
+		if (agent.runtimeStatus === "starting" || agent.runtimeStatus === "stopped") agent.runtimeStatus = "idle";
+		if (agent.health === "unhealthy") agent.health = "healthy";
+	}
+	agent.updatedAt = ts;
+	state.agents[id] = agent;
+	state.delivered[id] ||= [];
+	await appendFile(mailboxPath(p, id), "", "utf8");
+	const provenance = await writeEffectiveIdentity(cwd, p, state, agent, { reason: "register" });
+	const identityRelPath = relative(cwd, identityPath(p, id));
+	let injected = false;
+	if (input.inject !== false && tmuxAlive) {
+		const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${identityPrompt(cwd, identityRelPath)}`;
+		try { await sendToPane(pi, target, kickoff); injected = true; }
+		catch (err: any) { await trace(p, "agent.register.inject_failed", { agentId: id, target, error: String((err as Error)?.message || err) }); }
+	}
+	await trace(p, "agent.register.ok", { agentId: id, target, tmuxAlive, piRunning, model, provider, role: input.role, roleKind, reRegistered: Boolean(existing), injected, identityVersion: provenance.version });
+	return { agent, tmuxAlive, piRunning, injected, identity: identityPath(p, id), probe: probeFile };
+}
+
+// Kill an agent's tmux pane/window. Prefers kill-window (each spawned agent owns its window); falls
+// back to kill-pane for shared/registered panes. Returns what happened; never throws.
+export async function killAgentPane(pi: ExtensionAPI, p: Paths, agent: SwarmAgent): Promise<{ killed: boolean; method: string }> {
+	if (!agent.tmuxTarget || agent.tmuxTarget === "unknown") return { killed: false, method: "no-target" };
+	const alive = await isTmuxRunning(pi, agent.tmuxTarget);
+	if (!alive) return { killed: false, method: "already-dead" };
+	const winTarget = agent.tmuxWindow && agent.tmuxWindow !== "unknown" ? `${agent.tmuxSession}:${agent.tmuxWindow}` : agent.tmuxTarget;
+	try { await tmux(pi, ["kill-window", "-t", winTarget], 5_000); return { killed: true, method: "kill-window" }; }
+	catch { /* shared window or already gone — try the pane only */ }
+	try { await tmux(pi, ["kill-pane", "-t", agent.tmuxTarget], 5_000); return { killed: true, method: "kill-pane" }; }
+	catch (err: any) { await trace(p, "agent.kill_failed", { agentId: agent.id, target: agent.tmuxTarget, error: String((err as Error)?.message || err) }); return { killed: false, method: "kill-failed" }; }
+}
+
+// Stop a long-lived or ephemeral agent. Refuses active tasks unless force. Kills the pane and marks the
+// agent stopped (mailbox/identity/history persist via the stable id). Lock-free core (caller holds lock).
+export async function stopAgent(pi: ExtensionAPI, p: Paths, state: SwarmState, agentId: string, opts: { force?: boolean; killPane?: boolean } = {}) {
+	const agent = state.agents[agentId];
+	if (!agent) throw new Error(`Unknown swarm agent: ${agentId}`);
+	ensureAgentDefaults(agent);
+	if (!opts.force && agent.activeTaskIds.length) {
+		throw new Error(`Refusing to stop ${agentId}: active tasks [${agent.activeTaskIds.join(", ")}]. Reassign or release them, or pass force=true.`);
+	}
+	const ts = now();
+	let kill = { killed: false, method: "skipped" as string };
+	if (opts.killPane !== false) kill = await killAgentPane(pi, p, agent);
+	agent.status = "stopped";
+	agent.runtimeStatus = "stopped";
+	agent.health = "unhealthy";
+	agent.lastShutdownAt ||= ts;
+	agent.updatedAt = ts;
+	await trace(p, "agent.stop", { agentId, force: Boolean(opts.force), killPane: opts.killPane !== false, ...kill });
+	return { agent, ...kill };
+}
+
+// Stop + respawn a fresh pi at the SAME id (so mailbox, identity, and history persist). Reuses the
+// recorded role/model/provider. For an agent originally registered to an external pane, restart creates
+// a fresh swarm-managed window named <id> (the external pane cannot be reliably re-pi'd). Lock-free core.
+export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, agentId: string, opts: { initialPrompt?: string } = {}) {
+	const existing = state.agents[agentId];
+	if (!existing) throw new Error(`Unknown swarm agent: ${agentId}`);
+	ensureAgentDefaults(existing);
+	const kill = await killAgentPane(pi, p, existing);
+	existing.status = "stopped"; // satisfy spawnAgent's "already running" guard before it overwrites the record
+	existing.updatedAt = now();
+	await trace(p, "agent.restart.kill", { agentId, ...kill });
+	const roleKind = existing.roleKindExplicit ? existing.roleKind : undefined;
+	const r = await spawnAgent(pi, cwd, p, state, { id: agentId, role: existing.role, roleKind, model: existing.model, provider: existing.provider, initialPrompt: opts.initialPrompt });
+	await trace(p, "agent.restart.ok", { agentId, target: r.agent.tmuxTarget, killMethod: kill.method });
+	return { kill, ...r };
+}
+
+// Change an agent's role/roleKind/capabilities at runtime and regenerate + inject its identity, without
+// respawning. roleKind is re-derived from the new role unless roleKind is explicitly passed (pinned).
+// Lock-free core (caller holds the lock).
+export async function setAgentRole(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, agentId: string, input: { role?: string; roleKind?: string; capabilities?: string[]; note?: string }) {
+	const agent = state.agents[agentId];
+	if (!agent) throw new Error(`Unknown swarm agent: ${agentId}`);
+	if (input.role === undefined && input.roleKind === undefined && input.capabilities === undefined) {
+		throw new Error("set_role requires at least one of role, roleKind, or capabilities");
+	}
+	if (input.role !== undefined) agent.role = input.role;
+	if (input.roleKind !== undefined) { agent.roleKind = input.roleKind; agent.roleKindExplicit = true; }
+	else if (input.role !== undefined && !agent.roleKindExplicit) agent.roleKind = inferRoleKind(agentId, input.role);
+	if (input.capabilities !== undefined) agent.capabilities = Array.from(new Set(input.capabilities.map((c) => String(c).trim()).filter(Boolean)));
+	agent.updatedAt = now();
+	const provenance = await writeEffectiveIdentity(cwd, p, state, agent, { reason: "set_role" });
+	const inj = await injectReloadIfAlive(pi, p, agent, provenance, input.note, "set_role");
+	await trace(p, "agent.set_role", { agentId, role: agent.role, roleKind: agent.roleKind, capabilities: agent.capabilities, version: provenance.version, tmuxAlive: inj.tmuxAlive, injected: inj.injected });
+	return { agent, provenance, file: inj.file, tmuxAlive: inj.tmuxAlive, injected: inj.injected };
+}
+
+// Park/drain an agent from the reuse pool WITHOUT killing its pane. findReusableAgent skips paused
+// agents; status/list still show them. Pure state mutation (caller holds the lock).
+export function setAgentPaused(state: SwarmState, agentId: string, paused: boolean) {
+	const agent = state.agents[agentId];
+	if (!agent) throw new Error(`Unknown swarm agent: ${agentId}`);
+	if (paused) agent.paused = true; else delete agent.paused;
+	agent.updatedAt = now();
+	return agent;
+}
+
+// Send raw tmux keys to an agent pane. Non-literal mode interprets tmux key names (C-c, Up, Enter);
+// literal mode (-l) sends the exact text. Optionally append an Enter. Lock-free core.
+export async function sendKeys(pi: ExtensionAPI, p: Paths, target: string, keys: string, opts: { literal?: boolean; enter?: boolean } = {}) {
+	if (!target || target === "unknown") throw new Error("agent has no tmux pane target");
+	if (opts.literal) {
+		await tmux(pi, ["send-keys", "-t", target, "-l", keys], 10_000);
+	} else {
+		const tokens = keys.split(/\s+/).filter(Boolean);
+		if (tokens.length) await tmux(pi, ["send-keys", "-t", target, ...tokens], 10_000);
+	}
+	if (opts.enter) await tmux(pi, ["send-keys", "-t", target, "Enter"], 10_000);
+	await sleep(120);
+}
+
+// Pure helper: the tmux commands a human would run to jump into an agent's pane.
+export function attachTarget(agent: SwarmAgent) {
+	const winTarget = agent.tmuxWindow && agent.tmuxWindow !== "unknown" ? `${agent.tmuxSession}:${agent.tmuxWindow}` : agent.tmuxTarget;
+	return {
+		session: agent.tmuxSession,
+		windowTarget: winTarget,
+		paneTarget: agent.tmuxTarget,
+		attach: `tmux attach -t ${agent.tmuxSession}`,
+		selectWindow: `tmux select-window -t ${winTarget}`,
+		selectPane: `tmux select-pane -t ${agent.tmuxTarget}`,
+	};
 }
 
 export async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: { roleKind?: string; capabilities?: string[]; requireIdle?: boolean; requireTmuxAlive?: boolean; includeBusy?: boolean }): Promise<{ matches: ReusableAgentMatch[]; recommended?: string }> {
@@ -120,6 +342,7 @@ export async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: 
 	for (const agent of Object.values(st.agents)) {
 		if (agent.id === "orchestrator") continue; // never reuse the human-driven orchestrator
 		ensureAgentDefaults(agent);
+		if (agent.paused) continue; // paused/drain: parked but not killed — excluded from the reuse pool
 		if (wantKind && agent.roleKind !== wantKind) continue;
 		if (wantCaps.size && !agent.capabilities.map((c) => c.toLowerCase()).some((c) => wantCaps.has(c))) continue;
 		const responseMissing = responseMissingRecords(st, agent.id).length;
