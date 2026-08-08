@@ -162,6 +162,7 @@ export interface StartInput {
 	shell?: boolean; // default true
 	timeoutMs?: number;
 	sessionId?: string; // STABLE chat session id (ctx.sessionManager.getSessionId()); scopes visibility + nudges
+	survive?: boolean; // true => long-lived daemon: skip the parent-death watchdog so it outlives the spawning pi
 }
 
 export async function spawnTask(
@@ -263,6 +264,7 @@ function buildRecord(
 		env: input.env,
 		startedAt: ts,
 		timeoutMs: input.timeoutMs,
+		survive: input.survive,
 		spawnedByPid: process.pid,
 		spawnedBySession: input.sessionId,
 		kind: "shell",
@@ -289,7 +291,9 @@ function spawnChild(
 	let child: ReturnType<typeof spawn>;
 
 	if (!shell) {
-		// explicit argv: run directly detached. timeout/watchdog not applied in this mode (V1).
+		// explicit argv: run directly detached. timeout + parent-death watchdog are NOT applied in this
+		// mode (V1) because it bypasses the wrapper; such a task therefore OUTLIVES its spawning pi
+		// regardless of `survive`. Prefer the default shell mode when cleanup-on-exit matters.
 		child = spawn(input.command, input.args || [], {
 			cwd: input.cwd,
 			env,
@@ -297,12 +301,11 @@ function spawnChild(
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 	} else {
-		// shell mode: `sh -c WRAPPER sh <command> <exitMarkerAbs> [timeoutMs]`
-		// $0=sh, $1=command, $2=exitMarkerAbs, $3=timeoutMs (omitted when no timeout).
+		// shell mode: `sh -c WRAPPER sh <command> <exitMarkerAbs> <timeoutMs|""> <watchdog 1|0> <parentPid>`
+		// $0=sh, $1=command, $2=exitMarkerAbs, $3=timeoutMs, $4=watchdog, $5=parentPid (always passed).
 		const timeoutArg = input.timeoutMs && input.timeoutMs > 0 ? String(input.timeoutMs) : "";
-		const argv = timeoutArg
-			? ["-c", WRAPPER, "sh", input.command, markerAbsPath, timeoutArg]
-			: ["-c", WRAPPER, "sh", input.command, markerAbsPath];
+		const watchdogArg = input.survive ? "0" : "1";
+		const argv = ["-c", WRAPPER, "sh", input.command, markerAbsPath, timeoutArg, watchdogArg, String(process.pid)];
 		child = spawn("sh", argv, { cwd: input.cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 	}
 

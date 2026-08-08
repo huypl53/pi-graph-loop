@@ -4,6 +4,18 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(background-tasks): tasks die with their spawning pi by default (parent-death watchdog); opt-in `survive:true` for long-lived daemons
+
+- **Symptom:** background tasks were detached/unref'd and **outlived** the pi that started them. That was the old intentional default, but orphaned tasks surviving a pi **crash / kill-9** (where no `session_shutdown` hook can run) was treated as a critical bug — processes keep running with no owner.
+- **Fix — default lifetime reversed; crash/kill-9 now covered:**
+  - A **parent-death watchdog** runs *inside* the detached `sh` wrapper (`src/constants.ts` `WRAPPER`). It polls the wrapper's *current* parent vs. the spawning pi's pid — **passed explicitly** as a wrapper argv element (so there is no `$PPID` capture race). When that pi exits — cleanly OR via crash/kill-9 — the OS reparents the wrapper to init, the check fails, and the wrapper group-kills `"-$$"` (command + all descendants, no orphans; TERM then KILL after 2 s). Keying on **reparenting** (not pid liveness) makes it **pid-reuse resistant**. `src/lifecycle.ts` `spawnChild` always passes `process.pid` as that arg; `DPID` reaps the watchdog subshell on natural exit.
+  - **`survive:false` is the default** → task dies with pi. New **`survive?: boolean`** param on the `background_start` tool (`src/tools/index.ts`), `StartInput`, and `BackgroundTask` (`src/types.ts`); `survive:true` starts the wrapper with the watchdog **disabled** so a long-lived daemon outlives pi. Persisted to `state.json`.
+  - **`/reload` keeps tasks alive** — reload re-inits the extension but does not end the pi *process*, so the wrapper's parent never changes and the watchdog does not fire.
+  - `session_shutdown`'s `killOnShutdown` (`src/hooks.ts`) is now an orderly fast-path only: it skips `survive:true` tasks and covers just clean shutdowns (the watchdog is the authoritative path and also catches crash/kill-9).
+  - Caveat: **non-shell mode (`shell:false`) does not get the watchdog** — those tasks use `spawn` directly, not the wrapper. Documented as a V1 limitation.
+- Verified: `watchdog.test.mjs` (6 assertions — default task killed after its spawner exits; `survive:true` still alive with correct process count; `survive` persisted to `state.json`) using a forked helper (`watchdog-spawn-helper.mjs`) that spawns a real task then exits to simulate pi dying. **Live, through-pi tmux run** (`pi -ne -e <ext>`, isolated temp project): a default task appeared in the widget (`⏳ live-sleep777`) and was **killed** once its spawning process died (`sleep 777` procs = 0); a `survive:true` task **persisted** (`sleep 888` procs ≥ 1) across the parent's death. All 6 suites green (56 assertions); `tsc --strict` clean; `WRAPPER` validated with `sh -n`.
+- Note (pre-existing, surfaced during this work): the ambient UI refresh tick does a lock-free read only and does **not** reconcile (finalization relies on the live exit listener + tools + `/bg` dialog + `session_start`). So a task killed by the watchdog while pi is *up but idle* may stay `running` in state until a reconcile trigger; the next pi's `session_start` reconcile finalizes it to `unknown`. Not changed here (out of scope; the watchdog's own kill behavior is correct end-to-end).
+
 ### feat(background-tasks): output detail view opens at the latest line and auto-follows new output (`tail -f` behavior)
 
 - **Symptom:** opening a task's output in the `/bg` dialog always started at the **top** of the captured stdout/stderr, so for a still-running task you immediately had to scroll down (or wait and re-scroll) to see what it just produced.

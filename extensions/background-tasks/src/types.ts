@@ -20,6 +20,7 @@ export interface BackgroundTask {
 	lastNotifiedStatus?: BgStatus; // persisted UI toast dedup (survives /reload)
 	agentNudgedStatus?: BgStatus; // persisted agent-nudge dedup (survives /reload; one nudge per terminal status)
 	timeoutMs?: number; // optional auto-kill timer (from background_start)
+	survive?: boolean; // true => long-lived daemon: no parent-death watchdog; outlives the spawning pi (default false)
 	spawnedByPid: number; // process.pid of the pi that started it (killOnShutdown scoping)
 	spawnedBySession?: string; // STABLE chat session id (ctx.sessionManager.getSessionId()) — scopes visibility + nudges
 	kind: "shell"; // reserves a seam for a future "pi" mode

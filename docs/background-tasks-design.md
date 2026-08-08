@@ -30,9 +30,10 @@ turn and check status / output later. The process is owned by the project sessio
 | **background task (this extension)** | **No** | **Yes** | **Yes** (log files + tail tool) | A long-running **shell command** owned/observed by the current session |
 
 **The niche:** *"start a long build / test / eval / watcher as a plain command, keep chatting, poll
-status and output later — and have it survive session restarts."* It is the async, observable,
-restartable counterpart to the synchronous `bash` tool. It is **not** multi-agent coordination
-(swarm) and **not** delegated-agent delegation (subagent).
+status and output later — and have it die cleanly with this pi by default, or (opt-in `survive:true`)
+outlive it as a long-lived daemon."* It is the async, observable, restartable counterpart to the
+synchronous `bash` tool. It is **not** multi-agent coordination (swarm) and **not** delegated-agent
+delegation (subagent).
 
 ### Out of scope for V1 (call out explicitly)
 - Spawning a **separate pi process** as a background task (that overlaps subagent; revisit as an
@@ -62,10 +63,24 @@ shell wrapper that writes an exit marker.**
 - **Must survive the parent agent's turn** → `detached: true` makes the child a process-group
   leader; `child.unref()` removes it from the parent pi process's event loop so the tool call can
   return immediately and pi's turn can end.
-- **Should survive `session_shutdown`** (default): detached children outlive the spawning process.
-  This is the *desirable* default ("start the build, quit pi, the build keeps running"). A config
-  knob `PI_BG_TASKS_KILL_ON_SHUTDOWN` (default `0` = leave running) lets a user opt into killing
-  tasks this session started on shutdown.
+- **Must DIE with the spawning pi (default, `survive:false`)** → a **parent-death watchdog** runs
+  inside the wrapper: it polls its own current parent vs. the spawning pi's pid (passed **explicitly**,
+  so there is no `$PPID` capture race) and, when that pi exits — **cleanly OR via crash/kill-9** (no
+  `session_shutdown` hook can run on a crash) — the OS reparents the wrapper to init, the check fails,
+  and the wrapper kills its whole process group. Orphaned tasks after a crash were considered a
+  critical bug; this closes that hole for every exit path. Because it keys on reparenting (not pid
+  liveness) it is **pid-reuse resistant**. (Non-shell mode `shell:false` does not get the watchdog —
+  a documented V1 limitation.)
+- **`survive:true`** (`background_start`, opt-in) → the wrapper is started with the watchdog
+  **disabled**, so the task is a long-lived daemon that outlives pi (e.g. a dev server you want
+  running across sessions). The record persists `survive` in `state.json` and the `session_shutdown`
+  hook skips `survive:true` tasks.
+- **`/reload` keeps tasks alive** → reload re-inits the extension but does **not** end the pi
+  *process*, so the wrapper's parent never changes and the watchdog does not fire. Tasks naturally
+  survive a reload.
+- **`session_shutdown` hook** (`PI_BG_TASKS_KILL_ON_SHUTDOWN`, default `0`) → fast-path kill of
+  `survive:false` tasks *this session* started on a clean shutdown. Largely redundant with the
+  watchdog now (which also catches crash/kill-9), but kept as a prompt, orderly kill before pi exits.
 - **Killing a task**: because we spawned detached (new process group), we can kill the **whole
   group** with `process.kill(-pid, "SIGTERM")`, then escalate to `SIGKILL` after a grace period
   (`PI_BG_TASKS_STOP_GRACE_MS`, default 5000). This kills the command *and* any children it forked.
@@ -80,17 +95,23 @@ wrapper** by a portable `sh` watchdog: stock macOS has **no `timeout`/`gtimeout`
 Putting the watchdog in the child process group makes the deadline survive a pi crash:
 
 ```ts
-// spawn("sh", ["-c", WRAPPER, "<sh>", <user command>, <exit-marker abs path>, <timeoutMs|''>], { detached:true, ... })
+// spawn("sh", ["-c", WRAPPER, "<sh>", <command>, <exit-marker abs>, <timeoutMs|''>, <watchdog 1|0>, <parentPid>], { detached:true, ... })
 // Because Node spawns this wrapper detached:true, the wrapper IS the process-group leader (pgid == $$).
 const WRAPPER = [
-  'CMDFILE=$1; EXITFILE=$2; TIMEOUTMS=$3; shift 3;',
+  'CMDFILE=$1; EXITFILE=$2; TIMEOUTMS=$3; WATCHDOG=$4; PARENT_PID=$5; shift 5; DPID=;',
+  // PARENT-DEATH WATCHDOG (WATCHDOG=1 = default survive:false): polls the wrapper's CURRENT parent vs.
+  // the spawning pi's pid (passed explicitly as PARENT_PID — no $PPID capture race). When pi dies
+  // (clean OR crash/kill-9) the OS reparents the wrapper to init; the check fails and the subshell
+  // group-kills -"$$" (command + all descendants, no orphans). Keys on reparenting => pid-reuse
+  // resistant. DPID is reaped on natural exit below. WATCHDOG=0 => disabled (survive:true daemon).
+  'if [ "$WATCHDOG" != "0" ]; then ( while [ "$(ps -o ppid= -p $$ | tr -d \' \')" = "$PARENT_PID" ]; do sleep 3; done; kill -TERM -"$$" 2>/dev/null; sleep 2; kill -KILL -"$$" 2>/dev/null ) & DPID=$!; fi;',
   'sh -c "$CMDFILE" & CPID=$!;',          // user command as a NESTED sh -c (no interpolation)
   'WPID=',
-  // watchdog kills the WRAPPER'S WHOLE PROCESS GROUP (-"$$"), not just $CPID — so the command AND
+  // timeout watchdog kills the WRAPPER'S WHOLE PROCESS GROUP (-"$$"), not just $CPID — so the command AND
   // all its descendants die (no orphans, verified). Killing the wrapper before printf => NO marker => case 2.
   'if [ -n "$TIMEOUTMS" ]; then ( sleep "$((TIMEOUTMS/1000))" && kill -TERM -"$$" 2>/dev/null ) & WPID=$!; fi',
   'wait "$CPID"; EC=$?;',                  // natural exit OR group-killed by background_stop/watchdog
-  'kill "$WPID" 2>/dev/null;',             // reap the lingering watchdog subshell on natural exit
+  'kill "$WPID" 2>/dev/null; [ -n "$DPID" ] && kill "$DPID" 2>/dev/null;', // reap lingering subshells on natural exit
   "printf '{\"exitCode\":%s,\"signal\":\"\"}\n' \"$EC\" > \"$EXITFILE\";",   // BSD-date-safe: no %N, no date
   'exit "$EC"',
 ].join(" ");
@@ -294,9 +315,12 @@ parameters:
   env?: Record<string,string> // merged onto process.env
   shell?: boolean           // default true
   timeoutMs?: number        // optional auto-kill after N ms
+  survive?: boolean         // default false. false => parent-death watchdog kills the task when the
+                            //   spawning pi exits (clean/crash/kill-9). true => long-lived daemon
+                            //   that outlives pi (watchdog disabled). Persisted to state.json.
 returns:
   { taskId, status:"running"|"pending", pid, logOut, logErr, cwd }
-promptGuidelines: ["Use `background_start` to launch a long-running command that keeps running while you continue working; check it later with `background_status`/`background_output`."]
+promptGuidelines: ["Use `background_start` to launch a long-running command that keeps running while you continue working; check it later with `background_status`/`background_output`. Pass `survive:true` only for long-lived daemons that must outlive this pi process; by default tasks are killed when this pi exits."]
 ```
 
 ### 5.2 `background_status`
@@ -372,7 +396,7 @@ promptGuidelines: ["Use `background_stop` to terminate a running background task
 | **`session_start`** | `ensureDirs(p)`; run reconcile (§3) under `withLock`; `trace("session.start", {…})`. If `ctx.hasUI` set a status line `ctx.ui.setStatus("bg", "bg:N")`. |
 | **`background_status`** | Lazily reconcile before returning (cheap, bounded). |
 | **`session_start` (TUI)** | After reconcile: if `ctx.mode === "tui"` start the **UI refresh interval** (`PI_BG_TASKS_UI_REFRESH_MS`, default 1000ms) that re-reads state and re-renders the widget + status line (§11). Mirrors swarm's `startOrchestratorMailboxPump` (TUI-gated interval started in `session_start`). |
-| **`session_shutdown`** | If `PI_BG_TASKS_KILL_ON_SHUTDOWN==="1"`: for tasks with `spawnedByPid === process.pid` and `status==="running"`, send group **SIGTERM synchronously**, then fire-and-forget a SIGKILL escalation after `graceMs` (**do NOT `await` the grace window in the shutdown hook** — children are already detached/unref'd, so shutdown must not block on the grace period). Best-effort finalize as `killed` via the live listener. Otherwise: do nothing (children survive). |
+| **`session_shutdown`** | If `PI_BG_TASKS_KILL_ON_SHUTDOWN==="1"`: for tasks with `spawnedByPid === process.pid`, `status==="running"`, and `survive !== true` (the watchdog-disabled daemons are always skipped), send group **SIGTERM synchronously**, then fire-and-forget a SIGKILL escalation after `graceMs` (**do NOT `await` the grace window in the shutdown hook** — children are already detached/unref'd, so shutdown must not block on the grace period). Best-effort finalize as `killed` via the live listener. Otherwise: do nothing. (Note: this hook cannot run on a crash/kill-9; the **parent-death watchdog** in the wrapper is the authoritative kill path for `survive:false` tasks and covers every exit. `/reload` does not fire this hook for the same process.) |
 | **config (settings.json + env)** | Same precedence as `compact-resume`: **env > `.pi/settings.json` extensions block > defaults.** Knobs: `PI_BG_TASKS` (enable/disable), `PI_BG_TASKS_KILL_ON_SHUTDOWN`, `PI_BG_TASKS_MAX` (max concurrent, default 8), `PI_BG_TASKS_LOG_MAX_BYTES` (default 5MB), `PI_BG_TASKS_WAIT_MAX_MS` (default 120000), `PI_BG_TASKS_STOP_GRACE_MS` (default 5000), `PI_BG_TASKS_WAIT_POLL_MS` (default 250), **UI:** `PI_BG_TASKS_UI` (default on in TUI), `PI_BG_TASKS_UI_REFRESH_MS` (default 1000), `PI_BG_TASKS_UI_MAX_ROWS` (default 8). Settings shape under `extensions["background-tasks"]` (with optional `.ui = { enabled, refreshMs, maxRows }`). |
 | **zombie detection** | `process.kill(pid, 0)` in reconcile; ESRCH ⇒ dead. Marker file ⇒ finalized with code. |
 
@@ -533,7 +557,7 @@ The extension is **not** "validated" unless this actually runs in tmux. Smallest
    Justification for the extension = durability + observability + lifecycle, not capability. Worth
    stating in the tool guidelines.
 7. **`mode: "pi"` background agents.** ✅ **RESOLVED (review #1):** deferred; `BackgroundTask.kind: "shell"` added now as a cheap future seam. V1 strictly shell.
-8. **`killOnShutdown` default.** ✅ **RESOLVED (review #1):** default **leave-running**. Orphans are visible via `background_status`/reconcile.
+8. **`killOnShutdown` default / task lifetime.** ✅ **RESOLVED (reversed post-review):** a task now **dies with its spawning pi by default** via the wrapper's **parent-death watchdog** (covers clean exit *and* crash/kill-9 — the orphan-after-crash case was a critical bug). `killOnShutdown` is retained only as an orderly fast-path on clean shutdown and skips `survive:true` daemons. Long-lived daemons opt in with `background_start survive:true` (watchdog disabled). `/reload` keeps the pi process alive, so tasks survive a reload.
 9. **Windows.** `detached` + process groups + `process.kill(-pid)` are POSIX. `windowsHide` is set,
    but group-kill semantics differ. Scope V1 to macOS/Linux, document Windows as best-effort?
 10. **Id collisions.** `taskId = safeId(label)` can collide if labels repeat; fall back to
@@ -740,8 +764,11 @@ pending ──start(spawn ok)──▶ running ──exit(code 0)──▶ done
                               │      └──exit(code≠0)──▶ failed
                               │      └──background_stop──▶ killed
                               │      └──timeoutMs──▶ killed
-                              │      └──killOnShutdown──▶ killed
-                              └──(spawning pi dies)── reconcile: marker? finalize : (alive? running : unknown)
+                              │      └──killOnShutdown (survive:false)──▶ killed
+                              │      └──/reload──▶ running   (pi PROCESS persists; watchdog does not fire)
+                              └──(spawning pi dies)── survive:false → parent-death watchdog group-kills → killed*
+                                                       survive:true  → daemon keeps running
 ```
 Terminal states: `done`, `failed`, `killed`, `unknown`. Reconcile only moves forward to a terminal
-state; it never restarts.
+state; it never restarts.  \*killed by the watchdog *while pi is down* → no marker + no live listener
+→ finalized as `unknown` (reaping case 3) by the next session's `session_start` reconcile.

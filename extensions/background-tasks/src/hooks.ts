@@ -66,6 +66,7 @@ export function registerHooks(pi: ExtensionAPI, settings: BackgroundSettings) {
 					const st = await readState(p, process.cwd());
 					for (const t of Object.values(st.tasks)) {
 						if (t.spawnedByPid !== process.pid) continue;
+						if (t.survive) continue; // survive:true daemons are meant to outlive pi — never auto-killed
 						if (t.status !== "running" && t.status !== "pending") continue;
 						const pgid = t.pgid ?? t.pid;
 						if (pgid && isAlive(pgid)) {

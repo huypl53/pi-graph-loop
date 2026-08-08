@@ -41,9 +41,9 @@ export function registerTools(pi: ExtensionAPI, settings: BackgroundSettings) {
 			name: "background_start",
 			label: "Background Start",
 			description:
-				"Start a long-running shell command in the background. Returns immediately; the command keeps running (detached) while you continue working. You will be nudged automatically when it finishes, so do NOT block on background_wait. The task is scoped to THIS chat session.",
+				"Start a long-running shell command in the background. Returns immediately; the command keeps running (detached) while you continue working. You will be nudged automatically when it finishes, so do NOT block on background_wait. The task is scoped to THIS chat session. By default the task is KILLED when the pi session that started it exits or crashes; pass survive:true only for a long-lived daemon that should outlive pi (shell mode only).",
 			promptGuidelines: [
-				"Use `background_start` to launch a long-running command that keeps running while you continue working. It returns immediately with a taskId and log paths — do NOT call `background_wait`; you will be nudged when it finishes. View live output anytime with `background_output` or by reading the returned log path.",
+				"Use `background_start` to launch a long-running command that keeps running while you continue working. It returns immediately with a taskId and log paths — do NOT call `background_wait`; you will be nudged when it finishes. View live output anytime with `background_output` or by reading the returned log path. By default the task dies when its pi session exits or crashes; pass survive:true ONLY for a genuine long-lived daemon (e.g. a dev server you want to keep across pi restarts).",
 			],
 			parameters: Type.Object({
 				command: Type.String({ description: "Shell command to run (used when shell:true, default true)." }),
@@ -53,6 +53,7 @@ export function registerTools(pi: ExtensionAPI, settings: BackgroundSettings) {
 				env: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Extra env vars merged onto process.env." })),
 				shell: Type.Optional(Type.Boolean({ description: "Run via sh -c (default true)." })),
 				timeoutMs: Type.Optional(Type.Number({ description: "Optional auto-kill after N ms (enforced in a child watchdog)." })),
+				survive: Type.Optional(Type.Boolean({ description: "Long-lived daemon: skip the parent-death watchdog so the task OUTLIVES its pi session (default false = die with pi). Shell mode only." })),
 			}),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				const cwd = ctx.cwd;
@@ -68,6 +69,7 @@ export function registerTools(pi: ExtensionAPI, settings: BackgroundSettings) {
 						env: params.env as Record<string, string> | undefined,
 						shell: params.shell,
 						timeoutMs: params.timeoutMs,
+						survive: params.survive,
 						sessionId: currentSessionId(ctx),
 					},
 					() => {},
