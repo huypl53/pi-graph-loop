@@ -1,5 +1,19 @@
 # Pi Swarm Extension
 
+This file is now the **legacy consolidated reference** for swarm.
+
+For clearer, maintainable docs, start with the focused doc set:
+
+- [`docs/swarm/index.md`](./swarm/index.md) — canonical doc map
+- [`docs/swarm/architecture.md`](./swarm/architecture.md) — system model, invariants, boundaries
+- [`docs/swarm/contributor-guide.md`](./swarm/contributor-guide.md) — where to implement changes
+- [`docs/swarm/operations.md`](./swarm/operations.md) — runtime files, debugging, validation
+- [`docs/swarm/tools.md`](./swarm/tools.md) — grouped commands and tools
+
+The rest of this file is preserved for compatibility and deep reference.
+
+---
+
 `pi-swarm` is a project-local pi extension that turns a single pi session into a tmux-backed group of cooperating pi agents. It is intentionally simple and inspectable: there is no daemon or mini server. Coordination uses tmux panes, JSON state, JSONL mailboxes, and structured trace files under the project `.pi/swarm/` runtime directory.
 
 ## Architecture

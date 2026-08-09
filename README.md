@@ -25,10 +25,20 @@ The swarm extension provides:
 - task-graph tooling, assignment/update flows, closure derivation, and runtime warnings
 - opt-in task-graph iteration proposal loop (V1.5): after a loop-enabled task closes terminal-done, collect proposals from a fixed agent pool, synthesize the next plan, and best-effort refresh agents
 
-Full docs are in:
+Docs are organized as:
 
 ```text
-docs/swarm.md
+docs/swarm/index.md                 # canonical swarm doc map
+docs/swarm/architecture.md          # system model and invariants
+docs/swarm/contributor-guide.md     # where to implement changes
+docs/swarm/operations.md            # runtime/debugging/validation
+docs/swarm/tools.md                 # grouped tool and command reference
+```
+
+Detailed topic docs remain available in:
+
+```text
+docs/swarm.md                       # compact legacy landing/reference
 docs/swarm-new-project-setup.md
 docs/swarm-memory.md
 docs/swarm-task-graph.md

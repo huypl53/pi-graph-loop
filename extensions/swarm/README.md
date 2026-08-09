@@ -39,10 +39,15 @@ and `computeIterationBest` (used by the `.test.mjs` regression suites) and calls
 
 This is the packaged extension source (see `package.json` → `pi.extensions = ["./extensions"]`). The old `.pi/extensions/swarm/index.ts` dev wrapper was removed; load the extension from `extensions/swarm/index.ts`.
 
-Full documentation:
+Documentation entrypoints:
 
 ```text
-docs/swarm.md
+docs/swarm/index.md                 # canonical swarm doc map
+docs/swarm/architecture.md          # system model and invariants
+docs/swarm/contributor-guide.md     # contributor workflow + change checklists
+docs/swarm/operations.md            # runtime files, debugging, validation
+docs/swarm/tools.md                 # grouped tools and /swarm commands
+docs/swarm.md                       # compact legacy landing/reference
 ```
 
 Quick start:

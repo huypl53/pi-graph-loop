@@ -13,6 +13,12 @@ pi --model glm-5.1 --provider zai-coding-cn
 pi --model gpt-5.4-mini --provider openai
 ```
 
+## extension docs map
+- canonical swarm docs live under `docs/swarm/`
+- start with `docs/swarm/index.md`, then read `docs/swarm/architecture.md` and `docs/swarm/contributor-guide.md` before changing swarm behavior
+- use `extensions/swarm/README.md` for the implementation module map
+- update focused docs in `docs/swarm/` when adding or changing swarm features; do not treat `docs/swarm.md` as the only source of truth
+
 ## extension development flow
 - when developing or changing a pi extension, do not stop at code changes; always include a validation/test step in tmux so the extension is exercised in a fresh interactive pi environment
 - prefer an isolated tmux target dedicated to the validation run so the user can later inspect or attach to it for review
