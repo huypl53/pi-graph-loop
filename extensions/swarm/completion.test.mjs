@@ -11,13 +11,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const mod = await import(join(here, "index.ts"));
 const factory = mod.default;
 
-// --- mock pi: capture tools + the swarm command options (incl. getArgumentCompletions) ---
+// --- mock pi: capture tools + swarm command options (incl. getArgumentCompletions) ---
 const tools = {};
-let swarmCmd = null;
+const cmds = {};
 const handlers = {}; // event -> [handler]
 const pi = {
 	registerTool: (def) => { tools[def.name] = def; },
-	registerCommand: (name, opts) => { if (name === "swarm") swarmCmd = opts; },
+	registerCommand: (name, opts) => { cmds[name] = opts; },
 	on: (ev, h) => { (handlers[ev] ??= []).push(h); },
 	exec: async (_cmd, args) => {
 		if (args?.[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
@@ -25,11 +25,15 @@ const pi = {
 	},
 };
 factory(pi);
-if (!swarmCmd || typeof swarmCmd.getArgumentCompletions !== "function") {
-	console.error("FAIL: /swarm command did not register getArgumentCompletions");
-	process.exit(1);
+for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg", "swarm-loop"]) {
+	if (!cmds[name] || typeof cmds[name].getArgumentCompletions !== "function") {
+		console.error(`FAIL: /${name} command did not register getArgumentCompletions`);
+		process.exit(1);
+	}
 }
-const complete = (prefix) => swarmCmd.getArgumentCompletions(prefix);
+const complete = (prefix) => cmds.swarm.getArgumentCompletions(prefix);
+const completeScoped = (name, prefix) => cmds[name].getArgumentCompletions(prefix);
+const valsScoped = async (name, prefix) => (await completeScoped(name, prefix) ?? []).map((i) => i.value);
 
 // --- scratch project ---
 const scratch = join(tmpdir(), `swarm-completion-${process.pid}-${Date.now()}`);
@@ -157,6 +161,15 @@ ok("junk does not throw", JSON.stringify(await complete("graph     ")) !== null 
 // 19. items carry labels + descriptions.
 const items0 = await complete("");
 ok("subcommand items have descriptions", items0.every((i) => i.label && i.description && i.value));
+
+// 20. scoped command completions expose only their domain and remap to alias values.
+ok("/swarm-agents top-level verbs", JSON.stringify(await valsScoped("swarm-agents", "")) === JSON.stringify(["list", "status", "spawn", "register", "panes", "stop", "restart", "role", "pause", "resume", "sendkey", "attach", "release", "identity"]));
+ok("/swarm-tasks top-level verbs", JSON.stringify(await valsScoped("swarm-tasks", "")) === JSON.stringify(["list", "graph", "status", "next", "validate"]));
+ok("/swarm-tasks status remaps task completion", JSON.stringify(await valsScoped("swarm-tasks", "status ")) === JSON.stringify(["status 1"]));
+ok("/swarm-msg only offers send", JSON.stringify(await valsScoped("swarm-msg", "")) === JSON.stringify(["send"]));
+ok("/swarm-msg send <space> -> agents", JSON.stringify((await valsScoped("swarm-msg", "send ")).sort()) === JSON.stringify(["send planner", "send reviewer"]));
+ok("/swarm-loop top-level verbs", JSON.stringify(await valsScoped("swarm-loop", "")) === JSON.stringify(["status", "plan"]));
+ok("/swarm-loop status remaps loop task-id completion", JSON.stringify(await valsScoped("swarm-loop", `status ${taskId.slice(0, 6)}`)) === JSON.stringify([`status ${taskId}`]));
 
 rmSync(scratch, { recursive: true, force: true });
 if (fail) { console.error(`\nCOMPLETION FAIL (${fail})`); process.exit(1); }

@@ -91,6 +91,8 @@ After `pi install -l ...`, start pi normally in the target project. Then inside 
 /swarm init
 /swarm status
 /swarm graph <task-id> mermaid
+/swarm-agents list
+/swarm-tasks status <task-id>
 Call swarm_agent_status for all agents.
 ```
 
