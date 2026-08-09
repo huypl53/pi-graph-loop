@@ -14,6 +14,7 @@ import { inferRoleKind, now, safeId } from "./utils.ts";
 import { loopStatusSnapshot, recordLoopPlan } from "./loop.ts";
 import { ensureOrchestrator, overridePath } from "./identity.ts";
 import { startOrchestratorPump } from "./hooks.ts";
+import { applySwarmToolGating } from "./tools/gating.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
@@ -310,6 +311,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							// nudges via the PM pump, and update the footer. This makes the pane a REAL orchestrator.
 							process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
 							process.env.PI_SWARM_AGENT_ID = "orchestrator";
+							applySwarmToolGating(pi); // re-enable the swarm tool surface now that this pane is the PM
 							await withLock(p, async () => {
 								const st = await readState(p, ctx.cwd);
 								ensureOrchestrator(st, ctx.cwd, p);
@@ -349,6 +351,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						}
 						if (isCurrent) {
 							process.env.PI_SWARM_AGENT_ID = result.agent.id;
+							applySwarmToolGating(pi); // re-enable the swarm tool surface for the newly adopted identity
 							if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${result.agent.id}`);
 							adopted = true;
 							await trace(p, "agent.adopt_identity", { agentId: result.agent.id, via: isHereToken(tmuxTarget) ? "here" : "explicit", source: "command" });
