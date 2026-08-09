@@ -162,9 +162,19 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// second orchestrator lane cannot starve this PM process). Recent window bounds work; acked messages
 		// (ackedAt = "recipient processed it") are skipped. We no longer pre-filter surfaced here: surfaced
 		// vs triggered vs re-trigger is decided below, because surfacing must be gated on idle.
+		const deliveredOrch = new Set(st.delivered.orchestrator || []);
 		const windowMsgs = (await readMailbox(p, "orchestrator"))
 			.slice(-PUMP_SCAN_WINDOW)
-			.filter((m) => !(st.messages[m.id]?.ackedAt));
+			.filter((m) => {
+				const rec = st.messages[m.id];
+				if (rec?.ackedAt) return false;
+				// Informational orchestrator messages (requiresAck:false) are globally single-surface:
+				// once ANY orchestrator TUI session has actually surfaced them, or an explicit mailbox read
+				// marked them delivered, do not replay them to a later orchestrator process. Action-expected
+				// messages stay session-local + re-triggerable.
+				if (rec && rec.to === "orchestrator" && rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) return false;
+				return true;
+			});
 
 		// BUSY: defer entirely. Do NOT surface, do NOT mark surfaced, do NOT deliver a dead followUp. A
 		// followUp delivered while busy carries no triggerTurn, so it lands in context without prompting the
@@ -238,7 +248,28 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 				details: msg,
 			}, i === 0 ? { triggerTurn: true } : { deliverAs: "followUp" });
 		}
-		await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), retriggered: result.retriggered, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart });
+		// Global-consume informational PM traffic ONLY AFTER a real TUI surface succeeded. This avoids
+		// losing a message on stale-ctx/sendMessage failure while still preventing a later orchestrator
+		// process from replaying historical requiresAck:false notices that were already shown once.
+		const surfacedInfoIds = pending
+			.filter((m) => m.requiresAck === false)
+			.map((m) => m.id);
+		if (surfacedInfoIds.length) {
+			await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const ts = now();
+				const ledgerIds = st.delivered.orchestrator || [];
+				st.delivered.orchestrator = Array.from(new Set([...ledgerIds, ...surfacedInfoIds]));
+				for (const id of surfacedInfoIds) {
+					const rec = st.messages[id];
+					if (!rec || rec.to !== "orchestrator" || rec.requiresAck !== false || rec.surfacedAt) continue;
+					rec.surfacedAt = ts;
+					rec.updatedAt = ts;
+				}
+				await writeState(p, st);
+			});
+		}
+		await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), retriggered: result.retriggered, informationalConsumed: surfacedInfoIds.length, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart });
 	} else {
 		// In non-TUI mode, still trace pump activity (without ctx.isIdle) for visibility.
 		await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, mode: ctx.mode });

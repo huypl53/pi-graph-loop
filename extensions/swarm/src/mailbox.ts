@@ -72,7 +72,19 @@ export async function readMailbox(p: Paths, agentId: string): Promise<SwarmMessa
 	const file = mailboxPath(p, agentId);
 	if (!existsSync(file)) return [];
 	const raw = await readFile(file, "utf8");
-	return raw.split(/\n+/).filter(Boolean).map((line) => JSON.parse(line));
+	const out: SwarmMessage[] = [];
+	let bad = 0;
+	let firstBadLine = 0;
+	for (const [idx, line] of raw.split(/\n+/).filter(Boolean).entries()) {
+		try {
+			out.push(JSON.parse(line) as SwarmMessage);
+		} catch {
+			bad++;
+			if (!firstBadLine) firstBadLine = idx + 1;
+		}
+	}
+	if (bad) await trace(p, "mailbox.corrupt_lines_ignored", { agentId, file, bad, firstBadLine });
+	return out;
 }
 
 export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg: SwarmMessage) {

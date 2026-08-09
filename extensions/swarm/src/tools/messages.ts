@@ -148,10 +148,10 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				// DELIBERATELY DECOUPLED from the orchestrator auto-pump: check_mailbox keys "already read" on the
 				// shared st.delivered[agentId] ledger, NOT on the pump's per-process surfaced set
 				// (st.orchestratorPumpSessions). Because pumpOrchestratorMailbox never reads
-				// st.delivered.orchestrator, a check_mailbox(markDelivered:true) here cannot pre-empt a later
-				// pump surface; an explicit swarm_ack_message cannot either (the pump only skips ackedAt
-				// messages = correct "recipient processed it" semantics, not a surface cursor). This is what
-				// makes orchestrator surfacing read-safe as well as session-safe.
+				// st.delivered.orchestrator, a check_mailbox(markDelivered:true) here does not affect
+				// action-expected re-trigger logic. The ONE exception is explicit orchestrator reads of
+				// informational messages (requiresAck:false): when the PM asks to mark those delivered here,
+				// stamp surfacedAt so a later orchestrator session does not replay already-read history.
 				const ledgerIds = st.delivered[agentId] || [];
 				const deliveredIds = new Set(ledgerIds);
 				let messages = await readMailbox(p, agentId);
@@ -161,6 +161,15 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 					// Mark the whole matched set before applying the display limit so a small
 					// limit does not leave older pending messages to be reprocessed forever.
 					st.delivered[agentId] = Array.from(new Set([...ledgerIds, ...messages.map((m) => m.id)]));
+					if (agentId === "orchestrator") {
+						const ts = now();
+						for (const m of messages) {
+							const rec = st.messages[m.id];
+							if (!rec || rec.to !== "orchestrator" || rec.requiresAck !== false || rec.surfacedAt) continue;
+							rec.surfacedAt = ts;
+							rec.updatedAt = ts;
+						}
+					}
 					await writeState(p, st);
 				}
 				messages = messages.slice(-limit);

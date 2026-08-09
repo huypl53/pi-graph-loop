@@ -12,7 +12,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const { readState, readTaskState, paths, ensureDirs } = await import(join(here, "src", "state.ts"));
+const { readState, readTaskState, paths, ensureDirs, mailboxPath } = await import(join(here, "src", "state.ts"));
+const { readMailbox } = await import(join(here, "src", "mailbox.ts"));
 
 const scratch = join(tmpdir(), `swarm-corrupt-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
@@ -64,8 +65,23 @@ console.log("\n[2] readTaskState throws a clear error on corrupt task.json");
 	ok("original task.json path no longer exists (renamed)", !existsSync(tp));
 }
 
-// --- [3] Normal valid parses still work unchanged ---
-console.log("\n[3] normal valid parses still work");
+// --- [3] readMailbox ignores malformed JSONL lines instead of crashing the extension ---
+console.log("\n[3] readMailbox ignores malformed JSONL lines");
+{
+	const file = mailboxPath(p, "orchestrator");
+	writeFileSync(file, [
+		JSON.stringify({ id: "msg-good-1", swarmId: "swarm-x", from: "a", to: "orchestrator", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: "t1", body: "ok", requiresAck: false, headers: {} }),
+		"msg-178619-bad-not-json",
+		JSON.stringify({ id: "msg-good-2", swarmId: "swarm-x", from: "b", to: "orchestrator", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: "t2", body: "ok2", requiresAck: true, headers: {} }),
+	].join("\n") + "\n", "utf8");
+	const msgs = await readMailbox(p, "orchestrator");
+	ok("readMailbox returns the valid records", msgs.length === 2 && msgs[0].id === "msg-good-1" && msgs[1].id === "msg-good-2");
+	const events = readFileSync(p.events, "utf8");
+	ok("malformed mailbox line traced and ignored", /mailbox\.corrupt_lines_ignored/.test(events) && events.includes("\"bad\":1") && events.includes("\"firstBadLine\":2"));
+}
+
+// --- [4] Normal valid parses still work unchanged ---
+console.log("\n[4] normal valid parses still work");
 {
 	// readState: fresh dir creates + persists the default, second read parses it back.
 	const fresh = join(scratch, "fresh");

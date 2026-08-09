@@ -20,20 +20,27 @@ function freshWorld() {
 	return {
 		now: 1_700_000_000_000,
 		mailbox: [], // [{id, requiresAck, ackedAt?}]
-		records: {}, // id -> {requiresAck, ackedAt?}
+		records: {}, // id -> {requiresAck, ackedAt?, surfacedAt?}
+		delivered: [], // orchestrator delivered ledger
 		sess: { ids: [], triggeredAt: {}, retriggerCount: {}, lastAt: "" },
 	};
 }
 
 // Mirror of the pump's lock-block decision. Returns { toSurface, retriggered, deferred } and mutates world.
 function pumpDecision(world, idle) {
-	const { now, mailbox, records, sess } = world;
+	const { now, mailbox, records, delivered, sess } = world;
 	const surfaced = new Set(sess.ids);
 	const triggeredAt = { ...sess.triggeredAt };
 	const retriggerCount = { ...sess.retriggerCount };
 	sess.lastAt = String(now);
 
-	const windowMsgs = mailbox.slice(-PUMP_SCAN_WINDOW).filter((m) => !(records[m.id]?.ackedAt));
+	const deliveredSet = new Set(delivered);
+	const windowMsgs = mailbox.slice(-PUMP_SCAN_WINDOW).filter((m) => {
+		const rec = records[m.id];
+		if (rec?.ackedAt) return false;
+		if (rec?.requiresAck === false && (rec?.surfacedAt || deliveredSet.has(m.id))) return false;
+		return true;
+	});
 
 	// BUSY: defer entirely (the core fix).
 	if (!idle) {
@@ -58,6 +65,12 @@ function pumpDecision(world, idle) {
 		surfaced.add(m.id);
 		triggeredAt[m.id] = now;
 		if (retriggerSet.has(m.id)) retriggerCount[m.id] = (retriggerCount[m.id] ?? 0) + 1;
+	}
+	for (const m of toSurface) {
+		if (m.requiresAck === false) {
+			records[m.id].surfacedAt = String(now); // global consume after real surface
+			if (!deliveredSet.has(m.id)) delivered.push(m.id);
+		}
 	}
 	// persist back
 	sess.ids = [...surfaced].slice(-PUMP_SESSION_ID_CAP);
@@ -129,7 +142,22 @@ console.log("\n[4] Informational (requiresAck:false) messages trigger exactly on
 	assert(r2.toSurface.length === 0, "informational message is NOT re-triggered (sufficient to prompt once)");
 }
 
-console.log("\n[5] Acked message is never surfaced again");
+console.log("\n[5] Informational message is not replayed to a new orchestrator session once already surfaced");
+{
+	const w = freshWorld();
+	const info = { id: "info-2", requiresAck: false };
+	w.mailbox.push(info);
+	w.records["info-2"] = { requiresAck: false };
+	const r1 = pumpDecision(w, true);
+	assert(r1.toSurface.length === 1, "first orchestrator session surfaces informational message");
+	// Simulate a fresh orchestrator process/session: empty per-session surfaced ledger.
+	w.sess = { ids: [], triggeredAt: {}, retriggerCount: {}, lastAt: "" };
+	const r2 = pumpDecision(w, true);
+	assert(r2.toSurface.length === 0, "fresh orchestrator session skips already-surfaced informational history");
+	assert(Boolean(w.records["info-2"].surfacedAt), "informational record stamped surfacedAt for global consume");
+}
+
+console.log("\n[6] Acked message is never surfaced again");
 {
 	const w = freshWorld();
 	const m = { id: "m-1", requiresAck: true };
@@ -142,7 +170,7 @@ console.log("\n[5] Acked message is never surfaced again");
 	assert(r.toSurface.length === 0, "acked message skipped by pump");
 }
 
-console.log("\n[6] Fresh work is surfaced alongside an overdue re-trigger within one pump");
+console.log("\n[7] Fresh work is surfaced alongside an overdue re-trigger within one pump");
 {
 	const w = freshWorld();
 	const old = { id: "old-1", requiresAck: true };

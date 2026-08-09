@@ -29,6 +29,7 @@ export type MessageRecord = {
 	injectedAt?: string;
 	interceptedAt?: string;
 	ackedAt?: string;
+	surfacedAt?: string;
 	failedAt?: string;
 	ackMissingAt?: string;
 	attempts: number;
