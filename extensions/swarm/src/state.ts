@@ -93,6 +93,20 @@ export function defaultState(cwd: string): SwarmState {
 	};
 }
 
+// Best-effort: move a corrupt JSON file aside so subsequent reads re-create it from defaults.
+// Never throws — callers decide whether to recover silently (readState) or surface a clear error
+// (the typed readers, whose callers already guard unreadable files via try/catch).
+async function backupCorruptFile(file: string): Promise<void> {
+	try {
+		await rename(file, `${file}.corrupt.bak`);
+	} catch { /* best-effort; the caller's error message already references the .bak path */ }
+}
+
+function corruptParseError(file: string, err: unknown): Error {
+	const message = err instanceof Error ? err.message : String(err);
+	return new Error(`Failed to parse ${file}: ${message} (backed up to ${file}.corrupt.bak)`);
+}
+
 export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	await ensureDirs(p);
 	if (!existsSync(p.state)) {
@@ -100,7 +114,18 @@ export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 		await atomicWriteFile(p.state, `${JSON.stringify(st, null, 2)}\n`);
 		return st;
 	}
-	const st = JSON.parse(await readFile(p.state, "utf8")) as SwarmState;
+	let st: SwarmState;
+	try {
+		st = JSON.parse(await readFile(p.state, "utf8")) as SwarmState;
+	} catch (err) {
+		// Corrupt swarm-state.json: back it up best-effort, trace the recovery, and return a fresh
+		// default so the extension stays usable (agents/messages reset rather than crashing the
+		// session). The backup preserves the bad bytes for post-mortem.
+		const message = err instanceof Error ? err.message : String(err);
+		await backupCorruptFile(p.state);
+		await trace(p, "state.corrupt_recovered", { file: p.state, error: message });
+		return defaultState(cwd);
+	}
 	st.messages ||= {};
 	st.delivered ||= {};
 	st.orchestratorPumpSessions ||= {};
@@ -128,7 +153,16 @@ export async function appendJsonl(file: string, value: unknown) {
 }
 
 export async function readTaskState(file: string): Promise<TaskState> {
-	const task = JSON.parse(await readFile(file, "utf8")) as TaskState;
+	let task: TaskState;
+	try {
+		task = JSON.parse(await readFile(file, "utf8")) as TaskState;
+	} catch (err) {
+		// Unreadable task.json: back it up and surface a clear error. Reconcile's task_skip path
+		// (try { readTaskState } catch { continue }) and other guarded callers handle this; after
+		// the backup, existsSync(file) is false so the task is skipped on subsequent reads.
+		await backupCorruptFile(file);
+		throw corruptParseError(file, err);
+	}
 	task.nodes = Object.fromEntries(Object.entries(task.nodes || {}).map(([id, node]) => [id, normalizeTaskNode(node)]));
 	task.edges ||= [];
 	task.currentNodes ||= [];
@@ -274,7 +308,12 @@ export function iterationFile(p: Paths, iterationId: string) {
 export async function readIteration(p: Paths, iterationId: string): Promise<IterationSession | undefined> {
 	const file = iterationFile(p, iterationId);
 	if (!existsSync(file)) return undefined;
-	return JSON.parse(await readFile(file, "utf8")) as IterationSession;
+	try {
+		return JSON.parse(await readFile(file, "utf8")) as IterationSession;
+	} catch (err) {
+		await backupCorruptFile(file);
+		throw corruptParseError(file, err);
+	}
 }
 
 export async function writeIteration(p: Paths, session: IterationSession) {
@@ -285,7 +324,12 @@ export async function writeIteration(p: Paths, session: IterationSession) {
 export async function readMetricContract(p: Paths, id: string): Promise<MetricContract | undefined> {
 	const file = join(p.metricsDir, `${safeId(id)}.json`);
 	if (!existsSync(file)) return undefined;
-	return JSON.parse(await readFile(file, "utf8")) as MetricContract;
+	try {
+		return JSON.parse(await readFile(file, "utf8")) as MetricContract;
+	} catch (err) {
+		await backupCorruptFile(file);
+		throw corruptParseError(file, err);
+	}
 }
 
 export async function latestRuns(p: Paths): Promise<RunRecord[]> {
@@ -317,8 +361,12 @@ export async function readLoopState(p: Paths, taskId: string): Promise<LoopState
 	if (!existsSync(file)) return undefined;
 	try {
 		return JSON.parse(await readFile(file, "utf8")) as LoopState;
-	} catch {
-		return undefined;
+	} catch (err) {
+		// Corrupt loop-state.json: back it up and surface a clear error. After the backup,
+		// existsSync(file) is false so the next read returns undefined and the loop self-heals
+		// (round restarts from 1) instead of silently masking the corruption.
+		await backupCorruptFile(file);
+		throw corruptParseError(file, err);
 	}
 }
 

@@ -132,7 +132,16 @@ export async function kickoffLoopIfEnabled(pi: ExtensionAPI, cwd: string, p: Pat
 	const cfg = getLoopConfig(task.loop);
 	if (!cfg) return;
 	if (task.status !== "done") return;
-	const existing = await readLoopState(p, task.taskId);
+	// readLoopState throws (after backing up the file) on a corrupt loop-state.json. Self-heal: treat
+	// that as "no existing loop" so the round restarts from 1, preserving the pre-resilience behavior
+	// and ensuring a corrupt file can't permanently block loop kickoff for a just-closed task.
+	let existing: LoopState | undefined;
+	try {
+		existing = await readLoopState(p, task.taskId);
+	} catch (err: any) {
+		await traceTask(tp, "task.loop.kickoff_corrupt_recovered", { taskId: task.taskId, error: String((err as Error)?.message || err) });
+		existing = undefined;
+	}
 	if (existing && ["collecting_proposals", "awaiting_plan", "refreshing"].includes(existing.phase)) {
 		await traceTask(tp, "task.loop.kickoff_skipped", { taskId: task.taskId, phase: existing.phase, reason: "active round exists" });
 		return;

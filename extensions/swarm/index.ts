@@ -7,6 +7,7 @@ import { registerMessagesTools } from "./src/tools/messages.ts";
 import { registerTasksTools } from "./src/tools/tasks.ts";
 import { registerMetricsTools } from "./src/tools/metrics.ts";
 import { registerLoopTools } from "./src/tools/loop.ts";
+import { registerGcTools } from "./src/tools/gc.ts";
 export { isDeliveryFailureRetryable } from "./src/delivery.ts";
 export { validateRunAgainstContract, computeIterationBest } from "./src/metric.ts";
 
@@ -17,5 +18,6 @@ export default function (pi: ExtensionAPI) {
 	registerTasksTools(pi);
 	registerMetricsTools(pi);
 	registerLoopTools(pi);
+	registerGcTools(pi);
 	registerSwarmCommand(pi);
 }
