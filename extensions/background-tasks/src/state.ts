@@ -41,6 +41,7 @@ export async function readState(p: BgPaths, cwd: string): Promise<BackgroundStat
 	}
 	const st = JSON.parse(await readFile(p.state, "utf8")) as BackgroundState;
 	st.tasks ||= {};
+	st.watchers ||= {};
 	return st;
 }
 

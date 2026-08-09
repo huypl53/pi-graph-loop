@@ -38,6 +38,7 @@ export interface BackgroundState {
 	version: number; // 1
 	cwd: string;
 	tasks: Record<string, BackgroundTask>;
+	watchers?: Record<string, Watcher>; // V1.1 additive; lazily defaulted to {} on read
 	createdAt: string;
 	updatedAt: string;
 }
@@ -56,6 +57,51 @@ export interface BackgroundSettings {
 		refreshMs: number;
 		maxRows: number;
 	};
+	watch: WatchSettings;
+}
+
+// --- watchers (background_watch): event-driven nudges evaluated on the ui tick ---
+// A watcher registers a condition (pattern in NEW output | tcp port open | idle stall) against a
+// background task. The renderUi tick loop evaluates armed watchers every refreshMs and nudges the
+// agent (idle-gated, same path as the completion nudge) when a condition matches — so the agent
+// never has to poll background_output in a loop.
+export type WatchTrigger = "pattern" | "port" | "idle";
+export type WatchStatus = "armed" | "fired" | "expired" | "cancelled";
+
+export interface Watcher {
+	watchId: string; // watch-<ts36>-<rand>
+	taskId: string; // target background task
+	session?: string; // owning chat session id (scopes visibility + nudges, like spawnedBySession)
+	createdAt: string; // ISO
+	trigger: WatchTrigger; // which condition is active
+	pattern?: string; // regex source (trigger === "pattern")
+	patternFlags?: string; // regex flags (e.g. "i"; "g" always stripped)
+	port?: number; // tcp port readiness on 127.0.0.1 (trigger === "port")
+	idleMs?: number; // stall threshold (trigger === "idle")
+	once: boolean; // fire once then complete (default true); false = continuous, rate-limited by refireMs
+	ttlMs?: number; // optional expiry from createdAt (0/undefined = no ttl)
+	// scan cursors: bytes already consumed per stream. Initialized to 0 so the FIRST scan sees the
+	// whole existing log (readiness fires immediately if already ready); then advances so only NEW
+	// output is matched on later ticks.
+	scanOut: number;
+	scanErr: number;
+	lastOutputAt: number; // epoch ms of last new output (idle trigger + refire reset)
+	// firing state
+	status: WatchStatus; // armed (active) | fired (once, pending nudge delivery) | expired | cancelled
+	firedCount: number; // total fires
+	lastFiredAt?: number; // epoch ms (rate-limits continuous refires)
+	lastSnippet?: string; // last matched line / reason (nudge body + list)
+	pendingNudge?: string; // buffered nudge text awaiting idle delivery (cleared on send)
+	updatedAt: string;
+}
+
+export interface WatchSettings {
+	enabled: boolean;
+	maxPerSession: number; // cap armed watchers per session
+	refireMs: number; // min gap between fires for once:false continuous watchers
+	portTimeoutMs: number; // tcp connect probe timeout
+	patternMaxLen: number; // cap snippet length embedded in nudges
+	rangeReadBytes: number; // max bytes scanned per stream per tick (bounds per-tick work)
 }
 
 export interface BgPaths {

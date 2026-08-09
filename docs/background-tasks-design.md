@@ -734,6 +734,48 @@ Like swarm's pump, a captured `ctx` can go stale after `/reload`/session replace
 
 ---
 
+## 12. Watchers (`background_watch`) — event-driven monitoring
+
+**Problem.** Before watchers, noticing that a dev server became ready, a build failed, or a process
+stalled required either blocking on `background_wait` (wasting a turn) or polling `background_output`
+in a token-burning loop. There was no event primitive.
+
+**Design.** A watcher registers ONE condition against a background task. It is evaluated on the
+existing `renderUi` tick loop (§11.2) every `ui.refreshMs` and nudges the agent via the SAME
+idle-gated `pi.sendUserMessage` path as the completion nudge (§11.3). No new polling/threading.
+
+**Three triggers (exactly one per watch):**
+
+| Trigger | Fires when |
+|---|---|
+| `pattern` | regex matches **NEW** combined output (stdout+stderr) since the last scan; `ignoreCase` optional |
+| `port` | TCP port on `127.0.0.1` starts accepting (readiness) |
+| `idleMs` | no new output for N ms (stall/hung build) |
+
+**Behavior.** `once:true` (default) fires once then completes; `once:false` is continuous and
+rate-limited by `watch.refireMs`; `ttlMs` caps lifetime (silent expiry). Scan cursors are per-stream
+byte offsets persisted in `state.json` (survive `/reload`), initialized to 0 so the FIRST scan sees
+the whole existing log (readiness fires immediately if already ready) and then advance so only NEW
+output matches thereafter. Per-tick reads are capped (`watch.rangeReadBytes`) to bound work.
+
+**Lifecycle.** Cancelled via `background_unwatch` (by `watchId` or `taskId`), on TTL, and
+automatically when the watched task goes terminal or is pruned. Session-scoped like tasks
+(`belongsToSession`): a watcher is only visible to / nudged in its owning chat session.
+
+**§12.1 Per-tick nudge coordination (the one subtlety).** Each `pi.sendUserMessage` starts a turn;
+a second one in the same tick throws `Agent is already processing a prompt`. The completion nudge
+(§11.3) and the watch nudge therefore SHARE a single per-tick slot: `renderUi` creates
+`const nudge = { sent: false }`, whichever path sends first sets `nudge.sent = true`, and the other
+`if (idle && !nudge.sent)`-gates its send and defers its still-pending nudge to the next idle tick.
+Both eventually deliver; at most one turn is triggered per tick.
+
+**§12.2 Tools.** `background_watch` (register), `background_watch_list` (list/filter, `allSessions`
+to inspect other sessions), `background_unwatch` (cancel). Settings under `extensions.background-
+tasks.watch.*` / `PI_BG_TASKS_WATCH*` env: `enabled`, `maxPerSession`, `refireMs`, `portTimeoutMs`,
+`patternMaxLen`, `rangeReadBytes`.
+
+---
+
 ## Appendix A — Reused primitives (proven in swarm)
 
 | Primitive | Source | Reused for |

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { paths, readState } from "./state.ts";
 import { belongsToSession, currentSessionId, elapsedMmSs, trace, truncateToWidth, visibleWidth } from "./utils.ts";
+import { evalWatchers } from "./watchers.ts";
 import type { BackgroundSettings, BackgroundState, BackgroundTask, BgStatus } from "./types.ts";
 
 const ICON: Record<BgStatus, string> = {
@@ -103,6 +104,11 @@ export async function renderUi(pi: ExtensionAPI, ctx: any, settings: BackgroundS
 	); // newest first
 
 	let stChanged = false;
+	// Coordinate nudge delivery: at most ONE pi.sendUserMessage per tick across the completion
+	// nudge and the watch nudge (each call starts a turn; a second one in the same tick throws
+	// "Agent is already processing a prompt"). Whichever sends first claims the slot; the other
+	// defers its (still-pending) nudge to the next idle tick.
+	const nudge = { sent: false };
 
 	// --- human toast: one notify per running->terminal transition (this session only; deduped via persisted lastNotifiedStatus) ---
 	for (const t of tasks) {
@@ -126,10 +132,11 @@ export async function renderUi(pi: ExtensionAPI, ctx: any, settings: BackgroundS
 		try {
 			idle = ctx.mode === "tui" && ctx.isIdle();
 		} catch {}
-		if (idle) {
+		if (idle && !nudge.sent) {
 			try {
 				pi.sendUserMessage(formatNudge(toNudge));
 				for (const t of toNudge) t.agentNudgedStatus = t.status;
+				nudge.sent = true;
 				stChanged = true;
 				await trace(p.events, "task.nudge.sent", { ids: toNudge.map((t) => t.taskId), sid }).catch(() => {});
 			} catch (err: any) {
@@ -140,6 +147,15 @@ export async function renderUi(pi: ExtensionAPI, ctx: any, settings: BackgroundS
 			// busy (or non-TUI): defer — leave agentNudgedStatus unset so a later idle tick retries.
 			await trace(p.events, "task.nudge.deferred", { count: toNudge.length, idle, mode: ctx.mode }).catch(() => {});
 		}
+	}
+
+	// --- AGENT WATCH NUDGES: evaluate background_watch conditions on this same tick and nudge via
+	// the same idle-gated sendUserMessage path. Fast-path returns when no armed watchers exist.
+	// Shares the per-tick `nudge` slot with the completion nudge so the two never double-send.
+	try {
+		await evalWatchers(pi, ctx, settings, cwd, nudge);
+	} catch (err: any) {
+		await trace(p.events, "watch.tick_error", { error: String((err && err.message) || err) }).catch(() => {});
 	}
 
 	if (stChanged) {

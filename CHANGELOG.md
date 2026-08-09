@@ -4,6 +4,20 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(background-tasks): `background_watch` — event-driven monitoring so the agent never polls
+
+- The agent could already `background_start` / `background_status` / `background_output`, but there was no event primitive: to notice a dev server becoming ready, a build failing, or a process stalling, it had to either block on `background_wait` (wasting a turn) or burn tokens in a `background_output` poll loop.
+- **Added three tools**: `background_watch` (register a monitor), `background_watch_list` (list/cancel), `background_unwatch` (cancel by `watchId` or `taskId`). A watch takes exactly ONE trigger:
+  - `pattern` — regex matched against **NEW** combined output (stdout+stderr) since the last scan. `ignoreCase` optional.
+  - `port` — TCP readiness on `127.0.0.1` (nudge when the port starts accepting).
+  - `idleMs` — stall detection (nudge if no new output for N ms).
+  - `once:true` (default) fires once then completes; `once:false` is continuous and rate-limited by `watch.refireMs`; `ttlMs` caps lifetime.
+- **Zero new polling infrastructure**: the evaluator piggybacks on the existing `renderUi` tick loop (`session_start` setInterval) and delivers via the SAME idle-gated `pi.sendUserMessage` path as the completion nudge — TUI-only, deferred while busy so it never interrupts a streaming turn.
+- **Session-scoped & durable**: watchers persist in `state.json` (survive `/reload`); cursors advance per-stream so only NEW output matches (readiness still fires immediately on already-present output, since the first scan starts at offset 0). Cancellation on `background_unwatch`, on TTL, and automatically when the watched task goes terminal or is pruned.
+- **Per-tick nudge coordination**: at most ONE `sendUserMessage` per tick is sent across the completion nudge and the watch nudge (each call starts a turn; a second one in the same tick previously threw `Agent is already processing a prompt`). Whichever claims the slot sends; the other defers its still-pending nudge to the next idle tick.
+- Settings (env > `.pi/settings.json` > defaults): `PI_BG_TASKS_WATCH`, `PI_BG_TASKS_WATCH_MAX`, `PI_BG_TASKS_WATCH_REFIRE_MS`, `PI_BG_TASKS_WATCH_PORT_TIMEOUT_MS`, `PI_BG_TASKS_WATCH_PATTERN_MAX_LEN`, `PI_BG_TASKS_WATCH_RANGE_READ_BYTES`.
+- Verified: new `watcher.test.mjs` (25 assertions: register validation, readiness/immediate fire, new-output-only, continuous refire + rate-limit, idle, port with a real listener, session scope, unwatch, prune cleanup, busy-defer); all 7 suites green (81 assertions); live tmux `pi --model glm-5.1 --provider zai-coding-cn` run confirms `background_start` → `background_watch` → `background_watch_list` shows `status:fired, firedCount:1, lastSnippet:SERVER-READY`, and both the completion nudge and the watch nudge deliver cleanly with no double-send error.
+
 ### chore(background-tasks): remove the redundant `/background-tasks` command; `/bg` is the sole command
 
 - The extension registered **two** slash commands that did different things and invited confusion:

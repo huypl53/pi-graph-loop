@@ -8,9 +8,27 @@ import { join } from "node:path";
 import { paths, readState } from "../state.ts";
 import { assertCwdContained, killTask, reconcile, scheduleKillEscalation, spawnTask } from "../lifecycle.ts";
 import { belongsToSession, currentSessionId, sleep, textResult, trace } from "../utils.ts";
+import { registerWatcher, listWatchers, cancelWatcher } from "../watchers.ts";
 import type { BackgroundSettings, BackgroundTask, BgStatus } from "../types.ts";
 
 const ICON: Record<BgStatus, string> = { pending: "…", running: "⏳", done: "✓", failed: "✗", killed: "◔", unknown: "?" };
+
+// Compact, LLM-friendly projection of a watcher for watch_list results.
+function watchRowOf(w: any) {
+	return {
+		watchId: w.watchId,
+		taskId: w.taskId,
+		trigger: w.trigger,
+		pattern: w.pattern,
+		port: w.port,
+		idleMs: w.idleMs,
+		once: w.once,
+		status: w.status,
+		firedCount: w.firedCount,
+		lastSnippet: w.lastSnippet,
+		createdAt: w.createdAt,
+	};
+}
 
 // Session-scoped filter for list views. `sid` is the current chat session id; legacy tasks without a
 // session stay visible so nothing vanishes silently after upgrade.
@@ -282,6 +300,110 @@ export function registerTools(pi: ExtensionAPI, settings: BackgroundSettings) {
 					`Stopped background task ${t.taskId} (status ${t.status}, signal ${sig}).`,
 					{ task: rowOf(t) },
 				);
+			},
+		}),
+	);
+
+	// ---------- background_watch ----------
+	// Register an event-driven monitor. The tick loop evaluates it every refreshMs and nudges the
+	// agent (idle-gated, same path as the completion nudge) when the condition matches — so the
+	// agent never has to poll background_output in a loop.
+	pi.registerTool(
+		defineTool({
+			name: "background_watch",
+			label: "Background Watch",
+			description:
+				"Register an event-driven monitor on a background task. The task is evaluated on the ui tick and you are nudged (idle-gated) when the condition matches — do NOT poll. Pick EXACTLY ONE trigger: `pattern` (regex matched against NEW output), `port` (tcp port open on 127.0.0.1), or `idleMs` (no new output for N ms). Default `once:true` fires once then completes; `once:false` is continuous and rate-limited. Use this for dev-server readiness (pattern 'Ready on' / port), build failure markers ('ERROR'/'FAILED'), and stall detection (idleMs).",
+			promptGuidelines: [
+				"Use `background_watch` instead of polling `background_output` in a loop. Register exactly ONE trigger (pattern | port | idleMs) on a background task; you'll be nudged when it matches. Canonical cases: server readiness via pattern 'Ready on' or a port; build/test failure via pattern 'ERROR|FAILED'; a hung process via idleMs. List with `background_watch_list`, cancel with `background_unwatch`.",
+			],
+			parameters: Type.Object({
+				taskId: Type.String({ description: "Background task to watch (must belong to this session)." }),
+				pattern: Type.Optional(Type.String({ description: "Regex matched against NEW combined output (stdout+stderr). Ignored 'g'; pass ignoreCase for case-insensitive. Use for readiness ('Ready on', 'Listening') or failure ('ERROR', 'FAILED', 'EADDRINUSE')." })),
+				ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive pattern match (regex 'i' flag). Default false." })),
+				port: Type.Optional(Type.Number({ description: "TCP port readiness on 127.0.0.1 — nudge when the port starts accepting connections. Integer 1..65535." })),
+				idleMs: Type.Optional(Type.Number({ description: "Stall detection — nudge if NO new output arrives for N ms (>= 100). Use for hung builds/migrations." })),
+				once: Type.Optional(Type.Boolean({ description: "true (default): fire once then complete. false: keep monitoring and re-nudge on each match (rate-limited)." })),
+				ttlMs: Type.Optional(Type.Number({ description: "Optional lifetime cap; the watcher silently expires after this many ms without a nudge." })),
+			}),
+			async execute(_id, params, _signal, _onUpdate, ctx) {
+				const cwd = ctx.cwd;
+				const w = await registerWatcher(cwd, settings, {
+					taskId: params.taskId,
+					pattern: params.pattern,
+					ignoreCase: params.ignoreCase,
+					port: params.port,
+					idleMs: params.idleMs,
+					once: params.once,
+					ttlMs: params.ttlMs,
+					session: currentSessionId(ctx),
+				});
+				const cond =
+					w.trigger === "pattern" ? `pattern /${w.pattern}/${w.patternFlags?.includes("i") ? "i" : ""}` : w.trigger === "port" ? `port ${w.port}` : `idle ${w.idleMs}ms`;
+				return textResult(
+					`Watching background task ${w.taskId} (${cond}); ${w.once ? "fires once then completes" : "continuous (rate-limited)"}. You will be nudged when it matches — do NOT poll. ` +
+						`watchId: ${w.watchId}. List: background_watch_list. Cancel: background_unwatch(watchId="${w.watchId}").`,
+					{ watcher: watchRowOf(w) },
+				);
+			},
+		}),
+	);
+
+	// ---------- background_watch_list ----------
+	pi.registerTool(
+		defineTool({
+			name: "background_watch_list",
+			label: "Background Watch List",
+			description:
+				"List background_watch monitors visible to THIS session (pass allSessions:true for every session). Optional status filter.",
+			promptGuidelines: [
+				"Use `background_watch_list` to see active monitors for this session (optionally filter by status). Pass allSessions:true to inspect other sessions' watchers.",
+			],
+			parameters: Type.Object({
+				status: Type.Optional(
+					StringEnum(["armed", "fired", "expired", "cancelled"] as const, { description: "Filter by watcher status." }),
+				),
+				allSessions: Type.Optional(Type.Boolean({ description: "Include other chat sessions' watchers (default: only this session)." })),
+			}),
+			async execute(_id, params, _signal, _onUpdate, ctx) {
+				const cwd = ctx.cwd;
+				const list = await listWatchers(cwd, {
+					status: params.status as any,
+					allSessions: params.allSessions,
+					session: currentSessionId(ctx),
+					scopeBySession: settings.scopeBySession,
+				});
+				const rows = list.map(watchRowOf);
+				const scopeNote = settings.scopeBySession && !params.allSessions ? `(session ${currentSessionId(ctx) ?? "?"})` : "(all sessions)";
+				return textResult(JSON.stringify({ count: rows.length, scope: scopeNote, watchers: rows }, null, 2), { watchers: rows });
+			},
+		}),
+	);
+
+	// ---------- background_unwatch ----------
+	pi.registerTool(
+		defineTool({
+			name: "background_unwatch",
+			label: "Background Unwatch",
+			description:
+				"Cancel background_watch monitors. Cancel one by watchId, or ALL monitors for a task by taskId. Provide at least one of watchId / taskId.",
+			promptGuidelines: [
+				"Use `background_unwatch` to cancel a monitor by watchId, or all monitors for a task by taskId.",
+			],
+			parameters: Type.Object({
+				watchId: Type.Optional(Type.String({ description: "Exact watch id to cancel." })),
+				taskId: Type.Optional(Type.String({ description: "Cancel ALL monitors for this task." })),
+			}),
+			async execute(_id, params, _signal, _onUpdate, ctx) {
+				if (!params.watchId && !params.taskId) throw new Error("background_unwatch needs watchId or taskId.");
+				const cwd = ctx.cwd;
+				const { cancelled } = await cancelWatcher(cwd, {
+					watchId: params.watchId,
+					taskId: params.taskId,
+					session: currentSessionId(ctx),
+					scopeBySession: settings.scopeBySession,
+				});
+				return textResult(`Cancelled ${cancelled} background watcher(s).`, { cancelled });
 			},
 		}),
 	);

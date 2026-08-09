@@ -18,6 +18,14 @@ export const DEFAULT_UI_REFRESH_MS = 1_000;
 export const DEFAULT_UI_MAX_ROWS = 8;
 export const DEFAULT_SCOPE_BY_SESSION = true;
 
+// --- watch defaults ---
+export const DEFAULT_WATCH_ENABLED = true;
+export const DEFAULT_WATCH_MAX_PER_SESSION = 32;
+export const DEFAULT_WATCH_REFIRE_MS = 3_000; // min gap between continuous (once:false) fires
+export const DEFAULT_WATCH_PORT_TIMEOUT_MS = 250; // tcp connect probe timeout
+export const DEFAULT_WATCH_PATTERN_MAX_LEN = 240; // snippet cap inside nudges
+export const DEFAULT_WATCH_RANGE_READ_BYTES = 512 * 1024; // max bytes scanned per stream per tick
+
 // The detached `sh` wrapper. Run as:
 //   spawn("sh", ["-c", WRAPPER, "<sh>", <user command>, <exit-marker abs path>, <timeoutMs|"">, <watchdog 1|0>, <parentPid>], { detached: true, ... })
 // Because Node spawns this wrapper with detached:true, the wrapper IS the process-group leader

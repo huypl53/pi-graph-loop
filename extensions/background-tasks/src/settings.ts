@@ -12,6 +12,12 @@ import {
 	DEFAULT_UI_REFRESH_MS,
 	DEFAULT_WAIT_MAX_MS,
 	DEFAULT_WAIT_POLL_MS,
+	DEFAULT_WATCH_ENABLED,
+	DEFAULT_WATCH_MAX_PER_SESSION,
+	DEFAULT_WATCH_PATTERN_MAX_LEN,
+	DEFAULT_WATCH_PORT_TIMEOUT_MS,
+	DEFAULT_WATCH_RANGE_READ_BYTES,
+	DEFAULT_WATCH_REFIRE_MS,
 } from "./constants.ts";
 import type { BackgroundSettings } from "./types.ts";
 
@@ -40,6 +46,14 @@ type RawSettings = {
 	killOnShutdown?: boolean;
 	scopeBySession?: boolean;
 	ui?: { enabled?: boolean; refreshMs?: number; maxRows?: number };
+	watch?: {
+		enabled?: boolean;
+		maxPerSession?: number;
+		refireMs?: number;
+		portTimeoutMs?: number;
+		patternMaxLen?: number;
+		rangeReadBytes?: number;
+	};
 };
 
 function readRaw(): RawSettings {
@@ -71,6 +85,13 @@ export function readSettings(): BackgroundSettings {
 	const uiRefreshMs = envInt("PI_BG_TASKS_UI_REFRESH_MS") ?? raw.ui?.refreshMs ?? DEFAULT_UI_REFRESH_MS;
 	const uiMaxRows = envInt("PI_BG_TASKS_UI_MAX_ROWS") ?? raw.ui?.maxRows ?? DEFAULT_UI_MAX_ROWS;
 
+	const watchEnabled = envBool("PI_BG_TASKS_WATCH") ?? raw.watch?.enabled ?? DEFAULT_WATCH_ENABLED;
+	const watchMaxPerSession = envInt("PI_BG_TASKS_WATCH_MAX") ?? raw.watch?.maxPerSession ?? DEFAULT_WATCH_MAX_PER_SESSION;
+	const watchRefireMs = envInt("PI_BG_TASKS_WATCH_REFIRE_MS") ?? raw.watch?.refireMs ?? DEFAULT_WATCH_REFIRE_MS;
+	const watchPortTimeoutMs = envInt("PI_BG_TASKS_WATCH_PORT_TIMEOUT_MS") ?? raw.watch?.portTimeoutMs ?? DEFAULT_WATCH_PORT_TIMEOUT_MS;
+	const watchPatternMaxLen = envInt("PI_BG_TASKS_WATCH_PATTERN_MAX_LEN") ?? raw.watch?.patternMaxLen ?? DEFAULT_WATCH_PATTERN_MAX_LEN;
+	const watchRangeReadBytes = envInt("PI_BG_TASKS_WATCH_RANGE_READ_BYTES") ?? raw.watch?.rangeReadBytes ?? DEFAULT_WATCH_RANGE_READ_BYTES;
+
 	return {
 		enabled,
 		maxConcurrent,
@@ -81,5 +102,13 @@ export function readSettings(): BackgroundSettings {
 		killOnShutdown,
 		scopeBySession,
 		ui: { enabled: uiEnabled, refreshMs: uiRefreshMs, maxRows: uiMaxRows },
+		watch: {
+			enabled: watchEnabled,
+			maxPerSession: Math.max(1, watchMaxPerSession),
+			refireMs: Math.max(500, watchRefireMs),
+			portTimeoutMs: Math.max(50, watchPortTimeoutMs),
+			patternMaxLen: Math.max(32, watchPatternMaxLen),
+			rangeReadBytes: Math.max(4 * 1024, watchRangeReadBytes),
+		},
 	};
 }

@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { WRAPPER } from "./constants.ts";
 import { ensureDirs, paths, readState, withLock, writeState } from "./state.ts";
 import { belongsToSession, genTaskId, now, trace } from "./utils.ts";
+import { dropWatchersForTasks } from "./watchers.ts";
 import type { BackgroundSettings, BackgroundState, BackgroundTask, BgStatus, ExitMarker } from "./types.ts";
 
 // ---------- helpers ----------
@@ -448,6 +449,7 @@ export async function pruneTerminal(
 	const p = paths(cwd);
 	let removed = 0;
 	let filesRemoved = 0;
+	let prunedIds: string[] = [];
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const scope = opts.scopeBySession !== false;
@@ -469,8 +471,13 @@ export async function pruneTerminal(
 				}
 			}
 		}
+		prunedIds = toRemove;
 		if (removed > 0) await writeState(p, st);
 		await trace(p.events, "task.prune", { removed, filesRemoved, allSessions: !!opts.allSessions, sid: opts.sid }).catch(() => {});
 	});
+	// Drop watchers whose task was just reclaimed (its own lock; safe after the prune lock released).
+	if (prunedIds.length > 0) {
+		try { await dropWatchersForTasks(cwd, prunedIds); } catch {}
+	}
 	return { removed, filesRemoved };
 }
