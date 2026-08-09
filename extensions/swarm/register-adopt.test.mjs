@@ -5,7 +5,7 @@
 //  - registerAgent itself refuses the reserved 'orchestrator' id (safety net for the tool path)
 //
 // Run: node extensions/swarm/register-adopt.test.mjs
-import { rmSync, readFileSync, existsSync } from "node:fs";
+import { rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -138,6 +138,27 @@ console.log("\n[7] registerAgent itself refuses the reserved 'orchestrator' id (
 	const st0 = { swarmId: "x", tmuxSession: "s", agents: {}, delivered: {}, messages: {} };
 	await throws("registerAgent throws on orchestrator id", registerAgent(pi0, scratch, {}, st0, { tmuxTarget: "s:0.0", id: "orchestrator", role: "pm" }));
 	ok("no orchestrator agent record created", !st0.agents.orchestrator);
+}
+
+console.log("\n[8] ensureOrchestrator self-heals a 'misled' orchestrator record (real pane target -> mailbox-only)");
+{
+	bind("%7"); resetEnv();
+	process.env.TMUX = "/tmp/tmux-501/default,1234,0";
+	const stateFile = join(scratch, ".pi", "swarm", "swarm-state.json");
+	mkdirSync(join(scratch, ".pi", "swarm", "mailboxes"), { recursive: true });
+	// pre-seed a MISLED orchestrator record attached to a real tmux pane (the ship-crawl bug shape)
+	writeFileSync(stateFile, JSON.stringify({
+		version: 1, swarmId: "swarm-test", cwd: scratch, tmuxSession: "pi-swarm-x",
+		agents: { orchestrator: { id: "orchestrator", role: "misled pm", roleKind: "orchestrator", status: "running", runtimeStatus: "idle", health: "healthy", tmuxTarget: "pi-swarm-x:3.0", tmuxSession: "pi-swarm-x", tmuxWindow: "3", mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", maxConcurrentTasks: 1, cwd: scratch, createdAt: "t", updatedAt: "t", lastHeartbeatAt: "t", capabilities: [], activeTaskIds: [] } },
+		delivered: {}, messages: {}, createdAt: "t", updatedAt: "t",
+	}, null, 2));
+	ok("pre-seed: orchestrator misled to a real pane target", stateAgent("orchestrator")?.tmuxTarget === "pi-swarm-x:3.0");
+	const { ctx } = mkCtx();
+	await swarmCmd.handler("register here orchestrator Drive the swarm", ctx);
+	const healed = stateAgent("orchestrator");
+	ok("self-healed: tmuxTarget reset to 'unknown' (mailbox-only)", healed?.tmuxTarget === "unknown");
+	ok("self-healed: roleKind re-normalized to orchestrator", healed?.roleKind === "orchestrator");
+	ok("self-healed: tmuxWindow re-normalized to orchestrator", healed?.tmuxWindow === "orchestrator");
 }
 
 resetEnv();

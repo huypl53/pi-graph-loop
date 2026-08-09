@@ -17,7 +17,20 @@ export function ensureOrchestrator(st: SwarmState, cwd: string, p: Paths): Swarm
 	const ts = now();
 	const existing = st.agents["orchestrator"];
 	if (existing) {
+		// Self-heal the mailbox-only contract on every refresh. The orchestrator is a pseudo-agent with
+		// NO dedicated swarm pane, so delivery must always be mailbox-only. An older code version (or a
+		// manually-edited state) could have left the orchestrator attached to a real tmux pane target,
+		// which makes peer messages get tmux-injected into that pane instead of delivered to the mailbox.
+		// Re-normalize the structural fields so any such "misled" record is corrected on the next
+		// session_start/ensure. A custom role/role-text is preserved.
+		existing.roleKind = "orchestrator";
+		existing.tmuxTarget = "unknown";
+		existing.tmuxSession = st.tmuxSession;
+		existing.tmuxWindow = "orchestrator";
+		existing.mailbox = relative(cwd, mailboxPath(p, "orchestrator"));
+		existing.maxConcurrentTasks = 99;
 		existing.lastHeartbeatAt = ts;
+		existing.lastSessionStartAt = ts;
 		existing.updatedAt = ts;
 		existing.status = "running";
 		if (existing.health === "unhealthy") existing.health = "healthy";
