@@ -37,6 +37,7 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "sendkey", description: "Send keys to a pane: <id> <keys> [--literal] [--enter]" },
 	{ name: "attach", description: "Show tmux attach commands: <id>" },
 	{ name: "release", description: "Release a task from an agent: <id> [<task-id>] [--force]" },
+	{ name: "mailbox", description: "Mailbox maintenance: reset <id> --yes" },
 	{ name: "send", description: "Send a message: <to> <body>" },
 	{ name: "trace", description: "Show trace file path" },
 	{ name: "capture", description: "Capture an agent's tmux pane: <id>" },
@@ -44,16 +45,52 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "loop", description: "status|plan an iteration loop" },
 ];
 
+const SCOPED_COMMANDS: Record<string, { name: string; description: string; canonical: string }[]> = {
+	"swarm-agents": [
+		{ name: "list", description: "Show swarm summary (id, agent count, tmux)", canonical: "list" },
+		{ name: "status", description: "PM-facing status rollup", canonical: "status" },
+		{ name: "spawn", description: "Spawn an agent: <id> [role]", canonical: "spawn" },
+		{ name: "register", description: "Adopt a tmux pane into the swarm", canonical: "register" },
+		{ name: "panes", description: "List tmux panes/targets", canonical: "panes" },
+		{ name: "stop", description: "Stop an agent", canonical: "stop" },
+		{ name: "restart", description: "Restart an agent", canonical: "restart" },
+		{ name: "role", description: "Change an agent role", canonical: "role" },
+		{ name: "pause", description: "Pause an agent", canonical: "pause" },
+		{ name: "resume", description: "Resume an agent", canonical: "resume" },
+		{ name: "sendkey", description: "Send raw tmux keys to a pane", canonical: "sendkey" },
+		{ name: "attach", description: "Show tmux attach commands", canonical: "attach" },
+		{ name: "release", description: "Release stale task ownership from an agent", canonical: "release" },
+		{ name: "mailbox", description: "Mailbox maintenance: reset <id> --yes", canonical: "mailbox" },
+		{ name: "identity", description: "reload|show an agent's identity", canonical: "identity" },
+	],
+	"swarm-tasks": [
+		{ name: "list", description: "Indexed task list with age/next", canonical: "tasks" },
+		{ name: "graph", description: "Print a task graph (text|mermaid|json)", canonical: "graph" },
+		{ name: "status", description: "Detailed per-task status", canonical: "task" },
+		{ name: "next", description: "Ready nodes + suggested reusable agent", canonical: "next" },
+		{ name: "validate", description: "Validate a task graph", canonical: "validate" },
+	],
+	"swarm-msg": [
+		{ name: "send", description: "Send a message: <to> <body>", canonical: "send" },
+	],
+	"swarm-loop": [
+		{ name: "status", description: "Show loop status for a task", canonical: "loop status" },
+		{ name: "plan", description: "Record a next-iteration loop plan", canonical: "loop plan" },
+	],
+};
+
 const GRAPH_FORMATS = ["text", "mermaid", "json"];
 const RUNTIME_FLAGS = ["runtime", "--runtime", "-r"];
 const ROLE_KINDS = ["orchestrator", "planner", "reviewer", "tester", "implementer", "worker", "observer"];
 const IDENTITY_SUBS = ["reload", "show"];
+const MAILBOX_SUBS = ["reset"];
 const LOOP_SUBS = ["status", "plan"];
 const REGISTER_FLAGS = ["--kind", "--model", "--provider", "--inject", "--no-inject"];
 const STOP_FLAGS = ["--force", "--no-kill"];
 const ROLE_FLAGS = ["--kind", "--caps"];
 const SENDKEY_FLAGS = ["--literal", "--enter"];
 const RELEASE_FLAGS = ["--force"];
+const MAILBOX_RESET_FLAGS = ["--yes"];
 
 // getArgumentCompletions receives no ctx, so we remember the project cwd from
 // session_start (the command handler uses ctx.cwd; this keeps parity). Fallback
@@ -232,6 +269,14 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 				if (tokens.length === 2 && IDENTITY_SUBS.includes(tokens[1]))
 					return await agentSuggestions(p, cwd, b, currentWord);
 				return [];
+			case "mailbox":
+				if (tokens.length === 1) return simple(MAILBOX_SUBS, b, currentWord);
+				if (tokens.length === 2 && tokens[1] === "reset") {
+					const here = startsWith("here", currentWord) ? [{ value: `${b}here`, label: "here", description: "the current swarm pane identity" }] : [];
+					return [...here, ...(await agentSuggestions(p, cwd, b, currentWord))];
+				}
+				if (tokens.length >= 3) return flagSuggestions(MAILBOX_RESET_FLAGS, b, currentWord);
+				return [];
 			case "loop":
 				if (tokens.length === 1) return simple(LOOP_SUBS, b, currentWord);
 				if (tokens.length === 2 && LOOP_SUBS.includes(tokens[1]))
@@ -247,6 +292,44 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 			default:
 				return [];
 		}
+	} catch {
+		return null;
+	}
+}
+
+function completionEntry(commandName: string, firstToken: string) {
+	return (SCOPED_COMMANDS[commandName] || []).find((entry) => entry.name === firstToken) || null;
+}
+
+function mapScopedValue(entry: { name: string; canonical: string }, value: string): string {
+	const canonicalTokens = entry.canonical.split(/\s+/).filter(Boolean);
+	const valueTokens = value.split(/\s+/).filter(Boolean);
+	if (canonicalTokens.some((token, idx) => valueTokens[idx] !== token)) return value;
+	return [entry.name, ...valueTokens.slice(canonicalTokens.length)].join(" ");
+}
+
+export async function swarmScopedArgumentCompletions(commandName: string, argumentPrefix: string): Promise<AutocompleteItem[] | null> {
+	if (commandName === "swarm") return swarmArgumentCompletions(argumentPrefix);
+	try {
+		const entries = SCOPED_COMMANDS[commandName] || [];
+		const { tokens, currentWord } = parsePrefix(argumentPrefix);
+		if (tokens.length === 0) {
+			return entries
+				.filter((entry) => startsWith(entry.name, currentWord))
+				.map((entry) => ({ value: entry.name, label: entry.name, description: entry.description }));
+		}
+		const entry = completionEntry(commandName, tokens[0]);
+		if (!entry) return [];
+		const canonicalTokens = entry.canonical.split(/\s+/).filter(Boolean);
+		const rebuilt = [...canonicalTokens, ...tokens.slice(1)];
+		if (currentWord) rebuilt.push(currentWord);
+		let canonicalPrefix = rebuilt.join(" ");
+		if (/\s$/.test(argumentPrefix)) canonicalPrefix += " ";
+		const items = await swarmArgumentCompletions(canonicalPrefix);
+		return (items || []).map((item) => ({
+			...item,
+			value: mapScopedValue(entry, item.value),
+		}));
 	} catch {
 		return null;
 	}

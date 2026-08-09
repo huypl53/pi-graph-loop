@@ -15,6 +15,15 @@ For full parameter-by-parameter details, see [`../swarm.md`](../swarm.md).
 - `/swarm capture <id>`
 - `/swarm graph <task-id> [text|mermaid|json]`
 
+### Grouped slash-command aliases
+These are thin aliases over the same `/swarm` handlers; they do not introduce a second code path.
+
+- `/swarm-agents list|status|spawn|register|panes|stop|restart|role|pause|resume|sendkey|attach|release|identity ...`
+- `/swarm-tasks list|graph|status|next|validate ...`
+- `/swarm-msg send <to> <message>`
+- `/swarm-loop status <task-id>`
+- `/swarm-loop plan <task-id> <summary...>`
+
 ### Agent lifecycle
 - `/swarm spawn <id> [role]`
 - `/swarm register <here|tmux-target> <id> [role…] [flags]`
@@ -25,6 +34,7 @@ For full parameter-by-parameter details, see [`../swarm.md`](../swarm.md).
 - `/swarm sendkey <id> <keys…> [--literal] [--enter]`
 - `/swarm attach <id>`
 - `/swarm release <id> [<task-id>] [--force]`
+- `/swarm mailbox reset <id|here> --yes`
 
 ### Loop planning
 - `/swarm loop status <task-id>`
@@ -48,6 +58,8 @@ Use for spawn/adopt/restart/role control.
 - `swarm_release_agent_task`
 - `swarm_agent_identity`
 - `swarm_reload_identity`
+
+`/swarm mailbox reset <id|here> --yes` is a **human-initiated emergency repair command**. It archives the current mailbox file under `.pi/swarm/traces/mailbox-resets/`, clears the live mailbox JSONL, and clears the `delivered[agentId]` ledger. It does **not** delete message records from `swarm-state.json`; follow with `/reload` or a session restart if the pane was stuck on mailbox parse errors. `here` resolves the current pane's swarm identity and refuses when the pane is not adopted as a swarm agent/orchestrator.
 
 ### Messaging and delivery tools
 Use for mailbox coordination, ack tracking, and repair.

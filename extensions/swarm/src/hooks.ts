@@ -1,4 +1,5 @@
 // === swarm/hooks.ts — event hooks + orchestrator mailbox pump (verbatim from index.ts) ===
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname, relative, sep } from "node:path";
 import type { MessageResponseStatus } from "./types.ts";
 import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID } from "./constants.ts";

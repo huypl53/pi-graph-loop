@@ -1,4 +1,5 @@
 // === swarm/command.ts — /swarm slash command (verbatim from index.ts) ===
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
@@ -7,18 +8,18 @@ import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from 
 import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { enqueueAndDeliver } from "./mailbox.ts";
-import { ensureDirs, identityPath, loopStateFile, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "./state.ts";
+import { ensureDirs, identityPath, loopStateFile, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "./state.ts";
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
 import { loopStatusSnapshot, recordLoopPlan } from "./loop.ts";
 import { ensureOrchestrator, overridePath } from "./identity.ts";
 import { startOrchestratorPump } from "./hooks.ts";
-import { registerCwdTracking, swarmArgumentCompletions } from "./completion.ts";
+import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
-// --inject/--no-inject --kind <v> --model <v> --provider <v> --caps <v>; everything else goes to `rest`.
-function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string } {
-	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string } = { rest: [], force: false, kill: true, literal: false, enter: false };
+// --inject/--no-inject --kind <v> --model <v> --provider <v> --caps <v> --yes; everything else goes to `rest`.
+function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string } {
+	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string } = { rest: [], force: false, kill: true, literal: false, enter: false, yes: false };
 	for (let i = 0; i < tokens.length; i++) {
 		const t = tokens[i];
 		if (t === "--force") out.force = true;
@@ -26,6 +27,7 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 		else if (t === "--literal") out.literal = true;
 		else if (t === "--enter") out.enter = true;
 		else if (t === "--inject") out.inject = true;
+		else if (t === "--yes") out.yes = true;
 		else if (t === "--no-inject") out.inject = false;
 		else if (t === "--kind") out.kind = tokens[++i];
 		else if (t === "--model") out.model = tokens[++i];
@@ -36,16 +38,57 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 	return out;
 }
 
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|id> [runtime] | next <#|id> (ready nodes + suggested agent) | validate <#|id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>";
+
+type ScopedSwarmCommandName = "swarm" | "swarm-agents" | "swarm-tasks" | "swarm-msg" | "swarm-loop";
+
+function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
+	switch (commandName) {
+		case "swarm-agents":
+			return "Usage: /swarm-agents <list|status|spawn|register|panes|stop|restart|role|pause|resume|sendkey|attach|release|mailbox|identity> ...";
+		case "swarm-tasks":
+			return "Usage: /swarm-tasks <list|graph|status|next|validate> ...";
+		case "swarm-msg":
+			return "Usage: /swarm-msg send <to> <message>";
+		case "swarm-loop":
+			return "Usage: /swarm-loop <status|plan> <task-id> ...";
+		default:
+			return "Usage: /swarm ...";
+	}
+}
+
+function normalizeScopedSwarmArgs(commandName: ScopedSwarmCommandName, args: string): string | null {
+	if (commandName === "swarm") return args;
+	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	if (!tokens.length) return null;
+	const [cmd, ...rest] = tokens;
+	if (commandName === "swarm-agents") {
+		if (!["list", "status", "spawn", "register", "panes", "stop", "restart", "role", "pause", "resume", "sendkey", "attach", "release", "mailbox", "identity"].includes(cmd)) return null;
+		return [cmd, ...rest].join(" ");
+	}
+	if (commandName === "swarm-tasks") {
+		if (cmd === "list") return ["tasks", ...rest].join(" ");
+		if (cmd === "status") return ["task", ...rest].join(" ");
+		if (["graph", "next", "validate"].includes(cmd)) return [cmd, ...rest].join(" ");
+		return null;
+	}
+	if (commandName === "swarm-msg") return cmd === "send" ? [cmd, ...rest].join(" ") : null;
+	if (commandName === "swarm-loop") return ["status", "plan"].includes(cmd) ? ["loop", cmd, ...rest].join(" ") : null;
+	return null;
+}
+
 export function registerSwarmCommand(pi: ExtensionAPI) {
 	registerCwdTracking(pi);
-	pi.registerCommand("swarm", {
-		description: "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|id> [runtime] | next <#|id> (ready nodes + suggested agent) | validate <#|id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>",
-		getArgumentCompletions: (argumentPrefix) => swarmArgumentCompletions(argumentPrefix),
-		handler: async (args, ctx) => {
-			const p = paths(ctx.cwd);
-			await ensureDirs(p);
-			const [cmd, ...rest] = args.trim().split(/\s+/).filter(Boolean);
-			try {
+	const runCommand = async (args: string, ctx: any, commandName: ScopedSwarmCommandName = "swarm") => {
+		const scopedArgs = normalizeScopedSwarmArgs(commandName, args);
+		if (scopedArgs == null) {
+			ctx.ui.notify(scopedSwarmUsage(commandName), "warning");
+			return;
+		}
+		const p = paths(ctx.cwd);
+		await ensureDirs(p);
+		const [cmd, ...rest] = scopedArgs.trim().split(/\s+/).filter(Boolean);
+		try {
 				if (!cmd || cmd === "init") {
 					const st = await withLock(p, async () => { const s = await readState(p, ctx.cwd); await trace(p, "swarm.init", { by: currentAgentId() }); return s; });
 					ctx.ui.notify(`Swarm ${st.swarmId} ready: ${relative(ctx.cwd, p.state)}`, "info");
@@ -449,6 +492,54 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					ctx.ui.notify("Usage: /swarm identity reload <agent-id> [note] | identity show <agent-id>", "warning");
 					return;
 				}
+				if (cmd === "mailbox") {
+					const sub = rest.shift();
+					if (sub !== "reset") { ctx.ui.notify("Usage: /swarm mailbox reset <agent-id> --yes", "warning"); return; }
+					const flags = parseFlags(rest);
+					const id = flags.rest[0];
+					if (!id) { ctx.ui.notify("Usage: /swarm mailbox reset <agent-id|here> --yes", "warning"); return; }
+					const requestedId = id;
+					const resolvedHere = isHereToken(requestedId) ? currentAgentId() : undefined;
+					if (isHereToken(requestedId) && (!resolvedHere || resolvedHere === "swarm-guest")) {
+						ctx.ui.notify("Cannot resolve 'here' to a swarm agent mailbox in this pane. Register this pane first (for an agent: /swarm register here <id> [role]; for PM: /swarm register here orchestrator), or pass an explicit agent id.", "warning");
+						return;
+					}
+					const targetId = resolvedHere || requestedId;
+					if (!flags.yes) {
+						ctx.ui.notify(`Refusing mailbox reset for ${safeId(targetId)} without --yes. This command is intentionally human-initiated because it archives + clears the live mailbox and delivered ledger.`, "warning");
+						return;
+					}
+					const result = await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const agentId = safeId(targetId);
+						const file = mailboxPath(p, agentId);
+						if (!st.agents[agentId] && !existsSync(file)) throw new Error(`Unknown agent/mailbox ${agentId}`);
+						const archiveDir = join(p.traces, "mailbox-resets");
+						await mkdir(archiveDir, { recursive: true });
+						const ts = Date.now();
+						const archive = join(archiveDir, `${agentId}-${ts}.jsonl.bak`);
+						let existed = false;
+						let bytes = 0;
+						let lines = 0;
+						if (existsSync(file)) {
+							existed = true;
+							const raw = await readFile(file, "utf8");
+							bytes = Buffer.byteLength(raw, "utf8");
+							lines = raw ? raw.split(/\n/).filter((l) => l.length > 0).length : 0;
+							await writeFile(archive, raw, "utf8");
+						} else {
+							await writeFile(archive, "", "utf8");
+						}
+						await writeFile(file, "", "utf8");
+						const deliveredCleared = (st.delivered[agentId] || []).length;
+						st.delivered[agentId] = [];
+						await trace(p, "mailbox.reset", { agentId, via: "command", existed, bytes, lines, archive, deliveredCleared, by: currentAgentId() });
+						await writeState(p, st);
+						return { agentId, file, archive, existed, bytes, lines, deliveredCleared };
+					});
+					ctx.ui.notify(`Mailbox reset for ${result.agentId}${isHereToken(requestedId) ? " (resolved from 'here')" : ""}. Archived ${result.lines} line(s) to ${relative(ctx.cwd, result.archive)}; cleared live mailbox ${relative(ctx.cwd, result.file)} and delivered ledger entries=${result.deliveredCleared}. If a session was stuck on parse errors, /reload or restart that pi session next.`, "warning");
+					return;
+				}
 				if (cmd === "loop") {
 					// V1.5 iteration proposal loop: read-only status and orchestrator plan synthesis.
 					const sub = rest.shift();
@@ -476,11 +567,36 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					ctx.ui.notify("Usage: /swarm loop status <task-id> | loop plan <task-id> <summary...>", "warning");
 					return;
 				}
-				ctx.ui.notify(`Unknown /swarm command: ${cmd}`, "warning");
+				ctx.ui.notify(`Unknown /${commandName} command: ${cmd}`, "warning");
 			} catch (err: any) {
-				await trace(p, "error", { where: "command", command: cmd, message: err?.message || String(err), stack: err?.stack });
+				await trace(p, "error", { where: "command", command: cmd, commandName, message: err?.message || String(err), stack: err?.stack });
 				ctx.ui.notify(`Swarm error: ${err?.message || err}`, "error");
 			}
-		},
+		};
+
+	pi.registerCommand("swarm", {
+		description: SWARM_COMMAND_DESCRIPTION,
+		getArgumentCompletions: (argumentPrefix) => swarmArgumentCompletions(argumentPrefix),
+		handler: async (args, ctx) => runCommand(args, ctx, "swarm"),
+	});
+	pi.registerCommand("swarm-agents", {
+		description: "Agent lifecycle shortcuts for swarm: list | status | spawn | register | panes | stop | restart | role | pause | resume | sendkey | attach | release | mailbox | identity",
+		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-agents", argumentPrefix),
+		handler: async (args, ctx) => runCommand(args, ctx, "swarm-agents"),
+	});
+	pi.registerCommand("swarm-tasks", {
+		description: "Task graph shortcuts for swarm: list | graph | status | next | validate",
+		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-tasks", argumentPrefix),
+		handler: async (args, ctx) => runCommand(args, ctx, "swarm-tasks"),
+	});
+	pi.registerCommand("swarm-msg", {
+		description: "Messaging shortcut for swarm: send <to> <message>",
+		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-msg", argumentPrefix),
+		handler: async (args, ctx) => runCommand(args, ctx, "swarm-msg"),
+	});
+	pi.registerCommand("swarm-loop", {
+		description: "Loop shortcut for swarm: status <task-id> | plan <task-id> <summary>",
+		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-loop", argumentPrefix),
+		handler: async (args, ctx) => runCommand(args, ctx, "swarm-loop"),
 	});
 }

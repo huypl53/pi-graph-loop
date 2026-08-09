@@ -119,6 +119,7 @@ The extension registers `/swarm` for quick TUI use:
 | `/swarm sendkey <id> <keys…> [--literal] [--enter]` | Send raw tmux keys to an agent pane. |
 | `/swarm attach <id>` | Print tmux attach/select commands for an agent pane. |
 | `/swarm release <id> [<task-id>] [--force]` | Clear a stale active-task pointer (refuses non-terminal tasks unless `--force`). |
+| `/swarm mailbox reset <id\|here> --yes` | Emergency human-initiated mailbox reset: archive + clear the live mailbox JSONL and delivered ledger for one agent; `here` resolves the current pane's swarm identity. |
 | `/swarm send <to> <message>` | Send a mailbox/tmux-injected message. |
 | `/swarm trace` | Show recent structured trace events. |
 | `/swarm capture <id>` | Capture an agent pane to `.pi/swarm/traces/tmux/`. |
