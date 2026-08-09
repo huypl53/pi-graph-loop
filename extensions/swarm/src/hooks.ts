@@ -12,45 +12,60 @@ import { pumpOrchestratorMailbox, reconcile, runtimeTaskWarnings } from "./recon
 import { scanAgentOpenAssignments } from "./taskgraph.ts";
 import { tmux } from "./tmux.ts";
 
+// Orchestrator mailbox pump state. Module-level so the PM pump can be (re)started from outside the
+// session_start hook — notably by `/swarm register here orchestrator`, which opts a running session in
+// as the orchestrator after startup. `swarmPi` is captured once in registerSwarmHooks (always called
+// first by index.ts) and reused so there is a single pump per extension load.
+let swarmPi: ExtensionAPI | undefined;
+let orchestratorMailboxTimer: NodeJS.Timeout | undefined;
+let orchestratorMailboxPumpRunning = false;
+
+export function stopOrchestratorPump() {
+	if (orchestratorMailboxTimer) clearInterval(orchestratorMailboxTimer);
+	orchestratorMailboxTimer = undefined;
+}
+
+// (Re)start the orchestrator mailbox pump for this session: one immediate surface + a 5s TUI interval.
+// No-op unless this session resolves to the orchestrator. Safe to call from session_start or from the
+// `/swarm register here orchestrator` opt-in path. The captured ctx is session-bound; on stale-ctx
+// errors the run() guard stops the pump cleanly (the next orchestrator session_start restarts it).
+export async function startOrchestratorPump(ctx: any, reason = "session_start") {
+	const pi = swarmPi;
+	if (!pi) return;
+	stopOrchestratorPump();
+	// The auto-pump records a surfacing DECISION (per-pid set + writeState) in every orchestrator session,
+	// including explicit orchestrator opt-in runs (PI_SWARM_IS_ORCHESTRATOR=1 or PI_SWARM_AGENT_ID=orchestrator).
+	// The decision block is ctx-free file IO (see pumpOrchestratorMailbox), so it cannot hit
+	// the "This extension ctx is stale after session replacement or reload" error. The delivery loop
+	// (sendMessage/isIdle) and the trace that uses ctx.isIdle are now mode-gated to TUI only inside
+	// pumpOrchestratorMailbox, so non-TUI sessions (print/rpc/json) never make ctx-bound calls.
+	// The 5s polling interval is TUI-only (print sessions exit immediately after one turn); non-TUI
+	// callers read mailboxes via swarm_check_mailbox, which never touches a captured ctx.
+	if (currentAgentId() !== "orchestrator") return;
+	const p = paths(ctx.cwd);
+	// NOTE: the one-shot below is awaited (not fire-and-forget) so that a pi -p / print session — which
+	// exits immediately after its single turn — actually completes the surfacing decision (writeState +
+	// trace) before teardown. The interval timer remains fire-and-forget.
+	const run = async (reason: string) => {
+		if (orchestratorMailboxPumpRunning) return;
+		orchestratorMailboxPumpRunning = true;
+		try {
+			await pumpOrchestratorMailbox(pi, ctx, p, reason);
+		} catch (err: any) {
+			// Session-safe resilience: if the captured ctx/pi was invalidated (session replacement/reload)
+			// the pump's ctx-bound calls throw. Stop the pump cleanly instead of spamming stderr every 5s;
+			// the next interactive orchestrator session_start restarts a fresh pump with a live ctx.
+			const msg = String((err && err.message) || err);
+			stopOrchestratorPump();
+			await trace(p, "mailbox.orchestrator_pump_error", { reason, error: msg, stale: /stale after session/i.test(msg) }).catch(() => {});
+		} finally { orchestratorMailboxPumpRunning = false; }
+	};
+	await run(reason);
+	if (ctx.mode === "tui") orchestratorMailboxTimer = setInterval(() => { void run("interval"); }, 5_000);
+}
+
 export function registerSwarmHooks(pi: ExtensionAPI) {
-	let orchestratorMailboxTimer: NodeJS.Timeout | undefined;
-	let orchestratorMailboxPumpRunning = false;
-	const stopOrchestratorMailboxPump = () => {
-		if (orchestratorMailboxTimer) clearInterval(orchestratorMailboxTimer);
-		orchestratorMailboxTimer = undefined;
-	};
-	const startOrchestratorMailboxPump = async (ctx: any) => {
-		stopOrchestratorMailboxPump();
-		// The auto-pump records a surfacing DECISION (per-pid set + writeState) in every orchestrator session,
-		// including explicit orchestrator opt-in runs (PI_SWARM_IS_ORCHESTRATOR=1 or PI_SWARM_AGENT_ID=orchestrator).
-		// The decision block is ctx-free file IO (see pumpOrchestratorMailbox), so it cannot hit
-		// the "This extension ctx is stale after session replacement or reload" error. The delivery loop
-		// (sendMessage/isIdle) and the trace that uses ctx.isIdle are now mode-gated to TUI only inside
-		// pumpOrchestratorMailbox, so non-TUI sessions (print/rpc/json) never make ctx-bound calls.
-		// The 5s polling interval is TUI-only (print sessions exit immediately after one turn); non-TUI
-		// callers read mailboxes via swarm_check_mailbox, which never touches a captured ctx.
-		if (currentAgentId() !== "orchestrator") return;
-		const p = paths(ctx.cwd);
-		// NOTE: the session_start one-shot below is awaited (not fire-and-forget) so that a pi -p / print
-		// session — which exits immediately after its single turn — actually completes the surfacing
-		// decision (writeState + trace) before teardown. The interval timer remains fire-and-forget.
-		const run = async (reason: string) => {
-			if (orchestratorMailboxPumpRunning) return;
-			orchestratorMailboxPumpRunning = true;
-			try {
-				await pumpOrchestratorMailbox(pi, ctx, p, reason);
-			} catch (err: any) {
-				// Session-safe resilience: if the captured ctx/pi was invalidated (session replacement/reload)
-				// the pump's ctx-bound calls throw. Stop the pump cleanly instead of spamming stderr every 5s;
-				// the next interactive orchestrator session_start restarts a fresh pump with a live ctx.
-				const msg = String((err && err.message) || err);
-				stopOrchestratorMailboxPump();
-				await trace(p, "mailbox.orchestrator_pump_error", { reason, error: msg, stale: /stale after session/i.test(msg) }).catch(() => {});
-			} finally { orchestratorMailboxPumpRunning = false; }
-		};
-		await run("session_start");
-		if (ctx.mode === "tui") orchestratorMailboxTimer = setInterval(() => { void run("interval"); }, 5_000);
-	};
+	swarmPi = pi;
 
 	pi.on("session_start", async (_event, ctx) => {
 		const p = paths(ctx.cwd);
@@ -97,7 +112,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			}
 		});
 		if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${agentId}`);
-		if (agentId === "orchestrator") await startOrchestratorMailboxPump(ctx);
+		if (agentId === "orchestrator") await startOrchestratorPump(ctx);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -256,7 +271,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (_event, ctx) => {
 		const agentId = currentAgentId();
 		if (agentId === "orchestrator") {
-			stopOrchestratorMailboxPump();
+			stopOrchestratorPump();
 			return;
 		}
 		const p = paths(ctx.cwd);

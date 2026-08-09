@@ -55,9 +55,9 @@ let fail = 0;
 const ok = (name, cond) => { if (cond) console.log("  ok  ", name); else { fail++; console.error("  FAIL", name); } };
 const vals = async (prefix) => (await complete(prefix) ?? []).map((i) => i.value);
 
-// 1. Empty prefix -> all subcommands (23 total incl. lifecycle cmds).
+// 1. Empty prefix -> all subcommands (24 total incl. lifecycle cmds + panes).
 const subs = await vals("");
-ok("empty lists all subcommands", subs.length === 23 && subs.includes("graph") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("loop"));
+ok("empty lists all subcommands", subs.length === 24 && subs.includes("graph") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("loop") && subs.includes("panes"));
 
 // 2. Partial subcommand filters by prefix.
 const stSubs = await vals("st");
@@ -146,6 +146,10 @@ ok("release reviewer -- -> --force", JSON.stringify(await vals("release reviewer
 ok("register target id <space> -> role kinds", (await vals("register sess:0.1 newagent ")).includes("register sess:0.1 newagent planner"));
 ok("register target id role <space> -> flags", JSON.stringify((await vals("register sess:0.1 newagent planner ")).sort()) === JSON.stringify(["register sess:0.1 newagent planner --inject", "register sess:0.1 newagent planner --kind", "register sess:0.1 newagent planner --model", "register sess:0.1 newagent planner --no-inject", "register sess:0.1 newagent planner --provider"]));
 ok("register ... --kind <space> -> role kinds", (await vals("register sess:0.1 newagent planner --kind ")).includes("register sess:0.1 newagent planner --kind planner"));
+// 17b. register 'here' token: the current-pane shortcut is offered at the target position.
+ok("register <space> offers 'here' (current pane)", (await vals("register ")).includes("register here"));
+ok("register he -> here", (await vals("register he")).includes("register here"));
+ok("register explicit target does NOT force 'here'", !(await vals("register sess")).includes("register here"));
 
 // 18. never throws on junk.
 ok("junk does not throw", JSON.stringify(await complete("graph     ")) !== null || true);

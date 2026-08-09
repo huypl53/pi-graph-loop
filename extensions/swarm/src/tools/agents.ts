@@ -278,10 +278,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "swarm_register_agent",
 		label: "Swarm Register",
-		description: "Adopt an EXISTING tmux pane into the swarm under a role WITHOUT spawning a new pi. Upsert by id: re-registering with a different tmuxTarget retargets the agent (fixes the 'tmuxTarget: unknown' ghost-agent case for externally-started agents). The operator asserts the pane is available for the role.",
+		description: "Adopt an EXISTING tmux pane into the swarm under a role WITHOUT spawning a new pi. Upsert by id: re-registering with a different tmuxTarget retargets the agent (fixes the 'tmuxTarget: unknown' ghost-agent case for externally-started agents). The operator asserts the pane is available for the role. The reserved 'orchestrator' id is refused here — opt a session in as the PM via '/swarm register here orchestrator' or PI_SWARM_IS_ORCHESTRATOR=1.",
 		promptGuidelines: ["Use `swarm_register_agent` to bring an already-running pi pane (or shell pane you will start pi in) into the swarm as a role, instead of spawning a fresh agent. Prefer `swarm_spawn_agent` when you need a brand new pi."],
 		parameters: Type.Object({
-			tmuxTarget: Type.String({ description: "Tmux target of the pane to adopt, e.g. session:window.pane, session:window, %paneid, or =session." }),
+			tmuxTarget: Type.String({ description: "Tmux target of the pane to adopt, e.g. session:window.pane, session:window, %paneid, or =session. Pass the special token 'here' (also 'self'/'current'/'.') to adopt the CURRENT pane the tool is running in — useful to register this very pi session without first discovering its target." }),
 			id: Type.Optional(Type.String({ description: "Stable agent id. If the pane already runs pi with PI_SWARM_AGENT_ID set, pass that same id so the record matches." })),
 			role: Type.String({ description: "Role/instructions for the agent." }),
 			roleKind: Type.Optional(Type.String({ description: "Explicit role kind override (orchestrator/planner/reviewer/tester/observer/implementer/worker). Pinned; otherwise derived from id+role, or preserved from an existing pin." })),

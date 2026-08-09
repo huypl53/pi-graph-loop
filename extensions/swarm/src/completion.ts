@@ -27,7 +27,8 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "next", description: "Ready nodes + suggested reusable agent" },
 	{ name: "validate", description: "Validate a task graph" },
 	{ name: "spawn", description: "Spawn an agent: <id> [role]" },
-	{ name: "register", description: "Adopt a tmux pane: <target> <id> [role] [flags]" },
+	{ name: "register", description: "Adopt a tmux pane: <here|target> <id> [role] [flags]" },
+	{ name: "panes", description: "List tmux panes/targets (for register)" },
 	{ name: "stop", description: "Stop an agent: <id> [--force] [--no-kill]" },
 	{ name: "restart", description: "Restart an agent: <id>" },
 	{ name: "role", description: "Change role: <id> <role> [--kind K] [--caps a,b]" },
@@ -205,7 +206,13 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 				if (prev === "--kind") return simple(ROLE_KINDS, b, currentWord);
 				return flagSuggestions(ROLE_FLAGS, b, currentWord);
 			case "register":
-				// <tmux-target> <id> [role...] [flags]: first two positionals are free text.
+				// <here|tmux-target> <id> [role...] [flags]: 'here' adopts the current pane; otherwise the
+				// target is free text (use '/swarm panes' to discover explicit targets).
+				if (tokens.length === 1) {
+					return startsWith("here", currentWord)
+						? [{ value: `${b}here`, label: "here", description: "the current tmux pane" }]
+						: [];
+				}
 				if (tokens.length === 3) return simple(ROLE_KINDS, b, currentWord);
 				if (tokens.length >= 4) {
 					if (prev === "--kind") return simple(ROLE_KINDS, b, currentWord);

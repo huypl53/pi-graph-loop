@@ -96,7 +96,8 @@ The extension registers `/swarm` for quick TUI use:
 | `/swarm status` or `/swarm list` | Show agent count and tmux session. `/swarm status` emits a PM rollup (tasks/agents/closure). |
 | `/swarm graph <task-id> [text\|mermaid\|json]` | Render a task graph and write it to `.pi/swarm/traces/graphs/`. |
 | `/swarm spawn <id> [role]` | Spawn a child pi agent in tmux. |
-| `/swarm register <tmux-target> <id> [role…] [flags]` | Adopt an **existing** tmux pane into a role without spawning (upsert/retarget). |
+| `/swarm register <here\|tmux-target> <id> [role…] [flags]` | Adopt an **existing** tmux pane into a role without spawning (upsert/retarget). Pass `here` (also `self`/`current`/`.`) to adopt the **current** pane — no need to look up its target. |
+| `/swarm panes` | List every tmux pane with a copy-pasteable target (and flag the current one) so you know what to pass to `register`. |
 | `/swarm stop <id> [--force] [--no-kill]` | Stop an agent (refuses active tasks unless `--force`). |
 | `/swarm restart <id>` | Stop + respawn a fresh pi at the same id (mailbox/identity persist). |
 | `/swarm role <id> <role…> [--kind K] [--caps a,b]` | Repurpose role/roleKind/capabilities + identity reload, no respawn. |
@@ -111,6 +112,40 @@ The extension registers `/swarm` for quick TUI use:
 | `/swarm loop plan <task-id> <summary…>` | Record the next-iteration plan (writes `next-plan.md` + history). |
 
 For detailed JSON results, prefer the tools below.
+
+### Register the current pane (common case)
+
+The most frequent registration task is "make *this* pi session a swarm agent". You do **not** need to look up the tmux target — use the `here` token:
+
+```text
+/swarm panes                                       # see all panes + which one you're in
+/swarm register here reviewer Review the diff     # adopt the CURRENT pane as `reviewer`
+```
+
+`here` (aliases `self`, `current`, `.`) resolves to the pane the command runs in. Registering the current pane also **adopts the identity in place**: the footer/title switches from `swarm:swarm-guest` to `swarm:<id>` immediately, `PI_SWARM_AGENT_ID` is set for the running session, and subsequent hooks heartbeat the right agent record. (The reserved `orchestrator` id is never adopted this way — it needs explicit opt-in.)
+
+To adopt a *different* existing pane, run `/swarm panes` to copy a target, then:
+
+```text
+/swarm register mysession:research.1 researcher Research planner
+```
+
+Outside tmux, `here` fails with a clear message (run pi inside tmux, or use `/swarm spawn`).
+
+### Registering the current pane as the orchestrator (PM)
+
+The orchestrator is a human-driven coordinating role, not a generic pane agent — so `/swarm register here orchestrator [role]` is treated as an **explicit PM opt-in**, not a normal adoption. It:
+
+- sets `PI_SWARM_IS_ORCHESTRATOR=1` and `PI_SWARM_AGENT_ID=orchestrator` for the running session (so orchestrator-scoped tools act here),
+- ensures the proper **mailbox-only** orchestrator record (no hijacked pane target),
+- starts the **PM mailbox pump** (surfaces pending orchestrator nudges immediately + a 5s interval),
+- switches the footer to `swarm:orchestrator`.
+
+This fixes the half-state where a pane was registered as `orchestrator` and received nudges but could not actually orchestrate. Registering a *different* pane as `orchestrator` is refused (the orchestrator has no dedicated pane); the generic `swarm_register_agent` tool also refuses the reserved `orchestrator` id.
+
+```text
+/swarm register here orchestrator Drive task assignment and unblock agents
+```
 
 ## Tools
 

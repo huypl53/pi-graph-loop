@@ -5,7 +5,7 @@ import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Paths, ReusableAgentMatch, SwarmAgent, SwarmState } from "./types.ts";
 import { SPAWN_SETTLE_MS } from "./constants.ts";
-import { capturePane, isTmuxRunning, sendToPane, tmux } from "./tmux.ts";
+import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux } from "./tmux.ts";
 import { childPiArgs, currentModel, currentProvider } from "./session.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, shellQuote, sleep } from "./utils.ts";
 import { identityPath, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
@@ -148,9 +148,16 @@ export async function reloadIdentity(pi: ExtensionAPI, cwd: string, p: Paths, ag
 // case produced by session_start for externally-started agents). The operator asserts the pane is
 // available for the role; runtimeStatus defaults to "idle" for a fresh adoption.
 export async function registerAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { tmuxTarget: string; id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string; inject?: boolean }) {
-	const target = (input.tmuxTarget || "").trim();
-	if (!target) throw new Error("tmuxTarget is required (e.g. session:window.pane)");
+	// Resolve magic "here"/"self"/"current"/"." to the current pane so an operator can register THIS pi
+	// session without first discovering its tmux target. Explicit targets pass through unchanged.
+	const target = await resolveRegisterTarget(pi, input.tmuxTarget);
+	if (!target) throw new Error("tmuxTarget is required: use 'here' for the current pane, or a target like 'session:window.pane', 'session:window', '%paneid', '=session'");
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
+	// The orchestrator is a human-driven coordinating role with no dedicated swarm pane (mailbox-only).
+	// It must be created by ensureOrchestrator and opted into explicitly (PI_SWARM_IS_ORCHESTRATOR=1 or
+	// `/swarm register here orchestrator`), not adopted as a generic pane agent. Generic registration would
+	// hijack its record with a pane target and leave the session unable to actually orchestrate.
+	if (id === "orchestrator") throw new Error("Cannot register a pane as 'orchestrator': the orchestrator is a human-driven coordinating role (mailbox-only, no dedicated pane). To make THIS pi session the orchestrator, run `/swarm register here orchestrator [role]`, or relaunch pi with PI_SWARM_IS_ORCHESTRATOR=1.");
 	const existing = state.agents[id];
 	const tmuxAlive = await isTmuxRunning(pi, target);
 	const parsed = parseTmuxTarget(target, state.tmuxSession);

@@ -71,7 +71,9 @@ Inside pi:
 ```text
 /swarm init
 /swarm spawn reviewer Review the current diff and report risks. Do not edit files.
-/swarm register mysession:research.1 researcher Research planner   # adopt an existing pane
+/swarm panes                                                # list tmux panes + which one you're in
+/swarm register here reviewer Review the diff              # adopt the CURRENT pane (no target needed)
+/swarm register mysession:research.1 researcher Research planner   # adopt another existing pane
 /swarm role reviewer Senior reviewer --kind reviewer                # repurpose without respawn
 /swarm pause reviewer                                              # drain from reuse (pane stays alive)
 /swarm resume reviewer

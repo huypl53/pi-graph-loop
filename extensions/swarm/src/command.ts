@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
-import { capturePane, tmux } from "./tmux.ts";
+import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from "./tmux.ts";
 import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { enqueueAndDeliver } from "./mailbox.ts";
@@ -11,7 +11,8 @@ import { ensureDirs, identityPath, loopStateFile, paths, readState, readTaskStat
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
 import { loopStatusSnapshot, recordLoopPlan } from "./loop.ts";
-import { overridePath } from "./identity.ts";
+import { ensureOrchestrator, overridePath } from "./identity.ts";
+import { startOrchestratorPump } from "./hooks.ts";
 import { registerCwdTracking, swarmArgumentCompletions } from "./completion.ts";
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
@@ -38,7 +39,7 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 export function registerSwarmCommand(pi: ExtensionAPI) {
 	registerCwdTracking(pi);
 	pi.registerCommand("swarm", {
-		description: "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|id> [runtime] | next <#|id> (ready nodes + suggested agent) | validate <#|id> [runtime] | spawn <id> [role] | register <tmux-target> <id> [role...] (adopt a pane) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>",
+		description: "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|id> [runtime] | next <#|id> (ready nodes + suggested agent) | validate <#|id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>",
 		getArgumentCompletions: (argumentPrefix) => swarmArgumentCompletions(argumentPrefix),
 		handler: async (args, ctx) => {
 			const p = paths(ctx.cwd);
@@ -219,21 +220,98 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					ctx.ui.notify(`Spawned ${result.agent.id} at ${result.agent.tmuxTarget}`, "info");
 					return;
 				}
+				if (cmd === "panes") {
+					// List every tmux pane with a copy-pasteable target so the operator can discover what to pass
+					// to '/swarm register <target> ...'. The current pane is flagged so 'here' is obvious.
+					const panes = await listAllPanes(pi);
+					await trace(p, "swarm.panes", { by: currentAgentId(), count: panes.length });
+					if (!panes.length) { ctx.ui.notify("No tmux sessions/panes found (is pi running inside tmux?). Use '/swarm spawn <id> [role]' to create one.", "info"); return; }
+					const cur = panes.find((x) => x.current);
+					const rows = panes.map((x) => {
+						const tag = x.current ? " <- current (use 'here')" : (x.active ? " (active)" : "");
+						return `  ${x.target.padEnd(16)} ${x.paneId.padEnd(6)} ${(x.command || "").slice(0, 10).padEnd(10)} ${(x.title || "").slice(0, 18)}${tag}`;
+					});
+					const header = `tmux panes — adopt one with:  /swarm register <target> <id> [role]   |   /swarm register here <id> [role]${cur ? `   (you are in ${cur.target})` : ""}`;
+					ctx.ui.notify(`${header}\n${rows.join("\n")}`, "info");
+					return;
+				}
 				if (cmd === "register") {
 					// Adopt an EXISTING tmux pane into the swarm under a role without spawning. Upsert by id.
-					// Usage: /swarm register <tmux-target> <id> [role...] [--kind K] [--model M] [--provider P] [--no-inject]
+					// 'here' (also self/current/.) adopts the CURRENT pane. Usage: /swarm register <here|target> <id> [role...] [--kind K] [--model M] [--provider P] [--no-inject]
 					const tmuxTarget = rest.shift();
 					const id = rest.shift();
-					if (!tmuxTarget || !id) { ctx.ui.notify("Usage: /swarm register <tmux-target> <id> [role...] [--kind K] [--model M] [--provider P] [--no-inject]", "warning"); return; }
+					if (!tmuxTarget || !id) {
+						ctx.ui.notify("Adopt a tmux pane into the swarm:\n  /swarm register here <id> [role]            (this pane — no target needed)\n  /swarm register <target> <id> [role]         (another pane)\n  /swarm panes                                  (list targets)\ntarget = session:window.pane | session:window | %paneid | =session\nflags: --kind K --model M --provider P --no-inject", "warning");
+						return;
+					}
 					const flags = parseFlags(rest);
 					const roleText = flags.rest.join(" ");
+					const agentId = safeId(id);
+					// The orchestrator is a human-driven coordinating role, not a generic pane agent. Registering THIS
+					// pane as "orchestrator" is an explicit PM opt-in (env + mailbox-only record + PM pump). Registering
+					// a DIFFERENT pane as orchestrator is refused (the orchestrator has no dedicated pane).
+					if (agentId === "orchestrator") {
+						const isHere = isHereToken(tmuxTarget);
+						let isCurrent = isHere;
+						if (!isHere) {
+							const cur = await currentPaneTarget(pi);
+							if (cur) {
+								let tpid = "";
+								try { tpid = (await tmux(pi, ["display-message", "-p", "-t", tmuxTarget, "#{pane_id}"], 3_000)).trim(); } catch { /* not alive / unresolvable */ }
+								isCurrent = Boolean(tpid) && tpid === cur.paneId;
+							}
+						}
+						if (isCurrent) {
+							// Explicit PM opt-in: set the canonical env vars so isOrchestratorSession()/currentAgentId()
+							// resolve to "orchestrator", ensure the mailbox-only orchestrator record, surface pending
+							// nudges via the PM pump, and update the footer. This makes the pane a REAL orchestrator.
+							process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+							process.env.PI_SWARM_AGENT_ID = "orchestrator";
+							await withLock(p, async () => {
+								const st = await readState(p, ctx.cwd);
+								ensureOrchestrator(st, ctx.cwd, p);
+								await trace(p, "agent.orchestrator_optin", { via: "register-command", role: roleText || null });
+								await writeState(p, st);
+							});
+							if (ctx.hasUI) ctx.ui.setStatus("swarm", "swarm:orchestrator");
+							try { await startOrchestratorPump(ctx, "register-orchestrator"); }
+							catch (err: any) { await trace(p, "agent.orchestrator_optin.pump_failed", { error: String((err as Error)?.message || err) }); }
+							ctx.ui.notify("This pane is now the swarm orchestrator (PM): orchestrator-scoped tools now act here, pending orchestrator mail has been surfaced, and the PM mailbox pump is active for this session.", "info");
+							return;
+						}
+						ctx.ui.notify("The orchestrator is a human-driven coordinating role with no dedicated swarm pane — it cannot be attached to another pane. To make THIS pane the orchestrator (PM), run:\n  /swarm register here orchestrator [role]\nor relaunch pi with PI_SWARM_IS_ORCHESTRATOR=1.", "warning");
+						return;
+					}
 					const result = await withLock(p, async () => {
 						const st = await readState(p, ctx.cwd);
 						const r = await registerAgent(pi, ctx.cwd, p, st, { tmuxTarget, id, role: roleText || id, roleKind: flags.kind, model: flags.model, provider: flags.provider, inject: flags.inject });
 						await writeState(p, st);
 						return r;
 					});
-					ctx.ui.notify(`Registered ${result.agent.id} at ${result.agent.tmuxTarget} (alive=${result.tmuxAlive} piRunning=${result.piRunning} injected=${result.injected})`, "info");
+					// If we registered THIS pane (via 'here' or by naming the current pane), adopt the agent
+					// identity in-process so the footer/title reflects the new id and subsequent hooks heartbeat
+					// the right record. Setting PI_SWARM_AGENT_ID makes currentAgentId() resolve to it; we re-emit
+					// the status line immediately. The reserved "orchestrator" id is skipped (that identity must
+					// come from explicit opt-in, not registration).
+					let adopted = false;
+					if (result.agent.id !== "orchestrator") {
+						let isCurrent = isHereToken(tmuxTarget);
+						if (!isCurrent) {
+							const cur = await currentPaneTarget(pi);
+							if (cur) {
+								let tpid = "";
+								try { tpid = (await tmux(pi, ["display-message", "-p", "-t", result.agent.tmuxTarget, "#{pane_id}"], 3_000)).trim(); } catch { /* not alive / unresolvable */ }
+								isCurrent = Boolean(tpid) && tpid === cur.paneId;
+							}
+						}
+						if (isCurrent) {
+							process.env.PI_SWARM_AGENT_ID = result.agent.id;
+							if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${result.agent.id}`);
+							adopted = true;
+							await trace(p, "agent.adopt_identity", { agentId: result.agent.id, via: isHereToken(tmuxTarget) ? "here" : "explicit", source: "command" });
+						}
+					}
+					ctx.ui.notify(`Registered ${result.agent.id} at ${result.agent.tmuxTarget} (alive=${result.tmuxAlive} piRunning=${result.piRunning} injected=${result.injected})${adopted ? `; this pane is now '${result.agent.id}'` : ""}`, "info");
 					return;
 				}
 				if (cmd === "stop") {

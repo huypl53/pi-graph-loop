@@ -37,3 +37,70 @@ export function isTmuxRunning(pi: ExtensionAPI, target: string): Promise<boolean
 		.then((out) => out.trim().length > 0)
 		.catch(() => false);
 }
+
+// Tokens that mean "adopt the pane this command/tool is running in". Lets an operator register the
+// CURRENT pi pane without first discovering its tmux target: `/swarm register here <id> [role]`.
+export const HERE_TOKENS = new Set(["here", "self", "current", "."]);
+
+export function isHereToken(raw: string): boolean {
+	return HERE_TOKENS.has((raw || "").trim().toLowerCase());
+}
+
+// Detect the tmux pane the current process lives in. Returns null when not inside tmux (no $TMUX) or
+// when tmux can't describe the active pane. Used to resolve the "here" register token and to flag the
+// current pane in `/swarm panes`.
+export async function currentPaneTarget(pi: ExtensionAPI): Promise<{ target: string; paneId: string; session: string; window: string; pane: string } | null> {
+	if (!process.env.TMUX) return null;
+	try {
+		const out = await tmux(pi, ["display-message", "-p", "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}"], 3_000);
+		const parts = out.trim().split("\t");
+		const session = parts[0]; const window = parts[1]; const pane = parts[2]; const paneId = parts[3];
+		if (!session || !paneId) return null;
+		return { target: `${session}:${window}.${pane}`, paneId, session, window, pane };
+	} catch { return null; }
+}
+
+// Resolve a register target: magic "here" tokens expand to the current pane's target; anything else is
+// returned trimmed as-is. Throws a clear, actionable error when "here" is used outside tmux.
+export async function resolveRegisterTarget(pi: ExtensionAPI, raw: string): Promise<string> {
+	const trimmed = (raw || "").trim();
+	if (isHereToken(trimmed)) {
+		const cur = await currentPaneTarget(pi);
+		if (!cur) throw new Error("Cannot resolve 'here': this pi session is not running inside tmux. Run pi inside a tmux session, or pass an explicit target such as 'session:window.pane', 'session:window', or '%paneid'. Use '/swarm panes' to list available targets.");
+		return cur.target;
+	}
+	return trimmed;
+}
+
+export interface TmuxPaneInfo {
+	target: string;
+	paneId: string;
+	session: string;
+	window: string;
+	pane: string;
+	command: string;
+	title: string;
+	active: boolean;  // active pane within its window
+	current: boolean; // this pane (matches currentPaneTarget)
+}
+
+// List every tmux pane across all sessions with a copy-pasteable target. Powers `/swarm panes` so the
+// operator can discover the exact target for `/swarm register <target> ...`. Returns [] if tmux is
+// unavailable or there are no sessions/panes.
+export async function listAllPanes(pi: ExtensionAPI): Promise<TmuxPaneInfo[]> {
+	const fmt = "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_title}\t#{pane_active}";
+	let out: string;
+	try { out = await tmux(pi, ["list-panes", "-a", "-F", fmt], 5_000); }
+	catch { return []; }
+	const cur = await currentPaneTarget(pi);
+	const rows: TmuxPaneInfo[] = [];
+	for (const line of out.split("\n").map((l) => l.trim()).filter(Boolean)) {
+		const parts = line.split("\t");
+		const session = parts[0]; const window = parts[1]; const pane = parts[2]; const paneId = parts[3];
+		const command = parts[4] || ""; const title = parts[5] || ""; const active = parts[6] === "1";
+		if (!session || !paneId) continue;
+		const target = `${session}:${window}.${pane}`;
+		rows.push({ target, paneId, session, window, pane, command, title, active, current: Boolean(cur && cur.paneId === paneId) });
+	}
+	return rows;
+}
