@@ -438,13 +438,15 @@ export function scheduleKillEscalation(pgid: number | undefined, graceMs: number
 
 // ---------- prune (explicit, opt-in reclamation of terminal tasks) ----------
 // Removes finished/failed/killed/unknown tasks from state (and best-effort their log + exit-marker
-// files). NEVER called by default paths — only via the explicit `/bg prune` command. Live/pending
-// tasks are always retained. This is the ONLY mechanism that deletes exited tasks; default views
-// merely HIDE them, so nothing is reclaimed unless the user asks. Session-scoped by default; pass
-// allSessions:true to reclaim across every session. Returns counts for the caller to report.
+// files). NEVER called by default paths — only via an explicit user action (`/bg prune` or the
+// dialog's prune shortcut on a terminal row). Live/pending tasks are always retained. This is the
+// ONLY mechanism that deletes exited tasks; default views merely HIDE them, so nothing is reclaimed
+// unless the user asks. Session-scoped by default; pass allSessions:true to reclaim across every
+// session. `taskIds` narrows the reclaim set to specific rows/items when the UI asks to prune just
+// one old task from the list. Returns counts for the caller to report.
 export async function pruneTerminal(
 	cwd: string,
-	opts: { allSessions?: boolean; sid?: string; scopeBySession?: boolean; deleteLogs?: boolean } = {},
+	opts: { allSessions?: boolean; sid?: string; scopeBySession?: boolean; deleteLogs?: boolean; taskIds?: string[] } = {},
 ): Promise<{ removed: number; filesRemoved: number }> {
 	const p = paths(cwd);
 	let removed = 0;
@@ -453,8 +455,10 @@ export async function pruneTerminal(
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const scope = opts.scopeBySession !== false;
+		const requested = opts.taskIds && opts.taskIds.length > 0 ? new Set(opts.taskIds) : null;
 		const toRemove: string[] = [];
 		for (const [id, t] of Object.entries(st.tasks)) {
+			if (requested && !requested.has(id)) continue;
 			const terminal = t.status === "done" || t.status === "failed" || t.status === "killed" || t.status === "unknown";
 			if (!terminal) continue; // never reclaim a live/pending task
 			if (!opts.allSessions && !belongsToSession(t, opts.sid, scope)) continue; // respect session scope
@@ -473,7 +477,13 @@ export async function pruneTerminal(
 		}
 		prunedIds = toRemove;
 		if (removed > 0) await writeState(p, st);
-		await trace(p.events, "task.prune", { removed, filesRemoved, allSessions: !!opts.allSessions, sid: opts.sid }).catch(() => {});
+		await trace(p.events, "task.prune", {
+			removed,
+			filesRemoved,
+			allSessions: !!opts.allSessions,
+			sid: opts.sid,
+			taskIds: requested ? Array.from(requested) : undefined,
+		}).catch(() => {});
 	});
 	// Drop watchers whose task was just reclaimed (its own lock; safe after the prune lock released).
 	if (prunedIds.length > 0) {

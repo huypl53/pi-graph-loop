@@ -593,7 +593,8 @@ Rendering rules:
   finished/killed/exited tasks are **hidden** (they would linger forever otherwise), **not deleted**.
   They remain in state for inspection via the `/bg` dialog (which also defaults to live-only — press
   `e` to reveal exited tasks) and the footer summary, and are reclaimable **explicitly** with
-  `/bg prune` (§11.4). Reclaim is opt-in — never tied to a default flag or this default UI.
+  `/bg prune` or a dialog prune action on a selected terminal row (§11.4). Reclaim is opt-in —
+  never tied to a default flag or this default UI.
 - **0 live tasks** → clear the widget (`setWidget("bg-tasks", undefined)`). The footer status is
   kept if terminal history exists (e.g. `bg: 2 done`); it clears only when there is nothing to
   summarise. *(Deviation from review addendum T3, which suggested a dim "no background tasks"
@@ -694,15 +695,17 @@ possibly-stale captured `ctx`.)
 
 `pi.registerCommand("bg", { description, getArgumentCompletions, handler })` (API: `commands.ts`):
 - `/bg` → opens the overlay **dialog** (`Shift+Ctrl+B` too). The dialog **defaults to LIVE tasks
-  only**; press `e` to reveal finished/killed/exited tasks, `a` to cross sessions, `/` to text-filter.
-  The title counts always reflect the full scoped set (running/done/failed/killed).
+  only**; press `e` to reveal finished/killed/exited tasks, `a` to cross sessions, `/` to text-filter,
+  and `p` on a selected terminal row to explicitly prune that old task from the list. The title
+  counts always reflect the full scoped set (running/done/failed/killed).
 - `/bg running|done|failed|killed|pending|unknown` → a `ctx.ui.select` list filtered by status
   (autocomplete via `getArgumentCompletions`) — the explicit way to enumerate exited tasks.
 - `/bg all` → the same list across **every** session (all statuses).
 - `/bg prune [all]` → **explicit, opt-in** reclamation: removes finished/failed/killed/unknown
   tasks (and best-effort their log + exit-marker files) from state. Live/pending tasks are never
-  pruned. Session-scoped by default; `all` reclaims across sessions. This is the ONLY path that
-  deletes exited tasks — default views merely hide them.
+  pruned. Session-scoped by default; `all` reclaims across sessions. The dialog's `p` shortcut uses
+  the same prune path but narrows it to the selected terminal task. Default views merely hide exited
+  tasks until the user explicitly reclaims them.
 - `/bg off` → hides the widget for the session (re-enable with `/bg on`).
 
 ### 11.5 Guards (non-negotiable)

@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { paths, readState } from "./state.ts";
-import { killTask, reconcile } from "./lifecycle.ts";
+import { killTask, pruneTerminal, reconcile } from "./lifecycle.ts";
 import { belongsToSession, currentSessionId, elapsedMmSs, humanAge } from "./utils.ts";
 import type { BackgroundSettings, BackgroundTask, BgStatus } from "./types.ts";
 
@@ -24,7 +24,7 @@ function statusColor(s: BgStatus): string {
 }
 
 const MAX_ROWS = 14;
-const FOOTER = "↑↓/jk nav · o output · s stop · K kill · a all · e exited · / filter · r refresh · ? help · esc";
+const FOOTER = "↑↓/jk nav · o output · s stop · K kill · p prune old · a all · e exited · / filter · r refresh · ? help · esc";
 
 export interface BgDialogOpts {
 	settings: BackgroundSettings;
@@ -181,6 +181,7 @@ export class BgDialog implements Component {
 		if (matchesKey(data, Key.enter) || data === "o" || data === "O") { this.openDetail(vis[this.selected]); return; }
 		if (data === "s") { void this.actStop(vis[this.selected], "SIGTERM"); return; }
 		if (data === "K" || data === "x") { void this.actStop(vis[this.selected], "SIGKILL"); return; }
+		if (data === "p") { void this.actPrune(vis[this.selected]); return; }
 		if (data === "r") { this.flash("refreshing…"); void this.refresh(); return; }
 		if (data === "a") { this.showAll = !this.showAll; this.selected = 0; this.flash(this.showAll ? "showing all sessions" : "scoped to this session"); void this.refresh(); return; }
 		if (data === "e") { this.showExited = !this.showExited; this.selected = 0; this.flash(this.showExited ? "showing exited tasks" : "live tasks only"); this.tui.requestRender(); return; }
@@ -205,6 +206,38 @@ export class BgDialog implements Component {
 			const r = await killTask(this.opts.cwd, t.taskId, signal, this.opts.settings.stopGraceMs);
 			this.flash(`${signal === "SIGKILL" ? "killed" : "stopped"} ${r.label || r.taskId}`);
 		} catch (err: any) { this.flash(`failed: ${String((err && err.message) || err)}`); }
+		await this.refresh();
+	}
+
+	private async actPrune(t: BackgroundTask | undefined) {
+		if (!t) { this.flash("no task selected"); this.tui.requestRender(); return; }
+		if (t.status === "running" || t.status === "pending") {
+			this.flash(`cannot prune live task ${t.label || t.taskId}`);
+			this.tui.requestRender();
+			return;
+		}
+		try {
+			const res = await pruneTerminal(this.opts.cwd, {
+				allSessions: this.showAll,
+				sid: this.sid,
+				scopeBySession: this.opts.settings.scopeBySession,
+				taskIds: [t.taskId],
+			});
+			if (res.removed > 0) {
+				if (this.detailId === t.taskId) {
+					this.detailId = null;
+					this.detailLines = [];
+					this.detailScroll = 0;
+					this.detailFollow = true;
+				}
+				delete this.lastLines[t.taskId];
+				this.flash(`pruned ${t.label || t.taskId}`);
+			} else {
+				this.flash(`${t.label || t.taskId} was not prunable`);
+			}
+		} catch (err: any) {
+			this.flash(`failed: ${String((err && err.message) || err)}`);
+		}
 		await this.refresh();
 	}
 
@@ -362,6 +395,7 @@ export class BgDialog implements Component {
 			["view output", "enter or o (opens at latest)"],
 			["stop (SIGTERM)", "s"],
 			["kill (SIGKILL)", "K"],
+			["prune selected terminal task", "p"],
 			["refresh now", "r"],
 			["toggle all sessions", "a"],
 			["show exited tasks", "e"],

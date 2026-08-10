@@ -105,6 +105,20 @@ try {
 	if (res5.removed === 0 && st5.tasks.alive && st5.tasks.live2) ok("live/pending retained under allSessions prune");
 	else bad(`live task pruned! removed=${res5.removed} alive=${!!st5.tasks.alive} live2=${!!st5.tasks.live2}`);
 
+	// [P6] targeted prune removes only the selected terminal id.
+	console.log("\n[P6] targeted prune (taskIds) removes only the selected old task");
+	await seed("pick-me", { status: "done", session: "sessA" });
+	await seed("leave-me", { status: "failed", session: "sessA" });
+	await seed("leave-other", { status: "done", session: "sessOTHER" });
+	const res6 = await pruneTerminal(cwd, { sid: "sessA", scopeBySession: true, taskIds: ["pick-me"] });
+	const st6 = await readState(p, cwd);
+	if (res6.removed === 1) ok("targeted prune removed exactly one task");
+	else bad(`expected targeted removed=1, got ${res6.removed}`);
+	if (!st6.tasks["pick-me"]) ok("selected task removed");
+	else bad("selected task still present after targeted prune");
+	if (st6.tasks["leave-me"] && st6.tasks["leave-other"]) ok("non-selected tasks retained");
+	else bad(`non-selected tasks changed unexpectedly: leave-me=${!!st6.tasks["leave-me"]} leave-other=${!!st6.tasks["leave-other"]}`);
+
 	console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
 } catch (err) {
 	console.error("TEST ERROR:", err);
