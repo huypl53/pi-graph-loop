@@ -13,10 +13,14 @@
   "pi": {
     "extensions": [
       "./extensions"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "files": [
     "extensions/",
+    "skills/",
     "docs/",
     "README.md",
     "CHANGELOG.md",
