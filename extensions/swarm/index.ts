@@ -9,6 +9,9 @@ import { registerMetricsTools } from "./src/tools/metrics.ts";
 import { registerLoopTools } from "./src/tools/loop.ts";
 import { registerGcTools } from "./src/tools/gc.ts";
 export { isDeliveryFailureRetryable } from "./src/delivery.ts";
+export { providerForModel, currentProvider } from "./src/session.ts";
+export { isPiLikeCommand, isPanePiLike } from "./src/tmux.ts";
+export { findIdempotentMessage, readMailbox, readMailboxCached } from "./src/mailbox.ts";
 export { validateRunAgainstContract, computeIterationBest } from "./src/metric.ts";
 
 export default function (pi: ExtensionAPI) {

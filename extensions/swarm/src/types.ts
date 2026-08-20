@@ -32,6 +32,10 @@ export type MessageRecord = {
 	surfacedAt?: string;
 	failedAt?: string;
 	ackMissingAt?: string;
+	// Bounded re-injection of delivered-but-unacked messages (issue A): count of re-injections since
+	// the original delivery, capped by MAX_REINJECTS so an unresponsive-but-alive agent is not spammed.
+	reinjects?: number;
+	lastReinjectAt?: string;
 	attempts: number;
 	requiresAck: boolean;
 	requiresResponse?: boolean;
@@ -106,6 +110,13 @@ export type SwarmState = {
 	// PM session. Separate from `delivered` (the check_mailbox/ack ledger).
 	orchestratorPumpSessions?: Record<string, { ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string }>;
 	lastLoopReconcileAt?: string; // throttle for the loop-watcher reconcile (detect "plan recorded but graph still closed")
+	// Incremental mailbox read checkpoint for the orchestrator pump (issue B): byte offset already
+	// parsed per agent. Reset (full re-read) if the file shrank. Absent = no checkpoint yet.
+	mailboxReadOffset?: Record<string, number>;
+	// Lazily-built index: `${from}\u0000${to}\u0000${idempotencyKey}` -> messageId (issue C). Rebuilt
+	// when the message count changes; consulted for O(1) idempotency lookups inside the lock.
+	idempotencyIndex?: Record<string, string>;
+	idempotencyIndexCount?: number; // messages.length when the index was built
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;

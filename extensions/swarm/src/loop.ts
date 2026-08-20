@@ -8,7 +8,7 @@ import { SPAWN_SETTLE_MS } from "./constants.ts";
 import { appendLoopHistory, loopDir, loopHistoryFile, loopRoundFile, loopStateFile, paths, readLoopState, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeLoopState, writeState } from "./state.ts";
 import { collectDeclaredArtifacts } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
-import { deliverMessageLocked, readMailbox } from "./mailbox.ts";
+import { deliverMessageLocked, findIdempotentMessage, readMailbox } from "./mailbox.ts";
 import { isSafeRelativePath, now, safeId, sleep } from "./utils.ts";
 import { isTmuxRunning, tmux } from "./tmux.ts";
 import { reconcile } from "./reconcile.ts";
@@ -338,7 +338,7 @@ export async function recordLoopPlan(pi: ExtensionAPI, cwd: string, p: Paths, ta
 	await withLock(p, async () => {
 		const s = await readState(p, cwd);
 		const nudgeKey = `loop:${taskId}:round:${round.round}:nudge:orchestrator`;
-		const rec = Object.values(s.messages || {}).find((r) => r.idempotencyKey === nudgeKey && r.to === "orchestrator");
+		const rec = findIdempotentMessage(s, "orchestrator", "orchestrator", nudgeKey) || Object.values(s.messages || {}).find((r) => r.idempotencyKey === nudgeKey && r.to === "orchestrator");
 		if (rec && rec.requiresAck && !rec.ackedAt) {
 			const at = now();
 			s.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: me, status: "done", note: "auto-acked: loop plan recorded", at } };
@@ -387,7 +387,7 @@ export async function recordLoopPlan(pi: ExtensionAPI, cwd: string, p: Paths, ta
 
 export async function sendLoopReopenNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, round: number, planArtifact: string): Promise<void> {
 	const key = `loop:${taskId}:round:${round}:nudge:reopen`;
-	if (Object.values(st.messages || {}).some((r) => r.to === "orchestrator" && r.idempotencyKey === key)) return; // idempotent: one reopen nudge per round
+	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) return; // idempotent: one reopen nudge per round
 	let iterNodes = "the iteration nodes";
 	try { iterNodes = Object.keys((await readTaskState(taskPaths(p, taskId).taskJson)).nodes || {}).join(", ") || iterNodes; } catch {}
 	try {
@@ -406,7 +406,7 @@ export async function sendLoopReopenNudgeLocked(pi: ExtensionAPI, cwd: string, p
 // Ack a loop nudge (by idempotencyKey) if it exists, requires ack, and hasn't been acked yet. Helper for
 // reconcileLoopNudgesLocked so auto-ack logic (on plan-recorded / task-left-done) stays in one place.
 export function ackLoopNudgeLocked(st: SwarmState, key: string, nowMs: number, note: string): void {
-	const rec = Object.values(st.messages || {}).find((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+	const rec = findIdempotentMessage(st, "orchestrator", "orchestrator", key) || Object.values(st.messages || {}).find((r) => r.to === "orchestrator" && r.idempotencyKey === key);
 	if (rec && rec.requiresAck && !rec.ackedAt) {
 		const at = new Date(nowMs).toISOString();
 		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "orchestrator", status: "done", note, at } };
@@ -428,7 +428,7 @@ export function availableProposers(st: SwarmState): string[] {
 // sit on a stale kickoff nudge forever. Idempotent per round; auto-acked once a plan is recorded.
 export async function sendLoopPlanNowNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, round: number, emptyPool: boolean, workers: string[]): Promise<void> {
 	const key = `loop:${taskId}:round:${round}:nudge:plan-now`;
-	if (Object.values(st.messages || {}).some((r) => r.to === "orchestrator" && r.idempotencyKey === key)) return; // idempotent: one plan-now nudge per round
+	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) return; // idempotent: one plan-now nudge per round
 	try {
 		await deliverMessageLocked(pi, cwd, p, st, {
 			to: "orchestrator",

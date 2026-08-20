@@ -11,6 +11,7 @@ import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
 import { overridePath, writeEffectiveIdentity } from "../identity.ts";
 import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
+import { FAST_MODEL, FAST_PROVIDER } from "../constants.ts";
 import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 
 export function registerAgentsTools(pi: ExtensionAPI) {
@@ -148,7 +149,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			id: Type.Optional(Type.String({ description: "Stable agent id, e.g. planner or reviewer. Lowercase letters, digits, dash and underscore are safest." })),
 			role: Type.String({ description: "Role/instructions for the agent." }),
 			roleKind: Type.Optional(Type.String({ description: "Explicit role kind override (orchestrator/planner/reviewer/tester/observer/implementer/worker). Pinned so it is not re-derived from id/role. Defaults to inference (id-first, then role text)." })),
-			model: Type.Optional(Type.String({ description: "pi model id. Defaults to PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1. Supported fast preset: gpt-5.4-mini." })),
+			model: Type.Optional(Type.String({ description: "pi model id, or the preset alias 'fast' (expands to gpt-5.4-mini/openai). Defaults to PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1." })),
 			provider: Type.Optional(Type.String({ description: "pi provider id. Defaults to PI_SWARM_DEFAULT_PROVIDER or model preset provider (zai-coding-cn for glm-5.1, openai for gpt-5.4-mini)." })),
 			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt to send into the spawned agent after pi starts." })),
 		}),
@@ -158,8 +159,9 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				await trace(p, "agent.spawn.request", { requestedBy: currentAgentId(), ...params });
-				const model = params.model || currentModel();
-				const r = await spawnAgent(pi, ctx.cwd, p, st, { ...params, model, provider: params.provider || currentProvider(model) });
+				const model = params.model === "fast" ? FAST_MODEL : params.model || currentModel();
+				const provider = params.provider || (params.model === "fast" ? FAST_PROVIDER : currentProvider(model));
+				const r = await spawnAgent(pi, ctx.cwd, p, st, { ...params, model, provider });
 				await writeState(p, st);
 				return { swarmId: st.swarmId, tmuxSession: st.tmuxSession, ...r };
 			});
@@ -337,6 +339,8 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		promptGuidelines: ["Use `swarm_restart_agent` to reset an agent's pi process without losing its swarm identity/mailbox. This force-stops first (any active tasks are released to the fresh process)."],
 		parameters: Type.Object({
 			agentId: Type.String({ description: "Agent id to restart." }),
+			model: Type.Optional(Type.String({ description: "Optional model override for the respawned pi (defaults to the agent's recorded model)." })),
+			provider: Type.Optional(Type.String({ description: "Optional provider override for the respawned pi (defaults to the agent's recorded provider)." })),
 			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt sent into the respawned pi." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -344,7 +348,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			await ensureDirs(p);
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				const r = await restartAgent(pi, ctx.cwd, p, st, safeId(params.agentId), { initialPrompt: params.initialPrompt });
+				const r = await restartAgent(pi, ctx.cwd, p, st, safeId(params.agentId), { initialPrompt: params.initialPrompt, model: params.model, provider: params.provider });
 				await writeState(p, st);
 				return r;
 			});

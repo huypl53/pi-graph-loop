@@ -51,14 +51,18 @@ export function currentModel() {
 	return settings.defaultModel || process.env.PI_SWARM_DEFAULT_MODEL || DEFAULT_MODEL;
 }
 
-export function providerForModel(model: string) {
+export function providerForModel(model: string): string | undefined {
 	if (model === FAST_MODEL) return FAST_PROVIDER;
-	return DEFAULT_PROVIDER;
+	// Issue E: never force the zai hardcode onto an unknown model. Known presets win, then an explicit
+	// settings/env default; otherwise undefined — the caller decides (spawn falls back to
+	// DEFAULT_PROVIDER only at the final spawn-command boundary with a trace warning).
+	const settings = readSwarmSettings();
+	return settings.defaultProvider || process.env.PI_SWARM_DEFAULT_PROVIDER || undefined;
 }
 
 export function currentProvider(model = currentModel()) {
 	const settings = readSwarmSettings();
-	return settings.defaultProvider || process.env.PI_SWARM_DEFAULT_PROVIDER || providerForModel(model);
+	return settings.defaultProvider || process.env.PI_SWARM_DEFAULT_PROVIDER || providerForModel(model) || DEFAULT_PROVIDER;
 }
 
 export function childPiArgs() {

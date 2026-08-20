@@ -64,6 +64,14 @@ export const MEMORY_POLICY_DOC = "docs/swarm-memory.md";
 
 export const MAX_ATTEMPTS = 5;
 
+// Bounded re-injection of INJECTED-but-unacked messages (issue A): after this many re-injections the
+// message keeps its ack_missing marker but is no longer re-sent; dead-lettering still happens via TTL.
+export const MAX_REINJECTS = 2;
+
+// An injected-but-unacked message becomes eligible for re-injection only after this age past the
+// LAST delivery/re-injection attempt (avoids re-injecting a message the agent is actively working).
+export const REINJECT_AFTER_MS = 300_000;
+
 // Task staleness thresholds for the reconcile task sweep (advisory; never auto-fail nodes).
 export const TASK_STALE_MS = 24 * 60 * 60 * 1000; // in_progress node with no activity bump -> stale
 

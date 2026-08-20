@@ -17,6 +17,8 @@ export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state:
 	if (state.agents[id]?.status === "running") throw new Error(`Agent already exists and is running: ${id}`);
 	const model = input.model || currentModel();
 	const provider = input.provider || currentProvider(model);
+	const providerFallback = !input.provider && provider === DEFAULT_PROVIDER && model !== DEFAULT_MODEL && model !== FAST_MODEL;
+	if (providerFallback) await trace(p, "agent.spawn.provider_fallback", { agentId: id, model, provider, note: "no provider configured for model; fell back to DEFAULT_PROVIDER at spawn boundary" }).catch(() => {});
 	const window = id;
 	const target = `${state.tmuxSession}:${window}.0`;
 	const envPrefix = [
@@ -271,7 +273,7 @@ export async function stopAgent(pi: ExtensionAPI, p: Paths, state: SwarmState, a
 // Stop + respawn a fresh pi at the SAME id (so mailbox, identity, and history persist). Reuses the
 // recorded role/model/provider. For an agent originally registered to an external pane, restart creates
 // a fresh swarm-managed window named <id> (the external pane cannot be reliably re-pi'd). Lock-free core.
-export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, agentId: string, opts: { initialPrompt?: string } = {}) {
+export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, agentId: string, opts: { initialPrompt?: string; model?: string; provider?: string } = {}) {
 	const existing = state.agents[agentId];
 	if (!existing) throw new Error(`Unknown swarm agent: ${agentId}`);
 	ensureAgentDefaults(existing);
@@ -280,7 +282,7 @@ export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, stat
 	existing.updatedAt = now();
 	await trace(p, "agent.restart.kill", { agentId, ...kill });
 	const roleKind = existing.roleKindExplicit ? existing.roleKind : undefined;
-	const r = await spawnAgent(pi, cwd, p, state, { id: agentId, role: existing.role, roleKind, model: existing.model, provider: existing.provider, initialPrompt: opts.initialPrompt });
+	const r = await spawnAgent(pi, cwd, p, state, { id: agentId, role: existing.role, roleKind, model: opts.model || existing.model, provider: opts.provider || existing.provider, initialPrompt: opts.initialPrompt });
 	await trace(p, "agent.restart.ok", { agentId, target: r.agent.tmuxTarget, killMethod: kill.method });
 	return { kill, ...r };
 }

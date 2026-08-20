@@ -4,14 +4,14 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import type { IndexedTask, MessageResponseStatus, Paths, ReconcileAction, SwarmMessage, SwarmState, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, LOOP_RECONCILE_INTERVAL_MS, MAX_ATTEMPTS, MAX_STATUS_TASKS, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
+import { ACK_MISSING_MS, LOOP_RECONCILE_INTERVAL_MS, MAX_ATTEMPTS, MAX_REINJECTS, MAX_STATUS_TASKS, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
-import { deliver, deliverMessageLocked, readMailbox, upsertMessageRecord } from "./mailbox.ts";
+import { deliver, deliverMessageLocked, findIdempotentMessage, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
 import { ensureOrchestrator } from "./identity.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
-import { isTmuxRunning, tmux } from "./tmux.ts";
+import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { ackLoopNudgeLocked, reconcileLoopNudgesLocked } from "./loop.ts";
 
@@ -82,7 +82,7 @@ export function orchSession(st: SwarmState, nowMs: number): { ids: string[]; tri
 // is the actor) — it only surfaces the stall and the fix. Assumes the caller holds the state lock.
 async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, nodeId: string, role: string): Promise<void> {
 	const key = `task:${taskId}:node:${nodeId}:nudge:assign`;
-	if (Object.values(st.messages || {}).some((r) => r.to === "orchestrator" && r.idempotencyKey === key)) return; // idempotent: one assign nudge per node
+	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) return; // idempotent: one assign nudge per node
 	try {
 		await deliverMessageLocked(pi, cwd, p, st, {
 			to: "orchestrator",
@@ -163,7 +163,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// (ackedAt = "recipient processed it") are skipped. We no longer pre-filter surfaced here: surfaced
 		// vs triggered vs re-trigger is decided below, because surfacing must be gated on idle.
 		const deliveredOrch = new Set(st.delivered.orchestrator || []);
-		const windowMsgs = (await readMailbox(p, "orchestrator"))
+		const windowMsgs = (await readMailboxCached(p, "orchestrator"))
 			.slice(-PUMP_SCAN_WINDOW)
 			.filter((m) => {
 				const rec = st.messages[m.id];
@@ -446,6 +446,43 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 				const deliveredAge = nowMs - sinceMs;
 				const staleThreshold = 300_000; // 5 minutes
 				if (deliveredAge > staleThreshold) {
+					// Issue A: an injected-but-unacked message was previously only marked ack_missing and NEVER
+					// re-delivered — a message injected into a pane that pi never processed (crash, missed turn,
+					// pane-alive-but-shell per issue D) was silently lost. Now: bounded re-injection (MAX_REINJECTS)
+					// when the recipient's pane is alive AND pi-like, with a cooldown (REINJECT_AFTER_MS) since the
+					// last delivery so an agent actively working isn't spammed. Delivery staleness keeps being
+					// surfaced as ack_missing either way; attempts are NOT bumped (dead-lettering stays TTL-driven).
+					const reinjects = rec.reinjects || 0;
+					const sinceLast = Math.max(
+						rec.lastReinjectAt ? new Date(rec.lastReinjectAt).getTime() : 0,
+						sinceMs,
+					);
+					const cooldownOk = nowMs - sinceLast > REINJECT_AFTER_MS;
+					let reinjected = false;
+					if (!options.dryRun && cooldownOk && reinjects < MAX_REINJECTS && !rec.superseded) {
+						const reinjectAgent = st.agents[rec.to];
+						const hasPane = Boolean(reinjectAgent?.tmuxTarget) && reinjectAgent!.tmuxTarget !== "unknown";
+						const alive = hasPane && reinjectAgent?.status === "running" ? await isTmuxRunning(pi, reinjectAgent!.tmuxTarget!) : false;
+						const piLike = alive ? await isPanePiLike(pi, reinjectAgent!.tmuxTarget!) : { piLike: false, command: "" };
+						if (alive && piLike.piLike) {
+							const msg = await readMailbox(p, rec.to).then((msgs) => msgs.find((m) => m.id === msgId));
+							if (msg) {
+								const delivery = await deliver(pi, p, st, msg);
+								if (delivery?.delivered && !delivery.mailboxOnly) {
+									reinjected = true;
+									st.delivered[rec.to] = Array.from(new Set([...(st.delivered[rec.to] || []), msgId]));
+									upsertMessageRecord(st, msg, "injected", { injectedAt: now(), reinjects: reinjects + 1, lastReinjectAt: now() });
+									await trace(p, "reconcile.reinject.ok", { id: msgId, to: rec.to, reinjects: reinjects + 1, deliveredAge });
+								} else {
+									await trace(p, "reconcile.reinject.skip", { id: msgId, to: rec.to, reason: delivery?.reason || "no message" });
+								}
+							} else {
+								await trace(p, "reconcile.reinject.skip", { id: msgId, to: rec.to, reason: "Message not found in mailbox" });
+							}
+						} else if (alive && !piLike.piLike) {
+							await trace(p, "reconcile.reinject.skip", { id: msgId, to: rec.to, reason: `pane alive but not pi (pane_current_command=${piLike.command || "?"})` });
+						}
+					}
 					if (!options.dryRun) {
 						// Surface as ack_missing: keep the injected/intercepted status intact so this is NOT
 						// confused with a delivery failure (failed messages get re-injected by the retry branch
@@ -461,7 +498,7 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 						);
 						await trace(p, "reconcile.ack_missing", { id: msgId, to: rec.to, deliveredAge, status: rec.status, requiresAck: rec.requiresAck });
 					}
-					actions.push({ messageId: msgId, action: "ack_missing", reason: `Delivered ${Math.round(deliveredAge / 1000)}s ago, no ack from ${rec.to}` });
+					actions.push({ messageId: msgId, action: reinjected ? "reinjected" : "ack_missing", reason: `Delivered ${Math.round(deliveredAge / 1000)}s ago, no ack from ${rec.to}${reinjected ? ` (re-injected, ${reinjects + 1}/${MAX_REINJECTS})` : reinjects >= MAX_REINJECTS ? " (re-inject budget exhausted)" : ""}` });
 				} else {
 					actions.push({ messageId: msgId, action: "awaiting_ack", reason: "Recently delivered, awaiting ack" });
 				}
