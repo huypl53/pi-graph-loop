@@ -2,8 +2,8 @@
 // A bordered, color-coded, live-refreshing panel opened via /bg (no args) or Shift+Ctrl+B.
 // Keyboard-driven: navigate, stop/kill, view output, refresh, toggle all-sessions, filter.
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { readFile } from "node:fs/promises";
+import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { open, readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { paths, readState } from "./state.ts";
@@ -24,6 +24,23 @@ function statusColor(s: BgStatus): string {
 }
 
 const MAX_ROWS = 14;
+// Detail view reads at most this many bytes from the END of each log file, so huge streaming logs
+// stay cheap and the LATEST output is always visible (the head is truncated instead).
+const DETAIL_TAIL_BYTES = 128 * 1024;
+
+async function readTail(abs: string, maxBytes: number): Promise<string> {
+	try {
+		const st = await stat(abs);
+		if (st.size <= maxBytes) return readFile(abs, "utf8");
+		const fh = await open(abs, "r");
+		try {
+			const buf = Buffer.alloc(maxBytes);
+			await fh.read(buf, 0, maxBytes, st.size - maxBytes);
+			const txt = buf.toString("utf8");
+			return txt.startsWith("\n") ? txt.slice(1) : txt.slice(txt.indexOf("\n") + 1); // drop partial first line
+		} finally { await fh.close(); }
+	} catch { return ""; }
+}
 const FOOTER = "↑↓/jk nav · o output · s stop · K kill · p prune old · a all · e exited · / filter · r refresh · ? help · esc";
 
 export interface BgDialogOpts {
@@ -107,7 +124,7 @@ export class BgDialog implements Component {
 					const f = join(this.opts.cwd, t.logOut);
 					if (!existsSync(f)) { this.lastLines[t.taskId] = ""; return; }
 					try {
-						const txt = await readFile(f, "utf8");
+						const txt = await readTail(f, 16 * 1024);
 						const ls = txt.split("\n").filter((l) => l.trim() && !l.startsWith("[bg-task exited"));
 						this.lastLines[t.taskId] = (ls[ls.length - 1] || "").trim();
 					} catch { this.lastLines[t.taskId] = ""; }
@@ -121,7 +138,7 @@ export class BgDialog implements Component {
 	private async loadDetail() {
 		const t = this.all.find((x) => x.taskId === this.detailId);
 		if (!t) { this.detailId = null; this.detailLines = []; return; }
-		const readLog = async (rel: string) => { const f = join(this.opts.cwd, rel); if (!existsSync(f)) return ""; return readFile(f, "utf8").catch(() => ""); };
+		const readLog = async (rel: string) => { const f = join(this.opts.cwd, rel); if (!existsSync(f)) return ""; return readTail(f, DETAIL_TAIL_BYTES); };
 		const text = (await readLog(t.logOut)) + (await readLog(t.logErr));
 		this.detailLines = text.split("\n").filter((l) => !l.startsWith("[bg-task exited"));
 		// `detailFollow` is the single source of truth for tailing. On (scrolling up pauses it; reaching
@@ -373,7 +390,8 @@ export class BgDialog implements Component {
 			const col = statusColor(t.status);
 			const head = `${this.fg(col, ICON[t.status])} ${this.fg(col, truncateToWidth(t.label || t.command, 30))}  ${this.fg("dim", t.status + (t.exitCode === null || t.exitCode === undefined ? "" : ` · exit ${t.exitCode}`))}  ${this.fg("dim", elapsedMmSs(t.startedAt))}`;
 			out.push(this.row(this.pad(head, innerW)));
-			out.push(this.row(this.pad(this.fg("dim", `cmd: ${truncateToWidth(t.command, innerW - 5)}`), innerW)));
+			// full command, wrapped across lines — never silently truncated with "…"
+			for (const ln of wrapTextWithAnsi(`cmd: ${t.command}`, Math.max(10, innerW))) out.push(this.row(this.pad(this.fg("dim", truncateToWidth(ln, innerW)), innerW)));
 			out.push(this.row(this.pad(this.fg("dim", `out: ${t.logOut}`), innerW)));
 			out.push(border("├", "┤"));
 			const bodyH = MAX_ROWS;
@@ -439,20 +457,14 @@ export async function openBgDialog(ctx: any, settings: BackgroundSettings, cwd: 
 		return;
 	}
 	try {
-		// Capture the live TUI so overlayOptions can read the SAME terminal width the overlay
-		// renderer uses (tui.terminal.columns). process.stdout.columns is unreliable in tmux/PTY and
-		// goes stale on resize; reading the TUI's own terminal guarantees our width <= viewport, so the
-		// box never wraps and never breaks its border. Capped to a readable max, floored for small terms.
-		let tuiRef: any = null;
+		// IMPORTANT: overlayOptions must be STATIC (percentages) — pi resolves them on EVERY render
+		// against the live terminal size, so the dialog reflows automatically when the terminal is
+		// resized. A dynamic function would be evaluated once at show time and go stale on resize.
 		await ctx.ui.custom(
-			(tui: TUI, theme: any, _kb: any, done: (v: unknown) => void) => { tuiRef = tui; return new BgDialog(tui, theme, { settings, cwd, ctx, initialAllSessions: opts.initialAllSessions }, done); },
+			(tui: TUI, theme: any, _kb: any, done: (v: unknown) => void) => new BgDialog(tui, theme, { settings, cwd, ctx, initialAllSessions: opts.initialAllSessions }, done),
 			{
 				overlay: true,
-				overlayOptions: () => {
-					const cols = (tuiRef && tuiRef.terminal && tuiRef.terminal.columns) || 100;
-					const width = Math.max(60, Math.min(116, cols - 4));
-					return { width, maxHeight: "78%", anchor: "center", margin: { top: 1, bottom: 1 } } as any;
-				},
+				overlayOptions: { width: "96%", minWidth: 60, maxHeight: "78%", anchor: "center", margin: { top: 1, bottom: 1 } } as any,
 			},
 		);
 	} catch (err: any) {
