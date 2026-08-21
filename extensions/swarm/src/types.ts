@@ -109,6 +109,8 @@ export type SwarmState = {
 	// the ids IT has surfaced, so one session cannot mark a notification consumed and starve a different
 	// PM session. Separate from `delivered` (the check_mailbox/ack ledger).
 	orchestratorPumpSessions?: Record<string, { ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string }>;
+	// Per-worker surfaced ledger for the session-start mailbox auto-surface (idempotent per message).
+	agentSurfaced?: Record<string, string[]>;
 	lastLoopReconcileAt?: string; // throttle for the loop-watcher reconcile (detect "plan recorded but graph still closed")
 	// Incremental mailbox read checkpoint for the orchestrator pump (issue B): byte offset already
 	// parsed per agent. Reset (full re-read) if the file shrank. Absent = no checkpoint yet.

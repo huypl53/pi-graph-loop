@@ -2,9 +2,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname, relative, sep } from "node:path";
 import type { MessageResponseStatus } from "./types.ts";
-import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID } from "./constants.ts";
+import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
-import { deliverMessageLocked, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
+import { deliverMessageLocked, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, trace, withLock, writeState, writeTaskState } from "./state.ts";
 import { ensureOrchestrator } from "./identity.ts";
@@ -25,6 +25,51 @@ let orchestratorMailboxPumpRunning = false;
 export function stopOrchestratorPump() {
 	if (orchestratorMailboxTimer) clearInterval(orchestratorMailboxTimer);
 	orchestratorMailboxTimer = undefined;
+}
+
+// Pull-based worker delivery: surface unacked messages addressed to this agent into its own TUI
+// conversation via pi.sendMessage (no tmux). Idempotent per message via the shared agentSurfaced ledger
+// (per-agent, capped), so restarts re-surface only what is still unacked. Never targets the orchestrator
+// (that is pumpOrchestratorMailbox's job) and never surfaces dead-lettered or superseded messages.
+export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, agentId: string, reason: string) {
+	if (currentAgentId() !== agentId) return { surfaced: 0, ids: [] as string[] };
+	const idleAtStart = ctx.mode === "tui" ? ctx.isIdle() : false;
+	const result = await withLock(p, async () => {
+		const st = await readState(p, ctx.cwd);
+		st.agentSurfaced ||= {};
+		const surfaced = new Set(st.agentSurfaced[agentId] || []);
+		const pending = Object.values(st.messages || {})
+			.filter((r) => r.to === agentId && !r.ackedAt && r.status !== "dead_letter" && !r.superseded && !surfaced.has(r.id))
+			.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+			.slice(0, 10);
+		if (pending.length) {
+			st.agentSurfaced[agentId] = [...surfaced, ...pending.map((r) => r.id)].slice(-PUMP_SESSION_ID_CAP);
+		}
+		await writeState(p, st);
+		return { ids: pending.map((r) => r.id) };
+	});
+	if (!result.ids.length) return { surfaced: 0, ids: [] };
+	if (ctx.mode !== "tui") {
+		await trace(p, "mailbox.agent_surface_skip", { agentId, reason, count: result.ids.length, mode: ctx.mode });
+		return { surfaced: 0, ids: result.ids };
+	}
+	// Read bodies from the mailbox (records carry no body).
+	const msgs = await readMailbox(p, agentId);
+	let delivered = 0;
+	for (let i = 0; i < result.ids.length; i++) {
+		const m = msgs.find((x) => x.id === result.ids[i]);
+		if (!m) continue;
+		// A requiresAck message is action-expected: trigger a real turn so the agent acts, not just sees.
+		pi.sendMessage({
+			customType: "swarm-message",
+			content: formatSwarmMessageContent(m),
+			display: true,
+			details: m,
+		}, i === 0 && idleAtStart ? { triggerTurn: true } : { deliverAs: "followUp" });
+		delivered++;
+	}
+	await trace(p, "mailbox.agent_surface", { agentId, reason, count: delivered, ids: result.ids, idleAtStart });
+	return { surfaced: delivered, ids: result.ids };
 }
 
 // (Re)start the orchestrator mailbox pump for this session: one immediate surface + a 5s TUI interval.
@@ -121,7 +166,20 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			}
 		});
 		if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${agentId}`);
-		if (agentId === "orchestrator") await startOrchestratorPump(ctx);
+		if (agentId === "orchestrator") {
+			await startOrchestratorPump(ctx);
+		} else if (ctx.mode === "tui") {
+			// Pull-based delivery for workers (root fix for the restart/injection-loss class): on session
+			// start, surface any unacked, non-dead-letter, non-superseded messages addressed to THIS agent
+			// directly into its conversation — no tmux injection, no reconcile, no orchestrator involvement.
+			// Mailbox is the source of truth; tmux injection stays as an opportunistic fast-path.
+			try {
+				await surfaceAgentPending(pi, ctx, p, agentId, "session_start");
+			// Re-check on settle: a message may have arrived (or a failed injection skipped) while the
+			// agent was busy; settling idle is the natural moment to catch up.
+			// (hook registered below; the surface here covers the startup gap)
+			} catch (err: any) { await trace(p, "agent.surface_error", { agentId, phase: "session_start", error: String((err as Error)?.message || err) }).catch(() => {}); }
+		}
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -177,6 +235,8 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			await pumpOrchestratorMailbox(pi, ctx, p, "agent_settled");
 			return;
 		}
+		// Catch-up surface for workers: anything unacked that arrived (or failed injection) while busy.
+		try { await surfaceAgentPending(pi, ctx, paths(ctx.cwd), agentId, "agent_settled"); } catch {}
 		const p = paths(ctx.cwd);
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
