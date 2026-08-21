@@ -11,6 +11,7 @@ import { ensureOrchestrator } from "./identity.ts";
 import { formatSwarmMessageContent, parseSystemDelivery } from "./delivery.ts";
 import { pumpOrchestratorMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
 import { scanAgentOpenAssignments } from "./taskgraph.ts";
+import { applySwarmToolGating } from "./tools/gating.ts";
 import { tmux } from "./tmux.ts";
 
 // Orchestrator mailbox pump state. Module-level so the PM pump can be (re)started from outside the
@@ -73,6 +74,11 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		await ensureDirs(p);
 		const agentId = currentAgentId();
 		const guest = agentId === SWARM_GUEST_ID;
+		// Identity-gated tool visibility: a guest session loses the swarm tool surface (it is a plain coding
+		// session, not a swarm participant); registered agents and the orchestrator keep it. The /swarm slash
+		// command is unaffected, so a guest can still opt in via `/swarm register here <role>`. Re-applied on
+		// opt-in (command.ts) so an in-session identity change re-enables the swarm tools immediately.
+		applySwarmToolGating(pi);
 		const ts = now();
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
@@ -81,9 +87,11 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				// Anonymous swarm session (no PI_SWARM_AGENT_ID and no explicit orchestrator opt-in): stay
 				// inert. Do NOT register an agent record, do NOT call ensureOrchestrator (which would refresh
 				// the orchestrator pseudo-agent heartbeat and mask a dead/stalled PM), and do NOT start the
-				// orchestrator mailbox pump (which would surface orchestrator mail here). Tools still work via
-				// currentAgentId() returning SWARM_GUEST_ID; this session just cannot act as or consume the
-				// orchestrator. See isOrchestratorSession() for the explicit opt-in path.
+				// orchestrator mailbox pump (which would surface orchestrator mail here). The swarm tool surface
+				// is gated off (see applySwarmToolGating above) — this session cannot act as or consume the
+				// orchestrator. It can still opt in via `/swarm register here <role>` (the slash command is
+				// unaffected by tool gating), which re-applies gating to re-enable the swarm tools. See
+				// isOrchestratorSession() for the explicit opt-in path.
 				return;
 			}
 			if (agentId === "orchestrator") {

@@ -40,6 +40,26 @@ These are thin aliases over the same `/swarm` handlers; they do not introduce a 
 - `/swarm loop status <task-id>`
 - `/swarm loop plan <task-id> <summary…>`
 
+## Guest tool visibility (identity gating)
+
+A session that neither sets `PI_SWARM_AGENT_ID` nor opts in as the orchestrator resolves to the
+anonymous `swarm-guest` identity. Such a guest is a plain coding session — it does **not** expose the
+swarm tool surface to the model. Tool visibility is identity-gated at runtime via `pi.setActiveTools`
+(see `extensions/swarm/src/tools/gating.ts`), not by conditional registration: every tool still
+registers unconditionally, but the active set is toggled by identity in `session_start`.
+
+- **Guest** (`swarm-guest`): all `swarm_*` tools are removed from the active set (their definitions and
+  `promptGuidelines` disappear from the system prompt). Built-in/non-swarm tools are untouched.
+- **Registered agent** (`PI_SWARM_AGENT_ID=<id>`) and **orchestrator** (`PI_SWARM_IS_ORCHESTRATOR=1`):
+  swarm tools are ensured present in the active set.
+- **Opt-in escape hatch**: the `/swarm` slash command is unaffected by tool gating, so a guest can still
+  run `/swarm register here <role>` (or `/swarm register here orchestrator`). That command adopts the
+  identity in-process and re-applies gating, so the swarm tools re-appear immediately for the next turn
+  — no `/reload` needed.
+
+Gating is idempotent and never adds/removes non-swarm tools. It is advisory: a failure to read/set the
+active set is swallowed rather than failing the session.
+
 ## Tool groups
 
 ### Agent lifecycle tools

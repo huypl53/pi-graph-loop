@@ -38,6 +38,35 @@ export function isTmuxRunning(pi: ExtensionAPI, target: string): Promise<boolean
 		.catch(() => false);
 }
 
+// Issue D (pane-alive-but-not-pi): `pane_current_command` values that mean "a pi process is (probably)
+// running in this pane". pi runs under node; a pane still on the shell prompt (zsh/bash/fish...) is NOT
+// pi. Unknown-but-plausible values default to pi-like (fail-open) so this guard never blocks delivery
+// to an exotic-but-valid setup; only clearly-shell panes are rejected.
+// UAT finding (task-swarm-uat-v2): a denylist cannot enumerate every non-pi foreground command (live
+// repro: a pane running `sleep` was marked delivered). Flip the default to ALLOWLIST: pi always runs as a
+// `node` process, so only `node` (and empty, treated as unresolved/fail-open) are pi-like. Everything
+// else — shells, sleep, cat, unknown binaries — is refused and stays retryable.
+const PI_COMMANDS = new Set(["node"]);
+
+export function isPiLikeCommand(command: string): boolean {
+	const c = (command || "").trim().replace(/^-/, ""); // login shells appear as "-zsh"
+	return !c || PI_COMMANDS.has(c);
+}
+
+export async function isPanePiLike(pi: ExtensionAPI, target: string): Promise<{ piLike: boolean; command: string }> {
+	try {
+		const out = await tmux(pi, ["display-message", "-p", "-t", target, "#{pane_current_command}"], 3_000);
+		const command = out.trim();
+		if (command && !PI_COMMANDS.has(command)) return { piLike: false, command };
+		return { piLike: true, command };
+	} catch {
+		// Unresolvable target: isTmuxRunning already gates liveness; fail-open here.
+		return { piLike: true, command: "" };
+	}
+}
+
+// Pure predicate (unit-testable without tmux): does this pane_current_command value look like pi?
+
 // Tokens that mean "adopt the pane this command/tool is running in". Lets an operator register the
 // CURRENT pi pane without first discovering its tmux target: `/swarm register here <id> [role]`.
 export const HERE_TOKENS = new Set(["here", "self", "current", "."]);

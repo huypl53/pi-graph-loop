@@ -1,13 +1,13 @@
 // === swarm/mailbox.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath, open } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { MessageRecord, MessageResponseStatus, MessageStatus, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
 import { SEND_SETTLE_MS } from "./constants.ts";
 import { appendJsonl, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
 import { buildSystemDelivery } from "./delivery.ts";
-import { capturePane, sendToPane, tmux } from "./tmux.ts";
+import { capturePane, isPanePiLike, sendToPane, tmux } from "./tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { ensureOrchestrator } from "./identity.ts";
 import { now, safeId, sleep } from "./utils.ts";
@@ -68,6 +68,93 @@ export function validateResultMessage(st: SwarmState, rec: MessageRecord, result
 	return result;
 }
 
+// O(1) idempotency lookup (issue C): returns the existing record for from+to+key, using + lazily
+// building a state-level index instead of an O(M) scan inside the lock. The index is rebuilt whenever
+// the message count changed since it was last built (cheap single pass amortized across lookups).
+export function findIdempotentMessage(st: SwarmState, from: string, to: string, key: string): MessageRecord | undefined {
+	const count = Object.keys(st.messages || {}).length;
+	let index = st.idempotencyIndex;
+	if (!index || st.idempotencyIndexCount !== count) {
+		index = {};
+		for (const rec of Object.values(st.messages || {})) {
+			if (rec.idempotencyKey) index[`${rec.from}\u0000${rec.to}\u0000${rec.idempotencyKey}`] = rec.id;
+		}
+		st.idempotencyIndex = index;
+		st.idempotencyIndexCount = count;
+	}
+	const id = index[`${from}\u0000${to}\u0000${key}`];
+	if (!id) return undefined;
+	const rec = st.messages[id];
+	// Guard against staleness: if the indexed id no longer resolves, rebuild once.
+	if (!rec) {
+		delete index[`${from}\u0000${to}\u0000${key}`];
+		return undefined;
+	}
+	return rec;
+}
+
+// Incremental mailbox read (issue B): parse only lines appended since the byte `offset`, avoiding a
+// full-file parse per pump tick on unbounded orchestrator mailboxes. Falls back to a full read (and
+// returns its length) when the file shrank or no checkpoint exists. Returns the parsed messages and
+// the new offset to persist as the checkpoint.
+export async function readMailboxSince(p: Paths, agentId: string, offset: number, maxLines = 500): Promise<{ messages: SwarmMessage[]; offset: number; truncated: boolean }> {
+	const file = mailboxPath(p, agentId);
+	if (!existsSync(file)) return { messages: [], offset: 0, truncated: false };
+	let size = 0;
+	try { size = (await stat(file)).size; } catch { return { messages: [], offset: 0, truncated: false }; }
+	if (size < offset || offset <= 0) {
+		// No/shrunk checkpoint: full read, bounded to the last maxLines lines.
+		const all = await readMailbox(p, agentId);
+		const keep = all.length > maxLines ? all.slice(all.length - maxLines) : all;
+		return { messages: keep, offset: size, truncated: all.length > keep.length };
+	}
+	if (size === offset) return { messages: [], offset, truncated: false };
+	const fd = await open(file, "r");
+	try {
+		const buf = Buffer.alloc(size - offset);
+		await fd.read(buf, 0, buf.length, offset);
+		let text = buf.toString("utf8");
+		// A trailing partial line (writer mid-append) is left for the next tick: only parse complete lines.
+		let complete = size;
+		if (!text.endsWith("\n")) {
+			const lastNl = text.lastIndexOf("\n");
+			if (lastNl < 0) return { messages: [], offset, truncated: false };
+			text = text.slice(0, lastNl + 1);
+			complete = offset + lastNl + 1;
+		}
+		const out: SwarmMessage[] = [];
+		let bad = 0;
+		for (const line of text.split("\n").filter(Boolean)) {
+			try { out.push(JSON.parse(line) as SwarmMessage); } catch { bad++; }
+		}
+		if (bad) await trace(p, "mailbox.corrupt_lines_ignored", { agentId, file, bad, incremental: true }).catch(() => {});
+		// Bound the parse per tick (protects a huge single append between ticks).
+		const truncated = out.length > maxLines;
+		const keep = truncated ? out.slice(out.length - maxLines) : out;
+		return { messages: keep, offset: truncated ? size : complete, truncated };
+	} finally {
+		await fd.close();
+	}
+}
+
+// Stat-gated mailbox read (issue B): the orchestrator pump ticks every ~5s; re-parsing the whole
+// (unbounded) mailbox JSONL each tick is pure waste when nothing was appended. Cache the last full
+// parse per file identity (size + mtime) in-process and re-read only when the file changed. Semantics
+// are IDENTICAL to readMailbox — same messages, same order — so the pump's window/retrigger logic
+// (which needs the historical tail) is unchanged.
+const mailboxReadCache = new Map<string, { size: number; mtimeMs: number; msgs: SwarmMessage[] }>();
+export async function readMailboxCached(p: Paths, agentId: string): Promise<SwarmMessage[]> {
+	const file = mailboxPath(p, agentId);
+	if (!existsSync(file)) return [];
+	let s: { size: number; mtimeMs: number };
+	try { s = await stat(file); } catch { return readMailbox(p, agentId); }
+	const hit = mailboxReadCache.get(file);
+	if (hit && hit.size === s.size && hit.mtimeMs === s.mtimeMs) return hit.msgs;
+	const msgs = await readMailbox(p, agentId);
+	mailboxReadCache.set(file, { size: s.size, mtimeMs: s.mtimeMs, msgs });
+	return msgs;
+}
+
 export async function readMailbox(p: Paths, agentId: string): Promise<SwarmMessage[]> {
 	const file = mailboxPath(p, agentId);
 	if (!existsSync(file)) return [];
@@ -99,6 +186,12 @@ export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg
 		return { delivered: true, mailboxOnly: true, reason: "recipient has no tmux pane (mailbox-only)" };
 	}
 	if (agent.status !== "running") return { delivered: false, reason: "target agent not running" };
+	// Issue D: a live pane that is NOT running pi (e.g. the shell after a crash/exit) must not be marked
+	// delivered — send-keys would just type the base64 line into a dead prompt. Keep it retryable
+	// ({delivered:false}) so reconcile re-injects once real pi is back, and use panePiLike for re-inject
+	// eligibility too. Fail-open on unknown commands (see isPanePiLike).
+	const panePi = await isPanePiLike(pi, agent.tmuxTarget);
+	if (!panePi.piLike) return { delivered: false, reason: `pane alive but not running pi (pane_current_command=${panePi.command || "?"})` };
 	const before = await capturePane(pi, p, msg.to, agent.tmuxTarget, `deliver-${msg.id}-before`);
 	await sendToPane(pi, agent.tmuxTarget, buildSystemDelivery(msg));
 	await sleep(SEND_SETTLE_MS);
@@ -118,9 +211,7 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 
 	// Idempotency check: if from+to+idempotencyKey already exists, return existing message
 	if (params.idempotencyKey) {
-		const existing = Object.values(st.messages).find(
-			(r) => r.from === from && r.to === to && r.idempotencyKey === params.idempotencyKey
-		);
+		const existing = findIdempotentMessage(st, from, to, params.idempotencyKey);
 		if (existing) {
 			const original = (await readMailbox(p, to)).find((m) => m.id === existing.id);
 			if (!original) throw new Error(`Idempotency record ${existing.id} exists but mailbox entry is missing for ${to}`);
