@@ -12,6 +12,21 @@ import { identityPath, mailboxPath, readState, trace, withLock, writeState } fro
 import { identityPrompt, writeEffectiveIdentity } from "./identity.ts";
 import { responseMissingRecords } from "./mailbox.ts";
 
+// Kickoff preamble injected on spawn/restart when the agent's mailbox holds messages that are not yet
+// acked (failed/injected/intercepted without ackedAt). This closes the restart-mailbox gap: a respawned
+// agent previously "awaited tasks" with no prompt to read its mailbox, so approvals delivered while the
+// pane was down (failed injection, retried by reconcile later) sat unread while the agent idled.
+export async function mailboxKickoffPrompt(p: Paths, st: SwarmState, id: string): Promise<string> {
+	try {
+		const pending = Object.values(st.messages || {}).filter((r) =>
+			r.to === id && !r.ackedAt && r.status !== "dead_letter" && !r.superseded,
+		);
+		if (!pending.length) return "";
+		const lines = pending.slice(-10).map((r) => `- ${r.id}${r.subject ? " (subject not stored; see mailbox)" : ""} from ${r.from}, status=${r.status}, requiresAck=${r.requiresAck}`).join("\n");
+		return `\n\n[PI-SWARM MAILBOX PENDING]\nYour mailbox has ${pending.length} undelivered/unacked message(s). Read them NOW with swarm_check_mailbox (they may contain work or approvals sent while you were down/restarting) and ack/handle per protocol. Recent:\n${lines}\n[/PI-SWARM MAILBOX PENDING]`;
+	} catch { return ""; }
+}
+
 export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string }) {
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
 	if (state.agents[id]?.status === "running") throw new Error(`Agent already exists and is running: ${id}`);
@@ -75,7 +90,7 @@ export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state:
 	await trace(p, "agent.spawn.ok", { agentId: id, tmuxTarget: target, model, provider, role: input.role, identity: identityRelPath });
 	await sleep(SPAWN_SETTLE_MS);
 	const snapshot = await capturePane(pi, p, id, target, "spawn-after");
-	const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${identityPrompt(cwd, identityRelPath)}`;
+	const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${await mailboxKickoffPrompt(p, state, id)}${identityPrompt(cwd, identityRelPath)}`;
 	await sendToPane(pi, target, kickoff);
 	return { agent, snapshot, identity: identityFile };
 }
@@ -228,7 +243,7 @@ export async function registerAgent(pi: ExtensionAPI, cwd: string, p: Paths, sta
 	const identityRelPath = relative(cwd, identityPath(p, id));
 	let injected = false;
 	if (input.inject !== false && tmuxAlive) {
-		const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${identityPrompt(cwd, identityRelPath)}`;
+		const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${await mailboxKickoffPrompt(p, state, id)}${identityPrompt(cwd, identityRelPath)}`;
 		try { await sendToPane(pi, target, kickoff); injected = true; }
 		catch (err: any) { await trace(p, "agent.register.inject_failed", { agentId: id, target, error: String((err as Error)?.message || err) }); }
 	}
