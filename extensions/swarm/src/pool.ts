@@ -78,20 +78,24 @@ export type PickResult = {
 
 // Pick a slot from the pool. Tries: eligible weighted slots (weight>0, not in cooldown) ->
 // fallback-only slots (weight=0, not in cooldown) -> any slot at all (all benched: best effort).
-// `stickyKey` (agent id) pins sticky strategy; `avoidKey` (the slot that just failed) is deprioritized
-// for round-robin so a failover restart doesn't land back on the same benched slot.
+// `stickyKey` (agent id) pins sticky strategy; `avoidKey` (the slot that just failed) is excluded
+// from candidates (all strategies) when alternatives exist, so a failover never lands back on the
+// slot that just died unless it is the only option.
 export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: string } = {}): Promise<PickResult | undefined> {
 	const { slots, rotation } = effectiveConfig();
 	if (!slots.length) return undefined;
 	const h = await readPoolHealth(p);
 	const nowMs = Date.now();
 
-	const eligible = slots
+	const notAvoided = ({ slot }: { slot: ModelSlot }) => !opts.avoidKey || slotKey(slot) !== opts.avoidKey;
+	const eligibleAll = slots
 		.map((slot, index) => ({ slot, index }))
 		.filter(({ slot }) => (slot.weight ?? 1) > 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
-	const fallbacks = slots
+	const fallbacksAll = slots
 		.map((slot, index) => ({ slot, index }))
 		.filter(({ slot }) => (slot.weight ?? 1) === 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
+	const eligible = eligibleAll.some(notAvoided) ? eligibleAll.filter(notAvoided) : eligibleAll;
+	const fallbacks = fallbacksAll.some(notAvoided) ? fallbacksAll.filter(notAvoided) : fallbacksAll;
 
 	if (eligible.length) {
 		if (rotation.strategy === "sticky" && opts.stickyKey) {
@@ -100,9 +104,6 @@ export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: 
 		}
 		if (rotation.strategy === "round-robin") {
 			let cursor = ((h.rrCursor ?? 0) % eligible.length + eligible.length) % eligible.length;
-			if (opts.avoidKey && eligible.length > 1 && slotKey(eligible[cursor].slot) === opts.avoidKey) {
-				cursor = (cursor + 1) % eligible.length;
-			}
 			h.rrCursor = cursor + 1;
 			await writePoolHealth(p, h).catch(() => {});
 			const { slot, index } = eligible[cursor];

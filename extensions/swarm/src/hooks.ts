@@ -2,7 +2,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname, relative, sep } from "node:path";
 import type { MessageResponseStatus } from "./types.ts";
-import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP } from "./constants.ts";
+import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, POOL_WATCH_INTERVAL_MS, POOL_WATCH_RESPAWN_COOLDOWN_MS } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
 import { deliverMessageLocked, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
@@ -12,7 +12,10 @@ import { formatSwarmMessageContent, parseSystemDelivery } from "./delivery.ts";
 import { pumpOrchestratorMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
 import { scanAgentOpenAssignments } from "./taskgraph.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
-import { tmux } from "./tmux.ts";
+import { recordSlotFailure } from "./pool.ts";
+import { restartAgent } from "./agents.ts";
+import type { SwarmAgent } from "./types.ts";
+import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 
 // Orchestrator mailbox pump state. Module-level so the PM pump can be (re)started from outside the
 // session_start hook — notably by `/swarm register here orchestrator`, which opts a running session in
@@ -21,10 +24,100 @@ import { tmux } from "./tmux.ts";
 let swarmPi: ExtensionAPI | undefined;
 let orchestratorMailboxTimer: NodeJS.Timeout | undefined;
 let orchestratorMailboxPumpRunning = false;
+let poolWatchTimer: NodeJS.Timeout | undefined;
+let poolWatchRunning = false;
+
+// Pool auto-rotation (fully automatic — no manual command needed): scan the agents this swarm
+// manages; when a running agent's pane is dead or not running pi (crashed, exited on quota/API
+// error), bench its model slot and respawn the SAME agent id (mailbox/identity/history preserved)
+// on a different healthy slot. Runs as a TUI interval in the orchestrator PM session — the one
+// long-lived process that owns the swarm — so failover happens even while workers are down.
+// Per-agent throttle: POOL_WATCH_RESPAWN_COOLDOWN_MS between respawn attempts so a hopeless slot
+// doesn't produce a spawn loop.
+export async function watchPoolOnce(pi: ExtensionAPI, cwd: string, p: Paths): Promise<{ checked: number; respawned: string[]; benched: string[] }> {
+	const respawned: string[] = [];
+	const benched: string[] = [];
+	// Snapshot candidates under NO lock (tmux probes are slow); re-check under the lock before acting.
+	const candidates: SwarmAgent[] = [];
+	{
+		const st = await readState(p, cwd);
+		for (const agent of Object.values(st.agents)) {
+			ensureAgentDefaults(agent);
+			if (agent.paused || agent.id === "orchestrator") continue;
+			// Running agents with a dead/not-pi pane crashed (quota/API error exit): rotate them.
+			// Stopped agents are eligible ONLY if the stop was a crash (session_shutdown marked them
+			// stopped when the pane died), not an intentional /swarm stop (manualStop).
+			if (agent.manualStop) continue;
+			if (agent.status !== "running" && agent.status !== "stopped") continue;
+			if (!agent.tmuxTarget || agent.tmuxTarget === "unknown") continue;
+			candidates.push(agent);
+		}
+	}
+	let checked = 0;
+	for (const snap of candidates) {
+		const alive = await isTmuxRunning(pi, snap.tmuxTarget).catch(() => false);
+		let piLike = { piLike: true, command: "" };
+		if (alive) {
+			piLike = await isPanePiLike(pi, snap.tmuxTarget).catch(() => ({ piLike: false, command: "error" }));
+		}
+		checked++;
+		if (alive && piLike.piLike) continue;
+		const reason = alive ? `pane alive but not pi (pane_current_command=${piLike.command || "?"})` : "pane dead";
+		const result = await withLock(p, async () => {
+			const st = await readState(p, cwd);
+			const agent = st.agents[snap.id];
+			if (!agent || agent.paused || agent.manualStop) return undefined;
+			if (agent.status !== "running" && agent.status !== "stopped") return undefined;
+			if (!agent.tmuxTarget || agent.tmuxTarget === "unknown") return undefined;
+			// Re-probe under the lock: state may have changed while we probed other agents.
+			const stillAlive = await isTmuxRunning(pi, agent.tmuxTarget).catch(() => false);
+			const stillPi = stillAlive ? (await isPanePiLike(pi, agent.tmuxTarget).catch(() => ({ piLike: false, command: "error" }))).piLike : false;
+			if (stillAlive && stillPi) return undefined;
+			// Throttle per agent: don't respawn the same agent more than once per cooldown window.
+			const last = agent.lastPoolRespawnAt ? new Date(agent.lastPoolRespawnAt).getTime() : 0;
+		if (Date.now() - last < POOL_WATCH_RESPAWN_COOLDOWN_MS) return undefined;
+			agent.lastPoolRespawnAt = new Date().toISOString();
+			// Bench the slot the agent was running on (its pane died; quota/API errors are the common cause).
+			const { effectiveConfig } = await import("./pool.ts");
+			const { slots } = effectiveConfig();
+			const slot = slots.find((s) => s.model === agent.model);
+			if (slot) {
+				await recordSlotFailure(p, slot, `agent ${agent.id} pane down: ${reason}`);
+				benched.push(`${slot.provider || "(default)"}/${slot.model}`);
+			}
+			// Respawn on a different healthy slot (restartAgent re-picks; mailbox pending is re-surfaced
+			// by spawnAgent's kickoff). Pass rotateFromSlot so a benched-slot check definitely rotates.
+			await restartAgent(pi, cwd, p, st, agent.id, { rotateFromSlot: slot ? `${slot.provider || "(default)"}/${slot.model}` : undefined });
+			await writeState(p, st);
+			return agent.id;
+		});
+		if (result) respawned.push(result);
+	}
+	if (respawned.length || benched.length) {
+		await trace(p, "pool.watch", { checked, respawned, benched }).catch(() => {});
+	}
+	return { checked, respawned, benched };
+}
+
+export function startPoolWatch(pi: ExtensionAPI, cwd: string) {
+	if (poolWatchTimer) return;
+	const p = paths(cwd);
+	poolWatchTimer = setInterval(() => {
+		if (poolWatchRunning) return;
+		poolWatchRunning = true;
+		watchPoolOnce(pi, cwd, p).catch(() => {}).finally(() => { poolWatchRunning = false; });
+	}, POOL_WATCH_INTERVAL_MS);
+}
+
+export function stopPoolWatch() {
+	if (poolWatchTimer) clearInterval(poolWatchTimer);
+	poolWatchTimer = undefined;
+}
 
 export function stopOrchestratorPump() {
 	if (orchestratorMailboxTimer) clearInterval(orchestratorMailboxTimer);
 	orchestratorMailboxTimer = undefined;
+	stopPoolWatch();
 }
 
 // Pull-based worker delivery: surface unacked messages addressed to this agent into its own TUI
@@ -168,6 +261,9 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${agentId}`);
 		if (agentId === "orchestrator") {
 			await startOrchestratorPump(ctx);
+			// Automatic model-pool rotation: the orchestrator PM is the long-lived owner of the swarm;
+			// its background watcher benches failing slots and respawns dead agents on healthy ones.
+			startPoolWatch(pi, ctx.cwd);
 		} else if (ctx.mode === "tui") {
 			// Pull-based delivery for workers (root fix for the restart/injection-loss class): on session
 			// start, surface any unacked, non-dead-letter, non-superseded messages addressed to THIS agent

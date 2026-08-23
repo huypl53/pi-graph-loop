@@ -31,6 +31,7 @@ export async function mailboxKickoffPrompt(p: Paths, st: SwarmState, id: string)
 export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string }) {
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
 	if (state.agents[id]?.status === "running") throw new Error(`Agent already exists and is running: ${id}`);
+	const previous = state.agents[id];
 	// Model resolution: explicit input wins; otherwise the model pool (if configured) picks a
 	// healthy slot via weighted/rr/sticky rotation; otherwise the single default.
 	let model = input.model;
@@ -100,6 +101,9 @@ export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state:
 		updatedAt: ts,
 	};
 	state.agents[id] = agent;
+	// Preserve pool-watch throttle across respawn: spawnAgent overwrites the whole record, but
+	// lastPoolRespawnAt must survive or the watcher would re-respawn immediately after its own fix.
+	if (previous?.lastPoolRespawnAt) agent.lastPoolRespawnAt = previous.lastPoolRespawnAt;
 	state.delivered[id] ||= [];
 	await appendFile(mailboxPath(p, id), "", "utf8");
 	const identityFile = identityPath(p, id);
@@ -298,6 +302,7 @@ export async function stopAgent(pi: ExtensionAPI, p: Paths, state: SwarmState, a
 	agent.runtimeStatus = "stopped";
 	agent.health = "unhealthy";
 	agent.lastShutdownAt ||= ts;
+	agent.manualStop = true; // intentional stop: the pool watcher must NOT auto-respawn this agent
 	agent.updatedAt = ts;
 	await trace(p, "agent.stop", { agentId, force: Boolean(opts.force), killPane: opts.killPane !== false, ...kill });
 	return { agent, ...kill };
