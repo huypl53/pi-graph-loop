@@ -3,6 +3,7 @@
 //   { "mode": "ok" }                       — always succeed
 //   { "mode": "error", "kind": "quota" }   — every request fails with that error kind
 //   { "mode": "flaky", "failNext": N }     — fail N requests then succeed
+//   { "mode": "raw", "status": 429, "body": {...} } — fail with an arbitrary verbatim payload (real-world captures)
 // Error kinds -> realistic provider payloads (verbatim text the classifiers must handle):
 //   quota:    429 "You exceeded your current quota, please check your plan and billing details"
 //   rate_limit: 429 "Rate limit reached for requests"
@@ -42,7 +43,9 @@ const server = createServer(async (req, res) => {
 	const scenario = await readScenario();
 
 	let failKind = null;
-	if (scenario.mode === "error") failKind = scenario.kind || "quota";
+	let rawError = null;
+	if (scenario.mode === "raw") rawError = { status: scenario.status || 429, body: scenario.body };
+	else if (scenario.mode === "error") failKind = scenario.kind || "quota";
 	else if (scenario.mode === "flaky") {
 		if (failNextRemaining > 0 || (scenario.failNext || 0) > 0) {
 			if (failNextRemaining === 0) failNextRemaining = scenario.failNext;
@@ -51,8 +54,8 @@ const server = createServer(async (req, res) => {
 		}
 	}
 
-	if (failKind) {
-		const e = ERRORS[failKind];
+	if (failKind || rawError) {
+		const e = rawError || ERRORS[failKind];
 		res.writeHead(e.status, { "content-type": "application/json" });
 		res.end(JSON.stringify(e.body));
 		console.log(`[${new Date().toISOString()}] ${failKind} FAIL (${e.status})`);
