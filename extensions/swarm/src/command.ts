@@ -261,7 +261,8 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm spawn <id> [role]", "warning"); return; }
 					const role = rest.join(" ") || id;
-					const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const model = currentModel(); const r = await spawnAgent(pi, ctx.cwd, p, st, { id, role, model, provider: currentProvider(model) }); await writeState(p, st); return r; });
+					// No explicit model here: spawnAgent consults the model pool (if configured) before the default.
+					const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await spawnAgent(pi, ctx.cwd, p, st, { id, role }); await writeState(p, st); return r; });
 					ctx.ui.notify(`Spawned ${result.agent.id} at ${result.agent.tmuxTarget}`, "info");
 					return;
 				}
