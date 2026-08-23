@@ -33,16 +33,8 @@ export function isTmuxRunning(pi: ExtensionAPI, target: string): Promise<boolean
 	// `#{pane_alive}` is not portable/reliable across tmux versions and was observed
 	// to report false for live panes. A target is alive if tmux can resolve it to a
 	// pane id; `display-message` exits non-zero when the pane/window/session is gone.
-	// Guard: tmux target resolution is fuzzy — `sess:gone-window.0` silently falls back to
-	// the session's ACTIVE window instead of failing, so a dead agent's window looks alive.
-	// Verify the resolved window name matches the requested one (when the target carries one).
-	return tmux(pi, ["display-message", "-p", "-t", target, "#{window_name}\t#{pane_id}"], 3_000)
-		.then((out) => {
-			const [resolvedWindow] = out.trim().split("\t");
-			const want = target.includes(":") ? target.slice(target.indexOf(":") + 1).split(".")[0] : undefined;
-			if (want && want !== "unknown" && resolvedWindow && resolvedWindow !== want) return false;
-			return out.trim().length > 0;
-		})
+	return tmux(pi, ["display-message", "-p", "-t", target, "#{pane_id}"], 3_000)
+		.then((out) => out.trim().length > 0)
 		.catch(() => false);
 }
 

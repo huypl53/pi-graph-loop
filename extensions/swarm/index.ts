@@ -11,7 +11,6 @@ import { registerGcTools } from "./src/tools/gc.ts";
 export { isDeliveryFailureRetryable } from "./src/delivery.ts";
 export { providerForModel, currentProvider } from "./src/session.ts";
 export { pickSlot, poolStatus, recordSlotFailure, recordSlotSuccess, setSlotCooldown, slotKey, effectiveConfig } from "./src/pool.ts";
-export { watchPoolOnce } from "./src/hooks.ts";
 export { isPiLikeCommand, isPanePiLike } from "./src/tmux.ts";
 export { findIdempotentMessage, readMailbox, readMailboxCached } from "./src/mailbox.ts";
 export { validateRunAgainstContract, computeIterationBest } from "./src/metric.ts";

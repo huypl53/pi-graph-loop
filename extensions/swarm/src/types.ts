@@ -110,13 +110,6 @@ export type SwarmAgent = {
 	lastSettleNotifyAt?: string; // persisted cooldown for agent_settled->orchestrator idle/open-work notify
 	lastToolAt?: string;
 	lastShutdownAt?: string;
-	// Throttle for the pool auto-rotation watcher: last time this agent was auto-respawned onto a
-	// different model slot after its pane died. Absent = never auto-respawned.
-	lastPoolRespawnAt?: string;
-	// True when the operator intentionally stopped this agent (/swarm stop, swarm_stop_agent). The
-	// pool watcher never auto-respawns a manually stopped agent; a crash (session_shutdown without
-	// manualStop) IS eligible for auto-rotation.
-	manualStop?: boolean;
 	pid?: number;
 	// Park/drain flag: a paused agent is skipped by the reuse pool (findReusableAgent) but is NOT killed
 	// and still appears in status/list. Cleared by resume (delete) so absent == not paused.

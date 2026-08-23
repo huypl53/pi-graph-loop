@@ -81,13 +81,9 @@ const { findIdempotentMessage } = await import(join(here, "src/mailbox.ts")).cat
 		on: () => {},
 		exec: async (cmd, args) => {
 			if (cmd === "tmux" && args[0] === "display-message") {
-				// pane_alive probe (window_name\tpane_id) and pi-likeness probe (#{pane_current_command})
+				// pane_alive probe (#{pane_id}) and pi-likeness probe (#{pane_current_command})
 				const fmt = args[args.length - 1];
-				if (fmt.includes("pane_current_command")) return { code: 0, stdout: "node\n", stderr: "" };
-				const tIdx = args.indexOf("-t");
-				const t = tIdx >= 0 ? args[tIdx + 1] : "";
-				const w = t.includes(":") ? t.slice(t.indexOf(":") + 1).split(".")[0] : "w";
-				return { code: 0, stdout: `${w || "w"}\t%1\n`, stderr: "" };
+				return { code: 0, stdout: fmt.includes("pane_current_command") ? "node\n" : "%1\n", stderr: "" };
 			}
 			if (cmd === "tmux" && args[0] === "send-keys") { sendKeysCalls++; return { code: 0, stdout: "", stderr: "" }; }
 			if (cmd === "tmux" && args[0] === "capture-pane") return { code: 0, stdout: "", stderr: "" };

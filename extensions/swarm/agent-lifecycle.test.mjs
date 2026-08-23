@@ -37,14 +37,7 @@ const pi = {
 			return { code: 1, stdout: "", stderr: "" };
 		}
 		const sub = args[0];
-		if (sub === "display-message") {
-			// Return the window name the target asked for (parse from -t arg) + a pane id, so the
-			// liveness window-name guard in isTmuxRunning sees a matching window.
-			const tIdx = args.indexOf("-t");
-			const t = tIdx >= 0 ? args[tIdx + 1] : "";
-			const w = t.includes(":") ? t.slice(t.indexOf(":") + 1).split(".")[0] : "w";
-			return { code: 0, stdout: `${w || "w"}\t%99\n`, stderr: "" };   // pane alive
-		}
+		if (sub === "display-message") return { code: 0, stdout: "%99\n", stderr: "" };   // pane alive
 		if (sub === "capture-pane") return { code: 0, stdout: "pi swarm session\nYou are reviewer\n", stderr: "" };
 		if (sub === "send-keys") { sentKeys.push(args.slice(1).join(" ")); return { code: 0, stdout: "", stderr: "" }; }
 		if (sub === "kill-window" || sub === "kill-pane") return { code: 0, stdout: "", stderr: "" };
