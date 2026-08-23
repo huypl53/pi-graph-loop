@@ -4,6 +4,14 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(swarm): automatic model-pool rotation — no manual commands
+
+- A pool watcher (`watchPoolOnce`, hooks.ts) runs every 15s in the orchestrator PM session. When an agent's pane is dead or no longer running pi (crash, quota/API-error exit), it automatically: (1) benches the agent's model slot via `recordSlotFailure`, (2) respawns the SAME agent id (mailbox/identity/history preserved) on a different healthy slot picked by the rotation strategy, (3) re-surfaces pending mailbox messages in the kickoff.
+- Per-agent respawn throttle (60s `lastPoolRespawnAt`, survives respawn). Manually stopped agents (`/swarm stop` sets `manualStop`) are never auto-respawned.
+- Fixed a liveness bug this exposed: tmux `display-message` silently resolves a dead `session:window.pane` target to the session's ACTIVE window, so crashed agents looked alive. `isTmuxRunning` now verifies the resolved window name matches the requested one.
+- `pickSlot` `avoidKey` now excludes the failed slot for ALL strategies, so a failover never lands back on the slot that just died.
+- Verified: `pool-auto-rotate.test.mjs` (13 assertions with fully mocked tmux — detects dead pane, benches slot, rotates model+provider, preserves agent id, throttle, manual-stop exemption); live tmux run killed an agent pane and the watcher auto-rotated glm/zai -> gpt-5.4-mini/openai within one interval (traces `pool.watch` + `pool.failover`).
+
 ### feat(swarm): model pool — weighted multi-provider rotation with health cooldown and restart failover
 
 - `settings.json` previously supported only ONE `defaultModel`/`defaultProvider`; every spawn pinned that pair. New opt-in `modelPool` (array of `{model, provider?, weight?, label?}`) + `rotation` (`{strategy, cooldownMs, maxRetries}`) under `swarm` (or `extensions.swarm`).
