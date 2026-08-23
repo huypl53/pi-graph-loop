@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import type { ModelSlot, Paths, PoolHealthState, PoolSlotHealth, RotationConfig, RotationStrategy } from "./types.ts";
+import type { ModelSlot, Paths, PoolHealthState, PoolSlotHealth, ProviderErrorKind, RotationConfig, RotationStrategy } from "./types.ts";
 import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
 import { readSwarmSettings } from "./session.ts";
 import { atomicWriteFile, trace } from "./state.ts";
@@ -126,20 +126,26 @@ export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: 
 
 // Record a failure for a slot. Once consecutive failures reach maxRetries, bench it for cooldownMs
 // and reset the counter (so post-cooldown it gets a fresh chance). Returns the new health.
-export async function recordSlotFailure(p: Paths, slot: ModelSlot, error: string): Promise<PoolSlotHealth> {
+// Record a provider/turn error for a slot (the in-process turn_end hook path). Error KIND drives
+// the bench policy: quota/auth bench IMMEDIATELY (retrying will not fix an exhausted quota or a
+// bad key); auth benches extra-long (6h floor) because keys do not self-heal; rate_limit/transient
+// follow the maxRetries streak before a normal cooldown.
+export async function recordProviderError(p: Paths, slot: ModelSlot, kind: ProviderErrorKind, error: string): Promise<PoolSlotHealth> {
 	const { rotation } = effectiveConfig();
 	const h = await readPoolHealth(p);
 	const key = slotKey(slot);
 	const prev = h.slots[key] || { failures: 0 };
 	const failures = (prev.failures || 0) + 1;
-	const next: PoolSlotHealth = { failures, lastError: error, lastErrorAt: new Date().toISOString() };
-	if (failures >= rotation.maxRetries) {
-		next.cooldownUntil = new Date(Date.now() + rotation.cooldownMs).toISOString();
+	const next: PoolSlotHealth = { failures, lastError: `${kind}: ${error}`.slice(0, 200), lastErrorAt: new Date().toISOString() };
+	const immediate = kind === "quota" || kind === "auth";
+	if (failures >= rotation.maxRetries || immediate) {
+		const ms = kind === "auth" ? Math.max(rotation.cooldownMs, 6 * 60 * 60_000) : rotation.cooldownMs;
+		next.cooldownUntil = new Date(Date.now() + ms).toISOString();
 		next.failures = 0; // fresh chance after cooldown
 	}
 	h.slots[key] = next;
 	await writePoolHealth(p, h);
-	await trace(p, "pool.slot_failure", { slot: key, failures, error, cooldownUntil: next.cooldownUntil }).catch(() => {});
+	await trace(p, "pool.slot_failure", { slot: key, failures, kind, error: error.slice(0, 200), cooldownUntil: next.cooldownUntil }).catch(() => {});
 	return next;
 }
 

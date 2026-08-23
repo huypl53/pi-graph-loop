@@ -31,6 +31,19 @@ export type ModelSlot = {
 
 export type RotationStrategy = "weighted" | "round-robin" | "sticky";
 
+// Classify a provider/turn error message. Quota/auth failures are the rotation triggers;
+// transient errors are tolerated a few times before benching.
+export type ProviderErrorKind = "quota" | "auth" | "rate_limit" | "transient" | "unknown";
+
+export function classifyProviderError(message: string): ProviderErrorKind {
+	const m = (message || "").toLowerCase();
+	if (/quota|insufficient|billing|balance|exceeded your current quota|prepaid/.test(m)) return "quota";
+	if (/rate.?limit|too many requests|429|overloaded/.test(m)) return "rate_limit";
+	if (/invalid api key|unauthorized|forbidden|401|403|authentication|api key/.test(m)) return "auth";
+	if (/timeout|timed out|econnrefused|econnreset|enotfound|5\d\d|network|connection/.test(m)) return "transient";
+	return "unknown";
+}
+
 export type RotationConfig = {
 	strategy?: RotationStrategy; // default weighted
 	cooldownMs?: number; // default 15min: a failing slot is benched this long after maxRetries

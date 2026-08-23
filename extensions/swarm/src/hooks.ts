@@ -4,6 +4,9 @@ import { join, dirname, relative, sep } from "node:path";
 import type { MessageResponseStatus } from "./types.ts";
 import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
+import type { ModelSlot } from "./types.ts";
+import { classifyProviderError } from "./types.ts";
+import { pickSlot, recordProviderError, slotKey } from "./pool.ts";
 import { deliverMessageLocked, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, trace, withLock, writeState, writeTaskState } from "./state.ts";
@@ -113,6 +116,58 @@ export async function startOrchestratorPump(ctx: any, reason = "session_start") 
 
 export function registerSwarmHooks(pi: ExtensionAPI) {
 	swarmPi = pi;
+
+	// === In-process model-pool auto-swap (Option 1: the agent fixes itself, no respawn) ===
+	// pi does NOT exit on provider errors — the turn fails with stopReason "error" and the
+	// process keeps running. So the RIGHT detection point is here, inside the agent's own pi
+	// process, not a tmux pane watcher. On a provider/quota error turn:
+	//   1. classify the error (quota/auth/rate_limit/transient) from errorMessage;
+	//   2. record it against the CURRENT slot in the shared pool health (quota/auth bench the
+	//      slot immediately — retrying will not fix an exhausted quota or a bad key);
+	//   3. pick a different healthy slot and pi.setModel() to it IN-PROCESS — the conversation,
+	//      context, mailbox and identity are all preserved. The next turn simply runs on the
+	//      new model. A system note is appended so the agent (and the transcript) know why.
+	pi.on("turn_end", async (event, ctx) => {
+		const msg: any = (event as any)?.message;
+		if (!msg || msg.role !== "assistant" || msg.stopReason !== "error") return;
+		const agentId = currentAgentId();
+		if (agentId === SWARM_GUEST_ID) return; // plain coding session: nothing to rotate
+		const p = paths(ctx.cwd);
+		const errorText = String(msg.errorMessage || "");
+		const kind = classifyProviderError(errorText);
+		// Non-provider-looking errors (e.g. context overflow, tool bugs) are traced but do NOT
+		// pollute the slot's failure streak and never trigger a swap.
+		if (kind === "unknown") {
+			await trace(p, "pool.turn_error_unclassified", { agentId, error: errorText.slice(0, 200) }).catch(() => {});
+			return;
+		}
+		const currentSlot: ModelSlot = { model: String(msg.model || ctx.model?.id || ""), provider: String(msg.provider || ctx.model?.provider || "") || undefined };
+		if (!currentSlot.model) return;
+		await recordProviderError(p, currentSlot, kind, errorText).catch(() => {});
+		const picked = await pickSlot(p, { stickyKey: agentId, avoidKey: slotKey(currentSlot) }).catch(() => undefined);
+		if (!picked) {
+			await trace(p, "pool.swap_no_candidate", { agentId, from: slotKey(currentSlot), kind }).catch(() => {});
+			return;
+		}
+		// Resolve the picked slot to a registered Model object and switch in-process.
+		const target = ctx.modelRegistry?.find?.(picked.slot.provider || "", picked.slot.model)
+			|| ctx.modelRegistry?.find?.("", picked.slot.model);
+		if (!target) {
+			await trace(p, "pool.swap_model_not_found", { agentId, slot: slotKey(picked.slot), reason: picked.reason }).catch(() => {});
+			return;
+		}
+		const okSwap = await pi.setModel(target).catch(() => false);
+		await trace(p, okSwap ? "pool.swap" : "pool.swap_failed", { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), kind, reason: picked.reason, target: `${target.provider}/${target.id}` }).catch(() => {});
+		if (okSwap) {
+			// Tell the agent (and the transcript) what happened so it can retry the failed work
+		// knowing it now runs on a different model.
+			pi.sendMessage({
+				customType: "swarm-message",
+				content: `[PI-SWARM MODEL POOL] The previous turn failed with a ${kind} error from ${slotKey(currentSlot)} (${errorText.slice(0, 160)}). That slot was benched and this session was switched to ${slotKey(picked.slot)} in-place. Continue your current task — your context and mailbox are intact.`,
+				display: true,
+			}, ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" });
+		}
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		const p = paths(ctx.cwd);

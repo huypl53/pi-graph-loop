@@ -79,7 +79,8 @@ Common first actions:
 
 - `weight`: relative share; `0` = fallback-only (used when every weighted slot is benched).
 - `strategy`: `weighted` (default) | `round-robin` | `sticky` (per-agent-id deterministic).
-- Health state persists in `.pi/swarm/pool-state.json`; `maxRetries` consecutive failures bench a slot for `cooldownMs`.
+- **Auto-swap on provider errors (in-process)**: pi never exits on 429/401/5xx — the turn fails with `stopReason "error"`. The swarm `turn_end` hook classifies the error, benches the exact failing slot (quota/auth immediately; auth ≥6h), and `setModel()`s the session to another healthy slot in-process. Context, mailbox and identity are preserved; the agent retries its work on the new model.
+- Health state persists in `.pi/swarm/pool-state.json` (includes the classified error); `maxRetries` consecutive rate_limit/transient failures bench a slot for `cooldownMs`.
 - Commands: `/swarm pool list`, `/swarm pool cooldown <provider/model> <ms>`, `/swarm pool clear <provider/model>`.
 - Without `modelPool`, the single `defaultModel`/`defaultProvider` behavior is unchanged.
 

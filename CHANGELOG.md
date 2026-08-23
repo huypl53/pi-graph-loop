@@ -4,6 +4,14 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(swarm): in-process model auto-swap on provider errors (turn_end hook) — the agent fixes itself, no respawn
+
+- pi does NOT exit on provider errors (429 quota, 401 auth, 5xx) — the turn fails with `stopReason: "error"` and the process keeps running. The earlier pane-watcher approach detected the wrong thing at the wrong layer and was reverted. Detection now happens INSIDE the agent's own pi process.
+- New `turn_end` hook (hooks.ts): on an assistant turn with `stopReason "error"`, classify `errorMessage` (quota / rate_limit / auth / transient / unknown) from the REAL provider error text, record it against the exact `provider/model` slot that failed, then `pi.setModel()` to a different healthy pool slot picked by the rotation strategy — **in-process, conversation/context/mailbox fully preserved**. A `[PI-SWARM MODEL POOL]` system note tells the agent why the turn failed and that it now runs on a new model, so it retries its work.
+- Error-kind bench policy (pool.ts `recordProviderError`): quota/auth bench the slot IMMEDIATELY (retrying cannot fix an exhausted quota or bad key); auth benches ≥6h; rate_limit/transient follow the `maxRetries` streak. Unknown errors (e.g. context overflow) never touch the streak and never swap.
+- `/swarm pool list` shows the classified error per slot (e.g. `quota: 429 ...`).
+- Verified live in tmux: an agent running a broken model (`ccs/nonexistent-model-x`) got a 502 on its turn → auto-swapped to `ccs/glm-5.1` in the SAME process → retried and answered normally, footer model changed, context intact (traces `pool.slot_failure` kind=transient + `pool.swap`). New `pool-swap.test.mjs` (12 assertions: classification matrix, quota immediate bench, in-process swap, context-overflow no-swap, transient streak, guest exemption).
+
 ### feat(swarm): model pool — weighted multi-provider rotation with health cooldown and restart failover
 
 - `settings.json` previously supported only ONE `defaultModel`/`defaultProvider`; every spawn pinned that pair. New opt-in `modelPool` (array of `{model, provider?, weight?, label?}`) + `rotation` (`{strategy, cooldownMs, maxRetries}`) under `swarm` (or `extensions.swarm`).

@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paths } from "./src/state.ts";
-import { pickSlot, recordSlotFailure, recordSlotSuccess, setSlotCooldown, poolStatus, slotKey } from "./src/pool.ts";
+import { pickSlot, recordProviderError, recordSlotSuccess, setSlotCooldown, poolStatus, slotKey } from "./src/pool.ts";
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) pass++; else { fail++; console.error("  FAIL:", name); } };
@@ -36,9 +36,9 @@ ok("pick carries model+provider", first.slot.model === "glm-5.1" && first.slot.p
 
 // Failure streak: 1 failure -> no cooldown; 2 (maxRetries) -> benched.
 const slot = { model: "glm-5.1", provider: "zai-coding-cn" };
-let h = await recordSlotFailure(p, slot, "429 quota exceeded");
+let h = await recordProviderError(p, slot, "rate_limit", "429 rate limit exceeded");
 ok("1st failure no cooldown", !h.cooldownUntil);
-h = await recordSlotFailure(p, slot, "429 quota exceeded");
+h = await recordProviderError(p, slot, "rate_limit", "429 rate limit exceeded");
 ok("2nd failure benches slot", Boolean(h.cooldownUntil));
 
 // Benched slot excluded from picks.
@@ -56,8 +56,8 @@ ok("poolStatus reports benched", benched.inCooldown && benched.cooldownRemaining
 
 // Fallback-only slot (weight 0) becomes the pick when all weighted slots are benched.
 const slot2 = { model: "gpt-5.4-mini", provider: "openai" };
-await recordSlotFailure(p, slot2, "429");
-await recordSlotFailure(p, slot2, "429");
+await recordProviderError(p, slot2, "rate_limit", "429 rate limit");
+await recordProviderError(p, slot2, "rate_limit", "429 rate limit");
 const fb = await pickSlot(p);
 ok("all benched -> fallback-only slot", fb.slot.model === "claude-sonnet-4");
 ok("fallback reason recorded", fb.reason.includes("fallback"));
