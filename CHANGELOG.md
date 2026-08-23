@@ -4,6 +4,17 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### fix(swarm): pool hardening — success resets, swap-chain cap, pool lock, provider-strict swap, dedupe, backoff
+
+Edge-case sweep from a code review of the auto-swap path:
+- **Success now resets the failure streak**: `turn_end` with `stopReason "stop"` calls `recordSlotSuccess` for that slot. Previously a slot that transient-failed once and then served hundreds of healthy turns would still bench on its next transient.
+- **Swap-chain cap (MAX_SWAP_CHAIN=2 per agent, 5min quiet reset)**: a failing prompt no longer cascades fail->swap->retry->fail through every pool slot, burning a turn each; beyond the cap the turn fails naturally (`pool.swap_chain_capped` trace).
+- **Pool-state lock**: all read-modify-write cycles on `.pi/swarm/pool-state.json` (pickSlot rrCursor, recordProviderError, recordSlotSuccess, setSlotCooldown) now run under a dedicated mkdir-based mutex — concurrent agent processes can no longer lost-update each other.
+- **Provider-strict swap resolution**: dropped the `find(model-without-provider)` fallback; ambiguous model ids shared across providers (gpt-5.4-mini exists on several) could resolve to a provider with no API key, yielding swap_failed loops. A slot that cannot resolve under its own provider is traced with a config hint.
+- **Incident dedupe**: identical error text on the same slot within 30s counts once toward the streak (pi emits multiple error turns for one underlying failure via internal retries/overflow recovery), so `maxRetries` means distinct failures.
+- **Exponential bench backoff**: consecutive benches without an intervening success double the cooldown (capped 24h) — a monthly-quota outage costs one probe per doubling instead of one per cooldownMs. `recordSlotSuccess` resets the streak.
+- Tests extended: pool.test.mjs 45 assertions (dedupe, backoff doubling), pool-swap.test.mjs 16 (success reset, chain cap). Mock UAT re-run green: quota bench+swap+retry, recovery after cooldown.
+
 ### test(swarm): mock-provider UAT harness + full-scenario pool validation
 
 - `scripts/uat/mock-provider-server.mjs`: local OpenAI-compatible server with scenario control (`{mode: ok | error | flaky}`) emitting VERBATIM provider error payloads — 429 quota (`insufficient_quota`), 429 rate_limit, 401 invalid key, 500 overloaded — over SSE. `scripts/uat/mock-provider-ext.ts`: pi extension registering `mock-a`/`mock-b` providers against it, so pi makes REAL streaming calls with fully scripted failures at zero cost.

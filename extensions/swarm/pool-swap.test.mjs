@@ -120,6 +120,45 @@ await turnEnd({ type: "turn_end", turnIndex: 4, message: {
 ok("guest session does not rotate", setModelCalls.length === guestCalls);
 delete process.env.PI_SWARM_AGENT_ID;
 
+// Success reset: a healthy turn clears the failure streak of that slot.
+{
+	process.env.PI_SWARM_AGENT_ID = "worker-a"; // the guest block above cleared it
+	const { recordProviderError } = await import("./src/pool.ts");
+	const slot = { model: "claude-sonnet-4", provider: "anthropic" }; // untouched by earlier turns
+	await recordProviderError(p, slot, "transient", "net blip");
+	let ps = await poolStatus(p);
+	let s = ps.slots.find((x) => x.key === slotKey(slot));
+	ok("streak recorded before success", (s.health?.failures ?? 0) === 1);
+	if ((s.health?.failures ?? 0) !== 1) console.log("  note: failures =", s.health?.failures, s.health);
+	const fakeModelClaude = { id: "claude-sonnet-4", provider: "anthropic" };
+	await turnEnd({ type: "turn_end", turnIndex: 10, message: {
+		role: "assistant", model: "claude-sonnet-4", provider: "anthropic",
+		stopReason: "stop", errorMessage: undefined,
+	}, toolResults: [] }, { ...ctx, model: fakeModelClaude });
+	ps = await poolStatus(p);
+	s = ps.slots.find((x) => x.key === slotKey(slot));
+	ok("healthy turn resets the streak", (s.health?.failures ?? 0) === 0);
+	if ((s.health?.failures ?? 0) !== 0) console.log("  note2:", JSON.stringify(s.health));
+}
+
+// Swap-chain cap: after MAX_SWAP_CHAIN swaps, further error turns are traced but NOT swapped.
+{
+	setModelCalls.length = 0;
+	// Fresh agent id: the main body's quota swap already put worker-a at chain count 1.
+	process.env.PI_SWARM_AGENT_ID = "chain-test-agent";
+	const { rm } = await import("node:fs/promises");
+	await rm(join(dir, ".pi", "swarm", "pool-state.json"), { force: true }); // earlier blocks benched both slots
+	const err = (i) => turnEnd({ type: "turn_end", turnIndex: 20 + i, message: {
+		role: "assistant", model: "glm-5.1", provider: "zai-coding-cn",
+		stopReason: "error", errorMessage: `Error 429: rate limit ${i}`,
+	}, toolResults: [] }, { ...ctx, model: fakeModelGlm });
+	await err(1); await err(2); // two swaps allowed
+	const two = setModelCalls.length;
+	ok("swap chain allows first 2 swaps", two === 2);
+	await err(3);
+	ok("swap chain caps the 3rd swap", setModelCalls.length === 2);
+}
+
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);
 process.chdir("/");
 await rm(dir, { recursive: true, force: true });

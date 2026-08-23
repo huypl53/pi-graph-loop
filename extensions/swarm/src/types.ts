@@ -55,7 +55,11 @@ export type PoolSlotHealth = {
 	failures: number;
 	lastError?: string;
 	lastErrorAt?: string;
+	// True when the recorded error was deduplicated (pi-internal retry of the same incident within
+	// 30s did not bump the streak). Informational only.
+	deduped?: boolean;
 	cooldownUntil?: string; // ISO; slot excluded from picking while in the future
+	benchStreak?: number; // consecutive benches without an intervening success (drives exponential backoff)
 };
 
 export type PoolHealthState = {

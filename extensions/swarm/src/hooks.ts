@@ -6,7 +6,7 @@ import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP } from "
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
 import type { ModelSlot } from "./types.ts";
 import { classifyProviderError } from "./types.ts";
-import { pickSlot, recordProviderError, slotKey } from "./pool.ts";
+import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "./pool.ts";
 import { deliverMessageLocked, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, trace, withLock, writeState, writeTaskState } from "./state.ts";
@@ -24,6 +24,12 @@ import { tmux } from "./tmux.ts";
 let swarmPi: ExtensionAPI | undefined;
 let orchestratorMailboxTimer: NodeJS.Timeout | undefined;
 let orchestratorMailboxPumpRunning = false;
+
+// Swap-chain throttle for the turn_end auto-swap: agentId -> { count of consecutive swaps, last at }.
+// Caps the fail->swap->retry->fail cascade so a fully-dead pool cannot burn a turn per slot.
+const swapChain = new Map<string, { count: number; at: number }>();
+const MAX_SWAP_CHAIN = 2;
+const SWAP_CHAIN_RESET_MS = 5 * 60_000;
 
 export function stopOrchestratorPump() {
 	if (orchestratorMailboxTimer) clearInterval(orchestratorMailboxTimer);
@@ -129,16 +135,37 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 	//      new model. A system note is appended so the agent (and the transcript) know why.
 	pi.on("turn_end", async (event, ctx) => {
 		const msg: any = (event as any)?.message;
-		if (!msg || msg.role !== "assistant" || msg.stopReason !== "error") return;
+		if (!msg || msg.role !== "assistant") return;
 		const agentId = currentAgentId();
 		if (agentId === SWARM_GUEST_ID) return; // plain coding session: nothing to rotate
 		const p = paths(ctx.cwd);
+		// Healthy turn: reset this slot's failure streak. Without this, a slot that transient-failed
+		// once and then served hundreds of OK turns would still bench on its NEXT transient (streak
+		// never decays). Only "stop" counts — toolUse turns continue within the same agent loop and
+		// would over-credit; aborted/error are handled below.
+		if (msg.stopReason === "stop") {
+			const okSlot: ModelSlot = { model: String(msg.model || ctx.model?.id || ""), provider: String(msg.provider || ctx.model?.provider || "") || undefined };
+			if (okSlot.model) await recordSlotSuccess(p, okSlot).catch(() => {});
+			return;
+		}
+		if (msg.stopReason !== "error") return;
 		const errorText = String(msg.errorMessage || "");
 		const kind = classifyProviderError(errorText);
 		// Non-provider-looking errors (e.g. context overflow, tool bugs) are traced but do NOT
 		// pollute the slot's failure streak and never trigger a swap.
 		if (kind === "unknown") {
 			await trace(p, "pool.turn_error_unclassified", { agentId, error: errorText.slice(0, 200) }).catch(() => {});
+			return;
+		}
+		// Swap-chain cap: one failing prompt can cascade (fail -> swap -> retry -> fail -> swap ...),
+		// burning a turn per dead slot and firing triggerTurn notes. Cap consecutive swaps per agent;
+		// beyond the cap the turn is left to fail naturally (the agent/user can act).
+		const nowMs = Date.now();
+		const chain = swapChain.get(agentId) || { count: 0, at: 0 };
+		// A quiet gap (no swap for 5 minutes) starts a fresh chain.
+		if (nowMs - chain.at > SWAP_CHAIN_RESET_MS) chain.count = 0;
+		if (chain.count >= MAX_SWAP_CHAIN) {
+			await trace(p, "pool.swap_chain_capped", { agentId, count: chain.count, kind, error: errorText.slice(0, 120) }).catch(() => {});
 			return;
 		}
 		const currentSlot: ModelSlot = { model: String(msg.model || ctx.model?.id || ""), provider: String(msg.provider || ctx.model?.provider || "") || undefined };
@@ -149,14 +176,20 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			await trace(p, "pool.swap_no_candidate", { agentId, from: slotKey(currentSlot), kind }).catch(() => {});
 			return;
 		}
-		// Resolve the picked slot to a registered Model object and switch in-process.
-		const target = ctx.modelRegistry?.find?.(picked.slot.provider || "", picked.slot.model)
-			|| ctx.modelRegistry?.find?.("", picked.slot.model);
+		// Resolve the picked slot to a registered Model object and switch in-process. Require the
+		// slot's provider explicitly — find(model-without-provider) can match an unrelated provider
+		// sharing the same model id (gpt-5.4-mini exists on several providers), landing on one with
+		// no API key and a swap_failed every error turn. A pool slot without a resolvable provider is
+		// a config error; trace it clearly instead of guessing.
+		const target = picked.slot.provider
+			? ctx.modelRegistry?.find?.(picked.slot.provider, picked.slot.model)
+			: undefined;
 		if (!target) {
-			await trace(p, "pool.swap_model_not_found", { agentId, slot: slotKey(picked.slot), reason: picked.reason }).catch(() => {});
+			await trace(p, "pool.swap_model_not_found", { agentId, slot: slotKey(picked.slot), reason: picked.reason, hint: picked.slot.provider ? "model not registered under the slot's provider" : "pool slot has no explicit provider; add one in settings.json modelPool" }).catch(() => {});
 			return;
 		}
 		const okSwap = await pi.setModel(target).catch(() => false);
+		if (okSwap) { swapChain.set(agentId, { count: chain.count + 1, at: nowMs }); }
 		await trace(p, okSwap ? "pool.swap" : "pool.swap_failed", { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), kind, reason: picked.reason, target: `${target.provider}/${target.id}` }).catch(() => {});
 		if (okSwap) {
 			// Tell the agent (and the transcript) what happened so it can retry the failed work

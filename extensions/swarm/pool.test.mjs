@@ -36,9 +36,9 @@ ok("pick carries model+provider", first.slot.model === "glm-5.1" && first.slot.p
 
 // Failure streak: 1 failure -> no cooldown; 2 (maxRetries) -> benched.
 const slot = { model: "glm-5.1", provider: "zai-coding-cn" };
-let h = await recordProviderError(p, slot, "rate_limit", "429 rate limit exceeded");
+let h = await recordProviderError(p, slot, "rate_limit", "429 rate limit exceeded (1)");
 ok("1st failure no cooldown", !h.cooldownUntil);
-h = await recordProviderError(p, slot, "rate_limit", "429 rate limit exceeded");
+h = await recordProviderError(p, slot, "rate_limit", "429 rate limit exceeded (2)");
 ok("2nd failure benches slot", Boolean(h.cooldownUntil));
 
 // Benched slot excluded from picks.
@@ -56,8 +56,8 @@ ok("poolStatus reports benched", benched.inCooldown && benched.cooldownRemaining
 
 // Fallback-only slot (weight 0) becomes the pick when all weighted slots are benched.
 const slot2 = { model: "gpt-5.4-mini", provider: "openai" };
-await recordProviderError(p, slot2, "rate_limit", "429 rate limit");
-await recordProviderError(p, slot2, "rate_limit", "429 rate limit");
+await recordProviderError(p, slot2, "rate_limit", "429 rate limit (1)");
+await recordProviderError(p, slot2, "rate_limit", "429 rate limit (2)");
 const fb = await pickSlot(p);
 ok("all benched -> fallback-only slot", fb.slot.model === "claude-sonnet-4");
 ok("fallback reason recorded", fb.reason.includes("fallback"));
@@ -74,6 +74,35 @@ await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: { ...
 const picks = new Set();
 for (let i = 0; i < 5; i++) picks.add(slotKey((await pickSlot(p, { stickyKey: "agent-x" })).slot));
 ok("sticky is deterministic", picks.size === 1);
+
+// Dedupe: identical error within 30s counts once (pi internal retries).
+{
+	await rm(join(dir, ".pi", "swarm", "pool-state.json"), { force: true }); // fresh health for these blocks
+	const slot3 = { model: "glm-5.1", provider: "zai-coding-cn" };
+	let h3 = await recordProviderError(p, slot3, "transient", "identical boom");
+	ok("dedupe: first counts", h3.failures === 1);
+	h3 = await recordProviderError(p, slot3, "transient", "identical boom");
+	ok("dedupe: identical within 30s does not bump", h3.failures === 1);
+	h3 = await recordProviderError(p, slot3, "transient", "a different boom");
+	ok("dedupe: different error bumps (benched at streak 2)", Boolean(h3.cooldownUntil));
+}
+// Exponential backoff: consecutive benches double the cooldown (capped 24h).
+{
+	await rm(join(dir, ".pi", "swarm", "pool-state.json"), { force: true }); // fresh health
+	// The sticky block above rewrote settings with cooldownMs:1000; restore the 60s config.
+	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify(settings));
+	const slot4 = { model: "glm-5.1", provider: "zai-coding-cn" };
+	await recordProviderError(p, slot4, "quota", "q1"); // immediate bench #1
+	const stA = await poolStatus(p);
+	const sA = stA.slots.find((s) => s.key === slotKey(slot4));
+	ok("backoff: bench #1 ~60s", sA.cooldownRemainingMs > 55_000 && sA.cooldownRemainingMs <= 61_000);
+	await setSlotCooldown(p, slotKey(slot4), 1); // expire now
+	await new Promise((r) => setTimeout(r, 5));
+	await recordProviderError(p, slot4, "quota", "q2"); // bench #2 -> 2x
+	const stB = await poolStatus(p);
+	const sB = stB.slots.find((s) => s.key === slotKey(slot4));
+	ok("backoff: bench #2 ~120s (2x)", sB.cooldownRemainingMs > 110_000 && sB.cooldownRemainingMs <= 122_000);
+}
 
 // No pool configured -> undefined pick.
 await rm(join(dir, ".pi", "settings.json"), { force: true });
