@@ -6,6 +6,8 @@ import { join, dirname, relative, sep } from "node:path";
 import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
 import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from "./tmux.ts";
 import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
+import { buildFlowSnapshot } from "./observability.ts";
+import { openFlowDialog, pickFlowTask } from "./flow-dialog.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { enqueueAndDeliver } from "./mailbox.ts";
 import { ensureDirs, identityPath, loopStateFile, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "./state.ts";
@@ -39,7 +41,7 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 	return out;
 }
 
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|id> [runtime] | next <#|id> (ready nodes + suggested agent) | validate <#|id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>";
 
 type ScopedSwarmCommandName = "swarm" | "swarm-agents" | "swarm-tasks" | "swarm-msg" | "swarm-loop";
 
@@ -142,6 +144,66 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					await writeFile(outFile, `${out}\n`, "utf8");
 					await traceTask(tp, "task.print", { taskId: task.taskId, format });
 					ctx.ui.notify(`Wrote ${format} graph for #${hit.index} ${task.taskId} to ${relative(ctx.cwd, outFile)}`, "info");
+					return;
+				}
+				if (cmd === "flow") {
+					// Read-only observatory snapshot: task graph, agent lanes, and recent events.
+					// In TUI mode, /swarm flow opens the picker or dialog overlay. Non-TUI remains the
+					// existing text snapshot path for compatibility and tests.
+					const arg = rest.shift();
+					let events = 20;
+					let badFlag: string | null = null;
+					for (let i = 0; i < rest.length; i++) {
+						const t = rest[i];
+						if (t === "--events") {
+							const raw = rest[++i];
+							const n = Number(raw);
+							if (!raw || !Number.isInteger(n) || n <= 0) { badFlag = `Invalid --events value: ${raw ?? "(missing)"}`; break; }
+							events = Math.min(100, n);
+							continue;
+						}
+						badFlag = `Unknown flow flag: ${t}`;
+						break;
+					}
+					if (badFlag) { ctx.ui.notify(`${badFlag}\n\nUsage: /swarm flow <#|task-id> [--events N]`, "warning"); return; }
+					if (ctx.mode === "tui" && ctx.hasUI) {
+						if (!arg) {
+							// Picker: resolved + dialog opened inside openFlowPicker; returns selected task-id (best-effort).
+							const picked = await pickFlowTask(ctx, ctx.cwd, p);
+							if (!picked) return;
+							await openFlowDialog(ctx, ctx.cwd, p, picked.task, picked.tp, { eventLimit: events });
+							return;
+						}
+						const { hit, list, missReason, ambiguous } = await resolveTaskArg(p, arg);
+						if (!hit) {
+							const hint = ambiguous ? `Ambiguous "${arg}" matches: ${ambiguous.join(", ")}` : (missReason || "task not found");
+							ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
+							return;
+						}
+						await openFlowDialog(ctx, ctx.cwd, p, hit.task, hit.tp, { eventLimit: events });
+						return;
+					}
+					if (!arg) {
+						const list = await listTasksIndexed(p);
+						ctx.ui.notify(`${renderTasksIndexedList(list)}\n\nUsage: /swarm flow <#|task-id> [--events N]`, "info");
+						return;
+					}
+					const { hit, list, missReason, ambiguous } = await resolveTaskArg(p, arg);
+					if (!hit) {
+						const hint = ambiguous ? `Ambiguous "${arg}" matches: ${ambiguous.join(", ")}` : (missReason || "task not found");
+						ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
+						return;
+					}
+					const task = hit.task;
+					const tp = hit.tp;
+					const st = await readState(p, ctx.cwd);
+					const out = await buildFlowSnapshot(p, ctx.cwd, task, tp, st, events, hit.index);
+					const graphsDir = join(p.traces, "graphs");
+					await mkdir(graphsDir, { recursive: true });
+					const outFile = join(graphsDir, `${safeId(task.taskId)}.flow.txt`);
+					await writeFile(outFile, `${out}\n`, "utf8");
+					await traceTask(tp, "task.flow.read", { taskId: task.taskId, via: "command", events, index: hit.index });
+					ctx.ui.notify(`${out}\n\n#${hit.index} ${task.taskId} (written to ${relative(ctx.cwd, outFile)})`.slice(0, 4000), "info");
 					return;
 				}
 				if (cmd === "tasks") {

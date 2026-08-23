@@ -1,6 +1,6 @@
 {
   "swarm": {
-    "defaultModel": "glm-5.1",
-    "defaultProvider": "zai-coding-cn"
+    "defaultModel": "vtai/MiniMax-M3",
+    "defaultProvider": "ccs"
   }
 }

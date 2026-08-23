@@ -17,6 +17,8 @@ src/constants.ts     module-level constants
 src/utils.ts         pure helpers (now, safeId, inferRoleKind, ...)
 src/state.ts         paths + state/lock/trace/JSONL/evidence file IO
 src/taskgraph.ts     graph algorithms, status/closure/transitions, rendering
+src/observability.ts read-only text flow snapshot renderer for `/swarm flow`
+src/flow-dialog.ts interactive TUI picker/dialog for `/swarm flow`
 src/metric.ts        run/memory/iteration validation + ranking
 src/delivery.ts      message parsing + retry predicate
 src/session.ts       model/orchestrator detection
@@ -114,6 +116,7 @@ Task-graph tools:
 
 - `swarm_create_task`, `swarm_assign_task`, `swarm_update_task`, `swarm_task_message`
 - `swarm_task_status` (closure rollup when `runtime=true`), `swarm_validate_graph`, `swarm_print_graph`, `swarm_next_nodes`
+- `/swarm flow <#|task-id> [--events N]` — read-only observatory snapshot (task graph, agent lanes, recent events)
 
 Runtime state is written under `.pi/swarm/` and ignored by git.
 

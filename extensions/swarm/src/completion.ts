@@ -25,6 +25,7 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "tasks", description: "Indexed task list with age/next" },
 	{ name: "task", description: "Detailed per-task status" },
 	{ name: "next", description: "Ready nodes + suggested reusable agent" },
+	{ name: "flow", description: "Read-only flow snapshot: nodes + agent lanes + recent events" },
 	{ name: "validate", description: "Validate a task graph" },
 	{ name: "spawn", description: "Spawn an agent: <id> [role]" },
 	{ name: "register", description: "Adopt a tmux pane: <here|target> <id> [role] [flags]" },
@@ -218,6 +219,10 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 				return [];
 			case "next":
 				return tokens.length === 1 ? await taskSuggestions(p, b, currentWord) : [];
+			case "flow":
+				if (tokens.length === 1) return await taskSuggestions(p, b, currentWord);
+				if (tokens.length === 2) return simple(["--events"], b, currentWord);
+				return [];
 			case "capture":
 			case "attach":
 			case "restart":

@@ -14,6 +14,21 @@ For full parameter-by-parameter details, see [`../swarm.md`](../swarm.md).
 - `/swarm trace`
 - `/swarm capture <id>`
 - `/swarm graph <task-id> [text|mermaid|json]`
+- `/swarm flow <task-id> [--events N]` — read-only observability snapshot of the task graph, agent lanes, and recent events; in TUI mode it opens the Flow picker/dialog overlay
+
+Example:
+
+```text
+Flow #3 swarm-observatory — Implement Swarm Observatory flow UI [in_progress] open=2 stale=0
+Nodes:
+  plan         [done    ] -> planner-01 (planner)
+  implement    [assigned] -> obs-implementer (implementer)
+Agents (lanes):
+  planner-01   idle     planner      active: -
+  obs-implementer running implementer active: swarm-observatory#implement
+Events (last 20):
+  04:45:31 task.assign taskId=swarm-observatory node=implement -> obs-implementer
+```
 
 ### Grouped slash-command aliases
 These are thin aliases over the same `/swarm` handlers; they do not introduce a second code path.

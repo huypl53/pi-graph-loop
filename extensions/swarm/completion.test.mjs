@@ -59,9 +59,9 @@ let fail = 0;
 const ok = (name, cond) => { if (cond) console.log("  ok  ", name); else { fail++; console.error("  FAIL", name); } };
 const vals = async (prefix) => (await complete(prefix) ?? []).map((i) => i.value);
 
-// 1. Empty prefix -> all subcommands (24 total incl. lifecycle cmds + panes).
+// 1. Empty prefix -> all subcommands (25 total incl. lifecycle cmds + panes + flow).
 const subs = await vals("");
-ok("empty lists all subcommands", subs.length === 24 && subs.includes("graph") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("loop") && subs.includes("panes"));
+ok("empty lists all subcommands", subs.length === 26 && subs.includes("graph") && subs.includes("flow") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("loop") && subs.includes("panes"));
 
 // 2. Partial subcommand filters by prefix.
 const stSubs = await vals("st");
@@ -85,7 +85,11 @@ ok("graph 1 <space> -> text/mermaid/json", JSON.stringify(fmt.sort()) === JSON.s
 const fmtPartial = await vals("graph 1 m");
 ok("graph 1 m -> mermaid only", JSON.stringify(fmtPartial) === JSON.stringify(["graph 1 mermaid"]));
 
-// 7. task/validate runtime flag position.
+// 7. flow + task/validate runtime flag position.
+const flowTasks = await vals("flow ");
+ok("flow <space> -> # form", JSON.stringify(flowTasks) === JSON.stringify(["flow 1"]));
+const flowFlags = await vals("flow 1 ");
+ok("flow 1 <space> -> --events", JSON.stringify(flowFlags) === JSON.stringify(["flow 1 --events"]));
 const rt = await vals("task 1 ");
 ok("task 1 <space> -> runtime flags", JSON.stringify(rt.sort()) === JSON.stringify(["task 1 --runtime", "task 1 -r", "task 1 runtime"]));
 const noneAfterNext = await complete("next 1 extra");
@@ -163,7 +167,7 @@ const items0 = await complete("");
 ok("subcommand items have descriptions", items0.every((i) => i.label && i.description && i.value));
 
 // 20. scoped command completions expose only their domain and remap to alias values.
-ok("/swarm-agents top-level verbs", JSON.stringify(await valsScoped("swarm-agents", "")) === JSON.stringify(["list", "status", "spawn", "register", "panes", "stop", "restart", "role", "pause", "resume", "sendkey", "attach", "release", "identity"]));
+ok("/swarm-agents top-level verbs", JSON.stringify(await valsScoped("swarm-agents", "")) === JSON.stringify(["list", "status", "spawn", "register", "panes", "stop", "restart", "role", "pause", "resume", "sendkey", "attach", "release", "mailbox", "identity"]));
 ok("/swarm-tasks top-level verbs", JSON.stringify(await valsScoped("swarm-tasks", "")) === JSON.stringify(["list", "graph", "status", "next", "validate"]));
 ok("/swarm-tasks status remaps task completion", JSON.stringify(await valsScoped("swarm-tasks", "status ")) === JSON.stringify(["status 1"]));
 ok("/swarm-msg only offers send", JSON.stringify(await valsScoped("swarm-msg", "")) === JSON.stringify(["send"]));
