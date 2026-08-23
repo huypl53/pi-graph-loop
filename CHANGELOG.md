@@ -4,6 +4,17 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### test(swarm): mock-provider UAT harness + full-scenario pool validation
+
+- `scripts/uat/mock-provider-server.mjs`: local OpenAI-compatible server with scenario control (`{mode: ok | error | flaky}`) emitting VERBATIM provider error payloads — 429 quota (`insufficient_quota`), 429 rate_limit, 401 invalid key, 500 overloaded — over SSE. `scripts/uat/mock-provider-ext.ts`: pi extension registering `mock-a`/`mock-b` providers against it, so pi makes REAL streaming calls with fully scripted failures at zero cost.
+- Fix found by the mock UAT: when EVERY pool slot is benched, `pickSlot` used to return the soonest-cooldown slot, causing the agent to thrash between dead slots (observed live: mock-a<->mock-b swap loop under all-slots-down). Now it returns undefined — the agent keeps its current model, the turn surfaces the error once, `pool.swap_no_candidate` is traced. No thrash.
+- UAT verified live in tmux with real pi processes:
+  - quota: agent on mock-a got a real 429 -> benched -> in-process swap to mock-b -> retried and answered on the SAME session/context.
+  - auth (401): slot benched 6h immediately; all-slots-down ends with `pool.swap_no_candidate` (no thrash).
+  - recovery: after scenario returns to ok and cooldowns expire, slots re-enter rotation and serve normally.
+  - multi-agent failover: 3 concurrent agents (w1/w2/w3) on mock-a all hit 429 simultaneously -> all three swapped to mock-b within the same second (traces: 3x `pool.slot_failure` + 3x `pool.swap`) and all completed their turns.
+  - remaining manual UAT: a REAL provider 429 with a nearly-exhausted key (scripted path is identical; only the error source differs) — run the same steps when such a key is available.
+
 ### feat(swarm): in-process model auto-swap on provider errors (turn_end hook) — the agent fixes itself, no respawn
 
 - pi does NOT exit on provider errors (429 quota, 401 auth, 5xx) — the turn fails with `stopReason: "error"` and the process keeps running. The earlier pane-watcher approach detected the wrong thing at the wrong layer and was reverted. Detection now happens INSIDE the agent's own pi process.

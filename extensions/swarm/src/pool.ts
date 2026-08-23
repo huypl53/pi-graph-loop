@@ -117,11 +117,10 @@ export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: 
 		return { slot, index, fromPool: true, reason: "fallback-only (all weighted slots benched)" };
 	}
 
-	// Everything is in cooldown: return the slot whose cooldown expires soonest rather than failing.
-	const soonest = slots
-		.map((slot, index) => ({ slot, index, until: new Date(h.slots[slotKey(slot)]?.cooldownUntil || 0).getTime() }))
-		.sort((a, b) => a.until - b.until)[0];
-	return { slot: soonest.slot, index: soonest.index, fromPool: true, reason: "all slots benched; soonest cooldown" };
+	// Everything is in cooldown: return undefined — the caller keeps its current model and simply
+	// retries on it (quota errors on every slot means the swap loop cannot help; thrashing between
+	// benched slots would burn the remaining turn budget). PoolStatus/traces make the outage visible.
+	return undefined;
 }
 
 // Record a failure for a slot. Once consecutive failures reach maxRetries, bench it for cooldownMs
