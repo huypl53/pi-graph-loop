@@ -86,6 +86,8 @@ Optionally, configure a weighted **model pool** for multi-provider rotation with
 
 Manage with `/swarm pool list` / `/swarm pool cooldown <slot> <ms>` / `/swarm pool clear <slot>`.
 
+On provider errors (429 quota/rate-limit, 401, 5xx) the failing slot is benched automatically and the agent swaps to a healthy slot in-process — context preserved, no respawn. Healthy turns reset the failure streak; repeated benches back off exponentially (capped 24h); unclassified errors (e.g. context overflow) never bench a slot. Details: `docs/swarm/operations.md` § Model pool.
+
 
 Precedence is explicit tool parameters, then `.pi/settings.json`, then env vars (`PI_SWARM_DEFAULT_MODEL`, `PI_SWARM_DEFAULT_PROVIDER`), then code defaults/model presets.
 

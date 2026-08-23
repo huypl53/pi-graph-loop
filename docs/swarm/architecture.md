@@ -59,7 +59,8 @@ Primary code:
 - `src/session.ts`
 - `src/hooks.ts`
 - `src/tools/agents*.ts`
-- `src/pool.ts` (model pool: weighted/round-robin/sticky slot picks, per-slot health cooldown, restart failover)
+- `src/pool.ts` (model pool: weighted/round-robin/sticky slot picks, per-slot health cooldown with exponential bench backoff, pool-state mutex, restart failover)
+- `src/hooks.ts` also hosts the pool auto-swap: `turn_end` classifies provider errors, records slot health (success resets the streak, identical errors within 30s dedupe), and swaps the session model in-process via `pi.setModel` — capped at 2 swaps per agent chain to prevent thrash on a dead pool.
 
 ### 2. Messaging lifecycle
 Handles mailbox append, tmux injection, interception, acknowledgements, retries, dead letters, and idempotency.

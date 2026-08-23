@@ -7,6 +7,8 @@ Notable changes in this project. Newest first.
 ### fix(swarm): pool hardening — success resets, swap-chain cap, pool lock, provider-strict swap, dedupe, backoff
 
 Edge-case sweep from a code review of the auto-swap path:
+
+Docs: `docs/swarm/operations.md` § Model pool and `docs/swarm/architecture.md` cover all of the above; `extensions/swarm/README.md` links the summary.
 - **Success now resets the failure streak**: `turn_end` with `stopReason "stop"` calls `recordSlotSuccess` for that slot. Previously a slot that transient-failed once and then served hundreds of healthy turns would still bench on its next transient.
 - **Swap-chain cap (MAX_SWAP_CHAIN=2 per agent, 5min quiet reset)**: a failing prompt no longer cascades fail->swap->retry->fail through every pool slot, burning a turn each; beyond the cap the turn fails naturally (`pool.swap_chain_capped` trace).
 - **Pool-state lock**: all read-modify-write cycles on `.pi/swarm/pool-state.json` (pickSlot rrCursor, recordProviderError, recordSlotSuccess, setSlotCooldown) now run under a dedicated mkdir-based mutex — concurrent agent processes can no longer lost-update each other.
@@ -25,6 +27,7 @@ Edge-case sweep from a code review of the auto-swap path:
   - recovery: after scenario returns to ok and cooldowns expire, slots re-enter rotation and serve normally.
   - multi-agent failover: 3 concurrent agents (w1/w2/w3) on mock-a all hit 429 simultaneously -> all three swapped to mock-b within the same second (traces: 3x `pool.slot_failure` + 3x `pool.swap`) and all completed their turns.
   - remaining manual UAT: a REAL provider 429 with a nearly-exhausted key (scripted path is identical; only the error source differs) — run the same steps when such a key is available.
+- Mock server also supports `{mode: "raw", status: <code>, body: {...}}` to replay any verbatim real-world provider payload. Validated live with a captured GlHF-style payload (`rate_limit_error`, code 1302): classified `rate_limit`, streak bumped, in-process swap to the fallback slot, agent answered on the same session.
 
 ### feat(swarm): in-process model auto-swap on provider errors (turn_end hook) — the agent fixes itself, no respawn
 
