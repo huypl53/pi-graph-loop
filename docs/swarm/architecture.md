@@ -59,6 +59,7 @@ Primary code:
 - `src/session.ts`
 - `src/hooks.ts`
 - `src/tools/agents*.ts`
+- `src/pool.ts` (model pool: weighted/round-robin/sticky slot picks, per-slot health cooldown, restart failover)
 
 ### 2. Messaging lifecycle
 Handles mailbox append, tmux injection, interception, acknowledgements, retries, dead letters, and idempotency.

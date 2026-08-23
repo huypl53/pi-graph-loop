@@ -4,6 +4,16 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### feat(swarm): model pool — weighted multi-provider rotation with health cooldown and restart failover
+
+- `settings.json` previously supported only ONE `defaultModel`/`defaultProvider`; every spawn pinned that pair. New opt-in `modelPool` (array of `{model, provider?, weight?, label?}`) + `rotation` (`{strategy, cooldownMs, maxRetries}`) under `swarm` (or `extensions.swarm`).
+- **Rotation strategies**: `weighted` (default; random by weight), `round-robin` (cursor persisted), `sticky` (sha256 of agent id → deterministic slot per agent).
+- **Health + cooldown**: per-slot health persists in `.pi/swarm/pool-state.json`; `maxRetries` (default 2) consecutive failures bench a slot for `cooldownMs` (default 15 min). `weight: 0` = fallback-only, used when every weighted slot is benched; if ALL slots are benched, the soonest-to-recover is returned best-effort.
+- **Spawn/restart integration**: `spawnAgent` picks from the pool when no explicit model is given (trace `pool.spawn_pick`); `restartAgent` detects the recorded slot is benched and re-picks a different slot (`pool.failover` trace, `avoidKey` deprioritized for round-robin). Agent id/role/mailbox/identity are preserved across failover restarts.
+- **Commands**: `/swarm pool list` (weights, failures, cooldown remaining), `/swarm pool cooldown <provider/model> <ms>`, `/swarm pool clear <provider/model>`. New `src/pool.ts`; exports added to `index.ts`.
+- Backward compatible: no `modelPool` ⇒ single-default behavior identical to before.
+- Verified: new `pool.test.mjs` (40 assertions: weighted pick distribution/exclusion, failure→cooldown, benched exclusion, fallback-only promotion, success-clears-streak, sticky determinism, no-pool undefined); all suites green (the 2 pre-existing `completion.test.mjs` failures are present on the clean baseline and unrelated).
+
 ### feat(background-tasks): `background_watch` — event-driven monitoring so the agent never polls
 
 - The agent could already `background_start` / `background_status` / `background_output`, but there was no event primitive: to notice a dev server becoming ready, a build failing, or a process stalling, it had to either block on `background_wait` (wasting a turn) or burn tokens in a `background_output` poll loop.

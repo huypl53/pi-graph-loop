@@ -69,6 +69,24 @@ Project-local swarm defaults can be set in `.pi/settings.json`:
 
 A nested `extensions.swarm` object is also accepted for backward compatibility, but top-level `swarm` is the safer recommendation because pi itself may use top-level `extensions` for extension discovery/config.
 
+Optionally, configure a weighted **model pool** for multi-provider rotation with automatic failover (see `docs/swarm/operations.md` § Model pool):
+
+```json
+{
+  "swarm": {
+    "modelPool": [
+      { "model": "glm-5.1", "provider": "zai-coding-cn", "weight": 50 },
+      { "model": "gpt-5.4-mini", "provider": "openai", "weight": 30 },
+      { "model": "claude-sonnet-4", "provider": "anthropic", "weight": 0 }
+    ],
+    "rotation": { "strategy": "weighted", "cooldownMs": 900000, "maxRetries": 2 }
+  }
+}
+```
+
+Manage with `/swarm pool list` / `/swarm pool cooldown <slot> <ms>` / `/swarm pool clear <slot>`.
+
+
 Precedence is explicit tool parameters, then `.pi/settings.json`, then env vars (`PI_SWARM_DEFAULT_MODEL`, `PI_SWARM_DEFAULT_PROVIDER`), then code defaults/model presets.
 
 Inside pi:

@@ -26,6 +26,11 @@ export const FAST_MODEL = "gpt-5.4-mini";
 
 export const FAST_PROVIDER = "openai";
 
+// Model pool defaults.
+export const POOL_COOLDOWN_MS = 15 * 60 * 1000; // bench a failing slot for 15 minutes
+
+export const POOL_MAX_RETRIES = 2; // consecutive failures before cooldown
+
 // Identity used for an anonymous swarm session that neither sets PI_SWARM_AGENT_ID nor opts in as the
 // orchestrator. Such a session is inert for swarm coordination (no agent record, no orchestrator pump,
 // no orchestrator heartbeat refresh); it is a stable, clearly-non-orchestrator id so tool defaults

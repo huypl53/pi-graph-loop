@@ -59,6 +59,30 @@ Common first actions:
 - `swarm_release_agent_task` for stale pointers after confirming reconcile results
 
 ### Inspect or change agent roles
+
+### Model pool (multi-provider rotation)
+
+`.pi/settings.json` (under `swarm` or `extensions.swarm`) supports a weighted model pool. When configured, agent spawn picks a healthy slot via rotation; restart fails over off a benched slot automatically.
+
+```json
+{
+  "swarm": {
+    "modelPool": [
+      { "model": "glm-5.1", "provider": "zai-coding-cn", "weight": 50 },
+      { "model": "gpt-5.4-mini", "provider": "openai", "weight": 30 },
+      { "model": "claude-sonnet-4", "provider": "anthropic", "weight": 0 }
+    ],
+    "rotation": { "strategy": "weighted", "cooldownMs": 900000, "maxRetries": 2 }
+  }
+}
+```
+
+- `weight`: relative share; `0` = fallback-only (used when every weighted slot is benched).
+- `strategy`: `weighted` (default) | `round-robin` | `sticky` (per-agent-id deterministic).
+- Health state persists in `.pi/swarm/pool-state.json`; `maxRetries` consecutive failures bench a slot for `cooldownMs`.
+- Commands: `/swarm pool list`, `/swarm pool cooldown <provider/model> <ms>`, `/swarm pool clear <provider/model>`.
+- Without `modelPool`, the single `defaultModel`/`defaultProvider` behavior is unchanged.
+
 - `swarm_agent_identity`
 - `swarm_reload_identity`
 - `swarm_set_role`

@@ -16,6 +16,39 @@ export type MessageResponseStatus = "not_required" | "missing" | "sent" | "verif
 export type SwarmSettings = {
 	defaultModel?: string;
 	defaultProvider?: string;
+	// Model pool: multiple model/provider candidates with weights and rotation. When present,
+	// spawn/restart pick from the pool (respecting health/cooldown) instead of the single default.
+	modelPool?: ModelSlot[];
+	rotation?: RotationConfig;
+};
+
+export type ModelSlot = {
+	model: string;
+	provider?: string;
+	weight?: number; // default 1; 0 = fallback-only (used only when all weighted slots are down)
+	label?: string;
+};
+
+export type RotationStrategy = "weighted" | "round-robin" | "sticky";
+
+export type RotationConfig = {
+	strategy?: RotationStrategy; // default weighted
+	cooldownMs?: number; // default 15min: a failing slot is benched this long after maxRetries
+	maxRetries?: number; // default 2 consecutive failures before cooldown
+};
+
+// Persisted per-slot health, keyed by `${provider}/${model}`. Stored in .pi/swarm/pool-state.json.
+export type PoolSlotHealth = {
+	failures: number;
+	lastError?: string;
+	lastErrorAt?: string;
+	cooldownUntil?: string; // ISO; slot excluded from picking while in the future
+};
+
+export type PoolHealthState = {
+	slots: Record<string, PoolSlotHealth>;
+	// round-robin cursor (index into the configured slot list)
+	rrCursor?: number;
 };
 
 export type MessageRecord = {

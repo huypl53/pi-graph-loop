@@ -43,6 +43,7 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "capture", description: "Capture an agent's tmux pane: <id>" },
 	{ name: "identity", description: "reload|show an agent's identity" },
 	{ name: "loop", description: "status|plan an iteration loop" },
+	{ name: "pool", description: "Model pool status: list | cooldown <slot> <ms> | clear <slot>" },
 ];
 
 const SCOPED_COMMANDS: Record<string, { name: string; description: string; canonical: string }[]> = {
