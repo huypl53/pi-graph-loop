@@ -1,0 +1,240 @@
+// === swarm/pool.ts — model pool: weighted rotation + health cooldown + failover picks ===
+import { mkdir, readFile, stat, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
+import type { ModelSlot, Paths, PoolHealthState, PoolSlotHealth, ProviderErrorKind, RotationConfig, RotationStrategy } from "./types.ts";
+import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
+import { readSwarmSettings } from "./session.ts";
+import { atomicWriteFile, trace } from "./state.ts";
+
+// Health state lives next to swarm-state.json so every swarm process (orchestrator, workers,
+// spawned agents) shares one view of which slots are benched.
+export function poolHealthFile(p: Paths) {
+	return join(p.root, "pool-state.json");
+}
+
+// Dedicated lock for pool-state.json. The swarm state lock (withLock) guards swarm-state.json only;
+// pool health is read-modify-written concurrently by every agent process (turn_end hook), so it needs
+// its own mutex. Same mkdir-based algorithm as withLock (atomic mkdir, stale-break, bounded wait).
+function poolLockFile(p: Paths) {
+	return join(p.root, "pool-state.lock");
+}
+
+export async function withPoolLock<T>(p: Paths, fn: () => Promise<T>): Promise<T> {
+	await mkdir(p.root, { recursive: true });
+	const lock = poolLockFile(p);
+	const started = Date.now();
+	while (true) {
+		try {
+			await mkdir(lock);
+			break;
+		} catch (err: any) {
+			if (err?.code !== "EEXIST") throw err;
+			try {
+				const s = await stat(lock);
+				if (Date.now() - s.mtimeMs > 60_000) await rm(lock, { recursive: true, force: true });
+			} catch {}
+			if (Date.now() - started > 120_000) throw new Error(`Timed out acquiring pool lock: ${lock}`);
+			await sleep(50);
+		}
+	}
+	try {
+		return await fn();
+	} finally {
+		await rm(lock, { recursive: true, force: true });
+	}
+}
+
+export async function readPoolHealth(p: Paths): Promise<PoolHealthState> {
+	const file = poolHealthFile(p);
+	if (!existsSync(file)) return { slots: {} };
+	try {
+		const st = JSON.parse(await readFile(file, "utf8")) as PoolHealthState;
+		st.slots ||= {};
+		st.rrCursor = typeof st.rrCursor === "number" ? st.rrCursor : 0;
+		return st;
+	} catch {
+		return { slots: {} };
+	}
+}
+
+export async function writePoolHealth(p: Paths, h: PoolHealthState) {
+	await atomicWriteFile(poolHealthFile(p), `${JSON.stringify(h, null, 2)}\n`);
+}
+
+export function slotKey(slot: Pick<ModelSlot, "model" | "provider">): string {
+	return `${slot.provider || "(default)"}/${slot.model}`;
+}
+
+export function effectiveConfig(): { slots: ModelSlot[]; rotation: Required<RotationConfig> } {
+	const settings = readSwarmSettings();
+	const slots = settings.modelPool && settings.modelPool.length ? settings.modelPool : [];
+	const r = settings.rotation || {};
+	return {
+		slots,
+		rotation: {
+			strategy: (r.strategy || "weighted") as RotationStrategy,
+			cooldownMs: r.cooldownMs ?? POOL_COOLDOWN_MS,
+			maxRetries: r.maxRetries ?? POOL_MAX_RETRIES,
+		},
+	};
+}
+
+function inCooldown(h: PoolSlotHealth | undefined, nowMs: number): boolean {
+	if (!h?.cooldownUntil) return false;
+	return new Date(h.cooldownUntil).getTime() > nowMs;
+}
+
+function weightedPick<T extends { weight: number }>(items: T[]): T {
+	const total = items.reduce((s, i) => s + i.weight, 0);
+	let roll = Math.random() * total;
+	for (const item of items) {
+		roll -= item.weight;
+		if (roll <= 0) return item;
+	}
+	return items[items.length - 1];
+}
+
+function stickyIndex(key: string, n: number): number {
+	const hash = createHash("sha256").update(key).digest();
+	return hash.readUInt32BE(0) % n;
+}
+
+export type PickResult = {
+	slot: ModelSlot;
+	index: number;
+	fromPool: true;
+	reason: string;
+};
+
+// Pick a slot from the pool. Tries: eligible weighted slots (weight>0, not in cooldown) ->
+// fallback-only slots (weight=0, not in cooldown) -> any slot at all (all benched: best effort).
+// `stickyKey` (agent id) pins sticky strategy; `avoidKey` (the slot that just failed) is deprioritized
+// for round-robin so a failover restart doesn't land back on the same benched slot.
+export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: string } = {}): Promise<PickResult | undefined> {
+	const { slots, rotation } = effectiveConfig();
+	if (!slots.length) return undefined;
+	// Round-robin mutates the shared cursor, so the whole pick runs under the pool lock.
+	return withPoolLock(p, async () => {
+	const h = await readPoolHealth(p);
+	const nowMs = Date.now();
+
+	const eligible = slots
+		.map((slot, index) => ({ slot, index }))
+		.filter(({ slot }) => (slot.weight ?? 1) > 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
+	const fallbacks = slots
+		.map((slot, index) => ({ slot, index }))
+		.filter(({ slot }) => (slot.weight ?? 1) === 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
+
+	if (eligible.length) {
+		if (rotation.strategy === "sticky" && opts.stickyKey) {
+			const { slot, index } = eligible[stickyIndex(opts.stickyKey, eligible.length)];
+			return { slot, index, fromPool: true, reason: `sticky(${opts.stickyKey})` };
+		}
+		if (rotation.strategy === "round-robin") {
+			let cursor = ((h.rrCursor ?? 0) % eligible.length + eligible.length) % eligible.length;
+			if (opts.avoidKey && eligible.length > 1 && slotKey(eligible[cursor].slot) === opts.avoidKey) {
+				cursor = (cursor + 1) % eligible.length;
+			}
+			h.rrCursor = cursor + 1;
+			await writePoolHealth(p, h).catch(() => {});
+			const { slot, index } = eligible[cursor];
+			return { slot, index, fromPool: true, reason: `round-robin(${cursor})` };
+		}
+		const { slot, index } = weightedPick(eligible.map((e) => ({ ...e, weight: e.slot.weight ?? 1 })));
+		return { slot, index, fromPool: true, reason: `weighted(w=${slot.weight ?? 1})` };
+	}
+
+	if (fallbacks.length) {
+		const { slot, index } = fallbacks[0];
+		return { slot, index, fromPool: true, reason: "fallback-only (all weighted slots benched)" };
+	}
+
+	// Everything is in cooldown: return undefined — the caller keeps its current model and simply
+	// retries on it (quota errors on every slot means the swap loop cannot help; thrashing between
+	// benched slots would burn the remaining turn budget). PoolStatus/traces make the outage visible.
+	return undefined;
+	});
+}
+
+// Record a failure for a slot. Once consecutive failures reach maxRetries, bench it for cooldownMs
+// and reset the counter (so post-cooldown it gets a fresh chance). Returns the new health.
+// Record a provider/turn error for a slot (the in-process turn_end hook path). Error KIND drives
+// the bench policy: quota/auth bench IMMEDIATELY (retrying will not fix an exhausted quota or a
+// bad key); auth benches extra-long (6h floor) because keys do not self-heal; rate_limit/transient
+// follow the maxRetries streak before a normal cooldown.
+export async function recordProviderError(p: Paths, slot: ModelSlot, kind: ProviderErrorKind, error: string): Promise<PoolSlotHealth> {
+	const { rotation } = effectiveConfig();
+	return withPoolLock(p, async () => {
+	const h = await readPoolHealth(p);
+	const key = slotKey(slot);
+	const prev = h.slots[key] || { failures: 0 };
+	// Deduplicate pi-internal retries of the SAME incident: pi can emit several error turns for one
+	// underlying failure (stream retry, overflow-recovery re-run). An identical error on the same
+	// slot within 30s counts once toward the streak, so maxRetries means real distinct failures.
+	const sameIncident = prev.lastError === `${kind}: ${error}`.slice(0, 200)
+		&& prev.lastErrorAt && (Date.now() - new Date(prev.lastErrorAt).getTime()) < 30_000;
+	const failures = sameIncident ? (prev.failures || 0) : (prev.failures || 0) + 1;
+	const next: PoolSlotHealth = { failures, lastError: `${kind}: ${error}`.slice(0, 200), lastErrorAt: new Date().toISOString(), deduped: sameIncident || undefined };
+	const immediate = kind === "quota" || kind === "auth";
+	if (failures >= rotation.maxRetries || immediate) {
+		// Exponential backoff for repeated benching: a slot that keeps failing right after each
+		// cooldown doubles its bench time (capped at 24h), so a long outage (monthly quota reset)
+		// costs at most one probe attempt per doubling instead of one per cooldownMs.
+		const benchStreak = (prev.benchStreak || 0) + 1;
+		const base = kind === "auth" ? Math.max(rotation.cooldownMs, 6 * 60 * 60_000) : rotation.cooldownMs;
+		const ms = Math.min(base * Math.pow(2, benchStreak - 1), 24 * 60 * 60_000);
+		next.cooldownUntil = new Date(Date.now() + ms).toISOString();
+		next.failures = 0; // fresh chance after cooldown
+		next.benchStreak = benchStreak;
+	}
+	h.slots[key] = next;
+	await writePoolHealth(p, h);
+	await trace(p, "pool.slot_failure", { slot: key, failures, kind, error: error.slice(0, 200), cooldownUntil: next.cooldownUntil }).catch(() => {});
+	return next;
+	});
+}
+
+// Record a success: clears the failure streak AND the bench backoff (a healthy call proves the
+// slot works again — the next failure starts a fresh, short cooldown).
+export async function recordSlotSuccess(p: Paths, slot: ModelSlot): Promise<void> {
+	await withPoolLock(p, async () => {
+	const h = await readPoolHealth(p);
+	const key = slotKey(slot);
+	const prev = h.slots[key];
+	if (!prev || (!prev.failures && !prev.cooldownUntil && !prev.lastError)) return;
+	h.slots[key] = { failures: 0 };
+	await writePoolHealth(p, h);
+	await trace(p, "pool.slot_success", { slot: key }).catch(() => {});
+	});
+}
+
+// Manual cooldown control for `/swarm pool cooldown <key> <ms|clear>`.
+export async function setSlotCooldown(p: Paths, key: string, ms: number | null): Promise<boolean> {
+	return withPoolLock(p, async () => {
+	const h = await readPoolHealth(p);
+	const slot = h.slots[key];
+	if (!slot && ms === null) return false;
+	h.slots[key] = slot || { failures: 0 };
+	if (ms === null) delete h.slots[key].cooldownUntil;
+	else h.slots[key].cooldownUntil = new Date(Date.now() + ms).toISOString();
+	await writePoolHealth(p, h);
+	return true;
+	});
+}
+
+export async function poolStatus(p: Paths): Promise<{ slots: Array<ModelSlot & { key: string; health: PoolSlotHealth | undefined; inCooldown: boolean; cooldownRemainingMs: number }>; rotation: Required<RotationConfig> }> {
+	const { slots, rotation } = effectiveConfig();
+	const h = await readPoolHealth(p);
+	const nowMs = Date.now();
+	return {
+		rotation,
+		slots: slots.map((slot) => {
+			const key = slotKey(slot);
+			const health = h.slots[key];
+			const until = health?.cooldownUntil ? new Date(health.cooldownUntil).getTime() : 0;
+			return { ...slot, key, health, inCooldown: until > nowMs, cooldownRemainingMs: Math.max(0, until - nowMs) };
+		}),
+	};
+}

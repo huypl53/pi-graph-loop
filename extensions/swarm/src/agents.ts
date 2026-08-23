@@ -4,9 +4,10 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Paths, ReusableAgentMatch, SwarmAgent, SwarmState } from "./types.ts";
-import { SPAWN_SETTLE_MS } from "./constants.ts";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, FAST_MODEL, SPAWN_SETTLE_MS } from "./constants.ts";
 import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux } from "./tmux.ts";
 import { childPiArgs, currentModel, currentProvider } from "./session.ts";
+import { pickSlot, poolStatus } from "./pool.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, shellQuote, sleep } from "./utils.ts";
 import { identityPath, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
 import { identityPrompt, writeEffectiveIdentity } from "./identity.ts";
@@ -30,9 +31,26 @@ export async function mailboxKickoffPrompt(p: Paths, st: SwarmState, id: string)
 export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string }) {
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
 	if (state.agents[id]?.status === "running") throw new Error(`Agent already exists and is running: ${id}`);
-	const model = input.model || currentModel();
-	const provider = input.provider || currentProvider(model);
-	const providerFallback = !input.provider && provider === DEFAULT_PROVIDER && model !== DEFAULT_MODEL && model !== FAST_MODEL;
+	// Model resolution: explicit input wins; otherwise the model pool (if configured) picks a
+	// healthy slot via weighted/rr/sticky rotation; otherwise the single default.
+	let model = input.model;
+	let provider = input.provider;
+	let poolReason: string | undefined;
+	if (!model) {
+		const picked = await pickSlot(p, { stickyKey: id });
+		if (picked) {
+			model = picked.slot.model;
+			provider = picked.slot.provider || currentProvider(model);
+			poolReason = picked.reason;
+		} else {
+			model = currentModel();
+			provider = currentProvider(model);
+		}
+	} else {
+		provider = provider || currentProvider(model);
+	}
+	if (poolReason) await trace(p, "pool.spawn_pick", { agentId: id, slot: `${provider}/${model}`, reason: poolReason }).catch(() => {});
+	const providerFallback = !input.provider && !poolReason && provider === DEFAULT_PROVIDER && model !== DEFAULT_MODEL && model !== FAST_MODEL;
 	if (providerFallback) await trace(p, "agent.spawn.provider_fallback", { agentId: id, model, provider, note: "no provider configured for model; fell back to DEFAULT_PROVIDER at spawn boundary" }).catch(() => {});
 	const window = id;
 	const target = `${state.tmuxSession}:${window}.0`;
@@ -286,9 +304,10 @@ export async function stopAgent(pi: ExtensionAPI, p: Paths, state: SwarmState, a
 }
 
 // Stop + respawn a fresh pi at the SAME id (so mailbox, identity, and history persist). Reuses the
-// recorded role/model/provider. For an agent originally registered to an external pane, restart creates
+// recorded role/model/provider unless a new model is passed OR the recorded slot has been benched by
+// the pool (health cooldown) — in that case the pool picks a replacement slot for the failover.
 // a fresh swarm-managed window named <id> (the external pane cannot be reliably re-pi'd). Lock-free core.
-export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, agentId: string, opts: { initialPrompt?: string; model?: string; provider?: string } = {}) {
+export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, agentId: string, opts: { initialPrompt?: string; model?: string; provider?: string; rotateFromSlot?: string } = {}) {
 	const existing = state.agents[agentId];
 	if (!existing) throw new Error(`Unknown swarm agent: ${agentId}`);
 	ensureAgentDefaults(existing);
@@ -297,8 +316,24 @@ export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, stat
 	existing.updatedAt = now();
 	await trace(p, "agent.restart.kill", { agentId, ...kill });
 	const roleKind = existing.roleKindExplicit ? existing.roleKind : undefined;
-	const r = await spawnAgent(pi, cwd, p, state, { id: agentId, role: existing.role, roleKind, model: opts.model || existing.model, provider: opts.provider || existing.provider, initialPrompt: opts.initialPrompt });
-	await trace(p, "agent.restart.ok", { agentId, target: r.agent.tmuxTarget, killMethod: kill.method });
+	// Pool failover: if the caller signals the old slot failed (rotateFromSlot = slot key), or the
+	// recorded slot is currently benched, let spawnAgent re-pick from the pool instead of reusing it.
+	let model = opts.model;
+	let provider = opts.provider;
+	if (!model) {
+		const status = await poolStatus(p);
+		const benched = status.slots.find((s) => s.model === existing.model && (s.provider || "(default)") === (existing.provider || "(default)"));
+		if (benched && (opts.rotateFromSlot || benched.inCooldown)) {
+			const picked = await pickSlot(p, { stickyKey: agentId, avoidKey: benched.key });
+			if (picked) {
+				model = picked.slot.model;
+				provider = picked.slot.provider || currentProvider(picked.slot.model);
+				await trace(p, "pool.failover", { agentId, from: benched.key, to: `${provider}/${model}`, reason: picked.reason }).catch(() => {});
+			}
+		}
+	}
+	const r = await spawnAgent(pi, cwd, p, state, { id: agentId, role: existing.role, roleKind, model, provider, initialPrompt: opts.initialPrompt });
+	await trace(p, "agent.restart.ok", { agentId, target: r.agent.tmuxTarget, killMethod: kill.method, model: r.agent.model, provider: r.agent.provider });
 	return { kill, ...r };
 }
 

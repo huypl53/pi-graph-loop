@@ -159,8 +159,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				await trace(p, "agent.spawn.request", { requestedBy: currentAgentId(), ...params });
-				const model = params.model === "fast" ? FAST_MODEL : params.model || currentModel();
-				const provider = params.provider || (params.model === "fast" ? FAST_PROVIDER : currentProvider(model));
+				// Explicit model / 'fast' preset pin the slot; otherwise spawnAgent consults the
+				// model pool (if configured) before falling back to the single default.
+				const model = params.model === "fast" ? FAST_MODEL : params.model || undefined;
+				const provider = params.provider || (params.model === "fast" ? FAST_PROVIDER : undefined);
 				const r = await spawnAgent(pi, ctx.cwd, p, st, { ...params, model, provider });
 				await writeState(p, st);
 				return { swarmId: st.swarmId, tmuxSession: st.tmuxSession, ...r };

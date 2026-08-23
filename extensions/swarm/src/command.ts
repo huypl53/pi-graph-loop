@@ -17,6 +17,7 @@ import { loopStatusSnapshot, recordLoopPlan } from "./loop.ts";
 import { ensureOrchestrator, overridePath } from "./identity.ts";
 import { startOrchestratorPump } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
+import { poolStatus, setSlotCooldown } from "./pool.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
@@ -322,7 +323,8 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm spawn <id> [role]", "warning"); return; }
 					const role = rest.join(" ") || id;
-					const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const model = currentModel(); const r = await spawnAgent(pi, ctx.cwd, p, st, { id, role, model, provider: currentProvider(model) }); await writeState(p, st); return r; });
+					// No explicit model here: spawnAgent consults the model pool (if configured) before the default.
+					const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await spawnAgent(pi, ctx.cwd, p, st, { id, role }); await writeState(p, st); return r; });
 					ctx.ui.notify(`Spawned ${result.agent.id} at ${result.agent.tmuxTarget}`, "info");
 					return;
 				}
@@ -439,6 +441,37 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await restartAgent(pi, ctx.cwd, p, st, safeId(id)); await writeState(p, st); return r; });
 						ctx.ui.notify(`Restarted ${result.agent.id} at ${result.agent.tmuxTarget} (kill=${result.kill.method})`, "info");
 					} catch (err: any) { ctx.ui.notify(`Restart failed: ${err?.message || err}`, "warning"); }
+					return;
+				}
+				if (cmd === "pool") {
+					const sub = rest.shift();
+					if (!sub || sub === "list") {
+						const status = await poolStatus(p);
+						if (!status.slots.length) { ctx.ui.notify("No model pool configured. Add `modelPool` under `swarm` (or extensions.swarm) in .pi/settings.json.", "warning"); return; }
+						const lines = [`Model pool (${status.rotation.strategy}, cooldown ${Math.round(status.rotation.cooldownMs / 60000)}min, maxRetries ${status.rotation.maxRetries}):`];
+						for (const s of status.slots) {
+							const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m` : "ok";
+							const err = s.health?.lastError ? ` lastError=${s.health.lastError.slice(0, 60)}` : "";
+							lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${err}`);
+						}
+						ctx.ui.notify(lines.join("\n"), "info");
+						return;
+					}
+					if (sub === "cooldown" || sub === "clear") {
+						const key = rest.shift();
+						if (!key) { ctx.ui.notify("Usage: /swarm pool cooldown <provider/model> <ms> | /swarm pool clear <provider/model>", "warning"); return; }
+						if (sub === "cooldown") {
+							const msRaw = rest.shift();
+							if (!msRaw || !/^\d+$/.test(msRaw)) { ctx.ui.notify("Cooldown requires a duration in ms", "warning"); return; }
+							const ok = await setSlotCooldown(p, key, parseInt(msRaw, 10));
+							ctx.ui.notify(ok ? `Slot ${key} cooldown set to ${msRaw}ms` : `Unknown slot key: ${key} (see /swarm pool list)`, ok ? "info" : "warning");
+						} else {
+							const ok = await setSlotCooldown(p, key, null);
+							ctx.ui.notify(ok ? `Slot ${key} cooldown cleared` : `Unknown slot key: ${key} (see /swarm pool list)`, ok ? "info" : "warning");
+						}
+						return;
+					}
+					ctx.ui.notify("Usage: /swarm pool [list] | /swarm pool cooldown <provider/model> <ms> | /swarm pool clear <provider/model>", "warning");
 					return;
 				}
 				if (cmd === "role") {

@@ -16,6 +16,56 @@ export type MessageResponseStatus = "not_required" | "missing" | "sent" | "verif
 export type SwarmSettings = {
 	defaultModel?: string;
 	defaultProvider?: string;
+	// Model pool: multiple model/provider candidates with weights and rotation. When present,
+	// spawn/restart pick from the pool (respecting health/cooldown) instead of the single default.
+	modelPool?: ModelSlot[];
+	rotation?: RotationConfig;
+};
+
+export type ModelSlot = {
+	model: string;
+	provider?: string;
+	weight?: number; // default 1; 0 = fallback-only (used only when all weighted slots are down)
+	label?: string;
+};
+
+export type RotationStrategy = "weighted" | "round-robin" | "sticky";
+
+// Classify a provider/turn error message. Quota/auth failures are the rotation triggers;
+// transient errors are tolerated a few times before benching.
+export type ProviderErrorKind = "quota" | "auth" | "rate_limit" | "transient" | "unknown";
+
+export function classifyProviderError(message: string): ProviderErrorKind {
+	const m = (message || "").toLowerCase();
+	if (/quota|insufficient|billing|balance|exceeded your current quota|prepaid/.test(m)) return "quota";
+	if (/rate.?limit|too many requests|429|overloaded/.test(m)) return "rate_limit";
+	if (/invalid api key|unauthorized|forbidden|401|403|authentication|api key/.test(m)) return "auth";
+	if (/timeout|timed out|econnrefused|econnreset|enotfound|5\d\d|network|connection/.test(m)) return "transient";
+	return "unknown";
+}
+
+export type RotationConfig = {
+	strategy?: RotationStrategy; // default weighted
+	cooldownMs?: number; // default 15min: a failing slot is benched this long after maxRetries
+	maxRetries?: number; // default 2 consecutive failures before cooldown
+};
+
+// Persisted per-slot health, keyed by `${provider}/${model}`. Stored in .pi/swarm/pool-state.json.
+export type PoolSlotHealth = {
+	failures: number;
+	lastError?: string;
+	lastErrorAt?: string;
+	// True when the recorded error was deduplicated (pi-internal retry of the same incident within
+	// 30s did not bump the streak). Informational only.
+	deduped?: boolean;
+	cooldownUntil?: string; // ISO; slot excluded from picking while in the future
+	benchStreak?: number; // consecutive benches without an intervening success (drives exponential backoff)
+};
+
+export type PoolHealthState = {
+	slots: Record<string, PoolSlotHealth>;
+	// round-robin cursor (index into the configured slot list)
+	rrCursor?: number;
 };
 
 export type MessageRecord = {

@@ -4,6 +4,49 @@ Notable changes in this project. Newest first.
 
 ## Unreleased
 
+### fix(swarm): pool hardening — success resets, swap-chain cap, pool lock, provider-strict swap, dedupe, backoff
+
+Edge-case sweep from a code review of the auto-swap path:
+
+Docs: `docs/swarm/operations.md` § Model pool and `docs/swarm/architecture.md` cover all of the above; `extensions/swarm/README.md` links the summary.
+- **Success now resets the failure streak**: `turn_end` with `stopReason "stop"` calls `recordSlotSuccess` for that slot. Previously a slot that transient-failed once and then served hundreds of healthy turns would still bench on its next transient.
+- **Swap-chain cap (MAX_SWAP_CHAIN=2 per agent, 5min quiet reset)**: a failing prompt no longer cascades fail->swap->retry->fail through every pool slot, burning a turn each; beyond the cap the turn fails naturally (`pool.swap_chain_capped` trace).
+- **Pool-state lock**: all read-modify-write cycles on `.pi/swarm/pool-state.json` (pickSlot rrCursor, recordProviderError, recordSlotSuccess, setSlotCooldown) now run under a dedicated mkdir-based mutex — concurrent agent processes can no longer lost-update each other.
+- **Provider-strict swap resolution**: dropped the `find(model-without-provider)` fallback; ambiguous model ids shared across providers (gpt-5.4-mini exists on several) could resolve to a provider with no API key, yielding swap_failed loops. A slot that cannot resolve under its own provider is traced with a config hint.
+- **Incident dedupe**: identical error text on the same slot within 30s counts once toward the streak (pi emits multiple error turns for one underlying failure via internal retries/overflow recovery), so `maxRetries` means distinct failures.
+- **Exponential bench backoff**: consecutive benches without an intervening success double the cooldown (capped 24h) — a monthly-quota outage costs one probe per doubling instead of one per cooldownMs. `recordSlotSuccess` resets the streak.
+- Tests extended: pool.test.mjs 45 assertions (dedupe, backoff doubling), pool-swap.test.mjs 16 (success reset, chain cap). Mock UAT re-run green: quota bench+swap+retry, recovery after cooldown.
+
+### test(swarm): mock-provider UAT harness + full-scenario pool validation
+
+- `scripts/uat/mock-provider-server.mjs`: local OpenAI-compatible server with scenario control (`{mode: ok | error | flaky}`) emitting VERBATIM provider error payloads — 429 quota (`insufficient_quota`), 429 rate_limit, 401 invalid key, 500 overloaded — over SSE. `scripts/uat/mock-provider-ext.ts`: pi extension registering `mock-a`/`mock-b` providers against it, so pi makes REAL streaming calls with fully scripted failures at zero cost.
+- Fix found by the mock UAT: when EVERY pool slot is benched, `pickSlot` used to return the soonest-cooldown slot, causing the agent to thrash between dead slots (observed live: mock-a<->mock-b swap loop under all-slots-down). Now it returns undefined — the agent keeps its current model, the turn surfaces the error once, `pool.swap_no_candidate` is traced. No thrash.
+- UAT verified live in tmux with real pi processes:
+  - quota: agent on mock-a got a real 429 -> benched -> in-process swap to mock-b -> retried and answered on the SAME session/context.
+  - auth (401): slot benched 6h immediately; all-slots-down ends with `pool.swap_no_candidate` (no thrash).
+  - recovery: after scenario returns to ok and cooldowns expire, slots re-enter rotation and serve normally.
+  - multi-agent failover: 3 concurrent agents (w1/w2/w3) on mock-a all hit 429 simultaneously -> all three swapped to mock-b within the same second (traces: 3x `pool.slot_failure` + 3x `pool.swap`) and all completed their turns.
+  - remaining manual UAT: a REAL provider 429 with a nearly-exhausted key (scripted path is identical; only the error source differs) — run the same steps when such a key is available.
+- Mock server also supports `{mode: "raw", status: <code>, body: {...}}` to replay any verbatim real-world provider payload. Validated live with a captured GlHF-style payload (`rate_limit_error`, code 1302): classified `rate_limit`, streak bumped, in-process swap to the fallback slot, agent answered on the same session.
+
+### feat(swarm): in-process model auto-swap on provider errors (turn_end hook) — the agent fixes itself, no respawn
+
+- pi does NOT exit on provider errors (429 quota, 401 auth, 5xx) — the turn fails with `stopReason: "error"` and the process keeps running. The earlier pane-watcher approach detected the wrong thing at the wrong layer and was reverted. Detection now happens INSIDE the agent's own pi process.
+- New `turn_end` hook (hooks.ts): on an assistant turn with `stopReason "error"`, classify `errorMessage` (quota / rate_limit / auth / transient / unknown) from the REAL provider error text, record it against the exact `provider/model` slot that failed, then `pi.setModel()` to a different healthy pool slot picked by the rotation strategy — **in-process, conversation/context/mailbox fully preserved**. A `[PI-SWARM MODEL POOL]` system note tells the agent why the turn failed and that it now runs on a new model, so it retries its work.
+- Error-kind bench policy (pool.ts `recordProviderError`): quota/auth bench the slot IMMEDIATELY (retrying cannot fix an exhausted quota or bad key); auth benches ≥6h; rate_limit/transient follow the `maxRetries` streak. Unknown errors (e.g. context overflow) never touch the streak and never swap.
+- `/swarm pool list` shows the classified error per slot (e.g. `quota: 429 ...`).
+- Verified live in tmux: an agent running a broken model (`ccs/nonexistent-model-x`) got a 502 on its turn → auto-swapped to `ccs/glm-5.1` in the SAME process → retried and answered normally, footer model changed, context intact (traces `pool.slot_failure` kind=transient + `pool.swap`). New `pool-swap.test.mjs` (12 assertions: classification matrix, quota immediate bench, in-process swap, context-overflow no-swap, transient streak, guest exemption).
+
+### feat(swarm): model pool — weighted multi-provider rotation with health cooldown and restart failover
+
+- `settings.json` previously supported only ONE `defaultModel`/`defaultProvider`; every spawn pinned that pair. New opt-in `modelPool` (array of `{model, provider?, weight?, label?}`) + `rotation` (`{strategy, cooldownMs, maxRetries}`) under `swarm` (or `extensions.swarm`).
+- **Rotation strategies**: `weighted` (default; random by weight), `round-robin` (cursor persisted), `sticky` (sha256 of agent id → deterministic slot per agent).
+- **Health + cooldown**: per-slot health persists in `.pi/swarm/pool-state.json`; `maxRetries` (default 2) consecutive failures bench a slot for `cooldownMs` (default 15 min). `weight: 0` = fallback-only, used when every weighted slot is benched; if ALL slots are benched, the soonest-to-recover is returned best-effort.
+- **Spawn/restart integration**: `spawnAgent` picks from the pool when no explicit model is given (trace `pool.spawn_pick`); `restartAgent` detects the recorded slot is benched and re-picks a different slot (`pool.failover` trace, `avoidKey` deprioritized for round-robin). Agent id/role/mailbox/identity are preserved across failover restarts.
+- **Commands**: `/swarm pool list` (weights, failures, cooldown remaining), `/swarm pool cooldown <provider/model> <ms>`, `/swarm pool clear <provider/model>`. New `src/pool.ts`; exports added to `index.ts`.
+- Backward compatible: no `modelPool` ⇒ single-default behavior identical to before.
+- Verified: new `pool.test.mjs` (40 assertions: weighted pick distribution/exclusion, failure→cooldown, benched exclusion, fallback-only promotion, success-clears-streak, sticky determinism, no-pool undefined); all suites green (the 2 pre-existing `completion.test.mjs` failures are present on the clean baseline and unrelated).
+
 ### feat(background-tasks): `background_watch` — event-driven monitoring so the agent never polls
 
 - The agent could already `background_start` / `background_status` / `background_output`, but there was no event primitive: to notice a dev server becoming ready, a build failing, or a process stalling, it had to either block on `background_wait` (wasting a turn) or burn tokens in a `background_output` poll loop.
