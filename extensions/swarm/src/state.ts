@@ -2,7 +2,7 @@
 import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
-import { join, dirname, relative, sep } from "node:path";
+import { join, dirname, relative, sep, basename } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { EvidenceDigest, IterationSession, LoopState, MemoryRecord, MetricContract, Paths, RunRecord, SwarmState, TaskPaths, TaskState } from "./types.ts";
 import { EXT, LOCK_STALE_MS, STATE_VERSION } from "./constants.ts";
@@ -142,8 +142,35 @@ export async function atomicWriteFile(file: string, content: string) {
 	await rename(tmp, file);
 }
 
+// Rolling backup: before overwriting a state file, copy the current contents aside so there is
+// always a restore point (case study: 89KB corruption with no backup). Backups live in a
+// `backups/` dir next to the file's parent scope (swarm root or task dir), named
+// `<basename>.<ms-timestamp>`. Keeps the newest KEEP_BACKUPS per file; pruning is best-effort.
+const KEEP_BACKUPS = 5;
+let backupSeq = 0;
+
+async function backupBeforeWrite(file: string, backupsDir: string): Promise<void> {
+	try {
+		if (!existsSync(file)) return;
+		const prev = await readFile(file, "utf8");
+		await mkdir(backupsDir, { recursive: true });
+		// Unique-ify with a random suffix when two writes land in the same millisecond —
+		// duplicate timestamped names would silently overwrite each other.
+		const name = `${basename(file)}.${Date.now()}-${String(backupSeq++).padStart(6, "0")}-${randomUUID().slice(0, 6)}`;
+		await writeFile(join(backupsDir, name), prev, "utf8");
+		// Prune oldest backups of this file beyond KEEP_BACKUPS.
+		const prefix = `${basename(file)}.`;
+		const ts = (f) => { const m = f.slice(prefix.length).match(/^(\d+)-(\d+)/); return m ? parseInt(m[1], 10) * 1e7 + parseInt(m[2], 10) : 0; };
+		const entries = (await readdir(backupsDir)).filter((f) => f.startsWith(prefix) && /^\d+/.test(f.slice(prefix.length))).sort((a, b) => ts(a) - ts(b));
+		for (const old of entries.slice(0, Math.max(0, entries.length - KEEP_BACKUPS))) {
+			try { await rm(join(backupsDir, old), { force: true }); } catch { /* best-effort */ }
+		}
+	} catch { /* best-effort; backup must never block the write */ }
+}
+
 export async function writeState(p: Paths, state: SwarmState) {
 	state.updatedAt = now();
+	await backupBeforeWrite(p.state, join(p.root, "backups"));
 	await atomicWriteFile(p.state, `${JSON.stringify(state, null, 2)}\n`);
 }
 
@@ -179,6 +206,7 @@ export async function readTaskState(file: string): Promise<TaskState> {
 
 export async function writeTaskState(tp: TaskPaths, task: TaskState) {
 	task.updatedAt = now();
+	await backupBeforeWrite(tp.taskJson, join(tp.root, "backups"));
 	await atomicWriteFile(tp.taskJson, `${JSON.stringify(task, null, 2)}\n`);
 }
 

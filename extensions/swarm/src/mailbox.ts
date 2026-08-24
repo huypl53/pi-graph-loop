@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { MessageRecord, MessageResponseStatus, MessageStatus, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
-import { SEND_SETTLE_MS } from "./constants.ts";
+import { SEND_SETTLE_MS, MAX_REINJECTS } from "./constants.ts";
 import { appendJsonl, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
 import { buildSystemDelivery } from "./delivery.ts";
 import { capturePane, isPanePiLike, sendToPane, tmux } from "./tmux.ts";
@@ -174,28 +174,49 @@ export async function readMailbox(p: Paths, agentId: string): Promise<SwarmMessa
 	return out;
 }
 
+function buildInjectionProbe(state: SwarmState, msg: SwarmMessage, outcome: "success" | "failure", attempts: number, reinjects: number) {
+	const related = Object.values(state.messages || {}).filter((rec) => rec.to === msg.to && rec.id !== msg.id);
+	const successes = related.filter((rec) => rec.status === "injected" || rec.status === "mailbox_delivered" || rec.status === "intercepted").length;
+	const failures = related.filter((rec) => rec.status === "failed" && !rec.lastAck).length;
+	const total = successes + failures + 1;
+	const failureRate = Number(((failures + (outcome === "failure" ? 1 : 0)) / total).toFixed(3));
+	const successRate = Number(((successes + (outcome === "success" ? 1 : 0)) / total).toFixed(3));
+	return { attempt: attempts, reinjects, retryBudget: MAX_REINJECTS, outcome, successes, failures, failureRate, successRate };
+}
+
 export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg: SwarmMessage) {
 	const agent = state.agents[msg.to];
-	if (!agent) return { delivered: false, reason: "unknown agent" };
+	if (!agent) {
+		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "failure", reason: "unknown agent", probe: buildInjectionProbe(state, msg, "failure", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+		return { delivered: false, reason: "unknown agent" };
+	}
 	// Mailbox-only recipients (e.g. the orchestrator pseudo-agent) have no swarm tmux pane. The
 	// message is already persisted in the mailbox; treat this as successful mailbox delivery, not
 	// a tmux injection failure. The recipient surfaces it via the orchestrator auto-pump
 	// (pumpOrchestratorMailbox, on session_start/agent_settled/interval) or swarm_check_mailbox;
 	// callers must NOT pre-mark it delivered (see deliverMessageLocked) so the pump can surface it.
 	if (!agent.tmuxTarget || agent.tmuxTarget === "unknown") {
+		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "success", reason: "mailbox-only", probe: buildInjectionProbe(state, msg, "success", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
 		return { delivered: true, mailboxOnly: true, reason: "recipient has no tmux pane (mailbox-only)" };
 	}
-	if (agent.status !== "running") return { delivered: false, reason: "target agent not running" };
+	if (agent.status !== "running") {
+		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "failure", reason: "target agent not running", probe: buildInjectionProbe(state, msg, "failure", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+		return { delivered: false, reason: "target agent not running" };
+	}
 	// Issue D: a live pane that is NOT running pi (e.g. the shell after a crash/exit) must not be marked
 	// delivered — send-keys would just type the base64 line into a dead prompt. Keep it retryable
 	// ({delivered:false}) so reconcile re-injects once real pi is back, and use panePiLike for re-inject
 	// eligibility too. Fail-open on unknown commands (see isPanePiLike).
 	const panePi = await isPanePiLike(pi, agent.tmuxTarget);
-	if (!panePi.piLike) return { delivered: false, reason: `pane alive but not running pi (pane_current_command=${panePi.command || "?"})` };
+	if (!panePi.piLike) {
+		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "failure", reason: `pane alive but not running pi (pane_current_command=${panePi.command || "?"})`, probe: buildInjectionProbe(state, msg, "failure", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+		return { delivered: false, reason: `pane alive but not running pi (pane_current_command=${panePi.command || "?"})` };
+	}
 	const before = await capturePane(pi, p, msg.to, agent.tmuxTarget, `deliver-${msg.id}-before`);
 	await sendToPane(pi, agent.tmuxTarget, buildSystemDelivery(msg));
 	await sleep(SEND_SETTLE_MS);
 	const after = await capturePane(pi, p, msg.to, agent.tmuxTarget, `deliver-${msg.id}-after`);
+	await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "success", reason: "tmux send-keys succeeded", probe: buildInjectionProbe(state, msg, "success", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
 	return { delivered: true, mailboxOnly: false, before, after };
 }
 

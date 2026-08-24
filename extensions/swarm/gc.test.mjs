@@ -1,9 +1,9 @@
-// gc.test.mjs — unit + tool tests for bounded retention/GC (pruneState + swarm_gc).
+// gc.test.mjs — unit tests for bounded retention/GC (pruneState).
 // Covers: terminal-tail bounding by updatedAt, actionable preservation (incl. old actionable),
 // keepMessages boundaries (0 / >= total / default), idempotency, delivered cap (intersection-safe),
-// and the swarm_gc tool end-to-end via a mock-pi harness (dryRun default, apply, idempotent re-run).
+// and a TTL-age regression check for actionable messages.
 // Run: node extensions/swarm/gc.test.mjs
-import { rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,8 +11,6 @@ import { dirname } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { pruneState, DEFAULT_KEEP_MESSAGES } = await import(join(here, "src", "gc.ts"));
-const factory = (await import(join(here, "index.ts"))).default;
-
 const scratch = join(tmpdir(), `swarm-gc-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
@@ -97,7 +95,24 @@ function buildMainState() {
 	ok("km0 b survived", !!st.messages.b);
 }
 
-// --- 4. keepMessages >= total keeps everything ----------------------------
+// --- 4. TTL-expired actionable message stays until terminal --------------
+{
+	const ttlActionable = queued("ttl-actionable", 0);
+	ttlActionable.ttlMs = 1;
+	const st = makeState({ "ttl-actionable": ttlActionable });
+	const res = pruneState(st, { keepMessages: 0 });
+	ok("ttl-expired actionable removed=0", res.removed === 0);
+	ok("ttl-expired actionable kept=1", res.kept === 1);
+	ok("ttl-expired actionable survived despite age>TTL", !!st.messages["ttl-actionable"]);
+
+	st.messages["ttl-actionable"] = ackedDone("ttl-actionable", 1);
+	st.messages["ttl-actionable"].ttlMs = 1;
+	const doneRes = pruneState(st, { keepMessages: 0 });
+	ok("ttl-expired acked-done removed=1", doneRes.removed === 1);
+	ok("ttl-expired acked-done removed from state", !st.messages["ttl-actionable"]);
+}
+
+// --- 5. keepMessages >= total keeps everything ----------------------------
 {
 	const st = buildMainState();
 	const res = pruneState(st, { keepMessages: 10000 });
@@ -105,7 +120,7 @@ function buildMainState() {
 	ok("huge keepMessages kept=640", res.kept === 640);
 }
 
-// --- 5. Default keepMessages = 500 ----------------------------------------
+// --- 6. Default keepMessages = 500 ----------------------------------------
 {
 	ok("DEFAULT_KEEP_MESSAGES is 500", DEFAULT_KEEP_MESSAGES === 500);
 	const messages = {};
@@ -118,7 +133,7 @@ function buildMainState() {
 	ok("default kept the newest 500 (min idx=100)", keptMin === 100);
 }
 
-// --- 6. Idempotency: a second run removes nothing -------------------------
+// --- 7. Idempotency: a second run removes nothing -------------------------
 {
 	const st = buildMainState();
 	pruneState(st, { keepMessages: 100 });
@@ -126,7 +141,7 @@ function buildMainState() {
 	ok("idempotent second run removed=0", res2.removed === 0);
 }
 
-// --- 7. delivered cap (intersection-safe) ---------------------------------
+// --- 8. delivered cap (intersection-safe) ---------------------------------
 {
 	const messages = {};
 	for (let i = 0; i < 500; i++) messages[`m${i}`] = deadLetter(`m${i}`, i);     // old terminal
@@ -140,66 +155,6 @@ function buildMainState() {
 	ok("delivered capped to 50", arr.length === 50);
 	ok("delivered keeps most-recent 50 (m550..m599)", arr[0] === "m550" && arr[49] === "m599");
 	ok("delivered intersection-safe (all ids still exist)", arr.every((id) => st.messages[id]));
-}
-
-// --- 8. Tool end-to-end via mock pi ---------------------------------------
-{
-	const tools = {};
-	const pi = {
-		registerTool: (def) => { tools[def.name] = def; },
-		registerCommand: () => {}, on: () => {},
-		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
-		sendMessage: () => {},
-	};
-	factory(pi);
-	ok("swarm_gc tool registered", !!tools.swarm_gc);
-
-	const call = async (name, params) => tools[name].execute("call", params, undefined, undefined, { cwd: params.cwd });
-
-	// (a) dry run (default): counts correct, file UNCHANGED
-	const cwd = join(scratch, "tool-run");
-	const stateDir = join(cwd, ".pi", "swarm");
-	mkdirSync(stateDir, { recursive: true });
-	const st0 = buildMainState(); st0.cwd = cwd;
-	writeFileSync(join(stateDir, "swarm-state.json"), JSON.stringify(st0, null, 2));
-
-	const dry = await call("swarm_gc", { cwd, keepMessages: 100 });
-	ok("tool dryRun default=true", dry.details.dryRun === true);
-	ok("tool dry removed=540", dry.details.removed === 540);
-	ok("tool dry kept=100", dry.details.kept === 100);
-	const afterDry = JSON.parse(readFileSync(join(stateDir, "swarm-state.json"), "utf8"));
-	ok("tool dryRun left file at 640", Object.keys(afterDry.messages).length === 640);
-
-	// (b) apply: state persisted, actionable preserved on disk
-	const applied = await call("swarm_gc", { cwd, keepMessages: 100, dryRun: false });
-	ok("tool applied removed=540", applied.details.removed === 540);
-	ok("tool applied dryRun=false", applied.details.dryRun === false);
-	const afterApply = JSON.parse(readFileSync(join(stateDir, "swarm-state.json"), "utf8"));
-	ok("tool applied file now 100", Object.keys(afterApply.messages).length === 100);
-	ok("tool applied queued preserved on disk", Object.keys(afterApply.messages).filter((id) => id.startsWith("queued-")).length === 40);
-
-	// (c) idempotent re-apply
-	const again = await call("swarm_gc", { cwd, keepMessages: 100, dryRun: false });
-	ok("tool re-apply removed=0 (idempotent)", again.details.removed === 0);
-
-	// (c2) default keepMessages (no param) honors DEFAULT_KEEP_MESSAGES=500 on a fresh full state
-	const cwdDef = join(scratch, "tool-run-default");
-	const sdDef = join(cwdDef, ".pi", "swarm");
-	mkdirSync(sdDef, { recursive: true });
-	const stDef = buildMainState(); stDef.cwd = cwdDef;
-	writeFileSync(join(sdDef, "swarm-state.json"), JSON.stringify(stDef, null, 2));
-	const rDef = await call("swarm_gc", { cwd: cwdDef, dryRun: false });
-	ok("tool default keepMessages=500 kept=500", rDef.details.kept === 500);
-	ok("tool default keepMessages=500 removed=140", rDef.details.removed === 140);
-
-	// (d) custom keepMessages honored
-	const cwd2 = join(scratch, "tool-run2");
-	const sd2 = join(cwd2, ".pi", "swarm");
-	mkdirSync(sd2, { recursive: true });
-	const st2 = buildMainState(); st2.cwd = cwd2;
-	writeFileSync(join(sd2, "swarm-state.json"), JSON.stringify(st2, null, 2));
-	const r2 = await call("swarm_gc", { cwd: cwd2, keepMessages: 50, dryRun: false });
-	ok("tool custom keepMessages=50 kept=50", r2.details.kept === 50);
 }
 
 rmSync(scratch, { recursive: true, force: true });

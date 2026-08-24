@@ -377,10 +377,17 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 			const ageMs = nowMs - new Date(rec.createdAt).getTime();
 			const expired = rec.ttlMs !== undefined ? ageMs > rec.ttlMs : false;
 			const maxAttempts = rec.attempts >= MAX_ATTEMPTS;
+			const actionable = Boolean((rec.requiresAck && !rec.ackedAt) || (rec.requiresResponse && rec.response?.status !== "verified" && rec.response?.status !== "waived"));
 			const agent = st.agents[rec.to];
 			const hasTmuxPane = Boolean(agent?.tmuxTarget) && agent.tmuxTarget !== "unknown";
 			const agentRunning = agent?.status === "running" && hasTmuxPane ? await isTmuxRunning(pi, agent.tmuxTarget!) : false;
 			const mailboxOnly = Boolean(agent) && !hasTmuxPane;
+
+			if (expired && actionable && !maxAttempts) {
+				if (!options.dryRun) await trace(p, "reconcile.ttl.defer_actionable", { id: msgId, to: rec.to, ageMs, ttlMs: rec.ttlMs, requiresAck: rec.requiresAck, requiresResponse: rec.requiresResponse });
+				actions.push({ messageId: msgId, action: "ttl_stale", reason: `TTL expired but message is still actionable; awaiting explicit resolve from ${rec.to}` });
+				continue;
+			}
 
 			if (expired || maxAttempts) {
 				if (!options.dryRun) {
