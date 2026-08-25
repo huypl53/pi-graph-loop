@@ -80,6 +80,7 @@ Checklist:
 | --- | --- |
 | spawn/restart/register/pause/role changes | `src/agents.ts`, `src/identity.ts`, `src/hooks.ts` |
 | model pool, rotation, preflight, config discoverability | `src/pool.ts` |
+| task cancellation / supersession / late-update fencing | `src/tools/tasks.ts`, `src/taskgraph.ts`, `src/mailbox.ts`, `src/types.ts` |
 | mailbox append/read/inject/ack | `src/mailbox.ts`, `src/delivery.ts`, `src/reconcile.ts` |
 | graph transitions/closure/validation | `src/taskgraph.ts` |
 | slash command UX | `src/command.ts` |

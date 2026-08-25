@@ -820,9 +820,13 @@ Failure propagation for V1:
 - `failed` node blocks dependent nodes.
 - `rejected` or `changes_requested` review outcome should re-open the implementation node by setting it back to `ready` or assigning a follow-up implementation node.
 - `skipped` only satisfies dependencies if the workflow explicitly marks the dependency optional.
-- `cancelled` makes the task terminal unless waived by orchestrator.
+- `cancelled` (added in issue 3) marks the task terminal; every non-terminal node is transitioned
+  to `cancelled`, every active attempt is revoked, and every assignment message is superseded.
+  Already-terminal nodes (done/failed/skipped) are NOT mutated. After cancellation, all subsequent
+  `swarm_update_task` calls are rejected with `TASK_CANCELLED` (or `NODE_CANCELLED`), even from
+  the orchestrator. Re-open requires a separately-designed policy and is out of scope for this PR.
 
-`swarm_update_task` should enforce basic transitions, for example `pending -> assigned -> in_progress -> done|failed|blocked`; terminal states should not regress without an orchestrator override.
+`swarm_update_task` should enforce basic transitions, for example `pending -> assigned -> in_progress -> done|failed|blocked`; terminal states (including `cancelled`) should not regress without an orchestrator override.
 
 ## Orchestrator-directed replies
 

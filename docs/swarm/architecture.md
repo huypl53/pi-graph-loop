@@ -82,7 +82,13 @@ Primary code:
 ### 3. Task graph lifecycle
 Handles durable tasks, ready/assigned/in-progress/terminal node transitions,
 branch outcomes, assignment, closure derivation, shared context, runtime
-warnings, and declared rework edges that can re-open a failed/skipped node as `ready` without an orchestrator force-reset.
+warnings, and declared rework edges that can re-open a failed/skipped node as `ready` without an orchestrator force-reset. **Cancellation:** the orchestrator-only
+`swarm_update_task(force=true, cancelTask=true)` revokes every active attempt,
+transitions non-terminal nodes to `cancelled`, supersedes every assignment-class message,
+releases agent `activeTaskIds` + advisory edit locks, and sends informational cancellation notices.
+Late updates are rejected at the handler boundary (`TASK_CANCELLED`/`NODE_CANCELLED`);
+later ACKs on superseded assignment records are rejected (`ASSIGNMENT_SUPERSEDED`). Cancellation
+never infers semantic completion and never un-does a node that already finished.
 
 Primary code:
 - `src/taskgraph.ts`

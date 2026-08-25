@@ -274,7 +274,7 @@ It must not auto-assign or auto-spawn.
 
 The reminder must never claim the work is finished and must never set node state itself.
 
-#### 6. Cancellation and supersession semantics
+#### 6. Cancellation and supersession semantics — **COMPLETE**
 
 Define precisely what cancellation means:
 
@@ -286,6 +286,44 @@ Define precisely what cancellation means:
 | late result after cancellation | reject as stale, retain audit evidence |
 
 A worker should ACK cancellation. Cancellation must not leave it authorized to continue editing.
+
+**Phase 2 implementation (issue 3):** `swarm_update_task(force=true, cancelTask=true)` is the
+single orchestrator-only cancellation surface — no new `swarm_cancel_task` tool. On cancel the
+handler:
+
+1. Marks `task.status = "cancelled"` (sticky terminal).
+2. Iterates every node: revokes the active attempt (`attempt.status = "cancelled"`), transitions
+   the node to `cancelled` (skipping already-terminal nodes so real work is never un-done), and
+   calls `releaseNodeAssignment` to clear the assignee's `activeTaskIds` + any advisory edit lock
+   on that node.
+3. Calls `supersedeTaskAssignmentMessages` to mark every per-node `assignmentMessageId` and all
+   task-scoped `handoffs[kind=assign]` entries as superseded (waiving response debt). A record already
+   superseded by reassignment retains its original supersession reason as canonical audit history.
+4. Sends informational cancellation notices (requiresAck:false, requiresResponse:false) to every
+   pre-cancel active assignee.
+5. Returns the task-close PM auto-notify (now treats `cancelled` as closure-ish so the PM mailbox
+   surfaces it).
+
+Late updates are rejected at the handler boundary:
+
+- `swarm_update_task` checks `isTaskOrNodeCancelled` BEFORE attempt fencing; rejects with
+  `TASK_CANCELLED` or `NODE_CANCELLED`. Even an orchestrator `force=true` cannot revive a cancelled
+  task — re-open is a separately-designed policy, not in this PR.
+- `swarm_ack_message` already rejects progress ACKs on superseded assignment records with
+  `ASSIGNMENT_SUPERSEDED` (orchestrator may pass `waive=true`).
+- Late `swarm_send_message(replyTo=superseded)` is non-actionable (the message is waived; the
+  recipient check in `swarm_ack_message` already blocks it).
+
+Helper: `isTaskOrNodeCancelled(task, nodeId?)` (in `taskgraph.ts`) — used by the handler boundary
+and exposed for tests/UI. Constants: `CANCELLATION_REASON = "task_cancellation"` is the stable
+audit key stamped on `message.superseded.supersededBy` and `trace` events.
+
+Coverage: `extensions/swarm/cancellation.test.mjs` (**42 assertions across 14 real-handler
+failure-injection scenarios** — cancel during assigned/in-progress, late non-assignee mutation,
+late result/ACK, reassignment and historical-handoff supersession, duplicate delivery, audit
+persistence, resource + edit-lock release, legacy compatibility). Independent test/review and
+fresh default-config tmux/Pi UAT evidence are stored in
+[`cancellation-and-supersession-semantics`](../../.pi/swarm/tasks/cancellation-and-supersession-semantics/artifacts/).
 
 #### 7. Retry vs reassign distinction
 

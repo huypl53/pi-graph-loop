@@ -354,11 +354,11 @@ export function isAllowedNodeTransition(from: TaskNodeStatus, to: TaskNodeStatus
 }
 
 // Release an agent's active-task pointer and advisory edit locks when a node reaches a terminal-ish
-// state (done/failed/blocked/skipped). activeTaskIds is task-granular; re-assignment re-adds it.
+// state (done/failed/blocked/skipped/cancelled). activeTaskIds is task-granular; re-assignment re-adds it.
 export function releaseNodeAssignment(st: SwarmState, task: TaskState, nodeId: string) {
 	const node = task.nodes[nodeId];
 	if (!node || !node.assignee) return;
-	const isTerminalish = node.status === "done" || node.status === "failed" || node.status === "blocked" || node.status === "skipped";
+	const isTerminalish = node.status === "done" || node.status === "failed" || node.status === "blocked" || node.status === "skipped" || node.status === "cancelled";
 	if (!isTerminalish) return;
 	const agent = st.agents[node.assignee];
 	if (agent) {
@@ -370,20 +370,34 @@ export function releaseNodeAssignment(st: SwarmState, task: TaskState, nodeId: s
 	}
 }
 
-// Derive the authoritative task status from node states. Closure is a deterministic consequence of
+// True iff the task OR the named node is in the orchestrator-explicit cancelled state. Read-only;
+// used by `swarm_update_task` and `swarm_send_message` to reject late mutations at the handler
+// boundary before any state is touched. `nodeId` is optional; when omitted the task-level check runs.
+// A cancelled task remains cancelled forever unless an orchestrator re-opens it (no automatic reopen
+// path — re-open requires a deliberate swarm_update_task(force=true) + a separately-designed policy
+// not in this PR).
+export function isTaskOrNodeCancelled(task: TaskState, nodeId?: string): boolean {
+	if (task.status === "cancelled") return true;
+	if (!nodeId) return false;
+	const node = task.nodes[nodeId];
+	return Boolean(node && node.status === "cancelled");
+}
+
 // Derive the authoritative task status from node states. Closure is a deterministic consequence of
 // the last node transition: failed if any node failed; done iff every graph-terminal node is
 // done/skipped (and none failed); blocked if every active node is blocked; in_progress once any node
-// has started; ready before that. `cancelled` is orchestrator-explicit and never auto-derived here.
+// has started; ready before that. `cancelled` is orchestrator-explicit and never auto-derived here;
+// `cancelled` nodes are skipped from failed/done/blocked aggregations so cancellation does not infer
+// semantic completion of the underlying work.
 // Precedence matters: failed and done win over blocked (a task with a failed node reads "failed").
 export function computeTaskStatus(task: TaskState): TaskStatus {
-	const nodes = Object.values(task.nodes);
+	const nodes = Object.values(task.nodes).filter((n) => n.status !== "cancelled");
 	if (nodes.some((n) => n.status === "failed")) return "failed";
-	const terminals = Object.keys(task.nodes).filter((id) => isGraphTerminalNode(task, id)).map((id) => task.nodes[id]);
+	const terminals = Object.keys(task.nodes).filter((id) => isGraphTerminalNode(task, id) && task.nodes[id].status !== "cancelled").map((id) => task.nodes[id]);
 	if (terminals.length && terminals.every((n) => n.status === "done" || n.status === "skipped")) return "done";
 	// Task-level blocked: every active (non-terminal, non-pending) node is blocked => the task cannot
 	// make progress. Pure (derived from node states, not the possibly-stale task.currentNodes); resumable
-	// (a node leaving `blocked` returns the task to in_progress/done).
+	// (a node leaving `blocked` returns the task to in_progress/done). Cancelled nodes are excluded.
 	const active = nodes.filter((n) => n.status === "ready" || n.status === "assigned" || n.status === "in_progress" || n.status === "blocked");
 	if (active.length > 0 && active.every((n) => n.status === "blocked")) return "blocked";
 	const started = nodes.some((n) => n.status === "assigned" || n.status === "in_progress" || n.status === "blocked" || n.status === "done" || n.status === "failed" || n.status === "skipped");
@@ -395,7 +409,7 @@ export function applyTaskStatus(task: TaskState): { changed: boolean; terminal: 
 	if (task.status === "cancelled") return { changed: false, terminal: true };
 	const prev = task.status;
 	task.status = computeTaskStatus(task);
-	const terminal = task.status === "done" || task.status === "failed";
+	const terminal = task.status === "done" || task.status === "failed" || task.status === "cancelled";
 	return { changed: task.status !== prev, terminal };
 }
 

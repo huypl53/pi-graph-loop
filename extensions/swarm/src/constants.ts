@@ -4,6 +4,12 @@ import type { TaskNodeStatus } from "./types.ts";
 
 export const EXT = "swarm";
 
+// Cancellation reason: stamped on supersession records + traces when an orchestrator cancels a task.
+// Stable, never interpolated — used as a search key in audits.
+export const CANCELLATION_REASON = "task_cancellation";
+// Per-message supersession `by` value: also stable, search-friendly.
+export const MESSAGE_SUPERSEDED_BY_TASK_CANCELLATION = CANCELLATION_REASON;
+
 export const STATE_VERSION = 1;
 
 export const LOCK_STALE_MS = 60_000;
@@ -36,22 +42,25 @@ export const POOL_MAX_RETRIES = 2; // consecutive failures before cooldown
 export const SWARM_GUEST_ID = "swarm-guest";
 
 export const NODE_ICON: Record<TaskNodeStatus, string> = {
-	done: "✓", ready: "●", assigned: "●", in_progress: "●", blocked: "⚠", failed: "✗", skipped: "⊘", pending: "○",
+	done: "✓", ready: "●", assigned: "●", in_progress: "●", blocked: "⚠", failed: "✗", skipped: "⊘", pending: "○", cancelled: "⊗",
 };
 
 export const SAFE_ID_RE = /^[a-z0-9_-]+$/;
 
-// Allowed non-orchestrator node status transitions. Terminal states (done/failed/skipped) cannot
+// Allowed non-orchestrator node status transitions. Terminal states (done/failed/skipped/cancelled) cannot
 // regress without an orchestrator override. The orchestrator bypasses this map entirely.
+// `cancelled` is reachable from every non-terminal state by an orchestrator-explicit cancelTask
+// (a worker CANNOT cancel; cancelTask requires orchestrator authority + force). Workers attempting to
+// transition INTO cancelled are rejected with NODE_TRANSITION_FORBIDDEN.
 export const ALLOWED_NODE_TRANSITIONS: Record<string, Set<string>> = {
-	pending: new Set(["ready", "assigned", "blocked", "skipped", "failed"]),
-	ready: new Set(["assigned", "blocked", "skipped"]),
-	assigned: new Set(["in_progress", "done", "failed", "blocked", "ready"]),
-	in_progress: new Set(["done", "failed", "blocked"]),
-	blocked: new Set(["assigned", "in_progress", "ready", "skipped"]),
+	pending: new Set(["ready", "assigned", "blocked", "skipped", "failed", "cancelled"]),
+	ready: new Set(["assigned", "blocked", "skipped", "cancelled"]),
+	assigned: new Set(["in_progress", "done", "failed", "blocked", "ready", "cancelled"]),
+	in_progress: new Set(["done", "failed", "blocked", "cancelled"]),
+	blocked: new Set(["assigned", "in_progress", "ready", "skipped", "cancelled"]),
 };
 
-export const TERMINAL_NODE_STATUSES = new Set<TaskNodeStatus>(["done", "failed", "skipped"]);
+export const TERMINAL_NODE_STATUSES = new Set<TaskNodeStatus>(["done", "failed", "skipped", "cancelled"]);
 
 export const METRIC_ID_RE = /^[a-z0-9_-]+$/;
 

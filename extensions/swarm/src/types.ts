@@ -212,7 +212,7 @@ export type SwarmMessage = {
 
 export type TaskStatus = "draft" | "ready" | "in_progress" | "blocked" | "reviewing" | "validating" | "done" | "failed" | "cancelled";
 
-export type TaskNodeStatus = "pending" | "ready" | "assigned" | "in_progress" | "blocked" | "done" | "failed" | "skipped";
+export type TaskNodeStatus = "pending" | "ready" | "assigned" | "in_progress" | "blocked" | "done" | "failed" | "skipped" | "cancelled";
 
 export type TaskGateStatus = "open" | "passed" | "failed" | "waived";
 

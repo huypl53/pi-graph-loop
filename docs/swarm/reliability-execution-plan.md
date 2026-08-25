@@ -32,7 +32,7 @@ Bare `tsc` TS5097 caused by existing `.ts` import specifiers is not treated as a
 |---:|---|---|---|
 | 1 | Authority, initial-ready nudge, nudge-policy foundation | Enforce server-side `force` / cancellation authority; alert the PM about a newly-created unassigned start node; centralize only the dedupe/cooldown/cap contract needed by this work. | Complete: `reliability-hardening-phase-1` |
 | 2 | Assignment attempt / lease fencing | Add a durable assignment attempt identity and reject late updates/results from a superseded/reopened/reassigned attempt. No silent compatibility break. | Complete: `assignment-attempt-lease-fencing` |
-| 3 | Cancellation and supersession | Define cancellation as lease revocation, cancel/supersede in-flight assignment messages, release resources, reject late task mutations, and provide auditable recovery. | Queued |
+| 3 | Cancellation and supersession | Define cancellation as lease revocation, cancel/supersede in-flight assignment messages, release resources, reject late task mutations, and provide auditable recovery. | Complete: `cancellation-and-supersession-semantics` |
 | 4 | File ownership / parallel conflict policy | After leases exist, prevent unsafe overlapping concurrent write scopes or add explicit orchestrator-approved lock policy. | Queued |
 | 5 | Recovery attention and worker reminder | Add one decision-oriented, bounded worker reminder and a synthesized orchestrator attention view. It must rely on durable assignment/message state, not idle panes as semantic proof. | Queued |
 | 6 | Provider/pool preflight | Classify provider/model/tmux/pool failures before spawn/assignment and give actionable fallback/recovery output. | Complete: `pool-config-ux-and-preflight` |

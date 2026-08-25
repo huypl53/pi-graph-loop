@@ -147,7 +147,14 @@ orchestrator auto-pump** (per-process surfaced set; `check_mailbox(markDelivered
 cannot pre-empt a pump surface; a second orchestrator lane or validation `pi -p`
 run cannot starve the PM); **server-side RBAC**: `swarm_update_task(force=true)`
 and `cancelTask` are orchestrator-only (a non-orchestrator caller is rejected
-before any mutation); an **initial-ready recovery nudge** that surfaces a fresh
+before any mutation); **orchestrator-explicit task cancellation** via
+`swarm_update_task(force=true, cancelTask=true)` — revokes every active attempt,
+transitions non-terminal nodes to `cancelled`, supersedes every assignment
+message, releases agent `activeTaskIds` + advisory edit locks, sends
+informational cancellation notices, and rejects all later updates with
+`TASK_CANCELLED`/`NODE_CANCELLED` (with later ACKs on superseded assignment
+records rejected via `ASSIGNMENT_SUPERSEDED`); an **initial-ready recovery
+nudge** that surfaces a fresh
 task whose start node stays ready+unassigned past a short grace period to the
 orchestrator (bounded, idempotent, never auto-assigns); a repeatable
 **task-graph UAT** entrypoint at `scripts/swarm_task_uat.sh`; and a full **agent

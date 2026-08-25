@@ -6,10 +6,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
-import { TERMINAL_NODE_STATUSES } from "../constants.ts";
-import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, validateTaskGraph } from "../taskgraph.ts";
+import { TERMINAL_NODE_STATUSES, CANCELLATION_REASON } from "../constants.ts";
+import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, validateTaskGraph } from "../taskgraph.ts";
 import { currentAgentId } from "../session.ts";
-import { deliverMessageLocked, supersedeOpenAssignments } from "../mailbox.ts";
+import { deliverMessageLocked, supersedeOpenAssignments, supersedeTaskAssignmentMessages } from "../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, now, safeId, textResult } from "../utils.ts";
 import { ensureDirs, paths, readState, readTaskByRef, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
 import { ensureOrchestrator, isOrchestratorAuthority } from "../identity.ts";
@@ -427,6 +427,24 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const node = task.nodes[params.nodeId];
 				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId } });
 				const isOrch = isOrchestratorAuthority(me);
+				// Cancellation fence (issue 3, fix-1): once a task is cancelled, NO caller — not even the
+				// orchestrator — can mutate task or node state via this handler. The fence is the most
+				// authoritative gate and runs BEFORE ownership/attempt checks so task cancellation
+				// deterministically wins for any late worker mutation (a worker that isn't even the
+				// assignee still gets TASK_CANCELLED, not NODE_ASSIGNEE_MISMATCH, on a cancelled task).
+				// Re-open is a separately-designed policy (out of scope for this PR). Allow the
+				// cancelTask request itself through (the only mutation that returns ok on a cancelled
+				// task is a redundant cancel — handled below by checking `params.cancelTask` after the
+				// fence).
+				if (isTaskOrNodeCancelled(task, params.nodeId) && !params.cancelTask) {
+					const where = task.status === "cancelled" ? `Task ${taskId} is cancelled` : `Node ${params.nodeId} of task ${taskId} is cancelled`;
+					await traceTask(tp, "task.cancel.fenced", { taskId, nodeId: params.nodeId, by: me, requestedStatus: params.status });
+					await failTaskTool(tp, p, task.status === "cancelled" ? "TASK_CANCELLED" : "NODE_CANCELLED",
+						`${where}. No further task or node updates are accepted. To re-open, the orchestrator must explicitly restore the task via a separately-designed policy (out of scope).`,
+						{ taskId, nodeId: params.nodeId, taskStatus: task.status, nodeStatus: node.status, blocked: true, suggestedNextCall: { tool: "swarm_task_status", params: { taskId } } }
+					);
+				}
+
 				if (!isOrch && node.assignee !== me) await failTaskTool(tp, p, "NODE_ASSIGNEE_MISMATCH", `Node ${params.nodeId} is assigned to ${node.assignee || "(unassigned)"}, but current agent is ${me}.`, { taskId, nodeId: params.nodeId, expected: { assignee: node.assignee || null, allowedAction: "update your own assigned node or send a task message" }, received: { agentId: me, requestedStatus: params.status } });
 
 				// NEW: Attempt fencing validation (same-agent reassign protection)
@@ -502,11 +520,70 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				releaseNodeAssignment(st, task, params.nodeId);
 				const reopened = activateReworkNodes(task);
 				const closingAssignee = node.assignee || undefined; // persisted on the node (not cleared by release)
-				// Orchestrator-explicit cancellation: sticky terminal state. applyTaskStatus preserves an
-				// existing `cancelled`, so setting it here then calling applyTaskStatus keeps it cancelled and
-				// releases every agent's active-task pointer for this task.
+				// Orchestrator-explicit cancellation (issue 3): sticky terminal state. Strengthened to:
+				//   1. mark every active attempt in the task as `cancelled` (revoke the lease)
+				//   2. supersede every assignment-class message (waive response debt; late ACKs rejected)
+				//   3. transition every non-terminal node to `cancelled` so worker-side attempts fencing
+				//      + read-only task/graph renders reflect the new state immediately
+				//   4. notify each assignee (informational, requiresAck:false)
+				// applyTaskStatus preserves an existing `cancelled`, so we set it here and the rest of the
+				// derive path leaves it alone. releaseTaskFromAllAgents clears every assignee's activeTaskIds.
 				const cancelled = Boolean(params.cancelTask) && isOrch;
-				if (cancelled) task.status = "cancelled";
+				if (cancelled) {
+					task.status = "cancelled";
+					// Revoke every active attempt in the task. Cancelled attempts are NOT terminal in the
+					// success/failure sense — they're lease revocations; the audit trail stays intact.
+					let revokedAttempts = 0;
+					for (const [nId, n] of Object.entries(task.nodes)) {
+						if (n.activeAttemptId && Array.isArray(n.attemptHistory)) {
+							const activeAttempt = n.attemptHistory.find((a: any) => a.attemptId === n.activeAttemptId);
+							if (activeAttempt && activeAttempt.status === "active") {
+								activeAttempt.status = "cancelled";
+								activeAttempt.lastActivityAt = now();
+								revokedAttempts++;
+							}
+						}
+						// Transition non-terminal nodes to cancelled; leave already-terminal nodes (done/failed/skipped)
+						// alone so a node that genuinely finished before cancellation is NOT mutated — cancellation
+						// must not retroactively un-do real work.
+						if (n.status !== "done" && n.status !== "failed" && n.status !== "skipped" && n.status !== "cancelled") {
+							n.status = "cancelled";
+							n.lastActivityAt = now();
+							// Release the assignee's active-task pointer + advisory edit locks NOW that the node
+							// is terminal-ish (releaseNodeAssignment at the top ran before the status flip, so it
+							// skipped; we release here per-node as each is cancelled).
+							releaseNodeAssignment(st, task, nId);
+						}
+					}
+					// Supersede every assignment-class message in the task so late ACK/result attempts are
+					// rejected at the swarm_ack_message / swarm_send_message handler boundary.
+					const sup = await supersedeTaskAssignmentMessages(p, st, task, CANCELLATION_REASON, me);
+					await traceTask(tp, "task.cancel.revoke_all", { taskId, revokedAttempts, supersededMessages: sup.supersededIds.length, skipped: sup.skipped, by: me });
+					// Informational cancel notifications to each assignee — requiresAck:false so workers
+					// never accumulate response debt on a cancelled assignment. We only notify assignees
+					// of nodes that were active before cancellation; never on already-terminal nodes.
+					const notifiees = new Set<string>();
+					for (const n of Object.values(task.nodes)) {
+						if (n.assignee && n.assignee !== "orchestrator" && (n.status === "cancelled" || n.status === "assigned" || n.status === "in_progress")) {
+							notifiees.add(n.assignee);
+						}
+					}
+					for (const assigneeId of notifiees) {
+						try {
+							ensureOrchestrator(st, ctx.cwd, p);
+							await deliverMessageLocked(pi, ctx.cwd, p, st, {
+								to: assigneeId,
+								subject: `Assignment cancelled: ${task.taskId}`,
+								body: `Your work on task ${task.taskId} has been cancelled by the orchestrator (${me}). All active attempts are revoked and assignment messages are superseded.\n\nAction:\n- Stop work on this task immediately.\n- Do NOT call swarm_update_task for any node in this task — it will be rejected with TASK_CANCELLED.\n- Informational only; no acknowledgement required.`,
+								conversationId: `cancel:${task.taskId}`,
+								requiresAck: false,
+								requiresResponse: false,
+							});
+						} catch (err: any) {
+							await traceTask(tp, "task.cancel.notify_failed", { taskId, to: assigneeId, error: String((err as Error)?.message || err) });
+						}
+					}
+				}
 				let taskStatusChange = applyTaskStatus(task);
 				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
 				for (const nodeId of autoClosed.closed) releaseNodeAssignment(st, task, nodeId);
@@ -527,7 +604,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// mailbox-only (no tmux inject); requiresAck=false (informational; orchestrator pump surfaces
 				// it). Best-effort: never fails the update. NB: node-status mutation already happened above;
 				// this only sends a message.
-				const closureIsh = (s: TaskNodeStatus | undefined): boolean => s === "done" || s === "failed" || s === "blocked";
+				const closureIsh = (s: TaskNodeStatus | undefined): boolean => s === "done" || s === "failed" || s === "blocked" || s === "cancelled";
 				const closedNow = !closureIsh(prevStatus) && closureIsh(newStatus);
 				if (closedNow) {
 					ensureOrchestrator(st, ctx.cwd, p);

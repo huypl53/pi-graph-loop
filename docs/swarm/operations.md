@@ -59,6 +59,36 @@ Common first actions:
 - `swarm_reconcile`
 - `swarm_release_agent_task` for stale pointers after confirming reconcile results
 
+### Cancel a task (orchestrator-only)
+
+Cancel a stuck or obsolete task with the existing `swarm_update_task(force=true, cancelTask=true)`:
+
+```text
+swarm_update_task(taskId=<id>, nodeId=<any-node>, force=true, cancelTask=true)
+```
+
+This is the ONLY cancellation surface — no separate `swarm_cancel_task` tool was added. On cancel:
+
+- `task.status` becomes `cancelled` (sticky terminal; never auto-reopens).
+- Every non-terminal node is marked `cancelled`; already-terminal nodes (done/failed/skipped) are
+  left untouched so real work is never un-done.
+- Every active attempt lease is revoked (`attempt.status = "cancelled"`).
+- Every per-node assignment message is marked superseded (waived) so late ACKs/results are
+  non-actionable.
+- Agent `activeTaskIds` and advisory edit locks for affected nodes are released.
+- Informational cancellation notices are sent to the pre-cancel assignees.
+
+After cancellation:
+
+- Any `swarm_update_task` call on that task is rejected with `TASK_CANCELLED` (or `NODE_CANCELLED`),
+  even from the orchestrator. Re-opening requires a separately-designed policy.
+- A later ACK on a superseded assignment is rejected with `ASSIGNMENT_SUPERSEDED` (the orchestrator
+  may pass `waive=true` to accept it as waived).
+- The audit trail is preserved: task.json, per-task events, message records (marked superseded, not
+  deleted), and attempt history all remain readable.
+
+Un-cancelling is not supported in this release. To work on the same goal again, create a new task.
+
 ### Inspect or change agent roles
 
 ### Model pool (multi-provider rotation)

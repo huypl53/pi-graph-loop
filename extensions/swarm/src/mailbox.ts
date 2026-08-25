@@ -351,3 +351,51 @@ export async function supersedeOpenAssignments(p: Paths, st: SwarmState, task: T
 	}
 	return supersededIds;
 }
+
+// Mark every assignment-class message related to a task as superseded (per-node assignment message
+// ids from node.assignmentMessageId + handoff-assign message ids). Cancellation notices are
+// informational (requiresAck:false/requiresResponse:false) so the worker cannot generate response
+// debt on an obsolete assignment, but late progress ACKs are still rejected via the supersede
+// guard in swarm_ack_message. Returns the count of messages that were newly superseded.
+// Read-only on intent: mutates only MessageRecord.superseded fields + emits trace events; does not
+// touch messages.delivered, agent.activeTaskIds (handled separately), or node state.
+export async function supersedeTaskAssignmentMessages(p: Paths, st: SwarmState, task: TaskState, reason: string, by: string): Promise<{ supersededIds: string[]; skipped: number }> {
+	const supersededIds: string[] = [];
+	let skipped = 0;
+	const ts = now();
+	const trySupersede = async (mid: string | undefined, nodeId: string) => {
+		if (!mid) return;
+		if (mid.startsWith("__")) return; // never touch synthetic markers
+		const rec = st.messages[mid];
+		if (!rec) { skipped++; return; }
+		if (rec.status === "failed" || rec.status === "dead_letter") { skipped++; return; }
+		if (rec.superseded) { skipped++; return; }
+		rec.superseded = { at: ts, by, supersededBy: reason };
+		rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: "waived" as MessageResponseStatus, waivedAt: ts, waivedBy: by, lastError: undefined };
+		rec.updatedAt = ts;
+		supersededIds.push(mid);
+		await trace(p, "message.superseded", { id: mid, supersededBy: reason, taskId: task.taskId, nodeId, by });
+	};
+	// 1. Current assignment message ids on every node (canonical, set by swarm_assign_task).
+	for (const [nodeId, node] of Object.entries(task.nodes)) {
+		await trySupersede(node.assignmentMessageId, nodeId);
+	}
+	// 2. Historical assignment handoffs. `task.handoffs` is scoped to this task by construction
+	//    (only swarm_assign_task and swarm_task_message push to it, both keyed by taskId in the
+	//    message envelope), and historical assign entries do NOT carry `taskId` on the handoff row
+	//    itself — so we scope by membership in this task's `nodes` rather than by a handoff-row
+	//    taskId predicate. Superseding a prior assignment for the SAME task by construction is
+	//    exactly the right behavior; cancellation must supersede every historical assign handoff
+	//    for this task, not just the most-recent node.assignmentMessageId. This matches the
+	//    per-node behavior of supersedeOpenAssignments.
+	const nodeIds = new Set(Object.keys(task.nodes));
+	for (const h of task.handoffs || []) {
+		const rec = h as Record<string, unknown>;
+		if (rec.kind !== "assign") continue;
+		const messageId = typeof rec.messageId === "string" ? rec.messageId : undefined;
+		if (!messageId) continue;
+		const toNode = typeof rec.toNode === "string" && nodeIds.has(rec.toNode) ? rec.toNode : "(historical)";
+		await trySupersede(messageId, toNode);
+	}
+	return { supersededIds, skipped };
+}
