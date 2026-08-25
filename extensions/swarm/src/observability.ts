@@ -2,7 +2,6 @@ import { existsSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import type { Paths, TaskPaths, TaskState, SwarmAgent, SwarmState } from "./types.ts";
 import { computeReadyNodes, computeTaskClosure } from "./taskgraph.ts";
-import { loopStatusSnapshot } from "./loop.ts";
 
 export type EventSource = "swarm" | "task";
 
@@ -164,7 +163,7 @@ export function renderFlowSnapshot(
 	current: string[],
 	agents: Record<string, SwarmAgent>,
 	events: EventLine[],
-	opts: { index?: number; open?: number; stale?: number; loopLine?: string; eventLimit?: number } = {},
+	opts: { index?: number; open?: number; stale?: number; eventLimit?: number } = {},
 ): string {
 	const lines: string[] = [];
 	const header = `Flow${opts.index != null ? ` #${opts.index}` : ""} ${task.taskId} — ${task.title} [${task.status}] open=${opts.open ?? 0} stale=${opts.stale ?? 0}`;
@@ -178,7 +177,6 @@ export function renderFlowSnapshot(
 	} else {
 		lines.push("  (none)");
 	}
-	if (opts.loopLine) lines.push(`Loop: ${opts.loopLine}`);
 	lines.push(`Ready: ${ready.length ? ready.join(", ") : "(none)"}`);
 	lines.push(`Current: ${current.length ? current.join(", ") : "(none)"}`);
 	lines.push(`Events (last ${opts.eventLimit ?? events.length}):`);
@@ -197,18 +195,6 @@ export async function buildFlowSnapshot(
 ): Promise<string> {
 	const { ready, current } = computeReadyNodes(task);
 	const closure = computeTaskClosure(st, task, tp);
-	let loopLine: string | undefined;
-	if (task.loop?.enabled) {
-		try {
-			const loop = await loopStatusSnapshot(p, cwd, task.taskId);
-			if (loop.enabled) {
-				const phase = loop.loop ? `round=${loop.loop.currentRound} phase=${loop.loop.phase}` : loop.proposalState || "not_started";
-				loopLine = `${phase}${loop.paths.planArtifact ? ` plan=${loop.paths.planArtifact}` : ""}`;
-			}
-		} catch {
-			// read-only best effort
-		}
-	}
 	const events = await readRecentEvents(p, tp, limit);
-	return renderFlowSnapshot(task, ready, current, st.agents, events, { index, open: closure.openNodes, stale: closure.staleNodes, loopLine, eventLimit: limit });
+	return renderFlowSnapshot(task, ready, current, st.agents, events, { index, open: closure.openNodes, stale: closure.staleNodes, eventLimit: limit });
 }

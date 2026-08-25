@@ -23,7 +23,7 @@ factory(pi);
 let fail = 0;
 const ok = (name, cond) => { if (cond) console.log("  ok  ", name); else { fail++; console.error("  FAIL", name); } };
 
-for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg", "swarm-loop"]) {
+for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg"]) {
 	ok(`${name} registered`, typeof cmds[name]?.handler === "function");
 }
 
@@ -51,8 +51,6 @@ ok("/swarm-tasks list delegates to tasks list", /No tasks found/.test(notes.at(-
 await cmds["swarm-msg"].handler("", ctx);
 ok("/swarm-msg empty shows usage", /Usage: \/swarm-msg send/.test(notes.at(-1)?.msg || ""));
 
-await cmds["swarm-loop"].handler("", ctx);
-ok("/swarm-loop empty shows usage", /Usage: \/swarm-loop/.test(notes.at(-1)?.msg || ""));
 
 rmSync(cwd, { recursive: true, force: true });
 if (fail) { console.error(`\nCOMMAND ALIAS FAIL (${fail})`); process.exit(1); }

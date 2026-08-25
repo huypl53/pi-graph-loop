@@ -1,8 +1,6 @@
 // === swarm/constants.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { join, dirname, relative, sep } from "node:path";
 import type { TaskNodeStatus } from "./types.ts";
-import { reconcile } from "./reconcile.ts";
-import { reconcileLoopNudgesLocked } from "./loop.ts";
 
 export const EXT = "swarm";
 
@@ -108,10 +106,34 @@ export const PUMP_RETRIGGER_DELAY_MS = 60 * 1000;
 
 export const PUMP_RETRIGGER_MAX = 3;
 
-// Loop-watcher reconcile cadence. The orchestrator pump runs reconcileLoopNudgesLocked at most this often:
-// it scans loop-enabled tasks and nudges the orchestrator when a plan is recorded but the task graph is still
-// closed (the harness never reopens the graph — the orchestrator does). Bounded so a busy pump doesn't
-// re-scan task.json files every tick.
-export const LOOP_RECONCILE_INTERVAL_MS = 30 * 1000;
-
 export const MAX_STATUS_TASKS = 100;
+
+// === Recovery notification policy (reliability-roadmap Phase 1) ===
+// Unified, actually-enforced dedupe/cooldown/cap contract for recovery nudges sent to the
+// orchestrator. `sendNotifyLocked` in reconcile.ts is the single enforcement point: a nudge is only
+// sent when (a) a message with the same semantic key is not already open, (b) the sender-level
+// cooldown for that key template has elapsed, and (c) the per-task nudge cap is not exceeded.
+
+// Grace period: a freshly created task whose start node is ready + unassigned may stay quiet this
+// long before the initial-ready nudge fires.
+export const TASK_INITIAL_READY_GRACE_MS = 60_000;
+
+export const NOTIFY_DEFAULT_COOLDOWN_MS = 300_000; // 5 minutes between nudges of the same template
+
+export const NOTIFY_DEFAULT_MAX_NUDGES = 3; // per task+template cap before we stop reminding
+
+// Semantic dedupe key templates. Templates are formatted by formatNotifyKey (never interpolated at
+// runtime) so every code path shares one identifier space and cannot accidentally collide or drift.
+export const NOTIFY_KEY_INITIAL_READY = "task:{taskId}:nudge:initial-ready";
+export const NOTIFY_KEY_GRAPH_ADVANCE = "task:{taskId}:node:{nodeId}:nudge:assign";
+
+// Format a NOTIFY_KEY_* template with validated (safe-id) substitutions.
+export function formatNotifyKey(template: string, params: Record<string, string>): string {
+	let out = template;
+	for (const [k, v] of Object.entries(params)) {
+		if (!SAFE_ID_RE.test(v)) throw new Error(`UNSAFE_NOTIFY_KEY_PARAM: ${k}=${v}`);
+		out = out.replace(`{${k}}`, v);
+	}
+	if (out.includes("{")) throw new Error(`UNRESOLVED_NOTIFY_KEY_PARAM: ${out}`);
+	return out;
+}

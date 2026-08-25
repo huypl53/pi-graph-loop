@@ -10,6 +10,7 @@
 //
 // Run: node extensions/swarm/delivery.test.mjs
 import { isDeliveryFailureRetryable } from "./index.ts";
+import { responseMissingRecords } from "./src/mailbox.ts";
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.error("  FAIL:", name); } };
@@ -38,6 +39,17 @@ const liveRecord = {
 	lastAck: { by: "planner-new", status: "failed", note: "NODE_ASSIGNEE_MISMATCH ...", at: "2026-08-03T09:10:21.633Z" },
 };
 ok("live acked-failed record would NOT be re-injected by reconcile", isDeliveryFailureRetryable(liveRecord) === false);
+
+const trackingState = {
+	messages: {
+		m1: { id: "m1", to: "worker-1", requiresResponse: true, status: "failed", response: { status: "missing" }, lastAck: undefined },
+		m2: { id: "m2", to: "worker-1", requiresResponse: true, status: "failed", response: { status: "missing" }, lastAck: { by: "worker-1", status: "processing", at: "2026-01-01T00:00:00.000Z" } },
+		m3: { id: "m3", to: "worker-1", requiresResponse: true, status: "injected", response: { status: "verified" }, lastAck: { by: "worker-1", status: "done", resultMessageId: "r3", at: "2026-01-01T00:00:00.000Z" } },
+	},
+};
+ok("failed-without-ack stays out of response tracking", responseMissingRecords(trackingState, "worker-1").some((r) => r.id === "m1") === false);
+ok("failed-then-processing ack enters response tracking", responseMissingRecords(trackingState, "worker-1").some((r) => r.id === "m2") === true);
+ok("verified response is not missing", responseMissingRecords(trackingState, "worker-1").some((r) => r.id === "m3") === false);
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

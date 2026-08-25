@@ -25,7 +25,7 @@ const pi = {
 	},
 };
 factory(pi);
-for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg", "swarm-loop"]) {
+for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg"]) {
 	if (!cmds[name] || typeof cmds[name].getArgumentCompletions !== "function") {
 		console.error(`FAIL: /${name} command did not register getArgumentCompletions`);
 		process.exit(1);
@@ -61,7 +61,7 @@ const vals = async (prefix) => (await complete(prefix) ?? []).map((i) => i.value
 
 // 1. Empty prefix -> all subcommands (25 total incl. lifecycle cmds + panes + flow).
 const subs = await vals("");
-ok("empty lists all subcommands", subs.length === 27 && subs.includes("graph") && subs.includes("flow") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("loop") && subs.includes("panes") && subs.includes("pool"));
+ok("empty lists all subcommands", subs.length === 26 && subs.includes("graph") && subs.includes("flow") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("panes") && subs.includes("pool"));
 
 // 2. Partial subcommand filters by prefix.
 const stSubs = await vals("st");
@@ -116,14 +116,7 @@ ok("identity <space> -> reload|show", JSON.stringify(await vals("identity ")) ==
 ok("identity reload <space> -> agents", JSON.stringify((await vals("identity reload ")).sort()) === JSON.stringify(["identity reload planner", "identity reload reviewer"]));
 ok("identity show re -> reviewer", JSON.stringify(await vals("identity show re")) === JSON.stringify(["identity show reviewer"]));
 
-// 11. loop status|plan then task-id (id-only, not #).
-ok("loop <space> -> status|plan", JSON.stringify(await vals("loop ")) === JSON.stringify(["loop status", "loop plan"]));
-const loopTask = await vals(`loop status ${taskId.slice(0, 6)}`);
-ok("loop status <id-prefix> -> id form", JSON.stringify(loopTask) === JSON.stringify([`loop status ${taskId}`]));
-const loopNum = await complete("loop status 1");
-ok("loop status does NOT offer # form", JSON.stringify(loopNum) === JSON.stringify([]));
-
-// 12. no-arg subcommands yield nothing.
+// 11. no-arg subcommands yield nothing.
 ok("status <space> -> no suggestions", JSON.stringify(await complete("status ")) === JSON.stringify([]));
 
 // 12b. lifecycle agent-id subcommands.
@@ -172,8 +165,6 @@ ok("/swarm-tasks top-level verbs", JSON.stringify(await valsScoped("swarm-tasks"
 ok("/swarm-tasks status remaps task completion", JSON.stringify(await valsScoped("swarm-tasks", "status ")) === JSON.stringify(["status 1"]));
 ok("/swarm-msg only offers send", JSON.stringify(await valsScoped("swarm-msg", "")) === JSON.stringify(["send"]));
 ok("/swarm-msg send <space> -> agents", JSON.stringify((await valsScoped("swarm-msg", "send ")).sort()) === JSON.stringify(["send planner", "send reviewer"]));
-ok("/swarm-loop top-level verbs", JSON.stringify(await valsScoped("swarm-loop", "")) === JSON.stringify(["status", "plan"]));
-ok("/swarm-loop status remaps loop task-id completion", JSON.stringify(await valsScoped("swarm-loop", `status ${taskId.slice(0, 6)}`)) === JSON.stringify([`status ${taskId}`]));
 
 rmSync(scratch, { recursive: true, force: true });
 if (fail) { console.error(`\nCOMPLETION FAIL (${fail})`); process.exit(1); }

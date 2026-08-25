@@ -4,16 +4,15 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import type { IndexedTask, MessageResponseStatus, Paths, ReconcileAction, SwarmMessage, SwarmState, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, LOOP_RECONCILE_INTERVAL_MS, MAX_ATTEMPTS, MAX_REINJECTS, MAX_STATUS_TASKS, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
+import { ACK_MISSING_MS, formatNotifyKey, MAX_ATTEMPTS, MAX_REINJECTS, MAX_STATUS_TASKS, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
-import { deliver, deliverMessageLocked, findIdempotentMessage, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
+import { deliver, deliverMessageLocked, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
 import { ensureOrchestrator } from "./identity.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
-import { ackLoopNudgeLocked, reconcileLoopNudgesLocked } from "./loop.ts";
 
 export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task: TaskState): Promise<string[]> {
 	const warnings: string[] = [];
@@ -80,8 +79,7 @@ export function orchSession(st: SwarmState, nowMs: number): { ids: string[]; tri
 // node being ready-but-unassigned, it nudges the orchestrator with the exact assign call. Idempotent per
 // (task,node); auto-acked once the node is assigned/terminal. The harness never assigns (the orchestrator
 // is the actor) — it only surfaces the stall and the fix. Assumes the caller holds the state lock.
-async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, nodeId: string, role: string): Promise<void> {
-	const key = `task:${taskId}:node:${nodeId}:nudge:assign`;
+async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, nodeId: string, role: string, key: string): Promise<void> {
 	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) return; // idempotent: one assign nudge per node
 	try {
 		await deliverMessageLocked(pi, cwd, p, st, {
@@ -96,9 +94,18 @@ async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	}
 }
 
+function ackOrchestratorNudgeLocked(st: SwarmState, key: string, nowMs: number, note: string): void {
+	const rec = findIdempotentMessage(st, "orchestrator", "orchestrator", key) || Object.values(st.messages || {}).find((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+	if (rec && rec.requiresAck && !rec.ackedAt) {
+		const at = new Date(nowMs).toISOString();
+		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "orchestrator", status: "done", note, at } };
+		st.delivered["orchestrator"] = Array.from(new Set([...(st.delivered["orchestrator"] || []), rec.id]));
+	}
+}
+
 // Watcher entry point for mid-graph stalls. For every active (in_progress) task, find actionable nodes
 // (ready but unassigned) and nudge; ack any outstanding assign nudge whose node is no longer stalled.
-// Runs in the same throttled tick as the loop watcher. Read-only on task state (never assigns).
+// Read-only on task state (never assigns).
 async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<void> {
 	if (!existsSync(p.tasksDir)) return;
 	let entries: string[] = [];
@@ -116,15 +123,71 @@ async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string, p: Pat
 			...cr.current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
 		]);
 		for (const nodeId of Object.keys(task.nodes)) {
-			const key = `task:${taskId}:node:${nodeId}:nudge:assign`;
+			const key = formatNotifyKey(NOTIFY_KEY_GRAPH_ADVANCE, { taskId, nodeId });
 			const node = task.nodes[nodeId];
 			if (actionable.has(nodeId) && !node.assignee && !TERMINAL_NODE_STATUSES.has(node.status)) {
-				await sendGraphAdvanceNudgeLocked(pi, cwd, p, st, taskId, nodeId, node.role || "worker");
+				await sendGraphAdvanceNudgeLocked(pi, cwd, p, st, taskId, nodeId, node.role || "worker", key);
 			} else {
 				// Node assigned / terminal / not yet ready -> clear any outstanding assign nudge for it.
-				ackLoopNudgeLocked(st, key, nowMs, "auto-acked: node assigned/left ready");
+				ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node assigned/left ready");
 			}
 		}
+	}
+}
+
+// Initial-ready watcher (reliability-roadmap Phase 1, P0 #2): for every freshly created task whose
+// start node remains READY + unassigned beyond TASK_INITIAL_READY_GRACE_MS, send exactly one
+// idempotent action-required nudge to the orchestrator. Never auto-assigns, never auto-spawns, and
+// auto-clears as soon as the node leaves the `ready`+unassigned state. Honors the shared semantic
+// dedupe + per-task cap policy (NOTIFY_DEFAULT_MAX_NUDGES). Runs alongside the graph-advance watcher.
+export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<void> {
+	if (!existsSync(p.tasksDir)) return;
+	let entries: string[] = [];
+	try { entries = await readdir(p.tasksDir); } catch { return; }
+	for (const taskId of entries) {
+		const tp = taskPaths(p, taskId);
+		if (!existsSync(tp.taskJson)) continue;
+		let task: TaskState;
+		try { task = await readTaskState(tp.taskJson); } catch { continue; }
+		// Only act on tasks that have never progressed past the very first node. `in_progress` is handled
+		// by the graph-advance watcher; terminal states have no actionable start node.
+		if (task.status !== "ready") continue;
+		const startId = task.start;
+		const startNode = task.nodes[startId];
+		if (!startNode) continue;
+		if (startNode.status !== "ready" || startNode.assignee) continue;
+		const createdAt = task.createdAt ? new Date(task.createdAt).getTime() : nowMs;
+		const age = nowMs - createdAt;
+		const key = formatNotifyKey(NOTIFY_KEY_INITIAL_READY, { taskId });
+		if (age < TASK_INITIAL_READY_GRACE_MS) {
+			ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: still within grace period");
+			continue;
+		}
+		// Cap: stop nudging once the orchestrator has ignored the same key MAX times.
+		const existing = Object.values(st.messages || {}).filter((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+		if (existing.length >= NOTIFY_DEFAULT_MAX_NUDGES) continue;
+		if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) continue;
+		// Cooldown: never re-send within NOTIFY_DEFAULT_COOLDOWN_MS of the last send for the same key.
+		const last = existing.map((r) => r.createdAt || "").sort().pop() || "";
+		if (last && nowMs - new Date(last).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) continue;
+		await sendInitialReadyNudgeLocked(pi, cwd, p, st, task, startId, key);
+	}
+}
+
+async function sendInitialReadyNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, task: TaskState, startId: string, key: string): Promise<void> {
+	const taskId = task.taskId;
+	const startNode = task.nodes[startId];
+	const role = startNode.role || "worker";
+	try {
+		await deliverMessageLocked(pi, cwd, p, st, {
+			to: "orchestrator",
+			subject: `Task ${taskId} start node is ready but unassigned`,
+			body: `Task ${taskId} ("${task.title || taskId}") was created ${Math.max(1, Math.round((Date.now() - new Date(task.createdAt || Date.now()).getTime()) / 60000))} minute(s) ago but its start node \`${startId}\` (${role}) is still ready and unassigned.\n\nAction required:\n  swarm_assign_task(taskId="${taskId}", nodeId="${startId}")\n\nAlternative actions:\n  swarm_assign_task(taskId="${taskId}", nodeId="${startId}", force=true)   # orchestrator-only override\n  swarm_update_task(taskId="${taskId}", nodeId="${startId}", cancelTask=true, force=true)   # orchestrator-only cancel\n\n(Auto-clears once ${startId} is assigned or the task leaves the ready state.)`,
+			requiresAck: true,
+			idempotencyKey: key,
+		});
+	} catch (err: any) {
+		await trace(p, "task.initial_ready_nudge_failed", { taskId, nodeId: startId, error: String((err as Error)?.message || err) }).catch(() => {});
 	}
 }
 
@@ -141,18 +204,12 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		for (const [k, v] of Object.entries(st.orchestratorPumpSessions!)) {
 			if (k !== String(process.pid) && nowMs - new Date(v.lastAt).getTime() > PUMP_SESSION_TTL_MS) delete st.orchestratorPumpSessions![k];
 		}
-		// Harness-as-watcher: throttled loop reconcile — detect "plan recorded but task graph still closed"
-		// (and auto-ack once reopened). Runs every tick but scans task.json files at most every
-		// LOOP_RECONCILE_INTERVAL_MS. The harness never changes task/loop state; it only nudges the
-		// orchestrator (an agent) to act. Placed before the mailbox read so freshly-created nudges surface
-		// in the same tick.
-		if (!st.lastLoopReconcileAt || nowMs - new Date(st.lastLoopReconcileAt).getTime() > LOOP_RECONCILE_INTERVAL_MS) {
-			st.lastLoopReconcileAt = new Date(nowMs).toISOString();
-			try { await reconcileLoopNudgesLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "loop.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
-			// Mid-graph stall safety net: nudge the orchestrator to assign any ready-but-unassigned node in an
-			// in_progress task (the loop watcher drives iteration boundaries; this drives the nodes in between).
-			try { await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
-		}
+		// Mid-graph stall safety net: nudge the orchestrator to assign any ready-but-unassigned node in an
+		// in_progress task. The nudge is idempotent, so it is safe to run on every pump tick.
+		try { await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		// Fresh-task stall safety net: nudge the orchestrator when a start node is still ready + unassigned
+		// past the creation grace period. Also idempotent + read-only on task state.
+		try { await reconcileInitialReadyLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "task.initial_ready_reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		const sess = orchSession(st, nowMs)!;
 		const surfaced = new Set(sess.ids);
 		const triggeredAt = { ...(sess.triggeredAt ?? {}) };
@@ -360,7 +417,7 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 
 		for (const [msgId, rec] of Object.entries(st.messages)) {
 			if (rec.status === "dead_letter") continue;
-			if (rec.requiresResponse && rec.status !== "queued" && rec.status !== "failed" && rec.response?.status !== "verified" && rec.response?.status !== "waived") {
+			if (isResponseTrackingActive(rec) && rec.response?.status !== "verified" && rec.response?.status !== "waived") {
 				const agent = st.agents[rec.to];
 				if (!options.dryRun) {
 					rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: rec.response?.status === "sent" ? "sent" : "missing", missingAt: rec.response?.missingAt || now(), lastError: `response_missing: awaiting verified result from ${rec.to}` };

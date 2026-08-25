@@ -1,12 +1,13 @@
 // === swarm/pool.ts — model pool: weighted rotation + health cooldown + failover picks ===
 import { mkdir, readFile, stat, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import type { ModelSlot, Paths, PoolHealthState, PoolSlotHealth, ProviderErrorKind, RotationConfig, RotationStrategy } from "./types.ts";
+import type { ModelSlot, Paths, PoolHealthState, PoolSlotHealth, PreflightError, PreflightResult, ProviderErrorKind, RotationConfig, RotationStrategy, SwarmSettings } from "./types.ts";
 import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
-import { readSwarmSettings } from "./session.ts";
+import { currentModel, currentProvider, readSwarmSettings } from "./session.ts";
 import { atomicWriteFile, trace } from "./state.ts";
+import { sleep } from "./utils.ts";
 
 // Health state lives next to swarm-state.json so every swarm process (orchestrator, workers,
 // spawned agents) shares one view of which slots are benched.
@@ -79,6 +80,147 @@ export function effectiveConfig(): { slots: ModelSlot[]; rotation: Required<Rota
 			maxRetries: r.maxRetries ?? POOL_MAX_RETRIES,
 		},
 	};
+}
+
+// Canonical JSON format shown by /swarm pool help and copied verbatim into suggestions + docs.
+// Kept in lock-step with the schema in docs/swarm/operations.md (see "Model pool configuration").
+export const POOL_FORMAT_EXAMPLE = {
+	modelPool: [
+		{ model: "gpt-5.4-mini", provider: "openai", weight: 50 },
+		{ model: "claude-sonnet-4", provider: "anthropic", weight: 30 },
+		{ model: "glm-5.1", provider: "zai-coding-cn", weight: 0 },
+	],
+	rotation: { strategy: "weighted", cooldownMs: 900000, maxRetries: 2 },
+} as const;
+
+// A singleton config (only defaultModel + defaultProvider) is treated as an OBSERVABLE implicit
+// singleton pool of size 1 — it remains the canonical backward-compatible path for users who do not
+// need rotation. This function answers "what does the implicit singleton look like right now?"
+// without rewriting the user's settings file. Used by `/swarm pool show`, `/swarm pool help`, and
+// preflight (so the singleton path is described in the same vocabulary as an explicit pool).
+export function implicitSingletonPool(): { slots: ModelSlot[]; rotation: Required<RotationConfig>; source: "settings" | "env" | "constants" } {
+	const settings = readSwarmSettings();
+	const model = currentModel();
+	const provider = currentProvider(model);
+	const source = settings.defaultModel || settings.defaultProvider
+		? "settings"
+		: (process.env.PI_SWARM_DEFAULT_MODEL || process.env.PI_SWARM_DEFAULT_PROVIDER)
+			? "env"
+			: "constants";
+	return {
+		slots: [{ model, provider, weight: 1 }],
+		rotation: effectiveConfig().rotation,
+		source,
+	};
+}
+
+// Decide if a settings file represents the explicit-pool shape OR the legacy singleton shape OR
+// is empty. Read-only: never rewrites the file. Used by `/swarm pool show|validate|help` and tests.
+export type SettingsShape =
+	| { kind: "empty" }
+	| { kind: "singleton"; defaultModel?: string; defaultProvider?: string; source: "extensions.swarm" | "swarm" }
+	| { kind: "explicit-pool"; slots: number; rotation?: RotationConfig; source: "extensions.swarm" | "swarm" }
+	| { kind: "both"; slots: number; rotation?: RotationConfig; singleton: { defaultModel?: string; defaultProvider?: string }; source: "extensions.swarm" | "swarm" };
+
+export function classifySwarmSettings(cwd = process.cwd()): SettingsShape {
+	let raw: any = null;
+	try {
+		const file = join(cwd, ".pi", "settings.json");
+		if (!existsSync(file)) return { kind: "empty" };
+		raw = JSON.parse(readFileSync(file, "utf8"));
+	} catch {
+		return { kind: "empty" };
+	}
+	const fromExt = raw?.extensions?.swarm;
+	const fromTop = raw?.swarm;
+	const cfg = (fromExt && typeof fromExt === "object" ? { ...fromExt, source: "extensions.swarm" as const } : null)
+		|| (fromTop && typeof fromTop === "object" ? { ...fromTop, source: "swarm" as const } : null);
+	if (!cfg) return { kind: "empty" };
+	const source: "extensions.swarm" | "swarm" = cfg.source;
+	const slots = Array.isArray(cfg.modelPool) ? cfg.modelPool.length : 0;
+	const rotation = (cfg.rotation && typeof cfg.rotation === "object") ? cfg.rotation as RotationConfig : undefined;
+	const hasSingleton = typeof cfg.defaultModel === "string" || typeof cfg.defaultProvider === "string";
+	if (slots && hasSingleton) return { kind: "both", slots, rotation, singleton: { defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider }, source };
+	if (slots) return { kind: "explicit-pool", slots, rotation, source };
+	if (hasSingleton) return { kind: "singleton", defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider, source };
+	return { kind: "empty" };
+}
+
+// Validation errors caught by `/swarm pool validate` and `preflightSpawn`. Each carries a stable
+// `kind` so the formatter can render an actionable suggestion; `field` is purely informational.
+export type PoolValidationError = { kind: string; field?: string; message: string };
+
+// Validate a settings shape WITHOUT mutating the file. Returns [] on success; otherwise an array
+// of structured errors suitable for `/swarm pool validate` rendering. Read-only.
+export function validateSwarmSettings(cwd = process.cwd()): { ok: boolean; errors: PoolValidationError[]; shape: SettingsShape } {
+	const errors: PoolValidationError[] = [];
+	let shape: SettingsShape;
+	let raw: any = null;
+	try {
+		const file = join(cwd, ".pi", "settings.json");
+		if (!existsSync(file)) {
+			shape = { kind: "empty" };
+			return { ok: true, errors: [], shape }; // empty is valid (use defaults)
+		}
+		raw = JSON.parse(readFileSync(file, "utf8"));
+	} catch (err: any) {
+		shape = { kind: "empty" };
+		errors.push({ kind: "settings_unreadable", message: `Could not parse .pi/settings.json: ${err?.message || err}` });
+		return { ok: false, errors, shape };
+	}
+	const fromExt = raw?.extensions?.swarm;
+	const fromTop = raw?.swarm;
+	const cfg = (fromExt && typeof fromExt === "object" ? fromExt : null) || (fromTop && typeof fromTop === "object" ? fromTop : null);
+	if (!cfg) {
+		shape = { kind: "empty" };
+		return { ok: true, errors: [], shape };
+	}
+	const source: "extensions.swarm" | "swarm" = fromExt ? "extensions.swarm" : "swarm";
+	const slots = Array.isArray(cfg.modelPool) ? cfg.modelPool : null;
+	const rotation = (cfg.rotation && typeof cfg.rotation === "object") ? cfg.rotation : null;
+	if (slots) {
+		const seen = new Set<string>();
+		slots.forEach((s: any, idx: number) => {
+			if (!s || typeof s !== "object") {
+				errors.push({ kind: "slot_not_object", field: `modelPool[${idx}]`, message: `modelPool[${idx}] must be an object` });
+				return;
+			}
+			const model = typeof s.model === "string" ? s.model.trim() : "";
+			const provider = typeof s.provider === "string" ? s.provider.trim() : "";
+			if (!model) errors.push({ kind: "slot_empty_model", field: `modelPool[${idx}].model`, message: `Slot #${idx + 1} has an empty model name` });
+			if (s.weight !== undefined) {
+				if (typeof s.weight !== "number" || !Number.isFinite(s.weight) || s.weight < 0) {
+					errors.push({ kind: "slot_bad_weight", field: `modelPool[${idx}].weight`, message: `Slot #${idx + 1} weight must be a non-negative number (0 = fallback-only)` });
+				}
+			}
+			const key = `${provider || "(default)"}/${model}`;
+			if (seen.has(key) && model) errors.push({ kind: "slot_duplicate", field: `modelPool[${idx}]`, message: `Duplicate slot: ${key}` });
+			if (model) seen.add(key);
+		});
+	}
+	if (rotation) {
+		if (rotation.strategy !== undefined && !["weighted", "round-robin", "sticky"].includes(rotation.strategy)) {
+			errors.push({ kind: "rotation_bad_strategy", field: "rotation.strategy", message: `rotation.strategy must be one of weighted | round-robin | sticky (got ${JSON.stringify(rotation.strategy)})` });
+		}
+		if (rotation.cooldownMs !== undefined && (typeof rotation.cooldownMs !== "number" || !Number.isFinite(rotation.cooldownMs) || rotation.cooldownMs < 0)) {
+			errors.push({ kind: "rotation_bad_cooldown", field: "rotation.cooldownMs", message: `rotation.cooldownMs must be a non-negative number of milliseconds` });
+		}
+		if (rotation.maxRetries !== undefined && (typeof rotation.maxRetries !== "number" || !Number.isFinite(rotation.maxRetries) || rotation.maxRetries < 1)) {
+			errors.push({ kind: "rotation_bad_maxretries", field: "rotation.maxRetries", message: `rotation.maxRetries must be a positive integer (>= 1)` });
+		}
+	}
+	const hasSingleton = typeof cfg.defaultModel === "string" || typeof cfg.defaultProvider === "string";
+	const slotsCount = slots ? slots.length : 0;
+	if (slotsCount && hasSingleton) {
+		shape = { kind: "both", slots: slotsCount, rotation: rotation || undefined, singleton: { defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider }, source };
+	} else if (slotsCount) {
+		shape = { kind: "explicit-pool", slots: slotsCount, rotation: rotation || undefined, source };
+	} else if (hasSingleton) {
+		shape = { kind: "singleton", defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider, source };
+	} else {
+		shape = { kind: "empty" };
+	}
+	return { ok: errors.length === 0, errors, shape };
 }
 
 function inCooldown(h: PoolSlotHealth | undefined, nowMs: number): boolean {
@@ -237,4 +379,160 @@ export async function poolStatus(p: Paths): Promise<{ slots: Array<ModelSlot & {
 			return { ...slot, key, health, inCooldown: until > nowMs, cooldownRemainingMs: Math.max(0, until - nowMs) };
 		}),
 	};
+}
+
+// Pure helper: would `effectiveConfig()`'s pool currently produce an eligible pick? Used by
+// preflightSpawn to classify "pool_exhausted" before spawning. Returns the reason string pickSlot
+// WOULD use (or undefined if no pool is configured at all — caller treats that as "use singleton").
+export async function previewPickable(p: Paths): Promise<{ configured: boolean; reason?: string; wouldPick?: PickResult }> {
+	const { slots } = effectiveConfig();
+	if (!slots.length) return { configured: false };
+	const r = await pickSlot(p);
+	if (r) return { configured: true, reason: r.reason, wouldPick: r };
+	// No eligible slot: rephrase the pickSlot() empty result for the operator.
+	const h = await readPoolHealth(p);
+	const nowMs = Date.now();
+	const total = slots.length;
+	const benched = slots.filter((s) => {
+		const until = h.slots[slotKey(s)]?.cooldownUntil;
+		return typeof until === "string" && new Date(until).getTime() > nowMs;
+	}).length;
+	return { configured: true, reason: `all ${total} slot(s) benched (${benched} in cooldown); wait for cooldown to expire or /swarm pool clear <slot>` };
+}
+
+// Preflight a spawn/restart. Validates (1) settings shape — if a pool is configured but every slot
+// has bad data, we report it; (2) the chosen (or defaulted) model resolves to a non-empty string and
+// its provider is set; (3) tmux is alive for the swarm session — spawnAgent does its own tmux
+// recovery on miss, but we surface it early so the operator gets an actionable message instead of
+// a half-spawned window. Pure (no side effects), read-only — never mutates settings or pool state.
+// Errors are classified with stable `kind` values for the formatter to render suggestions.
+export type PreflightOptions = {
+	/** Explicit model the caller wants; if undefined, pool/default resolution runs. */
+	model?: string;
+	/** Explicit provider; if undefined, derived from the resolved model. */
+	provider?: string;
+	/** Tmux session the spawn will land in (so we don't probe tmux for nothing). */
+	tmuxSession?: string;
+};
+
+export async function preflightSpawn(p: Paths, opts: PreflightOptions = {}): Promise<PreflightResult> {
+	// (1) Settings shape + integrity: surface any invalid config so we don't pretend everything
+	// is fine when the user has a typo in their pool.
+	const validation = validateSwarmSettings();
+	if (!validation.ok) {
+		const first = validation.errors[0];
+		return {
+			ok: false,
+			error: {
+				kind: "invalid_settings",
+				message: `Settings validation failed: ${first.message}`,
+				suggestion: `Run /swarm pool validate for the full list of issues; fix .pi/settings.json under the \`swarm\` (or \`extensions.swarm\`) key.`,
+				errors: validation.errors.map((e) => `${e.field || "config"}: ${e.message}`),
+			},
+		};
+	}
+
+	// (2) Pool eligibility: if a pool is configured, can it yield a slot right now?
+	const preview = await previewPickable(p);
+	if (preview.configured) {
+		if (!preview.wouldPick) {
+			return {
+				ok: false,
+				error: {
+					kind: "pool_exhausted",
+					message: `All configured model-pool slots are in cooldown. ${preview.reason || ""}`.trim(),
+					suggestion: `Wait for cooldown to expire (/swarm pool list), or /swarm pool clear <provider/model>.`,
+				},
+			};
+		}
+	}
+
+	// (3) Model/provider resolution: figure out what would actually be used and sanity-check it.
+	let model = opts.model;
+	let provider = opts.provider;
+	if (!model) {
+		if (preview.wouldPick) {
+			model = preview.wouldPick.slot.model;
+			provider = provider || preview.wouldPick.slot.provider || currentProvider(model);
+		} else {
+			model = currentModel();
+			provider = provider || currentProvider(model);
+		}
+	} else {
+		provider = provider || currentProvider(model);
+	}
+	if (!model || !model.trim()) {
+		return {
+			ok: false,
+			error: {
+				kind: "unknown_model",
+				model: model || "",
+				suggestion: `Set swarm.defaultModel in .pi/settings.json, or PI_SWARM_DEFAULT_MODEL in your shell.`,
+			},
+		};
+	}
+	if (!provider || !provider.trim()) {
+		return {
+			ok: false,
+			error: {
+				kind: "provider_not_found",
+				provider: provider || "",
+				suggestion: `Set swarm.defaultProvider in .pi/settings.json, or PI_SWARM_DEFAULT_PROVIDER in your shell.`,
+			},
+		};
+	}
+
+	// (4) tmux session liveness: only when the caller passes a session. Skip otherwise — `register`
+	// paths adopt an existing pane instead of needing a session.
+	if (opts.tmuxSession) {
+		const tmuxCheck = await checkTmuxSession(opts.tmuxSession);
+		if (!tmuxCheck.ok) {
+			return {
+				ok: false,
+				error: {
+					kind: "tmux_not_running",
+					message: tmuxCheck.message || `tmux session '${opts.tmuxSession}' is not running.`,
+					suggestion: `Start tmux: tmux new-session -d -s ${opts.tmuxSession} (or set TMUX to a running server).`,
+				},
+			};
+		}
+	}
+
+	return { ok: true, resolved: { model, provider, fromPool: Boolean(preview.wouldPick) } };
+}
+
+// Render a PreflightError as an actionable multi-line message suitable for a `notify`/`throw`.
+// Used by both spawnAgent and restartAgent to surface a uniform error to the user.
+export function formatPreflightError(err: PreflightError): string {
+	switch (err.kind) {
+		case "unknown_model":
+			return `PREFLIGHT: unknown model '${err.model}'.\nAction: ${err.suggestion}\nRun /swarm pool validate to check your full config.`;
+		case "provider_not_found":
+			return `PREFLIGHT: provider '${err.provider}' is not configured.\nAction: ${err.suggestion}\nRun /swarm pool validate to check your full config.`;
+		case "pool_exhausted":
+			return `PREFLIGHT: all model-pool slots are benched.\nReason: ${err.message}\nAction: ${err.suggestion}\nCurrent pool status: /swarm pool list`;
+		case "tmux_not_running":
+			return `PREFLIGHT: tmux is not running.\nReason: ${err.message}\nAction: ${err.suggestion}`;
+		case "tmux_create_failed":
+			return `PREFLIGHT: tmux window creation failed.\nReason: ${err.message}\nAction: ${err.suggestion}`;
+		case "invalid_settings":
+			return `PREFLIGHT: invalid swarm settings.\n${(err.errors || []).map((e) => `  - ${e}`).join("\n")}\nAction: ${err.suggestion}`;
+		default: {
+			// Exhaustiveness fallback: keep TS happy without `any`. Should be unreachable.
+			const _exhaustive: never = err;
+			return `PREFLIGHT: ${String((_exhaustive as any)?.message ?? "spawn aborted")}`;
+		}
+	}
+}
+
+// Lazy tmux-session probe (no tmux exec when not needed). Pure helper to keep preflightSpawn
+// self-contained; uses $TMUX awareness rather than spawning `tmux has-session` so it stays fast
+// and side-effect free. The real tmux probe is intentionally left to spawnAgent (which performs
+// the actual new-session fallback).
+export async function checkTmuxSession(session: string): Promise<{ ok: boolean; message?: string }> {
+	if (!session || session === "unknown") return { ok: false, message: "tmux session name is unknown (no swarm started yet; run /swarm init)." };
+	if (!process.env.TMUX && !process.env.PI_SWARM_TMUX_OK) {
+		return { ok: false, message: `No $TMUX env var set — the swarm normally runs inside tmux. Session requested: ${session}.` };
+	}
+	return { ok: true };
 }

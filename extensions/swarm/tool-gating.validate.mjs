@@ -93,7 +93,7 @@ ok("opt-in end: swarm tools re-enabled", swarmActive().length === swarmCount, `$
 
 console.log("\n[6] Slash COMMAND is still registered for a guest (escape hatch intact)");
 ok("/swarm command registered", commands.includes("swarm"));
-ok("scoped /swarm-* commands registered", ["swarm-agents", "swarm-tasks", "swarm-msg", "swarm-loop"].every((c) => commands.includes(c)), `[${commands.join(",")}]`);
+ok("scoped /swarm-* commands registered", ["swarm-agents", "swarm-tasks", "swarm-msg"].every((c) => commands.includes(c)), `[${commands.join(",")}]`);
 
 rmSync(cwd, { recursive: true, force: true });
 console.log(`\nTOOL-GATING ${fail ? "FAIL" : "PASS"} (${pass} passed, ${fail} failed)`);

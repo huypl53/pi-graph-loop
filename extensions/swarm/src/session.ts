@@ -2,7 +2,7 @@
 import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
-import type { ModelSlot, RotationConfig, SwarmSettings } from "./types.ts";
+import type { ModelSlot, RotationConfig, RotationStrategy, SwarmSettings } from "./types.ts";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, EXT, FAST_MODEL, FAST_PROVIDER, SWARM_GUEST_ID } from "./constants.ts";
 import { ensureOrchestrator } from "./identity.ts";
 

@@ -34,6 +34,46 @@ export function buildDefaultGraph(allowedFiles: string[]): { start: string; node
 	};
 }
 
+function edgeMatchesActivation(task: TaskState, edge: TaskEdge) {
+	const from = task.nodes[edge.from];
+	if (!from) return false;
+	if (from.outcome !== edge.when) return false;
+	if (from.status === "done") return true;
+	return Boolean(edge.rework && (from.status === "failed" || from.status === "skipped"));
+}
+
+export function activateReworkNodes(task: TaskState) {
+	const reopened: string[] = [];
+	for (const [nodeId, node] of Object.entries(task.nodes)) {
+		if (!(node.status === "failed" || node.status === "skipped")) continue;
+		const incoming = task.edges.filter((edge) => edge.to === nodeId);
+		if (!incoming.some((edge) => edge.rework && edgeMatchesActivation(task, edge))) continue;
+		node.status = "ready";
+		node.assignee = undefined;
+		node.assignmentMessageId = undefined;
+		// NEW: Clear activeAttemptId but preserve attemptHistory for audit trail
+		if (node.activeAttemptId && node.attemptHistory) {
+			const priorAttempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
+			if (priorAttempt) {
+				if (priorAttempt.status === "active") {
+					priorAttempt.status = "superseded";
+					priorAttempt.outcome = undefined;
+				}
+				// Audit annotation: record that the rework reopen ended this attempt's lease. The terminal
+				// status (failed/skipped/completed) is preserved; supersededBy marks how the lease ended.
+				priorAttempt.supersededAt ||= now();
+				priorAttempt.supersededBy = "<rework>";
+			}
+		}
+		delete node.activeAttemptId;
+		node.outcome = null;
+		delete node.staleAt;
+		node.lastActivityAt = now();
+		reopened.push(nodeId);
+	}
+	return reopened;
+}
+
 export function computeReadyNodes(task: TaskState) {
 	const ready: string[] = [];
 	const current = new Set<string>();
@@ -48,7 +88,9 @@ export function computeReadyNodes(task: TaskState) {
 		if (node.status !== "pending") continue;
 		const depsOk = (node.dependsOn || []).every((depId) => {
 			const dep = task.nodes[depId];
-			return dep && (dep.status === "done" || dep.status === "skipped");
+			if (!dep) return false;
+			if (dep.status === "done" || dep.status === "skipped") return true;
+			return (incoming.get(nodeId) || []).some((edge) => edge.from === depId && edgeMatchesActivation(task, edge));
 		});
 		if (!depsOk) continue;
 		if (nodeId === task.start) {
@@ -61,10 +103,7 @@ export function computeReadyNodes(task: TaskState) {
 		// AND-join: ready as soon as dependencies are done/skipped. Nodes WITH branch edges still require
 		// a satisfied edge (from done + outcome matches when), so outcome-based branching is preserved.
 		if (!edges.length) { ready.push(nodeId); current.add(nodeId); continue; }
-		const edgeOk = edges.some((edge) => {
-			const from = task.nodes[edge.from];
-			return from && from.status === "done" && from.outcome === edge.when;
-		});
+		const edgeOk = edges.some((edge) => edgeMatchesActivation(task, edge));
 		if (edgeOk) {
 			ready.push(nodeId);
 			current.add(nodeId);
@@ -435,7 +474,7 @@ export function autoCloseOrchestratorTerminalNodes(task: TaskState) {
 	return { closed };
 }
 
-export function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget: string, note?: string) {
+export function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget: string, note?: string, attemptId?: string) {
 	const node = task.nodes[nodeId];
 	const lines: string[] = [];
 	lines.push(`You are assigned task ${task.taskId}, node ${nodeId} (${node.role}).`);
@@ -446,6 +485,8 @@ export function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget
 	if (node.readArtifacts && node.readArtifacts.length) lines.push(`Read artifacts: ${node.readArtifacts.join(", ")}`);
 	if (node.writeArtifacts && node.writeArtifacts.length) lines.push(`Write artifacts: ${node.writeArtifacts.join(", ")}`);
 	if (task.acceptanceCriteria.length) lines.push(`Acceptance: ${task.acceptanceCriteria.join("; ")}`);
+	// NEW: Include attempt token in assignment contract for fencing
+	if (attemptId) lines.push(`Attempt token: ${attemptId}`);
 	if (note) lines.push(`Note: ${note}`);
 	lines.push(`When finished, call swarm_update_task with taskId=${task.taskId}, nodeId=${nodeId}, status=done (or failed/blocked) and an outcome. Ack this assignment message too.`);
 	return lines.join("\n");

@@ -43,12 +43,14 @@ export function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status
 	};
 }
 
+export function isResponseTrackingActive(rec: Pick<MessageRecord, "status" | "lastAck" | "requiresResponse">) {
+	return rec.requiresResponse && rec.status !== "dead_letter" && rec.status !== "queued" && (rec.status !== "failed" || Boolean(rec.lastAck));
+}
+
 export function responseMissingRecords(st: SwarmState, agentId: string) {
 	return Object.values(st.messages || {}).filter((m) =>
 		m.to === agentId &&
-		m.requiresResponse &&
-		m.status !== "dead_letter" &&
-		m.status !== "failed" &&
+		isResponseTrackingActive(m) &&
 		m.response?.status !== "verified" &&
 		m.response?.status !== "waived"
 	);

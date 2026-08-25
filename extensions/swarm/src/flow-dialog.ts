@@ -4,7 +4,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { readRecentEvents } from "./observability.ts";
-import { loopStatusSnapshot } from "./loop.ts";
 import { readState, readTaskState, taskPaths } from "./state.ts";
 import { computeReadyNodes, computeTaskClosure, hasOutgoingTaskEdge } from "./taskgraph.ts";
 import type { Paths, SwarmAgent, SwarmState, TaskPaths, TaskState } from "./types.ts";
@@ -54,7 +53,6 @@ export interface FlowDialogData {
 	staleCount: number;
 	ready: string[];
 	current: string[];
-	loopLine?: string;
 	attention: FlowAttentionItem[];
 	lanes: FlowLaneItem[];
 	otherAgentsCount: number;
@@ -111,9 +109,9 @@ function statusIcon(status: string): string {
 function laneIcon(agent?: SwarmAgent, missing = false): string {
 	if (missing) return "!";
 	if (!agent) return "·";
-	if (agent.status === "running") return "●";
-	if (agent.status === "idle") return "○";
-	if (agent.status === "stopped") return "✗";
+	if (agent.runtimeStatus === "busy" || agent.runtimeStatus === "tool_running") return "●";
+	if (agent.runtimeStatus === "idle" || agent.runtimeStatus === "starting") return "○";
+	if (agent.status === "stopped" || agent.runtimeStatus === "stopped") return "✗";
 	return "·";
 }
 function freshnessLabel(refreshedAt: string): { label: string; stale: boolean } {
@@ -371,8 +369,10 @@ async function collectNodeMessages(p: Paths, task: TaskState, st: SwarmState, no
 	messages.push(...baseFiltered);
 	for (const handoff of task.handoffs || []) {
 		if (handoff.toNode === nodeId || handoff.fromNode === nodeId) {
-			const rec = st.messages[handoff.messageId];
-			if (rec && !messages.find((m) => m.messageId === handoff.messageId)) push(handoff.messageId, rec, `handoff: ${handoff.fromNode || "?"} → ${handoff.toNode || "?"}`);
+			const handoffId = typeof handoff.messageId === "string" ? handoff.messageId : "";
+			if (!handoffId) continue;
+			const rec = st.messages[handoffId];
+			if (rec && !messages.find((m) => m.messageId === handoffId)) push(handoffId, rec, `handoff: ${handoff.fromNode || "?"} → ${handoff.toNode || "?"}`);
 		}
 	}
 	// Reverse direction: pull replies (replyTo chains) from st.messages so the conversation shows both sides.
@@ -735,7 +735,7 @@ function collectNodeRows(task: TaskState, st: SwarmState): Row[] {
 		const refs = collectNodeMessageRefs(task, nodeId);
 		const records = refs.map((id) => ({ id, rec: st.messages[id] })).filter((item) => item.rec);
 		records.sort((a, b) => Date.parse(a.rec.updatedAt || a.rec.createdAt) - Date.parse(b.rec.updatedAt || b.rec.createdAt));
-		const latest = records.findLast((item) => !item.rec.superseded) || records[records.length - 1];
+		const latest = [...records].reverse().find((item) => !item.rec.superseded) || records[records.length - 1];
 		const lane = node.assignee ? st.agents[node.assignee] : undefined;
 		const gateEntries = Object.entries(task.gates || {}).map(([gateId, gate]) => `${gateId}:${gate.status}`).join(", ") || "-";
 		const messageChain = records.length ? records.map((item) => `${item.id} ${messageLifecyclePhrase(item.rec)}${item.rec.superseded ? " (superseded)" : ""}`).join(" · ") : "-";
@@ -754,7 +754,7 @@ function collectNodeRows(task: TaskState, st: SwarmState): Row[] {
 }
 
 function collectLaneRows(task: TaskState, lanes: FlowLaneItem[], expandOthers: boolean, otherAgentsCount: number, st?: SwarmState): Row[] {
-	const rows = lanes.map((lane) => ({
+	const rows: Row[] = lanes.map((lane) => ({
 		section: "LANES" as Section,
 		id: lane.id,
 		title: lane.id,
@@ -811,20 +811,12 @@ async function buildPickerEntries(p: Paths, cwd: string): Promise<PickerEntry[]>
 export async function collectFlowData(p: Paths, cwd: string, task: TaskState, tp: TaskPaths, st: SwarmState, eventLimit: number): Promise<FlowDialogData> {
 	const { ready, current } = computeReadyNodes(task);
 	const closure = computeTaskClosure(st, task, tp);
-	let loopLine: string | undefined;
-	try {
-		const loop = await loopStatusSnapshot(p, cwd, task.taskId);
-		if (loop.enabled) {
-			const phase = loop.loop ? `round=${loop.loop.currentRound} phase=${loop.loop.phase}` : loop.proposalState || "not_started";
-			loopLine = `${phase}${loop.paths.planArtifact ? ` plan=${loop.paths.planArtifact}` : ""}`;
-		}
-	} catch { /* best-effort */ }
 	const attention = buildAttentionItems(task, tp, st).sort((a, b) => severityRank(a.severity) - severityRank(b.severity));
 	const { lanes, otherAgentsCount } = buildLanes(task, st, attention, false);
 	const events = await readRecentEvents(p, tp, eventLimit);
 	const refreshedAt = now();
 	const fresh = freshnessLabel(refreshedAt);
-	return { refreshedAt, freshnessLabel: fresh.label, stale: fresh.stale, task, tp, st, open: closure.openNodes, staleCount: closure.staleNodes, ready, current, loopLine, attention, lanes, otherAgentsCount, events, eventLimit, closure };
+	return { refreshedAt, freshnessLabel: fresh.label, stale: fresh.stale, task, tp, st, open: closure.openNodes, staleCount: closure.staleNodes, ready, current, attention, lanes, otherAgentsCount, events, eventLimit, closure };
 }
 
 type MaybeSnap = FlowDialogData | null;
@@ -1187,7 +1179,7 @@ export class FlowDialog implements Component {
 		const ttl = title.length + 8 > W ? ` swarm flow · ${snap.task.taskId.slice(0, Math.max(8, W - 58))}… · ${snap.task.status} ` : title;
 		const out: string[] = [];
 		out.push(this.fg("border", "╭─") + this.fg("accent", ttl) + this.fg("border", "─".repeat(Math.max(1, W - 3 - visibleWidth(ttl))) + "╮"));
-		out.push(this.fg("border", "│ ") + this.pad(this.fg("dim", `open=${snap.open} stale=${snap.staleCount}${snap.loopLine ? ` · loop ${snap.loopLine}` : ""}`), innerW) + this.fg("border", " │"));
+		out.push(this.fg("border", "│ ") + this.pad(this.fg("dim", `open=${snap.open} stale=${snap.staleCount}`), innerW) + this.fg("border", " │"));
 		if (this.filterMode || this.filter) out.push(this.fg("border", "│ ") + this.pad(this.fg("accent", `/ ${this.filter}${this.filterMode ? "▏" : ""}`), innerW) + this.fg("border", " │"));
 		return out;
 	}

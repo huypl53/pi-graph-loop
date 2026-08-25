@@ -43,8 +43,7 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "trace", description: "Show trace file path" },
 	{ name: "capture", description: "Capture an agent's tmux pane: <id>" },
 	{ name: "identity", description: "reload|show an agent's identity" },
-	{ name: "loop", description: "status|plan an iteration loop" },
-	{ name: "pool", description: "Model pool status: list | cooldown <slot> <ms> | clear <slot>" },
+	{ name: "pool", description: "Model pool: list | show | validate | help | preview-preflight | cooldown <slot> <ms> | clear <slot>" },
 ];
 
 const SCOPED_COMMANDS: Record<string, { name: string; description: string; canonical: string }[]> = {
@@ -75,10 +74,6 @@ const SCOPED_COMMANDS: Record<string, { name: string; description: string; canon
 	"swarm-msg": [
 		{ name: "send", description: "Send a message: <to> <body>", canonical: "send" },
 	],
-	"swarm-loop": [
-		{ name: "status", description: "Show loop status for a task", canonical: "loop status" },
-		{ name: "plan", description: "Record a next-iteration loop plan", canonical: "loop plan" },
-	],
 };
 
 const GRAPH_FORMATS = ["text", "mermaid", "json"];
@@ -86,7 +81,6 @@ const RUNTIME_FLAGS = ["runtime", "--runtime", "-r"];
 const ROLE_KINDS = ["orchestrator", "planner", "reviewer", "tester", "implementer", "worker", "observer"];
 const IDENTITY_SUBS = ["reload", "show"];
 const MAILBOX_SUBS = ["reset"];
-const LOOP_SUBS = ["status", "plan"];
 const REGISTER_FLAGS = ["--kind", "--model", "--provider", "--inject", "--no-inject"];
 const STOP_FLAGS = ["--force", "--no-kill"];
 const ROLE_FLAGS = ["--kind", "--caps"];
@@ -131,7 +125,7 @@ function startsWith(word: string, prefix: string): boolean {
 /**
  * Task picker. graph/task/next/validate accept an index OR a task-id (resolveTaskArg),
  * so by default we offer the "#" form when the word is empty/numeric and the id form
- * otherwise. loop status|plan take a raw task-id only, so pass { idOnly: true }.
+ * otherwise.
  */
 async function taskSuggestions(
 	p: Paths,
@@ -282,11 +276,6 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 					return [...here, ...(await agentSuggestions(p, cwd, b, currentWord))];
 				}
 				if (tokens.length >= 3) return flagSuggestions(MAILBOX_RESET_FLAGS, b, currentWord);
-				return [];
-			case "loop":
-				if (tokens.length === 1) return simple(LOOP_SUBS, b, currentWord);
-				if (tokens.length === 2 && LOOP_SUBS.includes(tokens[1]))
-					return await taskSuggestions(p, b, currentWord, { idOnly: true });
 				return [];
 			case "init":
 			case "list":

@@ -5,10 +5,18 @@ import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Paths, SwarmAgent, SwarmState } from "./types.ts";
 import { MEMORY_POLICY_DOC } from "./constants.ts";
-import { currentModel, currentProvider } from "./session.ts";
+import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { identityPath, mailboxPath, paths, trace } from "./state.ts";
 import { now, safeId } from "./utils.ts";
 import { tmux } from "./tmux.ts";
+
+// Centralized authority check used by every server-side mutation that depends on identity. Phase 1
+// deliberately keeps this strict (orchestrator-only); expanded admin roles live in a later roadmap
+// issue. Any tool that allows `force`/cancellation must consult this helper instead of trusting
+// caller-supplied parameters.
+export function isOrchestratorAuthority(agentId: string = currentAgentId()): boolean {
+	return agentId === "orchestrator";
+}
 
 // The orchestrator is a human-driven coordinating session with no dedicated swarm tmux pane.
 // Ensure it always has a routable pseudo-agent record + mailbox so swarm_send_message(to=orchestrator)

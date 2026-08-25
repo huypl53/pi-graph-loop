@@ -3,11 +3,11 @@ import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_M
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import type { Paths, ReusableAgentMatch, SwarmAgent, SwarmState } from "./types.ts";
+import type { Paths, PreflightError, ReusableAgentMatch, SwarmAgent, SwarmState } from "./types.ts";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, FAST_MODEL, SPAWN_SETTLE_MS } from "./constants.ts";
 import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux } from "./tmux.ts";
 import { childPiArgs, currentModel, currentProvider } from "./session.ts";
-import { pickSlot, poolStatus } from "./pool.ts";
+import { pickSlot, poolStatus, preflightSpawn, formatPreflightError } from "./pool.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, shellQuote, sleep } from "./utils.ts";
 import { identityPath, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
 import { identityPrompt, writeEffectiveIdentity } from "./identity.ts";
@@ -31,6 +31,16 @@ export async function mailboxKickoffPrompt(p: Paths, st: SwarmState, id: string)
 export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string }) {
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
 	if (state.agents[id]?.status === "running") throw new Error(`Agent already exists and is running: ${id}`);
+	// Preflight: validate settings + pool eligibility + tmux prereqs BEFORE we commit a swarm-state
+	// record. Read-only — never mutates settings or pool health; surfaces classified errors so the
+	// operator gets an actionable message instead of a half-spawned window. The tmux session probe
+	// here is best-effort; spawnAgent itself still attempts new-session fallback below.
+	const preflight = await preflightSpawn(p, { model: input.model, provider: input.provider, tmuxSession: state.tmuxSession });
+	if (preflight.ok === false) {
+		// Discriminated union: TS narrows preflight to { ok: false; error: PreflightError } here.
+		const err: PreflightError = preflight.error;
+		throw new Error(formatPreflightError(err));
+	}
 	// Model resolution: explicit input wins; otherwise the model pool (if configured) picks a
 	// healthy slot via weighted/rr/sticky rotation; otherwise the single default.
 	let model = input.model;
@@ -315,6 +325,15 @@ export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, stat
 	existing.status = "stopped"; // satisfy spawnAgent's "already running" guard before it overwrites the record
 	existing.updatedAt = now();
 	await trace(p, "agent.restart.kill", { agentId, ...kill });
+	// Preflight (restart): same checks as spawn, but before we commit to a new spawn. Pool failover
+	// already plans a replacement slot; preflight catches the case where the replacement is also bad
+	// (e.g. all slots benched, tmux down) so we fail fast instead of leaving a half-restarted agent.
+	const preflight = await preflightSpawn(p, { model: opts.model, provider: opts.provider, tmuxSession: state.tmuxSession });
+	if (preflight.ok === false) {
+		// Discriminated union: TS narrows preflight to { ok: false; error: PreflightError } here.
+		const err: PreflightError = preflight.error;
+		throw new Error(formatPreflightError(err));
+	}
 	const roleKind = existing.roleKindExplicit ? existing.roleKind : undefined;
 	// Pool failover: if the caller signals the old slot failed (rotateFromSlot = slot key), or the
 	// recorded slot is currently benched, let spawnAgent re-pick from the pool instead of reusing it.

@@ -402,13 +402,13 @@ Examples:
 
 ### Assignment idempotency & supersede
 
-Assignment (`swarm_assign_task`) is **idempotent per task/node/assignee/attempt**: an exact retry of the same assignment reuses the existing message (no duplicate, `message.idempotent_reuse` trace) and the node records the canonical current assignment as `node.assignmentMessageId`. When a new assignment supersedes prior open ones for the same task/node (e.g. a reassign after stale-status repair bumped the attempt), the older still-open assignment messages are stamped `superseded` and their `response.status` becomes `waived` (`message.superseded` trace) — so they are excluded from `response_missing` nagging and reuse blocking without special-case reconcile code. `node.messageIds[]` keeps the full audit history; `assignmentMessageId` is the single completable current assignment.
+Assignment (`swarm_assign_task`) is **idempotent per task/node/assignee/attempt**: an exact retry of the same assignment reuses the existing message (no duplicate, `message.idempotent_reuse` trace) and the node records the canonical current assignment as `node.assignmentMessageId`. When a new assignment supersedes prior open ones for the same task/node (e.g. a reassign after stale-status repair bumped the attempt), the older still-open assignment messages are stamped `superseded` and their `response.status` becomes `waived` (`message.superseded` trace) — so they are excluded from `response_missing` nagging and reuse blocking without special-case reconcile code. `node.messageIds[]` keeps the full audit history; `assignmentMessageId` is the single completable current assignment. If an assignment initially fails tmux delivery but the worker later surfaces it or acks `processing`, the message stays response-tracked until the worker sends a verified result and acks `done` with `resultMessageId`.
 
 **Retries do not require a duplicate response.** `swarm_ack_message` rejects a `done`/`processing` ack on a superseded assignment with `ASSIGNMENT_SUPERSEDED` (it points at the current assignment), so an implementer replying to an old assignment cannot double-complete. A `failed` ack is always allowed (informational); the orchestrator can override with `waive=true` to accept a superseded assignment as `waived`. `requiresResponse` semantics remain intact on the current assignment.
 
 ### Stale & reassignment cleanup
 
-**Reassign semantics.** When a node is reassigned, the harness clears the prior owner's state so it cannot pollute the new assignment: a fresh `swarm_assign_task` deletes any prior `node.staleAt` (`task.stale.cleared` trace; `swarm_update_task` also clears it on active re-entry to `assigned`/`in_progress`/`ready`); the old assignment message is superseded + waived (excluded from `response_missing` and reuse blocking); the old assignee's `activeTaskIds` is released. The shutdown/settle dying-agent scan only claims a node while the agent is its **canonical** owner — it skips nodes where `node.assignee !== agentId`, where the canonical `assignmentMessageId` is missing/superseded, or where that canonical message is addressed to a different agent. Thus an old owner that shuts down or settles after a reassign is not reported as still holding the node and does not stamp `staleAt` onto the new owner. `staleAt` is advisory only; `swarm_reconcile` may re-stamp it if the new owner actually goes idle.
+**Reassign semantics.** When a node is reassigned, the harness clears the prior owner's state so it cannot pollute the new assignment: a fresh `swarm_assign_task` deletes any prior `node.staleAt` (`task.stale.cleared` trace; `swarm_update_task` also clears it on active re-entry to `assigned`/`in_progress`/`ready`); the old assignment message is superseded + waived (excluded from `response_missing` and reuse blocking); the old assignee's `activeTaskIds` is released. Declared rework edges also re-enter work without an orchestrator force-reset: when a terminal `failed`/`skipped` node is the target of a satisfied `rework` edge, the engine can reopen it as `ready` so the next assignment is a normal graph transition, not a manual task reset. The shutdown/settle dying-agent scan only claims a node while the agent is its **canonical** owner — it skips nodes where `node.assignee !== agentId`, where the canonical `assignmentMessageId` is missing/superseded, or where that canonical message is addressed to a different agent. Thus an old owner that shuts down or settles after a reassign is not reported as still holding the node and does not stamp `staleAt` onto the new owner. `staleAt` is advisory only; `swarm_reconcile` may re-stamp it if the new owner actually goes idle.
 
 ## Shared task state
 
@@ -435,6 +435,8 @@ Rules:
 3. `task.json` should remain compact; large output goes under `artifacts/`.
 4. Updates must be scoped: an agent may update its assigned node, write declared artifacts, and add evidence/risks/questions related to that node. Cross-node changes require orchestrator authority or a dedicated graph tool transition.
 5. Downstream agents should read prior node artifacts plus `sharedContext` before acting.
+
+**Legacy note.** The file-backed metric/run/memory and iteration-session material below is retained for historical context only. The packaged swarm core no longer exposes the experimentation tools or `/swarm loop`, so treat the passages that follow as archived design notes rather than current supported behavior.
 
 **Metric / run / memory V1 linkage.** The file-backed metric/run/memory layer (`.pi/swarm/metrics/`, `runs/runs.jsonl`, `memory/memory.jsonl`) is separate from the task graph and changes **no graph behavior**. Run records may optionally link to a task via `taskId`/`nodeId`; when a run is tied to a graph, callers should also stamp `sharedContext`/`evidence`, but `runs.jsonl` remains the authoritative metric/evidence store. Memory promotion is evidence-gated (source run must be `pass`/`approved` with existing, readable evidence refs and a reconstructable git commit or diff) and never advances a node. See `docs/swarm.md` (Metric / run / memory V1) and the `swarm_metric_designer` skill.
 
@@ -1542,7 +1544,7 @@ Pass criteria:
 - Cover happy path, test failure/fix loop, review rejected/rework loop, agent unavailable/dead-letter, and bad tool-call recovery.
 - Assert task graph state, graph print output, validation output, artifacts, message ACKs, and traces.
 
-## Task-graph iteration proposal loop (V1.5)
+## Archived task-graph iteration proposal loop (V1.5)
 
 > Distinct from the **metric-contract iteration loop V1** (`swarm_iteration_*`, which optimizes runs against a metric contract). This V1.5 layer is a **task-graph** wrapper: after a loop-enabled task closes terminal-done, it collects improvement proposals from a fixed agent pool and lets the orchestrator record the next-iteration plan.
 
@@ -1593,16 +1595,17 @@ Loop `phase` transitions: `idle → collecting_proposals → awaiting_plan → p
 
 1. **Terminal-done close hook** — inside `swarm_update_task`, when a loop-enabled task becomes terminal **done**, `kickoffLoopIfEnabled` runs as a post-close side effect (atomic with the close; failures are traced, never thrown). It is a strict no-op when `loop` is absent/disabled, the task is not `done`, an active round already exists, or `maxRounds` is reached.
 2. **Proposal fanout** — one `requiresResponse`+`requiresAck` message per configured proposal agent (`conversationId = task:<taskId>:loop:<round>`), with a deterministic idempotency key. Unknown agents are recorded as `skipped` (never throw). Mailbox-only recipients (e.g. agents with no tmux pane) are delivered mailbox-only.
-3. **Orchestrator nudge** — immediately after fanout, an informational, mailbox-only, no-ack message is sent to the orchestrator stating the round started, the proposal agents / message ids / statuses, and the instruction to inspect `swarm_loop_status` then call `swarm_loop_plan` before the next iteration. (There is no event hook for "all replies received", so this nudge is necessary; it is sent for loop-enabled tasks only.)
-4. **Orchestrator synthesis pause** — the orchestrator reads `swarm_loop_status` (read-only), which reports `proposalState` = `collecting_proposals` (replies outstanding) → `ready_to_plan` (replies in) → `planned`, then records the plan.
-5. **Plan recording** — `swarm_loop_plan` (the only write tool) writes `artifacts/next-plan.md`, advances loop state to `planned`, appends `history.jsonl`.
-6. **Best-effort refresh (internal)** — as part of `swarm_loop_plan`, for each `refreshAgent`: a `tmux /new` context reset for live panes, then identity reload+injection. Failures are captured per-agent into `refreshResults` and **never corrupt loop state**.
+3. **Orchestrator nudge** — immediately after fanout, an informational, mailbox-only, no-ack message is sent to the orchestrator stating the round started and that the proposal loop is in progress. (There is no event hook for "all replies received", so this nudge was necessary in the legacy design.)
+4. **Orchestrator synthesis pause** — the orchestrator waited for all proposals to return, then recorded the next plan.
+5. **Plan recording** — the legacy write path wrote `artifacts/next-plan.md`, advanced loop state to `planned`, and appended `history.jsonl`.
+6. **Best-effort refresh (internal)** — the legacy plan step also refreshed configured agents. Failures were captured per-agent and never corrupted loop state.
 
-### Tools and commands
+### Legacy note
 
-- `swarm_loop_status(taskId)` — **read-only**: config snapshot, current phase/round, `proposalState` (`collecting_proposals` → `ready_to_plan` → `planned`), per-proposal request/ack/response/reply state, plan artifact path, refresh results, history path. Reports `disabled` vs `enabled-not-started` vs the live summary.
-- `swarm_loop_plan(taskId, summary, nextSteps?, artifact?, refresh?)` — the only write tool: records the plan, writes `next-plan.md`, advances to `planned`, appends history, and best-effort refreshes configured agents (tmux `/new` + identity reload). `refresh` defaults to true when `refreshAgents` are configured; failures are recorded and never corrupt loop state. Agent refresh is an internal side effect of `swarm_loop_plan`, not a separate public tool.
-- `/swarm loop status <task-id>` and `/swarm loop plan <task-id> <summary…>` — command equivalents.
+The opt-in task-graph proposal loop was removed from the packaged swarm core.
+The loop-related tools and command entrypoint are intentionally unsupported now;
+this section is preserved only for historical context about the former V1.5
+design.
 
 ### Non-goals
 

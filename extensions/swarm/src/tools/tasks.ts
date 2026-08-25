@@ -4,16 +4,16 @@ import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_M
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
-import type { LoopConfig, NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
+import { randomBytes } from "node:crypto";
+import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
 import { TERMINAL_NODE_STATUSES } from "../constants.ts";
-import { applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, validateTaskGraph } from "../taskgraph.ts";
+import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, validateTaskGraph } from "../taskgraph.ts";
 import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, supersedeOpenAssignments } from "../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, now, safeId, textResult } from "../utils.ts";
 import { ensureDirs, paths, readState, readTaskByRef, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
-import { ensureOrchestrator } from "../identity.ts";
+import { ensureOrchestrator, isOrchestratorAuthority } from "../identity.ts";
 import { findReusableAgent, spawnAgent } from "../agents.ts";
-import { getLoopConfig, kickoffLoopIfEnabled } from "../loop.ts";
 import { reconcile, runtimeTaskWarnings } from "../reconcile.ts";
 import { tmux } from "../tmux.ts";
 
@@ -45,12 +45,6 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				rework: Type.Optional(Type.Boolean()), parallel: Type.Optional(Type.Boolean()),
 			}))),
 			gates: Type.Optional(Type.Record(Type.String(), Type.Any())),
-			loop: Type.Optional(Type.Object({
-				enabled: Type.Boolean({ description: "Opt-in V1.5 post-iteration loop. Must be true to enable; absent/false = no behavior change." }),
-				proposalAgents: Type.Optional(Type.Array(Type.String({ description: "Fixed agent pool to request next-iteration proposals from after terminal-done close." }))),
-				refreshAgents: Type.Optional(Type.Array(Type.String({ description: "Agents to best-effort refresh (tmux /new + identity reload) after a plan is recorded." }))),
-				maxRounds: Type.Optional(Type.Number({ description: "Optional cap on rounds (defensive; V1.5 is one round per task)." })),
-			})),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
@@ -71,10 +65,6 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 					nodes: graph.nodes, edges: graph.edges, handoffs: [], gates: graph.gates, editLocks: {}, evidence: {},
 				};
-				// V1.5 opt-in loop config: normalize + persist only when enabled. Metadata only — it does not
-				// affect node routing, branch logic, closure, or readiness. getLoopConfig returns undefined otherwise.
-				const loopCfg = getLoopConfig(params.loop as Partial<LoopConfig> | undefined);
-				if (loopCfg) task.loop = loopCfg;
 				// Reject structurally-invalid graphs at creation (hard errors only; soft warnings are still allowed)
 				// so a broken task can't be written and linger. Run swarm_validate_graph for the full report.
 				const createValidation = validateTaskGraph(task);
@@ -298,9 +288,56 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					if (old) { ensureAgentDefaults(old); old.activeTaskIds = old.activeTaskIds.filter((t) => t !== task.taskId); }
 				}
 				// Count a fresh work attempt when (re)entering assigned from a non-active state.
-				if (["pending", "ready", "blocked"].includes(prevStatus)) {
+				const isNewAttempt = ["pending", "ready", "blocked"].includes(prevStatus);
+				if (isNewAttempt) {
 					if (node.maxAttempts && node.attempts >= node.maxAttempts) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} reached maxAttempts (${node.maxAttempts}); cannot reassign.`, { taskId, nodeId: params.nodeId, received: { attempts: node.attempts, maxAttempts: node.maxAttempts } });
 					node.attempts += 1;
+				}
+				
+				// Duplicate/retry handling: re-assigning the CURRENT active assignment (node already
+				// assigned to the same agent with a live active attempt) must NOT mint or supersede an
+				// attempt — preserve the existing attempt token so duplicate assignment calls / delivery
+				// retries cannot fence the worker that already holds the active token.
+				const activeAttemptRecord = node.activeAttemptId
+					? node.attemptHistory?.find((a: any) => a.attemptId === node.activeAttemptId)
+					: undefined;
+				const sameActiveAssignment =
+					!isNewAttempt &&
+					node.assignee === assignee.id &&
+					activeAttemptRecord &&
+					activeAttemptRecord.status === "active";
+				let attemptId: string;
+				if (sameActiveAssignment) {
+					attemptId = activeAttemptRecord!.attemptId;
+					activeAttemptRecord!.lastActivityAt = now();
+					await traceTask(tp, "task.attempt.reused", { taskId, nodeId: params.nodeId, attemptId, assignee: assignee.id, reason: "duplicate_assignment_retry" });
+				} else {
+					// Create attempt record for fencing. Any genuine (re)assignment — reassign, restart after
+					// release, rework re-entry, or same-agent reassign from a non-active state — mints a fresh
+					// identity so stale tokens from the prior attempt are fenced out.
+					attemptId = safeId(`attempt-${Date.now().toString(36)}-${randomBytes(8).toString("hex")}`);
+					const ts = now();
+					// Supersede prior active attempt if exists (including same-agent reassign)
+					if (node.activeAttemptId && node.attemptHistory) {
+						const priorAttempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
+						if (priorAttempt && priorAttempt.status === "active") {
+							priorAttempt.status = "superseded";
+							priorAttempt.supersededAt = ts;
+							priorAttempt.supersededBy = attemptId;
+							await traceTask(tp, "task.attempt.superseded", { taskId, nodeId: params.nodeId, priorAttemptId: priorAttempt.attemptId, supersededBy: attemptId, reason: "reassign" });
+						}
+					}
+					const newAttempt = {
+						attemptId,
+						attemptNumber: node.attempts,
+						assignmentMessageId: "", // filled after message creation
+						assignee: assignee.id,
+						assignedAt: ts,
+						status: "active" as const,
+						lastActivityAt: ts,
+					};
+					node.attemptHistory = [...(node.attemptHistory || []), newAttempt];
+					node.activeAttemptId = attemptId;
 				}
 				node.assignee = assignee.id;
 				node.status = "assigned";
@@ -312,10 +349,13 @@ export function registerTasksTools(pi: ExtensionAPI) {
 
 				const replyTarget = params.replyTarget || me;
 				const conversationId = `task:${task.taskId}:${params.nodeId}`;
-				const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note);
+				const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note, attemptId);
 				// Deterministic idempotency key: same task/node/assignee/attempt -> same message (no duplicate on retry).
 				const idempotencyKey = `assign:${task.taskId}:${params.nodeId}:${assignee.id}:${node.attempts}`;
 				const { msg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: assignee.id, body, subject: `Task ${task.taskId} / node ${params.nodeId} assigned`, conversationId, requiresAck: true, requiresResponse: true, idempotencyKey });
+				// Update attempt record with the actual message ID
+				const activeAttempt = node.attemptHistory?.find((a: any) => a.attemptId === attemptId);
+				if (activeAttempt) activeAttempt.assignmentMessageId = msg.id;
 				// Canonical current-assignment pointer (set on both new and idempotent-reuse).
 				node.assignmentMessageId = msg.id;
 				let supersededIds: string[] = [];
@@ -358,19 +398,79 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			})),
 			force: Type.Optional(Type.Boolean({ description: "Orchestrator override: skip ownership + transition checks. Defaults to false." })),
 			cancelTask: Type.Optional(Type.Boolean({ description: "Orchestrator-only (requires force): mark the whole task cancelled. Sticky: a cancelled task stays cancelled and releases all assignments. Defaults to false." })),
+			attemptId: Type.Optional(Type.String({ description: "Opaque attempt token received in assignment. Required for non-orchestrator callers when node has an active attempt. Prevents stale updates from superseded attempts." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
 			await ensureDirs(p);
 			const me = currentAgentId();
+			// Server-side RBAC (reliability-roadmap Phase 1, P0 #1): `force` and `cancelTask` are
+			// orchestrator-only escape hatches. Identity is checked against the live agent record; the
+			// caller's params cannot grant authority. Validation precedes any state mutation.
+			if (params.cancelTask === true) {
+				if (!isOrchestratorAuthority(me)) {
+					await trace(p, "task.rbac.cancel_forbidden", { taskId: params.taskId, caller: me, by: me });
+					throw new Error(`CANCEL_FORBIDDEN: swarm_update_task(cancelTask=true) requires orchestrator authority (caller=${me}). Only the orchestrator may cancel a task.`);
+				}
+				if (params.force !== true) {
+					throw new Error(`CANCEL_REQUIRES_FORCE: cancelTask=true must accompany force=true (orchestrator-only operation).`);
+				}
+			}
+			if (params.force === true && !isOrchestratorAuthority(me)) {
+				await trace(p, "task.rbac.force_forbidden", { taskId: params.taskId, nodeId: params.nodeId, caller: me, by: me });
+				throw new Error(`FORCE_FORBIDDEN: swarm_update_task(force=true) requires orchestrator authority (caller=${me}). Only the orchestrator may bypass ownership/transition checks.`);
+			}
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
 				const taskId = task.taskId;
 				const node = task.nodes[params.nodeId];
 				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId } });
-				const isOrch = me === "orchestrator" || Boolean(params.force);
+				const isOrch = isOrchestratorAuthority(me);
 				if (!isOrch && node.assignee !== me) await failTaskTool(tp, p, "NODE_ASSIGNEE_MISMATCH", `Node ${params.nodeId} is assigned to ${node.assignee || "(unassigned)"}, but current agent is ${me}.`, { taskId, nodeId: params.nodeId, expected: { assignee: node.assignee || null, allowedAction: "update your own assigned node or send a task message" }, received: { agentId: me, requestedStatus: params.status } });
+
+				// NEW: Attempt fencing validation (same-agent reassign protection)
+				// This is the critical fix: caller must present the active attempt token to fence stale updates
+				if (node.activeAttemptId) {
+					if (!isOrch) {
+						// Non-orchestrator callers must provide attempt token for nodes with active attempts
+						if (!params.attemptId) {
+							await failTaskTool(tp, p, "ATTEMPT_TOKEN_REQUIRED", `Node ${params.nodeId} has active attempt fencing. You must provide the attemptId parameter from your assignment contract.`, { taskId, nodeId: params.nodeId, expected: { attemptId: node.activeAttemptId }, received: { attemptId: params.attemptId || "(missing)" }, suggestedNextCall: { tool: "swarm_update_task", params: { ...params, attemptId: node.activeAttemptId } } });
+						}
+						// Verify the attempt token matches the active attempt (untrusted input validation)
+						if (params.attemptId !== node.activeAttemptId) {
+							// Find the attempt for error context
+							const providedAttempt = node.attemptHistory?.find((a: any) => a.attemptId === params.attemptId);
+							const providedStatus = providedAttempt ? providedAttempt.status : "unknown";
+							const activeAttempt = node.attemptHistory?.find((a: any) => a.attemptId === node.activeAttemptId);
+							const activeNumber = activeAttempt ? activeAttempt.attemptNumber : "?";
+							
+							await failTaskTool(tp, p, "ATTEMPT_TOKEN_MISMATCH", `Your attempt token ${params.attemptId} is not the active attempt for node ${params.nodeId}. Your attempt is ${providedStatus}; the current attempt is #${activeNumber} (${node.activeAttemptId}). This update is rejected as a stale write.`, { taskId, nodeId: params.nodeId, expected: { activeAttemptId: node.activeAttemptId, activeAttemptNumber: activeNumber }, received: { attemptId: params.attemptId, attemptStatus: providedStatus }, blocked: true });
+						}
+						
+						// Verify the attempt record exists and is valid
+						const activeAttempt = node.attemptHistory?.find((a: any) => a.attemptId === node.activeAttemptId);
+						if (!activeAttempt) {
+							await failTaskTool(tp, p, "ATTEMPT_NOT_FOUND", `Active attempt ${node.activeAttemptId} not found in attempt history for node ${params.nodeId}. State is corrupted; this is a data integrity error.`, { taskId, nodeId: params.nodeId, expected: { activeAttemptId: node.activeAttemptId }, received: { attemptHistorySize: node.attemptHistory?.length || 0 }, severity: "critical" });
+						}
+						if (activeAttempt.status !== "active") {
+							await failTaskTool(tp, p, "ATTEMPT_NOT_ACTIVE", `Attempt ${node.activeAttemptId} is not active (status=${activeAttempt.status}) for node ${params.nodeId}. This is a state inconsistency.`, { taskId, nodeId: params.nodeId, expected: { status: "active" }, received: { status: activeAttempt.status }, severity: "critical" });
+						}
+						// Verify caller is the active attempt's assignee (additional guard beyond assignee check)
+						if (activeAttempt.assignee !== me) {
+							await failTaskTool(tp, p, "ATTEMPT_ASSIGNEE_MISMATCH", `Active attempt ${activeAttempt.attemptId} is assigned to ${activeAttempt.assignee}, not ${me}.`, { taskId, nodeId: params.nodeId, expected: { assignee: activeAttempt.assignee }, received: { agentId: me }, blocked: true });
+						}
+					} else {
+						// Orchestrator with force: attempt check is bypassed (force override)
+						await traceTask(tp, "task.attempt.bypassed", { taskId, nodeId: params.nodeId, activeAttemptId: node.activeAttemptId, by: me, reason: "orchestrator_force" });
+					}
+				} else if (!node.activeAttemptId && (!node.attemptHistory || node.attemptHistory.length === 0)) {
+					// Legacy task: no attempt fencing, fall back to existing assignee check only
+					// Log a migration hint but don't fail
+					await traceTask(tp, "task.legacy_attempt", { taskId, nodeId: params.nodeId, hint: "Node has no attempt history - using legacy assignee check only. First assignment will create attempt records." });
+				}
+				// End attempt fencing validation
+
 				if (params.artifact && !isSafeRelativePath(params.artifact)) await failTaskTool(tp, p, "PATH_OUTSIDE_TASK", `Artifact path is unsafe (must be relative, no ..): ${params.artifact}`, { taskId, nodeId: params.nodeId, received: { artifact: params.artifact } });
 
 				const prevStatus = node.status;
@@ -384,15 +484,28 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				if ((newStatus === "assigned" || newStatus === "in_progress" || newStatus === "ready") && node.staleAt) { delete node.staleAt; }
 				if (params.outcome !== undefined) node.outcome = params.outcome;
 				node.lastActivityAt = now();
+
+				// NEW: Update attempt status on terminal node state
+				if (node.activeAttemptId && node.attemptHistory && (newStatus === "done" || newStatus === "failed" || newStatus === "skipped")) {
+					const activeAttempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
+					if (activeAttempt && activeAttempt.status === "active") {
+						activeAttempt.status = newStatus === "done" ? "completed" : newStatus;
+						activeAttempt.outcome = params.outcome || node.outcome || undefined;
+						activeAttempt.lastActivityAt = now();
+						await traceTask(tp, "task.attempt.terminal", { taskId, nodeId: params.nodeId, attemptId: node.activeAttemptId, status: activeAttempt.status, outcome: activeAttempt.outcome });
+					}
+				}
+
 				if (params.gateUpdates) applyGateUpdates(task, params.gateUpdates as Record<string, { status: TaskGateStatus; by?: string; artifact?: string | null }>, me);
 				if (params.sharedContextUpdates) applySharedContextUpdates(task, params.sharedContextUpdates as { summary?: string; decisions?: Array<{ text: string; severity?: string }>; risks?: Array<{ text: string; severity?: string }>; openQuestions?: Array<{ text: string }> }, me);
 				if (params.artifact) node.writeArtifacts = Array.from(new Set([...(node.writeArtifacts || []), params.artifact]));
 				releaseNodeAssignment(st, task, params.nodeId);
+				const reopened = activateReworkNodes(task);
 				const closingAssignee = node.assignee || undefined; // persisted on the node (not cleared by release)
 				// Orchestrator-explicit cancellation: sticky terminal state. applyTaskStatus preserves an
 				// existing `cancelled`, so setting it here then calling applyTaskStatus keeps it cancelled and
 				// releases every agent's active-task pointer for this task.
-				const cancelled = Boolean(params.cancelTask) && (me === "orchestrator" || Boolean(params.force));
+				const cancelled = Boolean(params.cancelTask) && isOrch;
 				if (cancelled) task.status = "cancelled";
 				let taskStatusChange = applyTaskStatus(task);
 				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
@@ -403,7 +516,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				task.currentNodes = nextReady.current;
 				await writeTaskState(tp, task);
 				await writeState(p, st);
-				await traceTask(tp, "task.update", { taskId, nodeId: params.nodeId, prevStatus, status: newStatus, outcome: params.outcome, note: Boolean(params.note), artifact: params.artifact, gateUpdates: params.gateUpdates ? Object.keys(params.gateUpdates) : [], sharedContext: Boolean(params.sharedContextUpdates), by: me, autoClosed: autoClosed.closed });
+				await traceTask(tp, "task.update", { taskId, nodeId: params.nodeId, prevStatus, status: newStatus, outcome: params.outcome, note: Boolean(params.note), artifact: params.artifact, gateUpdates: params.gateUpdates ? Object.keys(params.gateUpdates) : [], sharedContext: Boolean(params.sharedContextUpdates), by: me, autoClosed: autoClosed.closed, reopened });
 				if (autoClosed.closed.length) await traceTask(tp, "task.autoclose.orchestrator", { taskId, nodeIds: autoClosed.closed, triggerNodeId: params.nodeId, by: "engine" });
 				if (cancelled) await traceTask(tp, "task.cancel", { taskId, nodeId: params.nodeId, by: me });
 				if (taskStatusChange.terminal) await traceTask(tp, "task.close", { taskId, status: task.status, nodeId: params.nodeId, by: me });
@@ -438,19 +551,9 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					}
 					await writeState(p, st); // persist the notify message record + orchestrator pseudo-agent
 				}
-				// V1.5 opt-in post-iteration loop: when a loop-enabled task reaches terminal DONE, kick off the
-				// proposal round (best-effort; never alters default graph behavior). Runs inside this lock so
-				// proposal fanout is atomic with the close; failures are traced, not thrown.
-				if (taskStatusChange.terminal && task.status === "done") {
-					try {
-						await kickoffLoopIfEnabled(pi, ctx.cwd, p, st, task, tp);
-					} catch (err: any) {
-						await traceTask(tp, "task.loop.kickoff_failed", { taskId: task.taskId, nodeId: params.nodeId, error: String((err as Error)?.message || err) });
-					}
-				}
-				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled, autoClosed: autoClosed.closed };
+				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled, autoClosed: autoClosed.closed, reopened };
 			});
-			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${result.cancelled ? " Task marked cancelled; all assignments released." : ""}${result.autoClosed?.length ? ` Auto-closed orchestrator terminal nodes: ${result.autoClosed.join(", ")}.` : ""}${params.note ? ` Note: ${params.note}` : ""}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, taskStatus: result.taskStatus, cancelled: result.cancelled, by: me, autoClosed: result.autoClosed });
+			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${result.cancelled ? " Task marked cancelled; all assignments released." : ""}${result.reopened?.length ? ` Reopened rework nodes: ${result.reopened.join(", ")}.` : ""}${params.note ? ` Note: ${params.note}` : ""}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, taskStatus: result.taskStatus, cancelled: result.cancelled, by: me, autoClosed: result.autoClosed, reopened: result.reopened });
 		},
 	}))
 

@@ -50,6 +50,21 @@ export type RotationConfig = {
 	maxRetries?: number; // default 2 consecutive failures before cooldown
 };
 
+// Preflight classification — used by `preflightSpawn` and surfaced verbatim by spawn/restart
+// callers. Each `kind` carries enough context for `formatPreflightError` to render a concrete
+// corrective action. New variants must be added in lock-step with the formatter switch in pool.ts.
+export type PreflightError =
+	| { kind: "unknown_model"; model: string; suggestion: string }
+	| { kind: "provider_not_found"; provider: string; suggestion: string }
+	| { kind: "pool_exhausted"; message: string; suggestion: string }
+	| { kind: "tmux_not_running"; message: string; suggestion: string }
+	| { kind: "tmux_create_failed"; message: string; suggestion: string }
+	| { kind: "invalid_settings"; message: string; suggestion: string; errors: string[] };
+
+export type PreflightResult =
+	| { ok: true; resolved: { model: string; provider: string; fromPool: boolean } }
+	| { ok: false; error: PreflightError };
+
 // Persisted per-slot health, keyed by `${provider}/${model}`. Stored in .pi/swarm/pool-state.json.
 export type PoolSlotHealth = {
 	failures: number;
@@ -103,6 +118,7 @@ export type MessageRecord = {
 	replyTo?: string;
 	lastError?: string;
 	lastAck?: { by: string; status: string; note?: string; resultMessageId?: string; at: string };
+	subject?: string;
 	ttlMs?: number;
 	idempotencyKey?: string;
 	// Set when a newer assignment supersedes this open assignment message (idempotency/supersede fix).
@@ -200,6 +216,19 @@ export type TaskNodeStatus = "pending" | "ready" | "assigned" | "in_progress" | 
 
 export type TaskGateStatus = "open" | "passed" | "failed" | "waived";
 
+export type TaskNodeAttempt = {
+	attemptId: string;           // Unique lease identity (UUID), server-generated
+	attemptNumber: number;       // Monotonic counter (1, 2, 3...)
+	assignmentMessageId: string; // Message that carried this assignment
+	assignee: string;            // Agent who was assigned
+	assignedAt: string;           // ISO timestamp
+	supersededAt?: string;       // When this attempt was superseded (if applicable)
+	supersededBy?: string;        // Attempt ID or "<rework>" that superseded this one
+	status: "active" | "superseded" | "completed" | "failed" | "cancelled" | "skipped";
+	outcome?: string;             // Final outcome if terminal
+	lastActivityAt?: string;      // Last update timestamp
+};
+
 export type TaskNode = {
 	status: TaskNodeStatus;
 	outcome?: string | null;
@@ -219,6 +248,10 @@ export type TaskNode = {
 	terminal?: boolean;
 	lastActivityAt?: string;
 	staleAt?: string;
+	// NEW: Active attempt identity (set on assignment, cleared on reassign/rework)
+	activeAttemptId?: string;
+	// NEW: Audit history of all attempts (never cleared, append-only)
+	attemptHistory?: TaskNodeAttempt[];
 };
 
 export type TaskEdge = {

@@ -162,7 +162,7 @@ const snapshot = renderFlowSnapshot(task, ["implement"], ["plan", "implement"], 
 ok("renderFlowSnapshot header", snapshot.includes(`Flow #1 ${taskId} — Implement Swarm Observatory flow UI [in_progress] open=2 stale=1`));
 ok("renderFlowSnapshot nodes", snapshot.includes("Nodes:") && snapshot.includes("plan") && snapshot.includes("implement") && snapshot.includes("review"));
 ok("renderFlowSnapshot lanes", snapshot.includes("Agents (lanes):") && snapshot.includes("obs-implementer") && snapshot.includes(`active: ${taskId}#implement`));
-ok("renderFlowSnapshot events block", snapshot.includes("Events (last 3):") && snapshot.includes("task.assign") && snapshot.includes("Loop: not_started"));
+ok("renderFlowSnapshot events block", snapshot.includes("Events (last 3):") && snapshot.includes("task.assign"));
 
 await cmds.swarm.handler("flow", ctx);
 ok("no-arg flow shows usage", /Usage: \/swarm flow <#\|task-id> \[--events N\]/.test(notes.at(-1)?.msg || ""));

@@ -10,14 +10,13 @@ import { buildFlowSnapshot } from "./observability.ts";
 import { openFlowDialog, pickFlowTask } from "./flow-dialog.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { enqueueAndDeliver } from "./mailbox.ts";
-import { ensureDirs, identityPath, loopStateFile, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "./state.ts";
+import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "./state.ts";
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
-import { loopStatusSnapshot, recordLoopPlan } from "./loop.ts";
 import { ensureOrchestrator, overridePath } from "./identity.ts";
 import { startOrchestratorPump } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
-import { poolStatus, setSlotCooldown } from "./pool.ts";
+import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError } from "./pool.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
@@ -42,9 +41,55 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 	return out;
 }
 
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight] | pool cooldown <slot> <ms> | pool clear <slot>";
 
-type ScopedSwarmCommandName = "swarm" | "swarm-agents" | "swarm-tasks" | "swarm-msg" | "swarm-loop";
+// Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
+// on-disk shape with the validation result so the show line never reports a stale `source`.
+type RawShape = ReturnType<typeof classifySwarmSettings>;
+function classificationShape(validation: { ok: boolean; shape: RawShape }, classified: RawShape): RawShape {
+	return validation.shape || classified;
+}
+
+// Canonical pool-help text — kept as a single constant so /swarm pool help, docs/swarm/operations.md,
+// and tests all reference the same source. Pure documentation, no mutation.
+const POOL_HELP_TEXT = `Model pool configuration (canonical format)
+
+{
+  "swarm": {
+    "modelPool": [
+      { "model": "gpt-5.4-mini", "provider": "openai", "weight": 50 },
+      { "model": "claude-sonnet-4", "provider": "anthropic", "weight": 30 },
+      { "model": "glm-5.1", "provider": "zai-coding-cn", "weight": 0 }
+    ],
+    "rotation": { "strategy": "weighted", "cooldownMs": 900000, "maxRetries": 2 }
+  }
+}
+
+Slot fields
+  model     required, non-empty string
+  provider  optional; defaults to provider registry
+  weight    non-negative number; default 1; 0 = fallback-only (used when all weighted slots are benched)
+
+Rotation fields
+  strategy     weighted | round-robin | sticky (default: weighted)
+  cooldownMs   bench duration after maxRetries failures (default: 900000 = 15min)
+  maxRetries   consecutive failures before bench (default: 2)
+
+Legacy singleton (still supported, observable as an implicit singleton pool):
+
+{
+  "swarm": {
+    "defaultModel": "glm-5.1",
+    "defaultProvider": "zai-coding-cn"
+  }
+}
+
+Top-level \`swarm\` is preferred; \`extensions.swarm\` is accepted for backward compatibility.
+
+Discover: /swarm pool show    Validate: /swarm pool validate    Preflight probe: /swarm pool preview-preflight
+See: docs/swarm/operations.md (Model pool configuration)`;
+
+type ScopedSwarmCommandName = "swarm" | "swarm-agents" | "swarm-tasks" | "swarm-msg";
 
 function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
 	switch (commandName) {
@@ -54,8 +99,6 @@ function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
 			return "Usage: /swarm-tasks <list|graph|status|next|validate> ...";
 		case "swarm-msg":
 			return "Usage: /swarm-msg send <to> <message>";
-		case "swarm-loop":
-			return "Usage: /swarm-loop <status|plan> <task-id> ...";
 		default:
 			return "Usage: /swarm ...";
 	}
@@ -77,7 +120,6 @@ function normalizeScopedSwarmArgs(commandName: ScopedSwarmCommandName, args: str
 		return null;
 	}
 	if (commandName === "swarm-msg") return cmd === "send" ? [cmd, ...rest].join(" ") : null;
-	if (commandName === "swarm-loop") return ["status", "plan"].includes(cmd) ? ["loop", cmd, ...rest].join(" ") : null;
 	return null;
 }
 
@@ -471,7 +513,86 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						}
 						return;
 					}
-					ctx.ui.notify("Usage: /swarm pool [list] | /swarm pool cooldown <provider/model> <ms> | /swarm pool clear <provider/model>", "warning");
+					if (sub === "show") {
+						// Read-only model-pool (or implicit singleton) view — never touches .pi/settings.json.
+						// Output describes BOTH the explicit pool shape (when configured) AND the singleton
+						// fallback the user would get if the pool were empty/all-benched, so the operator
+						// can verify their config matches the canonical format before any spawn.
+						const validation = validateSwarmSettings();
+						const shape = classificationShape(validation, classifySwarmSettings());
+						const shapeSource = shape.kind === "empty" ? "defaults" : (shape as any).source || "defaults";
+						const lines: string[] = [];
+						const singleton = implicitSingletonPool();
+						const status = await poolStatus(p);
+						if (status.slots.length) {
+							lines.push(`Model pool: configured (${status.slots.length} slot${status.slots.length === 1 ? "" : "s"}, source=${shapeSource})`);
+							for (const s of status.slots) {
+								const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m` : (s.weight === 0 ? "ok (fallback-only)" : "ok");
+								const err = s.health?.lastError ? ` lastError=${s.health.lastError.slice(0, 60)}` : "";
+								lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${err}`);
+							}
+							lines.push(`Rotation: strategy=${status.rotation.strategy}, cooldown=${Math.round(status.rotation.cooldownMs / 60000)}min, maxRetries=${status.rotation.maxRetries}`);
+						} else {
+							lines.push(`Model pool: not configured — using implicit singleton (source=${singleton.source})`);
+							lines.push(`  ${(singleton.slots[0].provider || "(default)")}/${singleton.slots[0].model}  weight=1  (fallback-only when pool is empty)`);
+							lines.push(`Rotation: not configured (strategy defaults to weighted)`);
+						}
+						lines.push("");
+						lines.push("Discover config: /swarm pool help  |  Validate: /swarm pool validate");
+						await trace(p, "pool.show", { by: currentAgentId(), shape: shape.kind, slots: status.slots.length, ok: validation.ok });
+						ctx.ui.notify(lines.join("\n"), validation.ok ? "info" : "warning");
+						return;
+					}
+					if (sub === "validate") {
+						// Read-only structural check; never edits .pi/settings.json.
+						const v = validateSwarmSettings();
+						const lines: string[] = [];
+						if (v.ok) {
+							lines.push("Config validation: PASSED");
+							if (v.shape.kind === "empty") lines.push("  - No swarm config (using defaults).");
+							else if (v.shape.kind === "singleton") lines.push(`  - Singleton config: model=${(v.shape as any).defaultModel || "(unset)"}, provider=${(v.shape as any).defaultProvider || "(unset)"}`);
+							else if (v.shape.kind === "explicit-pool") lines.push(`  - Explicit pool with ${(v.shape as any).slots} slot(s).`);
+							else if (v.shape.kind === "both") lines.push(`  - Both: ${(v.shape as any).slots} pool slot(s) + singleton fallback.`);
+							lines.push("  - No duplicates, all weights/cooldownMs/maxRetries are well-formed.");
+							await trace(p, "pool.validate", { by: currentAgentId(), ok: true, shape: v.shape.kind });
+							ctx.ui.notify(lines.join("\n"), "info");
+						} else {
+							lines.push(`Config validation: FAILED (${v.errors.length} issue${v.errors.length === 1 ? "" : "s"})`);
+							for (const e of v.errors) lines.push(`  \u2717 ${e.field || "config"}: ${e.message}`);
+							lines.push("");
+							lines.push("Fix in .pi/settings.json (under `swarm` or `extensions.swarm`), then run /swarm pool validate again.");
+							await trace(p, "pool.validate", { by: currentAgentId(), ok: false, shape: v.shape.kind, errors: v.errors.length });
+							ctx.ui.notify(lines.join("\n"), "warning");
+						}
+						return;
+					}
+					if (sub === "help") {
+						// Canonical format reference — pure documentation in a notify. Never edits settings.
+						ctx.ui.notify(POOL_HELP_TEXT, "info");
+						return;
+					}
+					if (sub === "preview-preflight" || sub === "preflight") {
+						// Manual preflight probe — read-only. Reports what the next spawnAgent/restartAgent
+						// WOULD do, including classified errors if any. Lets the operator dry-run the gate
+						// without actually committing an agent record.
+						const { preflightSpawn } = await import("./pool.ts");
+						const preflight = await preflightSpawn(p, { model: rest[0], provider: rest[1], tmuxSession: (await readState(p, ctx.cwd)).tmuxSession });
+						const lines: string[] = [];
+						if (preflight.ok === true) {
+							lines.push(`Preflight: PASSED`);
+							lines.push(`  model=${preflight.resolved.model}`);
+							lines.push(`  provider=${preflight.resolved.provider}`);
+							lines.push(`  fromPool=${preflight.resolved.fromPool}`);
+							ctx.ui.notify(lines.join("\n"), "info");
+						} else {
+							// Discriminated union: preflight is narrowed to { ok: false; error: PreflightError } here.
+							lines.push(`Preflight: FAILED`);
+							lines.push(formatPreflightError((preflight as { ok: false; error: import("./types.ts").PreflightError }).error));
+							ctx.ui.notify(lines.join("\n"), "warning");
+						}
+						return;
+					}
+					ctx.ui.notify("Usage: /swarm pool [list|show|validate|help|preview-preflight] | /swarm pool cooldown <provider/model> <ms> | /swarm pool clear <provider/model>", "warning");
 					return;
 				}
 				if (cmd === "role") {
@@ -638,33 +759,6 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					ctx.ui.notify(`Mailbox reset for ${result.agentId}${isHereToken(requestedId) ? " (resolved from 'here')" : ""}. Archived ${result.lines} line(s) to ${relative(ctx.cwd, result.archive)}; cleared live mailbox ${relative(ctx.cwd, result.file)} and delivered ledger entries=${result.deliveredCleared}. If a session was stuck on parse errors, /reload or restart that pi session next.`, "warning");
 					return;
 				}
-				if (cmd === "loop") {
-					// V1.5 iteration proposal loop: read-only status and orchestrator plan synthesis.
-					const sub = rest.shift();
-					const taskId = rest.shift();
-					if (sub === "status") {
-						if (!taskId) { ctx.ui.notify("Usage: /swarm loop status <task-id>", "warning"); return; }
-						const snap = await loopStatusSnapshot(p, ctx.cwd, taskId);
-						if (!snap.enabled || !snap.loop) {
-							if (snap.enabled && !snap.started) ctx.ui.notify(`Task ${taskId} has an enabled loop but it has not started (close terminal-done to begin).`, "info");
-							else ctx.ui.notify(`Task ${taskId} has no enabled iteration loop.`, "info");
-							return;
-						}
-						const props = snap.proposals || [];
-						ctx.ui.notify(`Loop ${taskId}: round ${snap.loop.currentRound} phase=${snap.loop.phase}. Proposals: ${props.map((x) => `${x.agentId}=${x.status}`).join(", ") || "(none)"}. State: ${snap.paths.loopStateFile}`, "info");
-						return;
-					}
-					if (sub === "plan") {
-						if (!taskId) { ctx.ui.notify("Usage: /swarm loop plan <task-id> <summary...>", "warning"); return; }
-						const summaryText = rest.join(" ");
-						if (!summaryText) { ctx.ui.notify("Usage: /swarm loop plan <task-id> <summary...>", "warning"); return; }
-						const r = await recordLoopPlan(pi, ctx.cwd, p, taskId, { summary: summaryText });
-						ctx.ui.notify(`Recorded next-iteration plan for ${taskId} (round ${r.round}) at ${r.artifact}; phase=${r.phase}.`, "info");
-						return;
-					}
-					ctx.ui.notify("Usage: /swarm loop status <task-id> | loop plan <task-id> <summary...>", "warning");
-					return;
-				}
 				ctx.ui.notify(`Unknown /${commandName} command: ${cmd}`, "warning");
 			} catch (err: any) {
 				await trace(p, "error", { where: "command", command: cmd, commandName, message: err?.message || String(err), stack: err?.stack });
@@ -691,10 +785,5 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 		description: "Messaging shortcut for swarm: send <to> <message>",
 		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-msg", argumentPrefix),
 		handler: async (args, ctx) => runCommand(args, ctx, "swarm-msg"),
-	});
-	pi.registerCommand("swarm-loop", {
-		description: "Loop shortcut for swarm: status <task-id> | plan <task-id> <summary>",
-		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-loop", argumentPrefix),
-		handler: async (args, ctx) => runCommand(args, ctx, "swarm-loop"),
 	});
 }
