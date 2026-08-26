@@ -6,7 +6,7 @@ import { join, dirname, relative, sep } from "node:path";
 import type { IndexedTask, MessageResponseStatus, Paths, ReconcileAction, SwarmMessage, SwarmState, TaskState } from "./types.ts";
 import { ACK_MISSING_MS, formatNotifyKey, MAX_ATTEMPTS, MAX_REINJECTS, MAX_STATUS_TASKS, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
-import { computeReadyNodes, computeTaskStatus } from "./taskgraph.ts";
+import { computeReadyNodes, computeTaskStatus, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
 import { deliver, deliverMessageLocked, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
 import { ensureOrchestrator } from "./identity.ts";
@@ -51,6 +51,13 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 		if (TERMINAL_NODE_STATUSES.has(node.status)) {
 			for (const [file, lock] of Object.entries(task.editLocks)) if (lock?.nodeId === id) warnings.push(`terminal node ${id} still holds editLock for ${file}`);
 		}
+	}
+	// Attention derivation (roadmap issue 5): durable, pane-free recovery classification per node.
+	// Advisory only — appended to the existing runtime=true warnings surface, zero schema change.
+	for (const [id, node] of Object.entries(task.nodes)) {
+		const att = deriveNodeAttention(st, task, id, nowMs);
+		if (!att.workerReminderEligible) continue;
+		warnings.push(`attention: node ${id} → ${att.category} (assignee ${node.assignee || "?"}) — ${att.evidence.join("; ")} — orchestrator may send one bounded reminder via /swarm remind ${task.taskId} ${id}`);
 	}
 	if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
 		for (const agent of Object.values(st.agents)) {
@@ -408,7 +415,15 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 					if (options.nowMs - sinceMs > ACK_MISSING_MS) nudgeReasons.push(`assignment message ${msgId} ack_missing`);
 				}
 			}
-			if (!staleReasons.length && !nudgeReasons.length) continue;
+			if (!staleReasons.length && !nudgeReasons.length) {
+				// Attention derivation (issue 5): report-only reminder eligibility. Reconcile NEVER sends;
+				// the pointer names the one explicit orchestrator surface that can.
+				const att = deriveNodeAttention(st, task, nodeId, options.nowMs);
+				if (att.workerReminderEligible) {
+					actions.push({ messageId: `${taskId}/${nodeId}`, action: "reminder_eligible", reason: `${att.evidence.join("; ")}; one bounded reminder may be sent via /swarm remind ${taskId} ${nodeId} (orchestrator-only, informational)`, taskId, nodeId });
+				}
+				continue;
+			}
 			if (staleReasons.length) {
 				if (!options.dryRun && !node.staleAt) { node.staleAt = now(); dirty = true; await traceTask(tp, "task.stale.reconcile", { taskId, nodeId, assignee: node.assignee, reasons: staleReasons }); }
 				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_stale", reason: staleReasons.join("; "), taskId, nodeId });

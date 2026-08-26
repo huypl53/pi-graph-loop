@@ -85,11 +85,14 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				}
 				st.messages[params.messageId] = {
 					...rec,
-					// `seen` and `processing` are progress acks, not completion. Keep the
-					// delivery lifecycle visible until a final `done`/`failed` ack arrives.
+					// `seen` and `processing` durably acknowledge *receipt* while remaining
+					// non-terminal protocol states. `ackedAt` is therefore receipt evidence,
+					// not proof that node work is complete; completion remains lastAck=done
+					// plus the required result-response verification. This also prevents a
+					// received assignment from being re-injected as merely unacknowledged.
 					status: failed ? "failed" : done ? "acked" : rec.status,
 					updatedAt: ackAt,
-					ackedAt: done ? ackAt : rec.ackedAt,
+					ackedAt: failed ? rec.ackedAt : ackAt,
 					failedAt: failed ? ackAt : rec.failedAt,
 					ackMissingAt: failed ? rec.ackMissingAt : undefined,
 					lastError: failed ? params.note || rec.lastError : rec.lastError?.startsWith("ack_missing") ? undefined : rec.lastError,

@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ALLOWED_NODE_TRANSITIONS, NODE_ICON, SAFE_ID_RE, TERMINAL_NODE_STATUSES } from "./constants.ts";
+import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
+import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
 import { readTaskState, taskPaths, trace, traceTask } from "./state.ts";
 
@@ -160,6 +161,147 @@ export function collectActiveLeases(task: TaskState): ActiveLease[] {
 		out.push({ taskId: task.taskId, nodeId, assignee: attempt.assignee, attemptId: attempt.attemptId, scope });
 	}
 	return out;
+}
+
+// ---- Durable attention derivation (reliability roadmap issue 5) ----
+// Pure, read-only classification of a task node's recovery condition from persisted state only:
+// task.json (node + attempt history) and swarm-state messages/agents. NEVER consults tmux/process/
+// pane liveness — pane idleness is not semantic evidence of completion or failure. Advisory only.
+
+const isoMs = (v?: string): number => (v ? new Date(v).getTime() || 0 : 0);
+
+// The no-progress anchor: the MOST RECENT of the durable activity timestamps. The assignedAt floor
+// guarantees a value; a reminder fires only when even the freshest evidence is stale.
+function reminderAnchorMs(msg: MessageRecord | undefined, node: TaskNode, attempt: any): number {
+	return Math.max(
+		isoMs(msg?.lastAck?.at),
+		isoMs(node.lastActivityAt),
+		isoMs(attempt?.lastActivityAt),
+		isoMs(attempt?.assignedAt),
+	);
+}
+
+// Receipt/processing confirmation requires both durable receipt timestamp and a progress ACK on
+// the canonical assignment. `ackedAt` records receipt, never semantic completion; `done` still
+// follows the separate response/closure path. Transport injection without this ACK is never receipt.
+function receiptConfirmed(msg: MessageRecord | undefined): boolean {
+	const s = msg?.lastAck?.status;
+	return Boolean(msg?.ackedAt) && (s === "seen" || s === "processing");
+}
+
+export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: string, nowMs: number): NodeAttention {
+	const node = task.nodes[nodeId];
+	if (!node) return { category: "none", evidence: ["node does not exist"], workerReminderEligible: false, orchestratorDecision: false };
+	const evidence: string[] = [];
+
+	// 1. Cancellation/terminal guards — no reminder for dead work.
+	if (task.status === "cancelled") {
+		evidence.push(`task_cancelled: task ${task.taskId}`);
+		return { category: "cancelled", evidence, workerReminderEligible: false, orchestratorDecision: false };
+	}
+	if (node.status === "cancelled") {
+		evidence.push(`node_cancelled: node ${nodeId}`);
+		return { category: "cancelled", evidence, workerReminderEligible: false, orchestratorDecision: false };
+	}
+	if (TERMINAL_NODE_STATUSES.has(node.status)) {
+		evidence.push(`terminal: node is ${node.status}`);
+		return { category: "terminal", evidence, workerReminderEligible: false, orchestratorDecision: false };
+	}
+
+	// Attempt + canonical assignment message (persisted sources only).
+	const attempt: any = node.activeAttemptId && Array.isArray(node.attemptHistory)
+		? node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId)
+		: undefined;
+	const msg: MessageRecord | undefined = node.assignmentMessageId ? st.messages[node.assignmentMessageId] : undefined;
+
+	// 2. Supersession guard: obsolete assignments are never actionable.
+	if (msg?.superseded) {
+		evidence.push(`superseded: assignment ${msg.id} superseded by ${msg.superseded.supersededBy} at ${msg.superseded.at}`);
+		return { category: "superseded", evidence, workerReminderEligible: false, orchestratorDecision: false };
+	}
+	if (node.activeAttemptId && attempt && attempt.status !== "active") {
+		evidence.push(`superseded: attempt ${attempt.attemptId} status is ${attempt.status}`);
+		return { category: "superseded", evidence, workerReminderEligible: false, orchestratorDecision: false };
+	}
+
+	// 3. Ready-but-unassigned: orchestrator decision to assign.
+	if (node.status === "ready" && !node.assignee) {
+		evidence.push(`unassigned_ready: node ${nodeId} (${node.role}) is ready with no assignee`);
+		return { category: "unassigned_ready", evidence, workerReminderEligible: false, orchestratorDecision: true };
+	}
+
+	// 4. Transport problems (advisory display; never completion evidence).
+	const agent: SwarmAgent | undefined = node.assignee ? st.agents[node.assignee] : undefined;
+	if (msg && msg.status === "dead_letter") {
+		evidence.push(`dead_letter: assignment ${msg.id} (${msg.lastError || "unknown"})`);
+		return { category: "dead_letter", evidence, workerReminderEligible: false, orchestratorDecision: true };
+	}
+	if (msg && msg.status === "failed" && !msg.lastAck) {
+		evidence.push(`delivery_failed: assignment ${msg.id} (${msg.lastError || "unknown"})`);
+		return { category: "delivery_failed", evidence, workerReminderEligible: false, orchestratorDecision: true };
+	}
+	if (agent && agent.status === "stopped") {
+		evidence.push(`transport_unavailable: assignee ${agent.id} is stopped (advisory; not completion evidence)`);
+		return { category: "transport_unavailable", evidence, workerReminderEligible: false, orchestratorDecision: true };
+	}
+
+	// 5/6. Protocol problems.
+	if (msg && msg.requiresAck && !msg.ackedAt && !msg.lastAck) {
+		const since = Math.max(isoMs(msg.injectedAt), isoMs(msg.interceptedAt), isoMs(msg.createdAt));
+		const age = nowMs - since;
+		if (age > ACK_MISSING_MS) {
+			evidence.push(`ack_missing: assignment ${msg.id} delivered ${Math.round(age / 60000)}m ago (${msg.status}), no durable ack`);
+			return { category: "ack_missing", evidence, workerReminderEligible: false, orchestratorDecision: false };
+		}
+	}
+	// 6. Protocol problem: completion claimed but result unverified (worker acked done/failed without
+	// a verified response). An in-flight assignment acked seen/processing is work, not response debt.
+	if (msg && msg.requiresResponse && (msg.lastAck?.status === "done" || msg.lastAck?.status === "failed") && !(msg.response?.status === "verified" || msg.response?.status === "waived")) {
+		evidence.push(`response_missing: assignment ${msg.id} acked ${msg.lastAck!.status} but response is ${msg.response?.status || "missing"}`);
+		return { category: "response_missing", evidence, workerReminderEligible: false, orchestratorDecision: true };
+	}
+
+	// 7/8. Work-progress + reminder eligibility for open assignments.
+	if (node.status === "assigned" || node.status === "in_progress") {
+		// Attempt currency + canonical message are prerequisites for any worker reminder.
+		const attemptCurrent = Boolean(node.activeAttemptId && attempt && attempt.status === "active");
+		const canonical = Boolean(node.assignmentMessageId && msg && !msg.superseded);
+		const receipt = receiptConfirmed(msg);
+		const reminder: ReminderRecord | undefined = attempt?.reminder;
+		if (attemptCurrent && canonical) {
+			const anchor = reminderAnchorMs(msg, node, attempt);
+			const age = nowMs - anchor;
+			if (reminder) {
+				evidence.push(`reminder_sent: ${reminder.messageId} at ${reminder.sentAt} (anchor ${reminder.noProgressSince}); one-per-attempt budget consumed`);
+				if (age > TASK_NUDGE_MS) evidence.push(`no_progress: anchor is ${Math.round(age / 60000)}m old (> ${Math.round(TASK_NUDGE_MS / 60000)}m TASK_NUDGE_MS)`);
+				return { category: "reminder_sent", evidence, workerReminderEligible: false, orchestratorDecision: age > TASK_STALE_MS };
+			}
+			if (receipt && age > REMINDER_NO_PROGRESS_MS) {
+				evidence.push(`receipt confirmed: lastAck ${msg!.lastAck!.status} at ${msg!.lastAck!.at}`);
+				evidence.push(`no_progress: anchor ${Math.round(age / 60000)}m ago (> ${Math.round(REMINDER_NO_PROGRESS_MS / 60000)}m REMINDER_NO_PROGRESS_MS)`);
+				return { category: "reminder_eligible", evidence, workerReminderEligible: true, orchestratorDecision: false };
+			}
+			if (receipt && age > TASK_NUDGE_MS) {
+				evidence.push(`no_progress: anchor ${Math.round(age / 60000)}m ago (> ${Math.round(TASK_NUDGE_MS / 60000)}m TASK_NUDGE_MS), receipt confirmed`);
+				return { category: "no_progress", evidence, workerReminderEligible: false, orchestratorDecision: false };
+			}
+			if (!receipt) evidence.push(`receipt not confirmed: assignment ${msg!.id} status=${msg!.status} ackedAt=${msg!.ackedAt || "none"} lastAck=${msg!.lastAck?.status || "none"}`);
+			else evidence.push(`receipt confirmed (${msg!.lastAck!.status}), within no-progress window`);
+			return { category: "none", evidence, workerReminderEligible: false, orchestratorDecision: false };
+		}
+		// Legacy/open assignment without attempt metadata: readable, advisory staleness only.
+		const nodeAge = nowMs - Math.max(isoMs(node.lastActivityAt), isoMs(node.assignmentMessageId ? msg?.lastAck?.at : undefined), isoMs(attempt?.assignedAt));
+		if (nodeAge > TASK_NUDGE_MS) evidence.push(`no_progress: legacy/unfenced assignment, ~${Math.round(nodeAge / 60000)}m since last durable activity (no attempt metadata; reminder requires a fenced attempt)`);
+		return { category: nodeAge > TASK_NUDGE_MS ? "no_progress" : "none", evidence, workerReminderEligible: false, orchestratorDecision: false };
+	}
+
+	// Blocked/other open states.
+	if (node.status === "blocked") {
+		evidence.push(`blocked: node is blocked; awaiting dependency or orchestrator decision`);
+		return { category: "none", evidence, workerReminderEligible: false, orchestratorDecision: false };
+	}
+	evidence.push(`pending: node is ${node.status}, waiting on dependencies`);
+	return { category: "none", evidence, workerReminderEligible: false, orchestratorDecision: false };
 }
 
 export function buildDefaultGraph(allowedFiles: string[]): { start: string; nodes: Record<string, TaskNode>; edges: TaskEdge[]; gates: Record<string, TaskGate> } {

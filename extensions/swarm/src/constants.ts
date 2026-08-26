@@ -91,6 +91,12 @@ export const TASK_NUDGE_MS = 30 * 60 * 1000; // in_progress node with no activit
 
 export const ACK_MISSING_MS = 300_000; // delivered-but-unacked assignment -> ack_missing (mirrors mailbox)
 
+// Worker reminder policy (reliability roadmap issue 5). After confirmed assignment receipt/processing
+// (durable ack `seen`/`processing`) and this long without progress, the node becomes reminder-eligible.
+// At most ONE reminder per attempt, permanently — there is no cooldown re-send; a fresh reminder is
+// only possible after a reassign/rework mints a new attempt. The reminder is informational only.
+export const REMINDER_NO_PROGRESS_MS = 60 * 60 * 1000;
+
 // Cooldown for the agent_settled->orchestrator "settled with open work" notify, so repeated settles in
 // a window don't multiply into a message storm. Loop-safe: notify targets the mailbox-only
 // orchestrator (never the worker), and is rate-limited per agent via persisted lastSettleNotifyAt.

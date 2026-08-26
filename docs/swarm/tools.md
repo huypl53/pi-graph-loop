@@ -111,6 +111,12 @@ needs structured parameters or machine-readable results.
   mailbox, clears the mailbox JSONL and its delivered ledger, but preserves
   message records in `swarm-state.json`.
 - `/swarm send <to> <message>`
+- `/swarm attention [<#|task-id>]` — orchestrator-only, read-only durable recovery attention report
+  (task graph + assignment attempts + mailbox state; never tmux/pane state). Advisory only.
+- `/swarm remind <task-id> <node-id>` — orchestrator-only; the ONLY sending surface for the bounded
+  worker reminder. One per attempt, permanently; requires durable receipt ack (`seen`/`processing`),
+  the `REMINDER_NO_PROGRESS_MS` (60 min) no-progress interval, and the current active attempt.
+  `requiresAck:false`/`requiresResponse:false` — no ack/response debt; never mutates node state.
 - `/swarm pool list` — slot health + rotation status
 - `/swarm pool show` — full config view (pool OR implicit singleton fallback); never edits `.pi/settings.json`
 - `/swarm pool validate` — structural check (empty model, duplicates, bad weight, bad rotation); read-only

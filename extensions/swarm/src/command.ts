@@ -5,12 +5,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
 import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from "./tmux.ts";
-import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
+import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, deriveNodeAttention, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
 import { buildFlowSnapshot } from "./observability.ts";
 import { openFlowDialog, pickFlowTask } from "./flow-dialog.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
-import { enqueueAndDeliver } from "./mailbox.ts";
-import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "./state.ts";
+import { enqueueAndDeliver, deliverMessageLocked, findIdempotentMessage } from "./mailbox.ts";
+import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
 import { ensureOrchestrator, overridePath } from "./identity.ts";
@@ -41,7 +41,7 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 	return out;
 }
 
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight] | pool cooldown <slot> <ms> | pool clear <slot>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -331,6 +331,137 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					await traceTask(tp, "task.next_nodes", { taskId: task.taskId, ready: actionable, current, via: "command" });
 					ctx.ui.notify(lines.join("\n"), "info");
 					return;
+				}
+				if (cmd === "attention") {
+				// Orchestrator-gated, READ-ONLY recovery attention report (roadmap issue 5). Pure durable
+				// derivation from task graph + assignment attempts + mailbox state; never sends, never mutates.
+				if (currentAgentId() !== "orchestrator") {
+					ctx.ui.notify("attention is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+					return;
+				}
+				const arg = rest.shift();
+				const list = await listTasksIndexed(p);
+				const targets = arg ? (await resolveTaskArg(p, arg)) : { list };
+				if (arg && !targets.hit) {
+					const hint = targets.ambiguous ? `Ambiguous "${arg}" matches: ${targets.ambiguous.join(", ")}` : (targets.missReason || "task not found");
+					ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
+					return;
+				}
+				const scope = targets.hit ? [{ task: targets.hit.task, tp: targets.hit.tp }] : list.map((t) => ({ task: t.task, tp: t.tp }));
+				const st = await readState(p, ctx.cwd);
+				const nowMs = Date.now();
+				const lines: string[] = [arg ? `Attention report — task ${targets.hit!.task.taskId}` : `Attention report — ${scope.length} task(s)`];
+				let actionable = 0, reminders = 0, escalations = 0;
+				for (const { task, tp } of scope) {
+					const nodeLines: string[] = [];
+					for (const [nodeId, node] of Object.entries(task.nodes)) {
+						const att = deriveNodeAttention(st, task, nodeId, nowMs);
+						if (att.category === "none" || att.category === "terminal") continue;
+						if (att.workerReminderEligible) reminders++;
+						if (att.orchestratorDecision) escalations++;
+						actionable++;
+						nodeLines.push(`  ${nodeId} (${node.status}, assignee ${node.assignee || "-"}) → ${att.category}${att.workerReminderEligible ? ` — /swarm remind ${task.taskId} ${nodeId}` : ""}`);
+						for (const e of att.evidence) nodeLines.push(`      • ${e}`);
+					}
+					if (nodeLines.length) lines.push(``, `${task.taskId} (${task.status}):`, ...nodeLines);
+				}
+				lines.push("", `Summary: ${actionable} node signal(s); reminder-eligible: ${reminders}; orchestrator decisions: ${escalations}. Advisory only — nothing is auto-reassigned, cancelled, or completed.`);
+				await trace(p, "swarm.attention", { by: currentAgentId(), tasks: scope.length, actionable, reminders, escalations });
+				ctx.ui.notify(lines.join("\n"), "info");
+				return;
+				}
+				if (cmd === "remind") {
+				// Orchestrator-gated, the ONLY sending surface for bounded worker reminders (issue 5).
+				// Idempotent + attempt-fenced: at most one reminder per attempt, permanently; requires
+				// confirmed receipt (durable ack seen/processing) + no-progress interval; never mutates node
+				// status/outcome/readiness and creates no ack/response debt.
+				if (currentAgentId() !== "orchestrator") {
+					ctx.ui.notify("remind is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+					return;
+				}
+				const taskIdRaw = rest.shift();
+				const nodeId = rest.shift();
+				if (!taskIdRaw || !nodeId) { ctx.ui.notify("Usage: /swarm remind <task-id> <node-id> (orchestrator-only; see /swarm attention for eligibility)", "warning"); return; }
+				const taskId = safeId(taskIdRaw);
+				const tp = taskPaths(p, taskId);
+				if (!existsSync(tp.taskJson)) { ctx.ui.notify(`No task ${taskId}`, "warning"); return; }
+				const outcome = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					const nowMs = Date.now();
+					// Re-read under lock: the attempt may have been superseded while the operator typed.
+					const task = await readTaskState(tp.taskJson);
+					const node = task.nodes[nodeId];
+					if (!node) return { sent: false, reason: `node ${nodeId} does not exist in ${taskId}` };
+					const att = deriveNodeAttention(st, task, nodeId, nowMs);
+					if (att.category !== "reminder_eligible" || !att.workerReminderEligible) {
+						return { sent: false, reason: `not eligible: ${att.category} — ${att.evidence.join("; ")}` };
+					}
+					// Attempt-locality guard: receipt must be a durable processing/seen ack on the CURRENT
+					// assignment message. A prior (superseded) attempt's acked message is not receipt of the
+					// current assignment, and handoff traffic is not assignment traffic.
+					const currentMsg = st.messages[node.assignmentMessageId!];
+					if (!currentMsg || !(currentMsg.lastAck?.status === "seen" || currentMsg.lastAck?.status === "processing")) {
+						return { sent: false, reason: `not eligible: receipt not confirmed on current assignment ${node.assignmentMessageId} (lastAck ${currentMsg?.lastAck?.status || "none"})` };
+					}
+					const attemptId = node.activeAttemptId as string;
+					const attempt = (node.attemptHistory || []).find((a: any) => a.attemptId === attemptId);
+					if (!attempt || attempt.status !== "active") return { sent: false, reason: `not eligible: attempt ${attemptId} is ${attempt?.status || "missing"}` };
+					const assignee = node.assignee || attempt.assignee;
+					if (!assignee) return { sent: false, reason: `not eligible: node ${nodeId} has no assignee` };
+					const msg = st.messages[node.assignmentMessageId!];
+					const anchorMs = Math.max(
+						msg?.lastAck?.at ? new Date(msg.lastAck.at).getTime() : 0,
+						node.lastActivityAt ? new Date(node.lastActivityAt).getTime() : 0,
+						attempt.lastActivityAt ? new Date(attempt.lastActivityAt).getTime() : 0,
+						new Date(attempt.assignedAt).getTime(),
+					);
+					// Idempotency fence: one reminder message per attempt, ever. Crash between the mailbox append
+					// and the task.json write is repaired here on the next invocation.
+					const key = `task:${taskId}:node:${nodeId}:attempt:${attemptId}:reminder`;
+					const existing = findIdempotentMessage(st, "orchestrator", assignee, key);
+					if (existing || attempt.reminder) {
+						const reminderId = attempt.reminder?.reminderId || existing?.id || "unknown";
+						let repaired = false;
+						if (!attempt.reminder && existing) {
+							// Crash repair: message exists durably but the attempt record was never written.
+							attempt.reminder = { reminderId, sentAt: existing.createdAt, messageId: existing.id, attemptId, noProgressSince: new Date(anchorMs).toISOString() };
+							repaired = true;
+							await writeTaskState(tp, task);
+						}
+						return { sent: false, reason: `already sent for attempt ${attemptId} (reminder message ${attempt.reminder?.messageId || existing?.id})`, repaired };
+					}
+					// Send the reminder: informational only, no ack/response debt by construction.
+					const { msg: rmsg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, {
+						to: assignee,
+						subject: `Reminder: node ${nodeId} of ${taskId} awaiting progress`,
+						body: `You acknowledged the assignment for task ${taskId}, node ${nodeId} (${node.role}), but there has been no durable progress since ${new Date(anchorMs).toISOString()} (${Math.round((nowMs - anchorMs) / 60000)} minutes).\n\nRequired actions (choose one):\n1. If complete: swarm_update_task(taskId="${taskId}", nodeId="${nodeId}", status="done", outcome="<result>")\n2. If blocked: swarm_update_task(taskId="${taskId}", nodeId="${nodeId}", status="blocked", note="<reason>")\n3. If still working: continue, and update the node when finished.\n\nThis reminder is informational; it does not change your task status, assignment, or create any reply obligation. At most one reminder is sent per attempt.`,
+						requiresAck: false,
+						requiresResponse: false,
+						priority: "normal",
+						idempotencyKey: key,
+					});
+					// Persist the reminder record (message-first crash ordering: the idempotency key is the
+					// durable fence; a crash before this write is repaired above on the next invocation).
+					const taskNow = await readTaskState(tp.taskJson);
+					const attemptNow = (taskNow.nodes[nodeId].attemptHistory || []).find((a: any) => a.attemptId === attemptId);
+					if (attemptNow && !attemptNow.reminder) {
+						attemptNow.reminder = {
+							reminderId: rmsg.id,
+							sentAt: rmsg.createdAt,
+							messageId: rmsg.id,
+							attemptId,
+							noProgressSince: new Date(anchorMs).toISOString(),
+						};
+						await writeTaskState(tp, taskNow);
+					}
+					// Persist the message record/delivery mutation (deliverMessageLocked mutates st in memory only).
+					await writeState(p, st);
+					await traceTask(tp, "reminder.sent", { taskId, nodeId, attemptId, messageId: rmsg.id, assignee, anchor: new Date(anchorMs).toISOString(), injected: Boolean(delivery?.delivered) });
+					return { sent: true, messageId: rmsg.id, attemptId, assignee, injected: Boolean(delivery?.delivered) || delivery?.reused === true, reason: delivery?.reason };
+				});
+				if (outcome.sent) ctx.ui.notify(`Reminder sent: message ${outcome.messageId} → ${outcome.assignee} (attempt ${outcome.attemptId}; injected=${outcome.injected}). Informational only; one per attempt, ever.`, "info");
+				else ctx.ui.notify(`Reminder NOT sent: ${outcome.reason}${outcome.repaired ? " (crash-repaired the attempt reminder record)" : ""}`, "warning");
+				return;
 				}
 				if (cmd === "validate") {
 					// Structural + optional runtime validation. Mirrors swarm_validate_graph.

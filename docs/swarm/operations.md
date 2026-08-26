@@ -233,6 +233,39 @@ All recovery nudges share one semantic key space (`task:{taskId}:node:{nodeId}:n
 contract. Every message tells the recipient the concrete next action (the exact tool call) plus an
 alternative path (cancel/inspect).
 
+### Recovery attention and bounded worker reminder (roadmap issue 5)
+
+The orchestrator can derive a durable, decision-oriented **attention report** from persisted state
+only (task graph + assignment attempts + mailbox records). Pane/process/tmux idle state is NEVER
+semantic evidence of completion or failure.
+
+- **`/swarm attention [<#|task-id>]`** (orchestrator-only, read-only): per-node classification —
+  `unassigned_ready`, `ack_missing`, `response_missing`, `delivery_failed`, `dead_letter`,
+  `transport_unavailable`, `no_progress`, `reminder_eligible`, `reminder_sent`, `superseded`,
+  `cancelled`, `terminal` — each with evidence lines and a summary of orchestrator decisions.
+  Advisory only: it never reassigns, cancels, completes, or alters graph readiness.
+- **`swarm_task_status(runtime=true)`** appends the same `attention:` warning lines for
+  reminder-eligible nodes (no new tool parameter).
+- **`swarm_reconcile`** reports an informational `reminder_eligible` action naming the exact
+  `/swarm remind` invocation. **Reconcile never sends anything.**
+- **`/swarm remind <task-id> <node-id>`** (orchestrator-only): the ONLY sending surface. Sends at
+  most **one reminder per attempt, permanently** (idempotency key
+  `task:{taskId}:node:{nodeId}:attempt:{attemptId}:reminder`), and only when ALL hold:
+  1. canonical, non-superseded assignment message exists;
+  2. receipt/processing is confirmed by a durable ack (`lastAck.status` exactly `seen` or `processing` —
+     `injected`/`intercepted`/`mailbox_delivered` alone is never receipt; `done` is a closure problem);
+  3. the no-progress anchor — the most recent of `lastAck.at`, `node.lastActivityAt`,
+     `attempt.lastActivityAt`, `attempt.assignedAt` — is older than `REMINDER_NO_PROGRESS_MS` (60 min);
+  4. the attempt is the current active attempt (reassign/rework/cancel fences obsolete reminders);
+  5. the node is `assigned`/`in_progress` on a non-cancelled task;
+  6. the one-per-attempt budget is unconsumed.
+
+  The reminder message is `requiresAck:false` + `requiresResponse:false` (no ack/response debt by
+  construction), informational about the required protocol, and never mutates node status/outcome/
+  readiness. Crash between the mailbox append and the task.json write is repaired on the next
+  invocation (the idempotency key is the durable fence). Tests:
+  `extensions/swarm/attention-reminder.test.mjs`.
+
 ## Validation entrypoints
 
 Use these when validating behavior, not just reading docs:

@@ -212,9 +212,48 @@ export type SwarmMessage = {
 
 export type TaskStatus = "draft" | "ready" | "in_progress" | "blocked" | "reviewing" | "validating" | "done" | "failed" | "cancelled";
 
+// Durable attention classification for a task node (roadmap issue 5). Derived PURELY from
+// persisted state (task graph, assignment attempt, mailbox records) — never from tmux/process/
+// pane idle state. Advisory only: categories never mutate node status or infer outcome.
+export type AttentionCategory =
+	| "transport_unavailable"
+	| "delivery_failed"
+	| "dead_letter"
+	| "ack_missing"
+	| "response_missing"
+	| "stale_assignment"
+	| "unassigned_ready"
+	| "no_progress"
+	| "reminder_eligible"
+	| "reminder_sent"
+	| "superseded"
+	| "cancelled"
+	| "terminal"
+	| "none";
+
+export type NodeAttention = {
+	category: AttentionCategory;
+	evidence: string[];
+	// True when ALL reminder-eligibility rules hold right now (attempt-fenced, receipt confirmed,
+	// no-progress interval elapsed, budget unconsumed). Advisory; sending is a separate explicit step.
+	workerReminderEligible: boolean;
+	// True when the category requires an explicit orchestrator choice (assign/escalate/reassign).
+	orchestratorDecision: boolean;
+};
+
 export type TaskNodeStatus = "pending" | "ready" | "assigned" | "in_progress" | "blocked" | "done" | "failed" | "skipped" | "cancelled";
 
 export type TaskGateStatus = "open" | "passed" | "failed" | "waived";
+
+// Worker reminder record (reliability roadmap issue 5). Additive: legacy attempts simply lack the
+// field, and its presence never changes task semantics — a reminder is informational only.
+export type ReminderRecord = {
+	reminderId: string;
+	sentAt: string;
+	messageId: string;          // the reminder message sent to the assignee
+	attemptId: string;          // ties the reminder to one attempt lease
+	noProgressSince: string;    // anchor timestamp evidence at send time
+};
 
 export type TaskNodeAttempt = {
 	attemptId: string;           // Unique lease identity (UUID), server-generated
@@ -231,6 +270,11 @@ export type TaskNodeAttempt = {
 	// authoritative lifecycle field; these are optional audit annotations only.
 	releasedAt?: string;          // When the attempt's write-scope lease ended (any reason)
 	releaseReason?: "reassign" | "rework" | "terminal" | "cancel" | "orchestrator_override";
+	// Bounded worker reminder (roadmap issue 5): at most one per attempt, permanently. Presence of
+	// this record means the one-reminder budget for this attempt is consumed; it never mutates node
+	// status/outcome/readiness and creates no ack/response debt (the message requiresAck:false and
+	// requiresResponse:false by construction).
+	reminder?: ReminderRecord;
 	// Effective write scope stamped at assignment time; used by the ownership preflight to detect
 	// overlapping active write scopes across all tasks. Absent on pre-policy attempts (readable legacy).
 	scope?: { source: "node-explicit" | "node-inherited" | "task-default"; sourceNodeId?: string; files: string[] };

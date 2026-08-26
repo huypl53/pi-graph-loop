@@ -266,13 +266,19 @@ It must not auto-assign or auto-spawn.
 
 **Phase 1 implementation:** `reconcileInitialReadyLocked` runs on the orchestrator pump. After `TASK_INITIAL_READY_GRACE_MS` (1 min) a ready+unassigned start node is nudged once with an exact `swarm_assign_task` call. Idempotent per `task:{taskId}:nudge:initial-ready`; bounded by `NOTIFY_DEFAULT_MAX_NUDGES` / `NOTIFY_DEFAULT_COOLDOWN_MS`; auto-clears when the node is assigned. It never assigns or spawns. Covered by `extensions/swarm/rbac-initial-ready.test.mjs`.
 
-#### 5. Bounded worker completion reminder
+#### 5. Bounded worker completion reminder — **COMPLETE**
 
 **Gap:** worker can finish implementation but forget status/result protocol.
 
 **Proposal:** after confirmed receipt/processing and no task progress, send a single bounded worker reminder; escalate to orchestrator only if it remains unresolved.
 
 The reminder must never claim the work is finished and must never set node state itself.
+
+**Implemented** (see `docs/swarm/operations.md` → Recovery attention and bounded worker reminder):
+pure durable attention derivation (`deriveNodeAttention` in `src/taskgraph.ts`), orchestrator-gated
+read-only `/swarm attention`, one-per-attempt `/swarm remind` (idempotency-key fenced, crash-safe,
+no ack/response debt), `runtime=true` attention warnings, and a report-only `reminder_eligible`
+reconcile action. Reconcile never sends. Covered by `extensions/swarm/attention-reminder.test.mjs`.
 
 #### 6. Cancellation and supersession semantics — **COMPLETE**
 
@@ -345,7 +351,37 @@ Automatic delivery retry is reasonable. Automatic reassign is not, unless a task
 
 ### P2 — operational clarity and scalability
 
-#### 9. Separate liveness dimensions
+#### 9. Lifecycle-notification fencing and stale-event suppression
+
+**Observed failure:** an `agent_settled` notification can be emitted or delivered after the
+orchestrator has stopped/pruned that worker and released or reassigned its node. The historical
+notification then incorrectly says that the old worker still holds open work.
+
+**Required policy:** lifecycle events are advisory observations, never task authority. Before a
+settled/open-assignment notification is persisted or delivered, validate its observation against
+current durable state under the swarm lock. The notification must carry the relevant assignment
+attempt identity (where present), and must be suppressed or marked obsolete when that attempt/node
+has since been released, superseded, cancelled, reassigned, or the agent has been stopped. Pending
+notifications must receive the same fence immediately before delivery/retry; no obsolete notice may
+be reinjected merely because it was queued earlier.
+
+**Requirements:**
+
+- Do not infer work status from pane/process idleness; this changes notification correctness only.
+- Use task JSON, attempt history, agent state, and mailbox state as durable evidence; no pane state
+  can make an old assignment appear current.
+- Preserve append-only audit/trace evidence of the original observation and its suppression or
+  obsolescence reason without creating response debt.
+- Do not auto-close, fail, reassign, or mutate a node's semantic execution state.
+- Cover stop/release, reassignment, cancellation, rework, queued-delivery race, and legacy
+  assignment-without-attempt cases with failure-injection tests.
+
+**Acceptance criteria:** after a worker is stopped/released, a later `agent_settled` event cannot
+claim it owns the released node; a stale queued event cannot notify the orchestrator as actionable;
+a current worker/attempt notification continues to work exactly once within existing bounded
+nudge policy.
+
+#### 10. Separate liveness dimensions
 
 Do not equate an alive tmux pane with progress.
 
@@ -357,7 +393,7 @@ Do not equate an alive tmux pane with progress.
 
 Expose these separately in task and agent status.
 
-#### 10. Unified attention view
+#### 11. Unified attention view
 
 Operators should not need to infer required action from raw state across several tools.
 
@@ -382,7 +418,7 @@ It should prioritize:
 
 This should synthesize state; it must not silently mutate state.
 
-#### 11. Multi-orchestrator authority
+#### 12. Multi-orchestrator authority
 
 Decide whether multiple orchestrators are supported.
 
@@ -391,7 +427,7 @@ Decide whether multiple orchestrators are supported.
 
 Without this, two PM panes can race assignments and recovery decisions.
 
-#### 12. Provider/pool preflight
+#### 13. Provider/pool preflight
 
 Observed failure class: provider/model configuration error reaches spawn, is poorly classified, and leaves graph work stalled.
 
@@ -408,7 +444,7 @@ tmux availability
 
 Failures should be classified and return an actionable recovery/fallback recommendation.
 
-#### 13. Message/backpressure policy
+#### 14. Message/backpressure policy
 
 Multiple events (`session_start`, `agent_settled`, reconcile, graph advance, delivery retry, periodic PM pump) can produce duplicate notifications.
 
