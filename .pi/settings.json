@@ -1,8 +1,0 @@
-{
-  "swarm": {
-    "modelPool": [
-      { "model": "claude-opus-4-8", "provider": "ccs" },
-      { "model": "glm-4.7", "provider": "ccs" }
-    ]
-  }
-}
