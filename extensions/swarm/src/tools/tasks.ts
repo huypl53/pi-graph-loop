@@ -7,7 +7,7 @@ import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
 import { TERMINAL_NODE_STATUSES, CANCELLATION_REASON } from "../constants.ts";
-import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, validateTaskGraph, type EffectiveScope } from "../taskgraph.ts";
+import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
 import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, supersedeOpenAssignments, supersedeTaskAssignmentMessages } from "../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, now, safeId, textResult } from "../utils.ts";
@@ -416,6 +416,28 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note, attemptId);
 				// Deterministic idempotency key: same task/node/assignee/attempt -> same message (no duplicate on retry).
 				const idempotencyKey = `assign:${task.taskId}:${params.nodeId}:${assignee.id}:${node.attempts}`;
+				// Lifecycle-fencing (issue 9, site 8, defense-in-depth): per-node staleness check right
+				// before delivering the assignment message. By construction the just-mutated node is
+				// fresh, so this is a defensive belt-and-suspenders check that catches (a) a task that
+				// became terminal between the readiness gate and here, or (b) any future caller mutation
+				// sequence that leaves the node in an inconsistent state. The assignment record still
+				// mutates (the worker holds the lease) but the canonical assignment message is suppressed
+				// and replaced with an informational fence trace.
+				const assignStaleCheck = checkStallNotificationStale(st, task, params.nodeId, assignee.id, Date.now());
+				if (assignStaleCheck.stale) {
+					await traceTask(tp, "notification.stale.suppressed", { site: "swarm_assign_task.assignment", taskId, nodeId: params.nodeId, reason: assignStaleCheck.reason, evidence: assignStaleCheck.evidence });
+					const fencedKey = `${idempotencyKey}:fenced`;
+					const { msg: fmsg, delivery: fdelivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: assignee.id, body: `Assignment to node ${params.nodeId} of ${task.taskId} is stale (${assignStaleCheck.reason}: ${assignStaleCheck.evidence.join("; ")}). The assignment record persists but no canonical assignment message was sent.`, subject: `Task ${task.taskId} / node ${params.nodeId} assignment FENCED`, conversationId, requiresAck: false, requiresResponse: false, idempotencyKey: fencedKey });
+					const activeAttemptFenced = node.attemptHistory?.find((a: any) => a.attemptId === attemptId);
+					if (activeAttemptFenced) activeAttemptFenced.assignmentMessageId = fmsg.id;
+					node.assignmentMessageId = fmsg.id;
+					node.messageIds = Array.from(new Set([...(node.messageIds || []), fmsg.id]));
+					task.handoffs.push({ fromNode: null, toNode: params.nodeId, by: me, toAgent: assignee.id, messageId: fmsg.id, at: now(), kind: "assign", status: fdelivery?.delivered ? (fdelivery.mailboxOnly ? "mailbox_only" : "delivered") : "queued", fenced: true });
+					await writeTaskState(tp, task);
+					await writeState(p, st);
+					await traceTask(tp, "task.assign.fenced", { taskId, nodeId: params.nodeId, assignee: assignee.id, messageId: fmsg.id, reason: assignStaleCheck.reason });
+					return { task, tp, msg: fmsg, delivery: fdelivery, candidates, assigneeId: assignee.id, fenced: true, reason: assignStaleCheck.reason };
+				}
 				const { msg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: assignee.id, body, subject: `Task ${task.taskId} / node ${params.nodeId} assigned`, conversationId, requiresAck: true, requiresResponse: true, idempotencyKey });
 				// Update attempt record with the actual message ID
 				const activeAttempt = node.attemptHistory?.find((a: any) => a.attemptId === attemptId);
@@ -437,7 +459,8 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			});
 			const delivery = result.delivery;
 			const injected = Boolean(delivery?.delivered) && !delivery?.mailboxOnly;
-			return textResult(`Assigned node ${params.nodeId} of ${result.task.taskId} to ${result.assigneeId}${spawned ? " (spawned)" : ""}. Message ${result.msg.id} ${delivery?.delivered ? (delivery.mailboxOnly ? "queued (mailbox-only)" : "delivered") : "queued (agent not running; reconcile will retry)"}.`, { taskId: result.task.taskId, nodeId: params.nodeId, assignee: result.assigneeId, spawned, messageId: result.msg.id, injected, delivery, candidates: result.candidates });
+			const fencedSuffix = (result as any).fenced ? ` Message ${result.msg.id} FENCED (${(result as any).reason}) — informational trace only.` : "";
+			return textResult(`Assigned node ${params.nodeId} of ${result.task.taskId} to ${result.assigneeId}${spawned ? " (spawned)" : ""}. Message ${result.msg.id} ${delivery?.delivered ? (delivery.mailboxOnly ? "queued (mailbox-only)" : "delivered") : "queued (agent not running; reconcile will retry)"}.${fencedSuffix}`, { taskId: result.task.taskId, nodeId: params.nodeId, assignee: result.assigneeId, spawned, messageId: result.msg.id, injected, delivery, candidates: result.candidates, fenced: Boolean((result as any).fenced), reason: (result as any).reason ?? null });
 		},
 	}))
 
@@ -632,10 +655,24 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					// Informational cancel notifications to each assignee — requiresAck:false so workers
 					// never accumulate response debt on a cancelled assignment. We only notify assignees
 					// of nodes that were active before cancellation; never on already-terminal nodes.
-					const notifiees = new Set<string>();
-					for (const n of Object.values(task.nodes)) {
+					// Lifecycle-fencing (issue 9, site 7): build Map<assigneeId, nodeId> so each notifiee
+					// gets its OWN triggering-assignee for the predicate lookup. The predicate is narrow
+					// by design: it does NOT consider the just-set task.status="cancelled" or terminal node
+					// status as staleness — those are the trigger. Stale iff the node has since been
+					// reopened (status=ready) and reassigned to a different agent.
+					const triggeringAssigneeMap = new Map<string, string>();
+					for (const [nId, n] of Object.entries(task.nodes)) {
 						if (n.assignee && n.assignee !== "orchestrator" && (n.status === "cancelled" || n.status === "assigned" || n.status === "in_progress")) {
-							notifiees.add(n.assignee);
+							triggeringAssigneeMap.set(n.assignee, nId);
+						}
+					}
+					const notifiees = new Set(triggeringAssigneeMap.keys());
+					for (const [assigneeId, nId] of triggeringAssigneeMap) {
+						const cancelStaleCheck = checkClosureNotificationStale(st, task, nId, assigneeId, Date.now());
+						if (cancelStaleCheck.stale) {
+							await traceTask(tp, "notification.stale.suppressed", { site: "swarm_update_task.cancellation", taskId, to: assigneeId, nodeId: nId, reason: cancelStaleCheck.reason, evidence: cancelStaleCheck.evidence });
+							notifiees.delete(assigneeId);
+							continue;
 						}
 					}
 					for (const assigneeId of notifiees) {
@@ -677,26 +714,35 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const closureIsh = (s: TaskNodeStatus | undefined): boolean => s === "done" || s === "failed" || s === "blocked" || s === "cancelled";
 				const closedNow = !closureIsh(prevStatus) && closureIsh(newStatus);
 				if (closedNow) {
-					ensureOrchestrator(st, ctx.cwd, p);
-					const nextLabel = nextReady.ready.length ? nextReady.ready.join(", ") : "(none)";
-					const outcomeLabel = params.outcome ? ` (outcome=${params.outcome})` : "";
-					const who = closingAssignee ? ` assignee=${closingAssignee}.` : "";
-					const art = params.artifact ? ` artifact=${params.artifact}.` : "";
-					let subject: string, body: string;
-					if (taskStatusChange.terminal) {
-						subject = `task ${task.taskId} closed (${task.status})`;
-						body = `Task ${task.taskId} closed with status ${task.status}. Triggering node ${params.nodeId} moved ${prevStatus} -> ${newStatus}${outcomeLabel} by ${me}.${who}${art} Next ready: ${nextLabel}.`;
+					// Lifecycle-fencing (issue 9, site 6): per-node closure staleness check. The predicate is
+					// deliberately narrow: it does NOT consider the just-set terminal status or task status
+					// as staleness — those are the trigger. Stale iff the node has since been reopened and
+					// reassigned to a different agent (rework race) OR the node has been removed from the graph.
+					const closeStaleCheck = checkClosureNotificationStale(st, task, params.nodeId, closingAssignee, Date.now());
+					if (closeStaleCheck.stale) {
+						await traceTask(tp, "notification.stale.suppressed", { site: "swarm_update_task.closure", taskId, nodeId: params.nodeId, reason: closeStaleCheck.reason, evidence: closeStaleCheck.evidence });
 					} else {
-						subject = `task ${task.taskId} node ${params.nodeId} -> ${newStatus}`;
-						body = `Node ${params.nodeId} of ${task.taskId} moved ${prevStatus} -> ${newStatus}${outcomeLabel} by ${me}.${who}${art} Task status=${task.status}. Next ready: ${nextLabel}.${newStatus === "blocked" ? " (blocked is resumable.)" : ""}`;
+						ensureOrchestrator(st, ctx.cwd, p);
+						const nextLabel = nextReady.ready.length ? nextReady.ready.join(", ") : "(none)";
+						const outcomeLabel = params.outcome ? ` (outcome=${params.outcome})` : "";
+						const who = closingAssignee ? ` assignee=${closingAssignee}.` : "";
+						const art = params.artifact ? ` artifact=${params.artifact}.` : "";
+						let subject: string, body: string;
+						if (taskStatusChange.terminal) {
+							subject = `task ${task.taskId} closed (${task.status})`;
+							body = `Task ${task.taskId} closed with status ${task.status}. Triggering node ${params.nodeId} moved ${prevStatus} -> ${newStatus}${outcomeLabel} by ${me}.${who}${art} Next ready: ${nextLabel}.`;
+						} else {
+							subject = `task ${task.taskId} node ${params.nodeId} -> ${newStatus}`;
+							body = `Node ${params.nodeId} of ${task.taskId} moved ${prevStatus} -> ${newStatus}${outcomeLabel} by ${me}.${who}${art} Task status=${task.status}. Next ready: ${nextLabel}.${newStatus === "blocked" ? " (blocked is resumable.)" : ""}`;
+						}
+						try {
+							await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject, body, conversationId: `task:${task.taskId}:${params.nodeId}`, requiresAck: false });
+							await traceTask(tp, "task.close.notify", { taskId, nodeId: params.nodeId, status: newStatus, taskStatus: task.status, to: "orchestrator" });
+						} catch (err: any) {
+							await traceTask(tp, "task.close.notify_failed", { taskId, nodeId: params.nodeId, error: String(err?.message || err) });
+						}
+						await writeState(p, st); // persist the notify message record + orchestrator pseudo-agent
 					}
-					try {
-						await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject, body, conversationId: `task:${task.taskId}:${params.nodeId}`, requiresAck: false });
-						await traceTask(tp, "task.close.notify", { taskId, nodeId: params.nodeId, status: newStatus, taskStatus: task.status, to: "orchestrator" });
-					} catch (err: any) {
-						await traceTask(tp, "task.close.notify_failed", { taskId, nodeId: params.nodeId, error: String(err?.message || err) });
-					}
-					await writeState(p, st); // persist the notify message record + orchestrator pseudo-agent
 				}
 				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled, autoClosed: autoClosed.closed, reopened };
 			});

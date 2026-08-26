@@ -2,18 +2,18 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname, relative, sep } from "node:path";
 import type { MessageResponseStatus, Paths } from "./types.ts";
-import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP } from "./constants.ts";
+import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_KEY_SETTLE_STALE, formatNotifyKey } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
 import type { ModelSlot } from "./types.ts";
 import { classifyProviderError } from "./types.ts";
 import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "./pool.ts";
-import { deliverMessageLocked, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
+import { deliverMessageLocked, findIdempotentMessage, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, trace, withLock, writeState, writeTaskState } from "./state.ts";
 import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader } from "./identity.ts";
 import { formatSwarmMessageContent, parseSystemDelivery } from "./delivery.ts";
 import { pumpOrchestratorMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
-import { scanAgentOpenAssignments } from "./taskgraph.ts";
+import { scanAgentOpenAssignments, checkStallNotificationStale } from "./taskgraph.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { tmux } from "./tmux.ts";
 
@@ -374,15 +374,23 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			const missingResponses = responseMissingRecords(st, agentId);
 			agent.runtimeStatus = missingResponses.length ? "response_missing" : "idle";
 			if (missingResponses.length) {
-				for (const rec of missingResponses) {
-					rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: "missing", missingAt: rec.response?.missingAt || ts, lastError: `response_missing: ${agentId} settled before sending a verified result` };
-					rec.updatedAt = ts;
-				}
-				try {
-					await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject: `agent ${agentId} settled with missing response(s)`, body: `Agent ${agentId} settled while ${missingResponses.length} requiresResponse message(s) are still missing verified result messages: ${missingResponses.map((m) => m.id).join(", ")}. The agent is marked response_missing and is blocked from reuse until it sends replies and ack done with resultMessageId.`, requiresAck: false });
-					await trace(p, "message.response_missing.settled.notify", { agentId, messageIds: missingResponses.map((m) => m.id) });
-				} catch (err: any) {
-					await trace(p, "message.response_missing.notify_failed", { agentId, error: String(err?.message || err) });
+				// Lifecycle-fencing (issue 9, site 1): skip the settle-with-missing-response notify if every
+				// outstanding rec is stale (superseded by a later assignment, or no longer addressed to this
+				// settling agent). Fence at emit time using durable message state — no pane liveness inference.
+				const liveMissing = missingResponses.filter((rec) => !rec.superseded && rec.to === agentId);
+				if (liveMissing.length === 0) {
+					await trace(p, "notification.stale.suppressed", { site: "agent_settled.response_missing", agentId, reason: "all_recs_superseded_or_drifted", dropped: missingResponses.map((m) => m.id) });
+				} else {
+					for (const rec of liveMissing) {
+						rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: "missing", missingAt: rec.response?.missingAt || ts, lastError: `response_missing: ${agentId} settled before sending a verified result` };
+						rec.updatedAt = ts;
+					}
+					try {
+						await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject: `agent ${agentId} settled with missing response(s)`, body: `Agent ${agentId} settled while ${liveMissing.length} requiresResponse message(s) are still missing verified result messages: ${liveMissing.map((m) => m.id).join(", ")}. The agent is marked response_missing and is blocked from reuse until it sends replies and ack done with resultMessageId.`, requiresAck: false });
+						await trace(p, "message.response_missing.settled.notify", { agentId, messageIds: liveMissing.map((m) => m.id) });
+					} catch (err: any) {
+						await trace(p, "message.response_missing.notify_failed", { agentId, error: String(err?.message || err) });
+					}
 				}
 			}
 			// PM auto-notify (engine behavior): a settle while still holding open assignments is a
@@ -395,18 +403,45 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			if (agent.activeTaskIds.length) {
 				const sinceNotify = agent.lastSettleNotifyAt ? Date.now() - new Date(agent.lastSettleNotifyAt).getTime() : Number.POSITIVE_INFINITY;
 				if (sinceNotify > SETTLE_NOTIFY_COOLDOWN_MS) {
-					agent.lastSettleNotifyAt = ts;
 					let list = agent.activeTaskIds.join(", ");
 					let openCount = agent.activeTaskIds.length;
+					let open: Awaited<ReturnType<typeof scanAgentOpenAssignments>> = [];
 					try {
-						const open = await scanAgentOpenAssignments(p, st, agentId, agent.activeTaskIds);
+						open = await scanAgentOpenAssignments(p, st, agentId, agent.activeTaskIds);
 						if (open.length) { list = open.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", "); openCount = open.length; }
 					} catch { /* keep activeTaskIds fallback list */ }
-					try {
-						await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject: `agent ${agentId} settled idle with open assignment(s)`, body: `Agent ${agentId} settled (agent_settled) while still holding ${openCount} open assignment(s): ${list}. It may be idle or stalled; advance via swarm_next_nodes/swarm_update_task, reassign, or reconcile as needed.`, requiresAck: false });
-						await trace(p, "task.stale.settled.notify", { agentId, open: openCount });
-					} catch (err: any) {
-						await trace(p, "task.stale.settled.notify_failed", { agentId, error: String(err?.message || err) });
+					// Lifecycle-fencing (issue 9, site 2): per-node staleness check on every entry from
+					// scanAgentOpenAssignments. A node that has since become terminal / reassigned / closed
+					// must not produce a settle-stale notify. Per-(task,agent) dedupe key prevents repeated
+					// storming across settles. Notify is suppressed iff EVERY (task,node) entry is stale.
+					const liveOpen: typeof open = [];
+					for (const entry of open) {
+						const staleCheck = checkStallNotificationStale(st, entry.task, entry.nodeId, agentId, Date.now());
+						if (staleCheck.stale) {
+							await trace(p, "notification.stale.suppressed", { site: "agent_settled.open_assignment", agentId, taskId: entry.task.taskId, nodeId: entry.nodeId, reason: staleCheck.reason, evidence: staleCheck.evidence });
+							continue;
+						}
+						const key = formatNotifyKey(NOTIFY_KEY_SETTLE_STALE, { taskId: entry.task.taskId, agentId });
+						if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) {
+							await trace(p, "task.stale.settled.notify_cooldown", { agentId, taskId: entry.task.taskId, cooldownMs: SETTLE_NOTIFY_COOLDOWN_MS, key });
+							continue;
+						}
+						liveOpen.push(entry);
+					}
+					if (liveOpen.length === 0) {
+						// Every open entry is stale or deduped — do NOT send a settle-stale notify at all.
+						// No lastSettleNotifyAt stamp (so a real fresh open next settle is still allowed).
+						await trace(p, "notification.stale.suppressed", { site: "agent_settled.open_assignment", agentId, reason: "all_open_stale_or_deduped", scanned: open.length });
+					} else {
+						agent.lastSettleNotifyAt = ts;
+						const list2 = liveOpen.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
+						const openCount2 = liveOpen.length;
+						try {
+							await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject: `agent ${agentId} settled idle with open assignment(s)`, body: `Agent ${agentId} settled (agent_settled) while still holding ${openCount2} open assignment(s): ${list2}. It may be idle or stalled; advance via swarm_next_nodes/swarm_update_task, reassign, or reconcile as needed.`, requiresAck: false });
+							await trace(p, "task.stale.settled.notify", { agentId, open: openCount2 });
+						} catch (err: any) {
+							await trace(p, "task.stale.settled.notify_failed", { agentId, error: String(err?.message || err) });
+						}
 					}
 				} else {
 					await trace(p, "task.stale.settled.notify_cooldown", { agentId, cooldownMs: SETTLE_NOTIFY_COOLDOWN_MS });
@@ -485,21 +520,34 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			ensureAgentDefaults(agent);
 			if (agent.activeTaskIds.length) {
 				const open = await scanAgentOpenAssignments(p, st, agentId, agent.activeTaskIds);
-				for (const { task, tp, nodeId } of open) { task.nodes[nodeId].staleAt = ts; task.nodes[nodeId].lastActivityAt = ts; await writeTaskState(tp, task); }
-				if (open.length) {
-					await trace(p, "task.stale.shutdown", { agentId, open: open.map((o) => ({ taskId: o.task.taskId, nodeId: o.nodeId })) });
-					const list = open.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
+				// Lifecycle-fencing (issue 9, site 3): per-node staleness check before stamping staleAt and
+				// emitting the shutdown-with-open notify. A node that has since become terminal / reassigned
+				// / closed must NOT receive a stale stamp nor a shutdown notify.
+				const liveOpen: typeof open = [];
+				const nowMs = Date.now();
+				for (const entry of open) {
+					const staleCheck = checkStallNotificationStale(st, entry.task, entry.nodeId, agentId, nowMs);
+					if (staleCheck.stale) {
+						await trace(p, "notification.stale.suppressed", { site: "session_shutdown.open_node", agentId, taskId: entry.task.taskId, nodeId: entry.nodeId, reason: staleCheck.reason, evidence: staleCheck.evidence });
+						continue;
+					}
+					liveOpen.push(entry);
+				}
+				for (const { task, tp, nodeId } of liveOpen) { task.nodes[nodeId].staleAt = ts; task.nodes[nodeId].lastActivityAt = ts; await writeTaskState(tp, task); }
+				if (liveOpen.length) {
+					await trace(p, "task.stale.shutdown", { agentId, open: liveOpen.map((o) => ({ taskId: o.task.taskId, nodeId: o.nodeId })) });
+					const list = liveOpen.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
 					// Nudge the reassignment authority: prefer each open node's assigner (replyTarget, from its
 					// latest `assign` handoff `by`) when registered and not this dying agent; else orchestrator
 					// (mailbox-only). Stamps node.lastActivityAt so the shutdown itself is recorded as activity.
 					const nudgeTargets = new Set<string>();
-					for (const { task, nodeId } of open) {
+					for (const { task, nodeId } of liveOpen) {
 						const assigner = [...task.handoffs].reverse().find((h: any) => h?.toNode === nodeId && h?.kind === "assign")?.by as string | undefined;
 						if (assigner && assigner !== agentId && st.agents[assigner]) nudgeTargets.add(assigner);
 						else nudgeTargets.add("orchestrator");
 					}
 					for (const target of nudgeTargets) {
-						try { await deliverMessageLocked(pi, ctx.cwd, p, st, { to: target, subject: `agent ${agentId} shut down with open task node(s)`, body: `Agent ${agentId} shut down (session_shutdown) while still assigned ${open.length} non-terminal node(s): ${list}. Those nodes were marked stale (staleAt) and lastActivityAt stamped. Reassign via swarm_assign_task or reconcile as needed.`, requiresAck: false }); }
+						try { await deliverMessageLocked(pi, ctx.cwd, p, st, { to: target, subject: `agent ${agentId} shut down with open task node(s)`, body: `Agent ${agentId} shut down (session_shutdown) while still assigned ${liveOpen.length} non-terminal node(s): ${list}. Those nodes were marked stale (staleAt) and lastActivityAt stamped. Reassign via swarm_assign_task or reconcile as needed.`, requiresAck: false }); }
 						catch (err: any) { await trace(p, "task.stale.shutdown.nudge_failed", { agentId, target, error: String(err?.message || err) }); }
 					}
 				}

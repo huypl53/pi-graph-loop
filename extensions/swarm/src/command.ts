@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
 import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from "./tmux.ts";
-import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, deriveNodeAttention, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
+import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, checkStallNotificationStale, deriveNodeAttention, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
 import { buildFlowSnapshot } from "./observability.ts";
 import { openFlowDialog, pickFlowTask } from "./flow-dialog.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
@@ -429,6 +429,15 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							await writeTaskState(tp, task);
 						}
 						return { sent: false, reason: `already sent for attempt ${attemptId} (reminder message ${attempt.reminder?.messageId || existing?.id})`, repaired };
+					}
+					// Lifecycle-fencing (issue 9, site 9): per-node staleness check before emitting the reminder.
+					// Defense-in-depth (the reminder is already attempt-fenced and receipt-confirmed by the
+					// eligibility gate above). Suppresses reminders for nodes that have since become terminal,
+					// reassigned, or otherwise no longer match the assignee we're addressing.
+					const remindStaleCheck = checkStallNotificationStale(st, task, nodeId, assignee, Date.now());
+					if (remindStaleCheck.stale) {
+						await traceTask(tp, "notification.stale.suppressed", { site: "swarm_remind.reminder", taskId, nodeId, to: assignee, reason: remindStaleCheck.reason, evidence: remindStaleCheck.evidence });
+						return { sent: false, reason: `stale: ${remindStaleCheck.reason} (${remindStaleCheck.evidence.join("; ")})` };
 					}
 					// Send the reminder: informational only, no ack/response debt by construction.
 					const { msg: rmsg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, {

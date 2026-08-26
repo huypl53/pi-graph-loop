@@ -382,6 +382,17 @@ claim it owns the released node; a stale queued event cannot notify the orchestr
 a current worker/attempt notification continues to work exactly once within existing bounded
 nudge policy.
 
+**Implemented:** [`lifecycle-notification-fencing`](../../.pi/swarm/tasks/lifecycle-notification-fencing/task.md) adds two pure predicate helpers in `taskgraph.ts`
+(`checkStallNotificationStale` for sites 1–5, 8, 9 and `checkClosureNotificationStale` for sites 6, 7)
+that run inside each emitter's existing `withLock` block. Stale notifications emit a
+`notification.stale.suppressed` trace event carrying `site`, `taskId`, `nodeId`, `reason`, and
+`evidence`; legitimate non-final closure notifications and cancellation notifies for active assignees
+are NOT suppressed (narrow predicate per Rev 4 / ReRev-C1). Node pointers, `node.assignee`, and
+`activeAttemptId` are not mutated by the fence. Independent test file
+`extensions/swarm/lifecycle-fencing.test.mjs` covers all 9 sites with real emitter invocation;
+regression sweep across `attempt-fencing`, `cancellation`, `multi-orchestrator`,
+`attention-reminder`, `state-corruption`, `tool-gating`, `smoke`, and `tsc --noEmit` is clean.
+
 #### 10. Separate liveness dimensions
 
 Do not equate an alive tmux pane with progress.

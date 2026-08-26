@@ -38,7 +38,7 @@ Bare `tsc` TS5097 caused by existing `.ts` import specifiers is not treated as a
 | 6 | Provider/pool preflight | Classify provider/model/tmux/pool failures before spawn/assignment and give actionable fallback/recovery output. | Complete: `pool-config-ux-and-preflight` |
 | 7 | Crash consistency and failure injection | Harden and test locks/state/task/mailbox recovery under interrupted writes and concurrent mutation; document repair boundaries. | Complete: `crash-consistency-and-failure-injection` |
 | 8 | Multi-orchestrator policy | Either explicitly reject a second active orchestrator or introduce and test a durable leader lease/fencing protocol. This is not enabled partially. | Complete: `multi-orchestrator-policy` |
-| 9 | Lifecycle-notification fencing and stale-event suppression | Prevent an old `agent_settled` / open-assignment notification from remaining actionable after its assignment was released, superseded, cancelled, reassigned, or worker stopped. Fence creation and delivery using durable task/attempt/agent state; preserve audit without semantic mutation. | Queued |
+| 9 | Lifecycle-notification fencing and stale-event suppression | Prevent an old `agent_settled` / open-assignment notification from remaining actionable after its assignment was released, superseded, cancelled, reassigned, or worker stopped. Fence creation and delivery using durable task/attempt/agent state; preserve audit without semantic mutation. | Complete: `lifecycle-notification-fencing` |
 | 10 | Final surface and architecture review | Re-evaluate public tool/command exposure after operational semantics settle; keep core minimal and move debug/admin exposure behind appropriate role gates or commands. | Queued |
 
 ## Cross-issue invariants

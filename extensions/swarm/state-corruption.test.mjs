@@ -222,25 +222,31 @@ console.log("\n[8] failure injection: concurrent writes serialized under lock");
 		state1.counter = ++counter;
 		state1.writer = "writer1";
 		await realWriteState(p, state1);
-		writeOrder.push(state1.counter);
+		writeOrder.push({ who: "writer1", counter: state1.counter });
 	});
 	const write2 = withLock(p, async () => {
 		state2.counter = ++counter;
 		state2.writer = "writer2";
 		await realWriteState(p, state2);
-		writeOrder.push(state2.counter);
+		writeOrder.push({ who: "writer2", counter: state2.counter });
 	});
-	
+
 	await Promise.all([write1, write2]);
 	ok("both writes completed", writeOrder.length === 2);
-	ok("writes were serialized (sequential counter)", writeOrder[0] === 1 && writeOrder[1] === 2);
-	
+	ok("writes were serialized (sequential counter)", writeOrder[0].counter === 1 && writeOrder[1].counter === 2);
+
 	// Verify final state is valid JSON (not merged)
 	const final = await readState(p, scratch);
 	ok("final state is valid JSON", typeof final === "object" && final.swarmId);
+	// Atomicity check (order-independent): the final file must reflect the LAST COMPLETED write
+	// in full — counter + writer are written together as one JSON rename. The mutex
+	// (withLock = mkdir spinlock) does NOT guarantee FIFO ordering; either writer can win the
+	// lock first, so we assert that final matches whichever writer's withLock block ran LAST.
+	const lastWriter = writeOrder[writeOrder.length - 1].who;
+	const lastCounter = writeOrder[writeOrder.length - 1].counter;
 	ok("final state has one counter value (last writer won)", typeof final.counter === "number" && (final.counter === 1 || final.counter === 2));
 	ok("final state has one writer value (last writer won)", final.writer === "writer1" || final.writer === "writer2");
-	ok("both counter and writer from same write (atomicity)", final.counter === 1 && final.writer === "writer1" || final.counter === 2 && final.writer === "writer2");
+	ok("both counter and writer from same write (atomicity)", final.writer === lastWriter && final.counter === lastCounter);
 }
 
 // --- [9] Failure injection: task update fencing verified (F5) ---

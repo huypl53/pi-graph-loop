@@ -151,6 +151,7 @@ These rules should stay stable unless there is an intentional design change.
 - append-only message/task state
 - swarm-state locking for writes
 - **slash-command admin guards for `/swarm stop` and `/swarm release`; worker panes are denied before the mutable handler runs**
+- **lifecycle-notification fencing: every emit-time site (`agent_settled` response-missing + open-assignment, `session_shutdown`, reconcile graph-advance + initial-ready nudges, `swarm_update_task` closure + cancellation notifies, `swarm_assign_task` defense-in-depth, `/swarm remind`) runs a durable-state predicate (`checkStallNotificationStale` / `checkClosureNotificationStale`) inside its existing `withLock` block; suppressed notifies emit `notification.stale.suppressed` with `site`, `taskId`, `nodeId`, `reason`, and `evidence`**
 
 ### Advisory / best-effort
 - tmux pane injection

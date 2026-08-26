@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
+import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
 import { readTaskState, taskPaths, trace, traceTask } from "./state.ts";
@@ -302,6 +302,123 @@ export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: str
 	}
 	evidence.push(`pending: node is ${node.status}, waiting on dependencies`);
 	return { category: "none", evidence, workerReminderEligible: false, orchestratorDecision: false };
+}
+
+// ---- Lifecycle notification fencing (reliability roadmap issue 9) ----
+// Two-mode staleness predicates for emit-time fencing of lifecycle notifications:
+//   * checkStallNotificationStale: stall/orchestrator-safety-net notifies (sites 1-5, 8, 9)
+//   * checkClosureNotificationStale: closure/cancellation notifies (sites 6, 7)
+// Both are pure, read-only derivations of stale events from durable state already loaded by the
+// emitter (task.json node/attempt + swarm-state messages/agents). No tmux/process inspection, no
+// pane idleness inference. Emit-time only — emit iff the predicate returns { stale: false }.
+// Predicates short-circuit to { stale: false } when legacy attempt metadata is missing.
+
+export type NotificationStaleness = { stale: boolean; reason: string | null; evidence: string[] };
+
+// checkStallNotificationStale — used by sites that emit STALL or ORCHESTRATOR-SAFETY-NET notifies
+// (response_missing on settle, open-assignment on settle, session_shutdown with open nodes,
+// graph-advance nudge, initial-ready nudge, assignment itself, /swarm remind). Stale iff:
+//   1) task closed (done/failed/cancelled)
+//   2) node terminal (TERMINAL_NODE_STATUSES.has(node.status))
+//   3) canonical assignment message superseded
+//   4) active attempt is not active (or legacy short-circuit when attempt metadata is absent)
+//   5) node.assignee drift (the notifying agent is no longer the assignee)
+//   6) agent stopped/unhealthy AND assignment is older than SETTLE_NOTIFY_COOLDOWN_MS grace
+export function checkStallNotificationStale(
+	st: SwarmState,
+	task: TaskState,
+	nodeId: string,
+	agentId: string,
+	nowMs: number,
+): NotificationStaleness {
+	const evidence: string[] = [];
+	const node = task.nodes[nodeId];
+	if (!node) return { stale: false, reason: null, evidence: [] };
+
+	// (1) Task closed
+	if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
+		evidence.push(`task_closed: task ${task.taskId} status=${task.status}`);
+		return { stale: true, reason: "task_closed", evidence };
+	}
+
+	// (2) Node terminal by status
+	if (TERMINAL_NODE_STATUSES.has(node.status)) {
+		evidence.push(`node_terminal: node ${nodeId} status=${node.status}`);
+		return { stale: true, reason: "node_terminal", evidence };
+	}
+
+	// (3) Superseded canonical assignment message
+	const canonId = node.assignmentMessageId;
+	if (canonId) {
+		const rec = st.messages[canonId];
+		if (rec?.superseded) {
+			evidence.push(`superseded_message: assignment ${canonId} superseded by ${rec.superseded.supersededBy}`);
+			return { stale: true, reason: "superseded", evidence };
+		}
+	}
+
+	// (4) Attempt superseded — LEGACY SHORT-CIRCUIT (issue 4 plans predate attempt metadata).
+	if (!node.activeAttemptId || !Array.isArray(node.attemptHistory)) {
+		evidence.push(`legacy_no_attempt_metadata: skipping attempt staleness check`);
+	} else {
+		const attempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
+		if (attempt && attempt.status !== "active") {
+			evidence.push(`superseded_attempt: attempt ${attempt.attemptId} status=${attempt.status}`);
+			return { stale: true, reason: "superseded_attempt", evidence };
+		}
+	}
+
+	// (5) Assignee drift
+	if (node.assignee !== agentId) {
+		evidence.push(`assignee_drift: node assignee=${node.assignee || "(unassigned)"} but notifying agent=${agentId}`);
+		return { stale: true, reason: "assignee_drift", evidence };
+	}
+
+	// (6) Agent stopped / unhealthy with grace (SETTLE_NOTIFY_COOLDOWN_MS per plan §2 C4).
+	const agent = st.agents[agentId];
+	if (agent && (agent.status === "stopped" || agent.health === "unhealthy")) {
+		const assignmentAge = canonId && st.messages[canonId]?.createdAt
+			? nowMs - new Date(st.messages[canonId].createdAt).getTime()
+			: Number.POSITIVE_INFINITY;
+		if (assignmentAge > SETTLE_NOTIFY_COOLDOWN_MS) {
+			evidence.push(`agent_stopped: agent ${agentId} ${agent.status}/${agent.health}, assignment age=${Math.round(assignmentAge / 1000)}s > grace=${SETTLE_NOTIFY_COOLDOWN_MS}ms`);
+			return { stale: true, reason: "agent_stopped", evidence };
+		} else {
+			evidence.push(`agent_stopped_within_grace: assignment age=${Math.round(assignmentAge / 1000)}s < grace=${SETTLE_NOTIFY_COOLDOWN_MS}ms (fresh)`);
+		}
+	}
+
+	return { stale: false, reason: null, evidence };
+}
+
+// checkClosureNotificationStale — used by sites that emit CLOSURE or CANCELLATION notifies
+// (swarm_update_task closure, swarm_update_task cancellation). Critically narrow: it does NOT
+// consider TERMINAL_NODE_STATUSES, message.superseded, attempt.status, or task.status drift as
+// staleness — those are the EXPECTED trigger outcomes, not staleness. Stale iff:
+//   1) node no longer exists in the graph
+//   2) node re-opened (status=ready) AND re-assigned to a DIFFERENT agent (rework edge)
+export function checkClosureNotificationStale(
+	_st: SwarmState,
+	task: TaskState,
+	nodeId: string,
+	triggeringAssignee: string | undefined,
+	_nowMs: number,
+): NotificationStaleness {
+	const evidence: string[] = [];
+	const node = task.nodes[nodeId];
+	if (!node) {
+		evidence.push(`node_missing: node ${nodeId} no longer exists in graph`);
+		return { stale: true, reason: "node_missing", evidence };
+	}
+
+	// (2) Reopened + reassigned to a different agent: the closure/cancel event no longer applies
+	// because the node has been re-opened and routed elsewhere.
+	if (node.status === "ready" && node.assignee && node.assignee !== triggeringAssignee) {
+		evidence.push(`reopened_reassigned: node ${nodeId} status=ready, assignee=${node.assignee} (was ${triggeringAssignee || "unassigned"})`);
+		return { stale: true, reason: "reopened_reassigned", evidence };
+	}
+
+	return { stale: false, reason: null, evidence };
 }
 
 export function buildDefaultGraph(allowedFiles: string[]): { start: string; nodes: Record<string, TaskNode>; edges: TaskEdge[]; gates: Record<string, TaskGate> } {

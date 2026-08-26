@@ -292,3 +292,42 @@ semantic evidence of completion or failure.
   4. the attempt is the current active attempt (reassign/rework/cancel fences obsolete reminders);
   5. the node is `assigned`/`in_progress` on a non-cancelled task;
 
+### Interpreting `notification.stale.suppressed` traces (roadmap issue 9)
+
+Every emit-time lifecycle-notification site runs a durable-state predicate before delivery; if the
+predicate says the assignment is no longer actionable, the notify is **not delivered** and a
+`notification.stale.suppressed` event is appended to `.pi/swarm/traces/events.jsonl` with `site`,
+`taskId`, `nodeId`, `reason`, and `evidence` fields. This is the authoritative record that an old
+notification was caught before it could mislead the recipient.
+
+- **When you see one**: the system intentionally chose **audit over delivery**. The predicate
+  matched one of the staleness conditions below; the notify was suppressed to prevent the
+  recipient from acting on stale evidence. The original observation is NOT lost — look up the
+  same `taskId`+`nodeId` in the events trace preceding this event for the original observation.
+- **`reason` values** (canonical set):
+  - `task_closed` — the task's own `status` is terminal (`done`/`cancelled`/`failed`); notifies
+    that would have pointed back at this task are obsolete.
+  - `node_terminal` — the node's `status` is in `TERMINAL_NODE_STATUSES`; the assignment
+    authority is gone.
+  - `superseded_message` — the canonical assignment message has a non-empty `supersededBy`
+    field; a newer attempt owns the assignment.
+  - `superseded_attempt` — `activeAttemptId` is set and no canonical message exists with that
+    attempt id (legacy short-circuit when attempt metadata is absent returns `stale:false`).
+  - `assignee_drift` — the canonical message's `to` does not match the current node assignee
+    (reassign/rework completed but the message still names the old agent).
+  - `agent_stopped` — the assignee's agent record is `status: stopped` and either
+    `runtimeStatus` is `idle`/`unavailable`/empty, or the canonical message is older than
+    `SETTLE_NOTIFY_COOLDOWN_MS` (2 min) grace.
+  - `node_missing` (closure predicate) — the node id no longer exists in `task.nodes`.
+  - `reopened_reassigned` (closure predicate) — the node is `ready` and its current
+    assignee differs from the triggering closure assignee.
+- **Aggregate traces**: `agent_settled` emits `all_recs_superseded_or_drifted` (site 1) or
+  `all_open_stale_or_deduped` (site 2) when EVERY entry in the notifiable set was suppressed or
+  deduped. This is the same predicate fan-out per entry; the aggregate event summarises the
+  empty-notify outcome.
+- **What it is NOT**: it is not a failure, not an error, and not a request for action. The
+  orchestrator does not need to re-issue, retry, or inspect anything unless the volume of
+  suppressions for a given `taskId`+`nodeId` looks wrong for the timeline (e.g. a single node
+  whose notify keeps being suppressed while no fresh assignment is being issued).
+
+

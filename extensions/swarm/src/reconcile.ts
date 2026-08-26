@@ -6,7 +6,7 @@ import { join, dirname, relative, sep } from "node:path";
 import type { IndexedTask, MessageResponseStatus, Paths, ReconcileAction, SwarmMessage, SwarmState, TaskState } from "./types.ts";
 import { ACK_MISSING_MS, formatNotifyKey, MAX_ATTEMPTS, MAX_REINJECTS, MAX_STATUS_TASKS, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
-import { computeReadyNodes, computeTaskStatus, deriveNodeAttention } from "./taskgraph.ts";
+import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
 import { deliver, deliverMessageLocked, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
 import { ensureOrchestrator, readOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
@@ -133,6 +133,18 @@ async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string, p: Pat
 			const key = formatNotifyKey(NOTIFY_KEY_GRAPH_ADVANCE, { taskId, nodeId });
 			const node = task.nodes[nodeId];
 			if (actionable.has(nodeId) && !node.assignee && !TERMINAL_NODE_STATUSES.has(node.status)) {
+				// Lifecycle-fencing (issue 9, site 4): per-node staleness check before emitting a graph-advance
+				// nudge. A node that has since become terminal / reassigned / closed must not be force-assigned
+				// from this safety-net (the historical "force-assign unready nodes" bug). The predicate also
+				// guards against nudging for a node whose assignee drifted (orchestrator pseudo-agent stays a
+				// fine notify target — no filter on agentId=orchestrator here, since this nudge is addressed
+				// to the orchestrator rather than a worker).
+				const staleCheck = checkStallNotificationStale(st, task, nodeId, node.assignee || "orchestrator", nowMs);
+				if (staleCheck.stale) {
+					await trace(p, "notification.stale.suppressed", { site: "reconcile.graph_advance_nudge", taskId, nodeId, reason: staleCheck.reason, evidence: staleCheck.evidence });
+					ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node stale");
+					continue;
+				}
 				await sendGraphAdvanceNudgeLocked(pi, cwd, p, st, taskId, nodeId, node.role || "worker", key);
 			} else {
 				// Node assigned / terminal / not yet ready -> clear any outstanding assign nudge for it.
@@ -177,6 +189,17 @@ export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string,
 		// Cooldown: never re-send within NOTIFY_DEFAULT_COOLDOWN_MS of the last send for the same key.
 		const last = existing.map((r) => r.createdAt || "").sort().pop() || "";
 		if (last && nowMs - new Date(last).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) continue;
+		// Lifecycle-fencing (issue 9, site 5): per-node staleness check before the initial-ready nudge.
+		// Task status="ready" already rules out conditions (1)/(2) — but we still run the predicate so a
+		// cancelled attempt, assignee drift, or agent-stopped transition can short-circuit the emit. The
+		// start node's "assignee" here is always undefined (filtered above), so the predicate agentId
+		// placeholder is "orchestrator" (the only recipient of this nudge anyway).
+		const staleCheck = checkStallNotificationStale(st, task, startId, startNode.assignee || "orchestrator", nowMs);
+		if (staleCheck.stale) {
+			await trace(p, "notification.stale.suppressed", { site: "reconcile.initial_ready_nudge", taskId, nodeId: startId, reason: staleCheck.reason, evidence: staleCheck.evidence });
+			ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node stale");
+			continue;
+		}
 		await sendInitialReadyNudgeLocked(pi, cwd, p, st, task, startId, key);
 	}
 }

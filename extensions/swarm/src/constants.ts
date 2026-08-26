@@ -156,6 +156,10 @@ export const NOTIFY_DEFAULT_MAX_NUDGES = 3; // per task+template cap before we s
 // runtime) so every code path shares one identifier space and cannot accidentally collide or drift.
 export const NOTIFY_KEY_INITIAL_READY = "task:{taskId}:nudge:initial-ready";
 export const NOTIFY_KEY_GRAPH_ADVANCE = "task:{taskId}:node:{nodeId}:nudge:assign";
+// Lifecycle-fencing (issue 9): per-(task,agent) dedupe for the agent_settled -> orchestrator
+// "settled with open assignment(s)" notify so repeated settles in a window don't storm. Reused by
+// the session_shutdown site too via the same predicate gating.
+export const NOTIFY_KEY_SETTLE_STALE = "task:{taskId}:agent:{agentId}:nudge:settle-stale";
 
 // Format a NOTIFY_KEY_* template with validated (safe-id) substitutions.
 export function formatNotifyKey(template: string, params: Record<string, string>): string {
