@@ -13,7 +13,7 @@ import { enqueueAndDeliver, deliverMessageLocked, findIdempotentMessage } from "
 import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
-import { ensureOrchestrator, overridePath } from "./identity.ts";
+import { claimOrchestratorLeader, ensureOrchestrator, overridePath } from "./identity.ts";
 import { startOrchestratorPump } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError } from "./pool.ts";
@@ -543,9 +543,17 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							}
 						}
 						if (isCurrent) {
-							// Explicit PM opt-in: set the canonical env vars so isOrchestratorSession()/currentAgentId()
-							// resolve to "orchestrator", ensure the mailbox-only orchestrator record, surface pending
-							// nudges via the PM pump, and update the footer. This makes the pane a REAL orchestrator.
+							// Explicit PM opt-in: gate BEFORE setting env vars so a second live orchestrator cannot
+							// steal the role. The leader claim is state-backed; on denial we keep the pane inert.
+							const claim = await withLock(p, async () => {
+								const st = await readState(p, ctx.cwd);
+								return claimOrchestratorLeader(st, Date.now(), process.pid);
+							});
+							if (claim.kind === "denied") {
+								ctx.ui.notify(`Orchestrator already active on pid ${claim.currentLeader.pid} (heartbeat ${Math.round(claim.ageMs / 1000)}s ago); this pane cannot become the PM.`, "warning");
+								await trace(p, "agent.orchestrator_optin.denied", { currentLeaderPid: claim.currentLeader.pid, ageMs: claim.ageMs });
+								return;
+							}
 							process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
 							process.env.PI_SWARM_AGENT_ID = "orchestrator";
 							applySwarmToolGating(pi); // re-enable the swarm tool surface now that this pane is the PM
@@ -600,6 +608,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				if (cmd === "stop") {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm stop <id> [--force] [--no-kill]", "warning"); return; }
+					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("stop is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
 					const flags = parseFlags(rest);
 					try {
 						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await stopAgent(pi, p, st, safeId(id), { force: flags.force, killPane: flags.kill }); await writeState(p, st); return r; });
@@ -771,6 +780,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				if (cmd === "release") {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm release <id> [<task-id>] [--force]", "warning"); return; }
+					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("release is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
 					const flags = parseFlags(rest);
 					const taskId = flags.rest[0];
 					let failed: string | null = null;

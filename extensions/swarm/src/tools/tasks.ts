@@ -12,7 +12,7 @@ import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, supersedeOpenAssignments, supersedeTaskAssignmentMessages } from "../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, now, safeId, textResult } from "../utils.ts";
 import { ensureDirs, paths, readState, readTaskByRef, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
-import { ensureOrchestrator, isOrchestratorAuthority } from "../identity.ts";
+import { ensureOrchestrator, heartbeatOrchestratorLeader, isOrchestratorAuthority, requireOrchestratorAuthority } from "../identity.ts";
 import { findReusableAgent, spawnAgent } from "../agents.ts";
 import { reconcile, runtimeTaskWarnings } from "../reconcile.ts";
 import { tmux } from "../tmux.ts";
@@ -49,7 +49,12 @@ export function registerTasksTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
 			await ensureDirs(p);
+			const me = currentAgentId();
+			requireOrchestratorAuthority(currentAgentId(), "swarm_create_task");
 			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "create_task");
+				await writeState(p, st);
 				const ts = now();
 				const slug = safeId(params.title).slice(0, 24);
 				const taskId = safeId(params.taskId || `task-${ts.replace(/[-:.TZ]/g, "").slice(0, 12)}-${slug}`);
@@ -245,10 +250,12 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			const p = paths(ctx.cwd);
 			await ensureDirs(p);
 			const me = currentAgentId();
+			requireOrchestratorAuthority(me, "swarm_assign_task");
 			const reusePolicy = params.reusePolicy || "prefer_idle_existing";
 			let spawned = false;
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
+				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "assign_task");
 				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
 				const taskId = task.taskId;
 				const node = task.nodes[params.nodeId];
@@ -461,6 +468,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			const p = paths(ctx.cwd);
 			await ensureDirs(p);
 			const me = currentAgentId();
+			const isOrch = isOrchestratorAuthority(me);
 			// Server-side RBAC (reliability-roadmap Phase 1, P0 #1): `force` and `cancelTask` are
 			// orchestrator-only escape hatches. Identity is checked against the live agent record; the
 			// caller's params cannot grant authority. Validation precedes any state mutation.
@@ -479,11 +487,11 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			}
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
+				if (isOrch) heartbeatOrchestratorLeader(st, Date.now(), process.pid, "update_task");
 				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
 				const taskId = task.taskId;
 				const node = task.nodes[params.nodeId];
 				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId } });
-				const isOrch = isOrchestratorAuthority(me);
 				// Cancellation fence (issue 3, fix-1): once a task is cancelled, NO caller — not even the
 				// orchestrator — can mutate task or node state via this handler. The fence is the most
 				// authoritative gate and runs BEFORE ownership/attempt checks so task cancellation

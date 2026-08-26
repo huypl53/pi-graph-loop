@@ -28,25 +28,42 @@ const call = async (name, params) => tools[name].execute("call", params, undefin
 
 // --- RBAC server-side checks (regular worker identity) ---
 {
+  const prevAgent = process.env.PI_SWARM_AGENT_ID;
+  const prevOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+  process.env.PI_SWARM_AGENT_ID = "worker-01";
+  process.env.PI_SWARM_IS_ORCHESTRATOR = "";
+
+  let thrown = null;
+  try {
+    await call("swarm_create_task", { title: "rbac-fixture", goal: "x", priority: "normal", cwd: scratch });
+  } catch (err) { thrown = err; }
+  ok("worker create_task is rejected (ORCHESTRATOR_AUTHORITY_REQUIRED)", thrown && /ORCHESTRATOR_AUTHORITY_REQUIRED/.test(thrown.message || String(thrown)));
+
+  process.env.PI_SWARM_AGENT_ID = "orchestrator";
+  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
   const ct = await call("swarm_create_task", { title: "rbac-fixture", goal: "x", priority: "normal", cwd: scratch });
   const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
-  let threw = null;
+
+  process.env.PI_SWARM_AGENT_ID = "worker-01";
+  process.env.PI_SWARM_IS_ORCHESTRATOR = "";
+
+  thrown = null;
   try {
     await call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
-  } catch (err) { threw = err; }
-  ok("worker force=true is rejected (FORCE_FORBIDDEN)", threw && /FORCE_FORBIDDEN/.test(threw.message || String(threw)));
+  } catch (err) { thrown = err; }
+  ok("worker force=true is rejected (FORCE_FORBIDDEN)", thrown && /FORCE_FORBIDDEN/.test(thrown.message || String(thrown)));
 
-  threw = null;
+  thrown = null;
   try {
     await call("swarm_update_task", { taskId, nodeId: "plan", cancelTask: true, force: true, cwd: scratch });
-  } catch (err) { threw = err; }
-  ok("worker cancelTask is rejected (CANCEL_FORBIDDEN)", threw && /CANCEL_FORBIDDEN/.test(threw.message || String(threw)));
+  } catch (err) { thrown = err; }
+  ok("worker cancelTask is rejected (CANCEL_FORBIDDEN)", thrown && /CANCEL_FORBIDDEN/.test(thrown.message || String(thrown)));
 
-  threw = null;
+  thrown = null;
   try {
     await call("swarm_update_task", { taskId, nodeId: "plan", cancelTask: true, force: false, cwd: scratch });
-  } catch (err) { threw = err; }
-  ok("worker cancelTask without force rejected (CANCEL_FORBIDDEN)", threw && /CANCEL_FORBIDDEN/.test(threw.message || String(threw)));
+  } catch (err) { thrown = err; }
+  ok("worker cancelTask without force rejected (CANCEL_FORBIDDEN)", thrown && /CANCEL_FORBIDDEN/.test(thrown.message || String(thrown)));
 }
 
 // --- Orchestrator can use force=true (simulated by direct env identity switch) ---
@@ -71,6 +88,8 @@ const call = async (name, params) => tools[name].execute("call", params, undefin
 
 // --- Initial-ready nudge fires after grace, never auto-assigns ---
 {
+  process.env.PI_SWARM_AGENT_ID = "orchestrator";
+  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
   const ct = await call("swarm_create_task", { title: "initial-ready", goal: "x", priority: "normal", cwd: scratch });
   const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
   const taskPath = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);

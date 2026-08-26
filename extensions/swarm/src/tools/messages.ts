@@ -8,6 +8,7 @@ import { enqueueAndDeliver, readMailbox, validateResultMessage } from "../mailbo
 import { mailboxPath, paths, readState, trace, withLock, writeState } from "../state.ts";
 import { now, safeId, textResult } from "../utils.ts";
 import { pumpOrchestratorMailbox, reconcile } from "../reconcile.ts";
+import { heartbeatOrchestratorLeader } from "../identity.ts";
 import { tmux } from "../tmux.ts";
 
 export function registerMessagesTools(pi: ExtensionAPI) {
@@ -195,6 +196,15 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
+			// mark=true persists task.status writes — an orchestrator-authoritative mutation gated
+			// on leader heartbeat (plan §4.4.7). Advisory paths (mark=false/dryRun=true) stay ungated.
+			if (params.mark) {
+				await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					heartbeatOrchestratorLeader(st, Date.now(), process.pid, "reconcile_mark");
+					await writeState(p, st);
+				});
+			}
 			const result = await reconcile(pi, ctx.cwd, p, { agentId: params.agentId, dryRun: params.dryRun, mark: params.mark });
 			const summary = result.actions.map((a) => `  ${a.messageId}: ${a.action} (${a.reason})`).join("\n");
 			return textResult(`Reconciled ${result.count} item(s): ${result.messageCount} message(s), ${result.taskCount} task(s) (${result.dryRun ? "dry run" : "applied"}).\n${summary}`, result);

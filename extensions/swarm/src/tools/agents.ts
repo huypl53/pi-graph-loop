@@ -9,7 +9,7 @@ import { currentAgentId, currentModel, currentProvider } from "../session.ts";
 import { ensureDirs, identityPath, paths, readState, taskPaths, readTaskState, trace, withLock, writeState } from "../state.ts";
 import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
-import { overridePath, writeEffectiveIdentity } from "../identity.ts";
+import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority, writeEffectiveIdentity } from "../identity.ts";
 import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
 import { FAST_MODEL, FAST_PROVIDER } from "../constants.ts";
 import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
@@ -324,8 +324,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
+			requireOrchestratorAuthority(currentAgentId(), "swarm_stop_agent");
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
+				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "stop_agent");
 				const r = await stopAgent(pi, p, st, safeId(params.agentId), { force: params.force, killPane: params.killPane });
 				await writeState(p, st);
 				return r;
@@ -455,8 +457,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
+			requireOrchestratorAuthority(currentAgentId(), "swarm_release_agent_task");
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
+				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "release_agent_task");
 				const agent = st.agents[safeId(params.agentId)];
 				if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
 				const candidate = (agent.activeTaskIds || []).slice().filter((tid) => !params.taskId || tid === safeId(params.taskId));

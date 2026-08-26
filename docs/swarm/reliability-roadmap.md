@@ -201,7 +201,9 @@ The harness should not automatically:
 - mark a node `failed` because a pane died;
 - reassign work to a second worker without superseding the first lease;
 - spawn a new worker without an explicit task/pool policy;
-- declare a task complete from runtime signals alone.
+- declare a task complete from runtime signals alone;
+- allow a second live orchestrator to mutate graph/task state without a durable leader fence;
+- let slash-command admin paths bypass the same orchestrator-only gates used by validated tools.
 
 ---
 
@@ -299,16 +301,15 @@ handler:
 
 1. Marks `task.status = "cancelled"` (sticky terminal).
 2. Iterates every node: revokes the active attempt (`attempt.status = "cancelled"`), transitions
-   the node to `cancelled` (skipping already-terminal nodes so real work is never un-done), and
-   calls `releaseNodeAssignment` to clear the assignee's `activeTaskIds` + any advisory edit lock
-   on that node.
+the node to `cancelled` (skipping already-terminal nodes so real work is never un-done), and
+calls `releaseNodeAssignment` to clear the assignee's `activeTaskIds` + any advisory edit lock on that node.
 3. Calls `supersedeTaskAssignmentMessages` to mark every per-node `assignmentMessageId` and all
-   task-scoped `handoffs[kind=assign]` entries as superseded (waiving response debt). A record already
-   superseded by reassignment retains its original supersession reason as canonical audit history.
+task-scoped `handoffs[kind=assign]` entries as superseded (waiving response debt). A record already
+superseded by reassignment retains its original supersession reason as canonical audit history.
 4. Sends informational cancellation notices (requiresAck:false, requiresResponse:false) to every
-   pre-cancel active assignee.
+pre-cancel active assignee.
 5. Returns the task-close PM auto-notify (now treats `cancelled` as closure-ish so the PM mailbox
-   surfaces it).
+surfaces it).
 
 Late updates are rejected at the handler boundary:
 
@@ -420,12 +421,18 @@ This should synthesize state; it must not silently mutate state.
 
 #### 12. Multi-orchestrator authority
 
-Decide whether multiple orchestrators are supported.
+**Decision:** strict-reject multiple live orchestrators.
 
-- If unsupported: reject or clearly warn on a second active orchestrator.
-- If supported: introduce a durable leader lease/fencing token and require it for graph-mutating actions.
+- A second live orchestrator pid is rejected with `ORCHESTRATOR_LEADER_DENIED`.
+- The current leader lives in `SwarmState.orchestratorLeader`.
+- `ORCHESTRATOR_LEADER_STALE_MS` is the leadership blind-spot bound and is deliberately kept equal
+  to `LOCK_STALE_MS` for this issue.
+- Gated task/command paths must refresh the leader heartbeat inside the existing lock before mutating
+  authority-sensitive state.
+- Slash-command helpers that mutate stop/release surfaces must also check orchestrator identity before
+  entering their mutable branch.
 
-Without this, two PM panes can race assignments and recovery decisions.
+This keeps the policy simple: one live PM, one durable leader record, one rejected second leader.
 
 #### 13. Provider/pool preflight
 
@@ -521,7 +528,7 @@ Before implementing the follow-up items, confirm these policy choices:
 
 1. Should only `orchestrator` be allowed to use forced graph transitions, or should named admin roles exist?
 2. Should worker completion reminders be enabled by default, and what timeout/cap is acceptable?
-3. Are multiple concurrent orchestrators a supported deployment mode?
+3. Are multiple concurrent orchestrators a supported deployment mode? **Answered (Issue 8): No.** Strict-reject is enforced: `SwarmState.orchestratorLeader` records the live leader; a second live pid is rejected with `ORCHESTRATOR_LEADER_DENIED` on all orchestrator-authoritative tool and command paths (`multi-orchestrator-policy`).
 4. Should parallel file overlap be rejected by default, or merely warned?
 5. Which cancellation guarantee is required: best-effort stop, or lease revocation with stale-result rejection?
 6. Should recovery actions be model-callable tools, orchestrator-only tools, or slash commands only?

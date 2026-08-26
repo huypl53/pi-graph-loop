@@ -14,6 +14,21 @@ export const STATE_VERSION = 1;
 
 export const LOCK_STALE_MS = 60_000;
 
+// Multi-orchestrator leader staleness TTL (roadmap issue 8, strict-reject). A leader whose
+// lastHeartbeatAt is older than this is considered dead and may be replaced by a fresh claim.
+// Defaults to LOCK_STALE_MS so the leader lease shares the lock-staleness contract; this is a
+// deliberate trade-off documented in operations.md (60s crash-recovery blind spot).
+export const ORCHESTRATOR_LEADER_STALE_MS = LOCK_STALE_MS;
+
+// Stable error code for the orchestrator-leader gate. Surfaced verbatim by every category A/B
+// call site so callers / ops can act on it. NOT a new model-facing tool.
+export const ERR_ORCHESTRATOR_LEADER_DENIED = "ORCHESTRATOR_LEADER_DENIED";
+
+// Stable error code for orchestrator-authority-required tools that today have no authority check.
+// Thrown by tools that this issue elevates to orchestrator-only (swarm_create_task,
+// swarm_stop_agent, swarm_release_agent_task, swarm_reconcile(mark=true)). NOT a new tool.
+export const ERR_ORCHESTRATOR_AUTHORITY_REQUIRED = "ORCHESTRATOR_AUTHORITY_REQUIRED";
+
 export const SEND_SETTLE_MS = 700;
 
 export const SPAWN_SETTLE_MS = 2_500;

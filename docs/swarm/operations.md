@@ -191,6 +191,39 @@ prints the action directly so the operator never has to guess the fix.
 - `swarm_set_agent_paused`
 - `swarm_restart_agent`
 
+## Orchestrator leadership and recovery
+
+The swarm is intentionally strict-reject: one live orchestrator leadership record is the source of truth
+for authority-sensitive mutations. The durable record lives in `swarm-state.json.orchestratorLeader`.
+
+### Leadership rules
+- The current orchestrator pid must be the active holder of the leader record before any gated
+  orchestrator mutation runs.
+- A second live pid is rejected with `ORCHESTRATOR_LEADER_DENIED`.
+- Legacy/absent leader state is treated as vacant.
+- `ORCHESTRATOR_LEADER_STALE_MS` is the leadership blind-spot bound; today it matches `LOCK_STALE_MS`
+  (60s). That means a pane crash or hard stop can leave a short window before a fresh claim replaces
+  the stale leader.
+
+### Recovery behavior
+- `heartbeatOrchestratorLeader` refreshes the durable leader record during gated tool/command paths.
+- Create-only orchestrator materialization is allowed for startup normalization, but it does not upgrade
+  a worker pane into authority.
+- Command and tool gates still reject unsafe non-orchestrator mutations even if a stale leader has not
+  yet been replaced.
+- When debugging leadership drift, inspect `swarm-state.json`, the orchestrator mailbox, and the tmux
+  capture for the fresh session before assuming the recorded leader is current.
+
+### What to do on recovery
+1. Start or reattach the intended PM session.
+2. Confirm the session is the one that should claim leadership.
+3. Use the orchestrator-gated command or tool path so the leader record is refreshed.
+4. If another pane still believes it is leader, capture its pane and stop/release it only after
+   confirming it is not the active PM.
+
+The leadership blind spot is a documented trade-off, not a semantic failure: the harness treats the
+stale record as recoverable state, not evidence that a worker may take over.
+
 ## Recommended debugging flow
 
 ### Message did not arrive
@@ -258,29 +291,4 @@ semantic evidence of completion or failure.
      `attempt.lastActivityAt`, `attempt.assignedAt` — is older than `REMINDER_NO_PROGRESS_MS` (60 min);
   4. the attempt is the current active attempt (reassign/rework/cancel fences obsolete reminders);
   5. the node is `assigned`/`in_progress` on a non-cancelled task;
-  6. the one-per-attempt budget is unconsumed.
 
-  The reminder message is `requiresAck:false` + `requiresResponse:false` (no ack/response debt by
-  construction), informational about the required protocol, and never mutates node status/outcome/
-  readiness. Crash between the mailbox append and the task.json write is repaired on the next
-  invocation (the idempotency key is the durable fence). Tests:
-  `extensions/swarm/attention-reminder.test.mjs`.
-
-## Validation entrypoints
-
-Use these when validating behavior, not just reading docs:
-
-```bash
-NODE_PATH=$(npm root -g) npx tsc --noEmit --module nodenext --moduleResolution nodenext --skipLibCheck --target es2022 --lib es2022 extensions/swarm/index.ts
-bash scripts/swarm_task_uat.sh
-```
-
-Related review docs:
-- [`../swarm-graph-uat-scenario.md`](../swarm-graph-uat-scenario.md)
-- [`../swarm-dashboard.md`](../swarm-dashboard.md)
-
-## Documentation entrypoints for operators
-
-- [Architecture overview](./architecture.md)
-- [Tooling reference](./tools.md)
-- [`../swarm.md`](../swarm.md) for full consolidated reference

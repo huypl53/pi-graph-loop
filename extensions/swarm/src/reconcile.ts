@@ -9,7 +9,7 @@ import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } fro
 import { computeReadyNodes, computeTaskStatus, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
 import { deliver, deliverMessageLocked, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
-import { ensureOrchestrator } from "./identity.ts";
+import { ensureOrchestrator, readOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
@@ -205,6 +205,24 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 	const idleAtStart = ctx.mode === "tui" ? ctx.isIdle() : false;
 	const result = await withLock(p, async () => {
 		const st = await readState(p, ctx.cwd);
+		// Second-line defense (issue 8 §4.4.8): even if env vars were set by a path the preflight
+		// couldn't catch (e.g. an edge that skipped the gate), a non-leader pid must not run the
+		// pump. Read the leader record INSIDE the existing withLock (atomic with the rest of the
+		// pump decision block; no extra file IO); on deny, trace + return empty without firing
+		// nudges or stamping any surfaced set. This check piggybacks on the per-tick readState.
+		const leaderCheck = readOrchestratorLeader(st, Date.now());
+		if (leaderCheck.kind !== "claimed" || leaderCheck.leader.pid !== process.pid) {
+			await trace(p, "orchestrator.pump.denied", {
+				reason,
+				currentLeaderPid: leaderCheck.kind === "claimed" ? leaderCheck.leader.pid : null,
+				state: leaderCheck.kind,
+				callerPid: process.pid,
+				heartbeatAgeMs: leaderCheck.kind !== "vacant" ? leaderCheck.ageMs : null,
+			}).catch(() => {});
+			return { toSurface: [] as SwarmMessage[], retriggered: 0 };
+		}
+		// ensureOrchestrator (create-only post-issue-8): no heartbeat refresh, just materialises the
+		// pseudo-agent record for mailbox delivery. The heartbeat is owned by the gate.
 		ensureOrchestrator(st, ctx.cwd, p);
 		const nowMs = Date.now();
 		// Prune dead sessions (not pumped within TTL) to bound growth from transient validation pids.
@@ -440,6 +458,7 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { agentId?: string; dryRun?: boolean; mark?: boolean }) {
 	const result = await withLock(p, async () => {
 		const st = await readState(p, cwd);
+		if (options.mark) requireOrchestratorAuthority(currentAgentId(), "swarm_reconcile(mark=true)");
 		const nowMs = Date.now();
 		const actions: Array<{ messageId: string; action: string; reason: string }> = [];
 		const targetAgentId = options.agentId ? safeId(options.agentId) : undefined;

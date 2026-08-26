@@ -130,6 +130,8 @@ export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	st.delivered ||= {};
 	st.orchestratorPumpSessions ||= {};
 	st.agents ||= {};
+	// orchestratorLeader is additive (roadmap issue 8): absent === vacant. readState leaves the
+	// field as-is on legacy swarms so the first orchestrator-authoritative mutation claims it.
 	// Back-fill structured reuse metadata for agents persisted before these fields existed.
 	for (const a of Object.values(st.agents)) ensureAgentDefaults(a);
 	return st;

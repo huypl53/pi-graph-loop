@@ -98,6 +98,15 @@ filesystem enumeration). Overlap fails with `ACTIVE_SCOPE_CONFLICT` before any m
 release auditable (`releasedAt`/`releaseReason`) on terminal/reassign/rework/cancel. Legacy tasks
 without ownership metadata stay readable; reconcile reports them as advisory drift.
 
+**Orchestrator leadership and recovery:** the harness is strict-reject, single-leader by default.
+`SwarmState.orchestratorLeader` is the durable source of truth for the active orchestrator pid.
+A live leader is refreshed via `heartbeatOrchestratorLeader`; a second live pid is rejected with
+`ORCHESTRATOR_LEADER_DENIED`. Leader staleness is bounded by `ORCHESTRATOR_LEADER_STALE_MS`
+(currently equal to `LOCK_STALE_MS` = 60s), so a pane/process crash can leave a short blind spot
+before the next claim replaces the stale leader. During that window, slash-command / tool gates
+must still reject unsafe non-orchestrator mutations; the claim/heartbeat path never upgrades a
+worker into orchestrator authority.
+
 Primary code:
 - `src/taskgraph.ts`
 - `src/reconcile.ts`
@@ -136,10 +145,12 @@ These rules should stay stable unless there is an intentional design change.
 - durable task transitions and ownership checks
 - **file-scope ownership preflight: `swarm_assign_task` rejects overlapping active write scopes with `ACTIVE_SCOPE_CONFLICT` before any mutation**
 - **orchestrator-only authority for `force=true` and `cancelTask`** (server-side identity check; a non-orchestrator caller is rejected before any mutation)
+- **strict single-orchestrator leadership: `ORCHESTRATOR_LEADER_DENIED` rejects a second live pid on gated tool and command paths**
 - assignment state in task files
 - ack/response checks for response-required messages
 - append-only message/task state
 - swarm-state locking for writes
+- **slash-command admin guards for `/swarm stop` and `/swarm release`; worker panes are denied before the mutable handler runs**
 
 ### Advisory / best-effort
 - tmux pane injection

@@ -163,6 +163,18 @@ export type SwarmAgent = {
 	updatedAt: string;
 };
 
+// Multi-orchestrator policy (roadmap issue 8, strict-reject): a single durable leader record on
+// SwarmState identifies the live orchestrator. Every orchestrator-authoritative mutation must
+// refresh lastHeartbeatAt via heartbeatOrchestratorLeader; a second concurrent orchestrator is
+// rejected with ORCHESTRATOR_LEADER_DENIED. Absent or stale = vacant.
+export type OrchestratorLeader = {
+	pid: number;
+	sessionStartedAt: string;
+	claimedAt: string;
+	lastHeartbeatAt: string;
+	agentRecordId?: string;
+};
+
 export type SwarmState = {
 	version: number;
 	swarmId: string;
@@ -170,6 +182,10 @@ export type SwarmState = {
 	tmuxSession: string;
 	agents: Record<string, SwarmAgent>;
 	delivered: Record<string, string[]>;
+	// Multi-orchestrator leader lease (issue 8). Addditive; readState back-fills undefined for
+	// pre-policy swarms so first mutation claims vacant. See identity.ts:readOrchestratorLeader /
+	// heartbeatOrchestratorLeader / claimOrchestratorLeader for the gate semantics.
+	orchestratorLeader?: OrchestratorLeader;
 	// Per-session surfaced-id ledgers for the orchestrator auto-pump, keyed by consumer pid. Each
 	// orchestrator-context session (the long-lived PM, a validation `pi -p` run, another PM lane) tracks
 	// the ids IT has surfaced, so one session cannot mark a notification consumed and starve a different

@@ -42,6 +42,18 @@ const ctx = {
 await cmds.swarm.handler("init", ctx);
 ok("/swarm init notifies ready", notes.at(-1)?.msg?.includes("ready"));
 
+// Slash-command RBAC: worker identity must be denied the admin-only stop/release surfaces.
+const prevAgent = process.env.PI_SWARM_AGENT_ID;
+const prevOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+process.env.PI_SWARM_AGENT_ID = "worker-01";
+process.env.PI_SWARM_IS_ORCHESTRATOR = "";
+await cmds.swarm.handler("stop worker-01", ctx);
+ok("/swarm stop denied for worker", /orchestrator-only/.test(notes.at(-1)?.msg || ""));
+await cmds.swarm.handler("release worker-01", ctx);
+ok("/swarm release denied for worker", /orchestrator-only/.test(notes.at(-1)?.msg || ""));
+process.env.PI_SWARM_AGENT_ID = prevAgent;
+process.env.PI_SWARM_IS_ORCHESTRATOR = prevOrch;
+
 await cmds["swarm-agents"].handler("list", ctx);
 ok("/swarm-agents list delegates to list", /agents, tmux/.test(notes.at(-1)?.msg || ""));
 

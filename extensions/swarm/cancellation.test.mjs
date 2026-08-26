@@ -70,6 +70,10 @@ const expectErr = async (fn, code) => {
 };
 
 const buildTask = async (call, label) => {
+	const prevAgent = process.env.PI_SWARM_AGENT_ID;
+	const prevOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
 	const ct = await call("swarm_create_task", {
 		taskId: `task-test-${label}-${Math.random().toString(36).slice(2, 8)}`,
 		title: `Cancellation test ${label}`,
@@ -91,6 +95,8 @@ const buildTask = async (call, label) => {
 		cwd: scratch,
 	});
 	const m = asJson(ct).match(/task-[\w-]+/);
+	process.env.PI_SWARM_AGENT_ID = prevAgent;
+	process.env.PI_SWARM_IS_ORCHESTRATOR = prevOrch;
 	if (!m) throw new Error("no taskId parsed: " + asJson(ct));
 	return m[0];
 };

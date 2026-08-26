@@ -10,7 +10,7 @@ import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "./poo
 import { deliverMessageLocked, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, trace, withLock, writeState, writeTaskState } from "./state.ts";
-import { ensureOrchestrator } from "./identity.ts";
+import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader } from "./identity.ts";
 import { formatSwarmMessageContent, parseSystemDelivery } from "./delivery.ts";
 import { pumpOrchestratorMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
 import { scanAgentOpenAssignments } from "./taskgraph.ts";
@@ -85,10 +85,34 @@ export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, 
 // No-op unless this session resolves to the orchestrator. Safe to call from session_start or from the
 // `/swarm register here orchestrator` opt-in path. The captured ctx is session-bound; on stale-ctx
 // errors the run() guard stops the pump cleanly (the next orchestrator session_start restarts it).
+//
+// Multi-orchestrator policy (issue 8, strict-reject): a preflight `withLock` runs
+// heartbeatOrchestratorLeader so a non-leader pane cannot install the pump. On deny we trace
+// `orchestrator.pump.denied` and return without installing the interval. A second-line defense
+// inside pumpOrchestratorMailbox re-checks the leader pid on each tick.
 export async function startOrchestratorPump(ctx: any, reason = "session_start") {
 	const pi = swarmPi;
 	if (!pi) return;
 	stopOrchestratorPump();
+	// Preflight gate (Category A, plan §4.4.1): claim/refresh the leader; on denial, do NOT install
+	// the interval. The throw is converted to a trace + early-return so a guest pane doesn't crash.
+	if (currentAgentId() === "orchestrator") {
+		const p = paths(ctx.cwd);
+		try {
+			await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "pump_install");
+				await writeState(p, st);
+			});
+		} catch (err: any) {
+			const msg = String((err as Error)?.message || err);
+			if (msg.startsWith("ORCHESTRATOR_LEADER_DENIED")) {
+				await trace(p, "orchestrator.pump.denied", { reason, error: msg }).catch(() => {});
+				return;
+			}
+			throw err;
+		}
+	}
 	// The auto-pump records a surfacing DECISION (per-pid set + writeState) in every orchestrator session,
 	// including explicit orchestrator opt-in runs (PI_SWARM_IS_ORCHESTRATOR=1 or PI_SWARM_AGENT_ID=orchestrator).
 	// The decision block is ctx-free file IO (see pumpOrchestratorMailbox), so it cannot hit
@@ -229,6 +253,16 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			}
 			if (agentId === "orchestrator") {
 				ensureOrchestrator(st, ctx.cwd, p);
+				// Multi-orchestrator policy (issue 8): the heartbeat is now driven by the gate, not by
+				// ensureOrchestrator. Layer the heartbeatOrchestratorLeader call here so an orchestrator
+				// session_start both materialises the record and refreshes the leader lease.
+				try {
+					heartbeatOrchestratorLeader(st, Date.now(), process.pid, "session_start");
+				} catch (err: any) {
+					// A non-leader orchestrator session_start must NOT crash the session; trace + skip the
+					// pump install (handled at startOrchestratorPump preflight below).
+					await trace(p, "session.orchestrator_denied", { agentId, callerPid: process.pid, error: String((err as Error)?.message || err) }).catch(() => {});
+				}
 				await writeState(p, st);
 			} else if (!st.agents[agentId]) {
 				st.agents[agentId] = {

@@ -74,6 +74,28 @@ Checklist:
 - Do not handwave evidence rules for run/memory promotion.
 - Do not let `/swarm` command help become the only documentation of a feature.
 
+## Orchestrator-authoritative mutations
+
+Some mutations are only safe when the current identity is the active orchestrator leader.
+The check is two-part:
+
+1. **authority** — `isOrchestratorAuthority(currentAgentId())` must be true for the caller;
+2. **leadership** — the durable `SwarmState.orchestratorLeader` record must be claimed/heartbeated
+   by the current pid before the mutation proceeds.
+
+Apply the gate at the real mutation boundary, not just in UI wrappers.
+Create-only paths can materialize the orchestrator record without refreshing heartbeat; that is
+how a fresh PM session becomes visible without claiming extra authority.
+
+Required examples in this issue family:
+- `swarm_create_task`
+- `swarm_assign_task`
+- `swarm_stop_agent`
+- `swarm_release_agent_task`
+- `swarm_reconcile(mark=true)`
+- `/swarm stop`
+- `/swarm release`
+
 ## Where new code usually belongs
 
 | Change | Primary module(s) |
