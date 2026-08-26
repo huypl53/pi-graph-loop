@@ -475,6 +475,23 @@ Create one shared nudge policy for:
 - escalation target;
 - acknowledgement/auto-clear condition.
 
+#### 15. Orchestrator wake-up escalation
+
+Observed failure class: a node reaches done/ready, the graph-advance watcher emits its one-shot nudge into the
+orchestrator mailbox, but the orchestrator (a human-paced PM session) does not act until the next turn — so the
+pipeline idles indefinitely despite the engine having signalled correctly.
+
+Requirements:
+
+- escalating re-nudge: when a node is ready-but-unassigned (or ready-for-review) for longer than
+  `ESCALATE_AFTER_MS` after the first nudge, re-notify with a distinct `escalation` trace, bounded by a retry cap;
+- durable state only: escalation timing derives from recorded nudge timestamps in swarm state, never from pane
+  idleness;
+- wake-up surface: optionally escalate into the orchestrator PM pane via the existing tmux injection path
+  (`send-keys`) — reusing existing surfaces, no new tools;
+- respect leader gate: only the live `orchestratorLeader` pane may be nudged (Issue 8);
+- audit: every escalation traced; suppressed escalations use the Issue 9 fence contract.
+
 ---
 
 ## Tool-surface direction
@@ -530,6 +547,8 @@ This makes it possible to distinguish actual work completion from an agent merel
 7. Build attention-first operator view and reduce exposed tool surface.
 8. Add provider/pool preflight and actionable fallback classification.
 9. Harden crash recovery and decide/enforce multi-orchestrator policy.
+10. Final surface and architecture review.
+11. Orchestrator wake-up escalation (§15).
 
 ---
 
