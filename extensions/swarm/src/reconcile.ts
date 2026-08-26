@@ -368,6 +368,20 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 		}
 		// Only non-terminal tasks can have live stale/nudge signals.
 		if (storedClosed) continue;
+		// Advisory ownership drift (issue 4): active leases with no stamped write scope (legacy tasks
+		// predating the ownership policy) are readable and functional, but cannot participate in
+		// overlap preflight reliably — report as advisory drift; never fabricate ownership metadata.
+		for (const [nodeId, node] of Object.entries(task.nodes)) {
+			if (node.status !== "assigned" && node.status !== "in_progress") continue;
+			if (!node.activeAttemptId || !Array.isArray(node.attemptHistory)) {
+				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_ownership_legacy", reason: `active node ${nodeId} has no attempt ownership metadata (legacy task; first new assignment bootstraps the lease schema)`, taskId, nodeId });
+				continue;
+			}
+			const attempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
+			if (attempt && attempt.status === "active" && !attempt.scope) {
+				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_ownership_legacy", reason: `active attempt ${attempt.attemptId} has no stamped write scope (pre-policy lease; scope re-resolves live at preflight)`, taskId, nodeId });
+			}
+		}
 		for (const [nodeId, node] of Object.entries(task.nodes)) {
 			if (node.status !== "assigned" && node.status !== "in_progress") continue;
 			const staleReasons: string[] = [];

@@ -56,7 +56,7 @@ Common first actions:
 - `swarm_task_status(..., runtime=true)`
 - `swarm_validate_graph`
 - `swarm_print_graph`
-- `swarm_reconcile`
+- `swarm_reconcile` (also reports advisory `task_node_ownership_legacy` drift for active nodes on pre-policy tasks; never fabricates ownership)
 - `swarm_release_agent_task` for stale pointers after confirming reconcile results
 
 ### Cancel a task (orchestrator-only)

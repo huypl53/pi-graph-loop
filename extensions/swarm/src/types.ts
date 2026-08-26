@@ -227,6 +227,13 @@ export type TaskNodeAttempt = {
 	status: "active" | "superseded" | "completed" | "failed" | "cancelled" | "skipped";
 	outcome?: string;             // Final outcome if terminal
 	lastActivityAt?: string;      // Last update timestamp
+	// Additive lease-audit fields (file-ownership policy, roadmap issue 4). `status` remains the
+	// authoritative lifecycle field; these are optional audit annotations only.
+	releasedAt?: string;          // When the attempt's write-scope lease ended (any reason)
+	releaseReason?: "reassign" | "rework" | "terminal" | "cancel" | "orchestrator_override";
+	// Effective write scope stamped at assignment time; used by the ownership preflight to detect
+	// overlapping active write scopes across all tasks. Absent on pre-policy attempts (readable legacy).
+	scope?: { source: "node-explicit" | "node-inherited" | "task-default"; sourceNodeId?: string; files: string[] };
 };
 
 export type TaskNode = {

@@ -90,6 +90,14 @@ Late updates are rejected at the handler boundary (`TASK_CANCELLED`/`NODE_CANCEL
 later ACKs on superseded assignment records are rejected (`ASSIGNMENT_SUPERSEDED`). Cancellation
 never infers semantic completion and never un-does a node that already finished.
 
+**File-scope ownership (parallel conflict policy):** `swarm_assign_task` runs an atomic
+preflight under the swarm lock — the candidate node's effective write scope (node `allowedFiles` ->
+`allowedFilesFrom` inheritance -> task default, stamped on the attempt lease) is compared against
+every active attempt lease across ALL tasks with a conservative deterministic glob predicate (no
+filesystem enumeration). Overlap fails with `ACTIVE_SCOPE_CONFLICT` before any mutation; leases
+release auditable (`releasedAt`/`releaseReason`) on terminal/reassign/rework/cancel. Legacy tasks
+without ownership metadata stay readable; reconcile reports them as advisory drift.
+
 Primary code:
 - `src/taskgraph.ts`
 - `src/reconcile.ts`
@@ -126,6 +134,7 @@ These rules should stay stable unless there is an intentional design change.
 
 ### Enforced
 - durable task transitions and ownership checks
+- **file-scope ownership preflight: `swarm_assign_task` rejects overlapping active write scopes with `ACTIVE_SCOPE_CONFLICT` before any mutation**
 - **orchestrator-only authority for `force=true` and `cancelTask`** (server-side identity check; a non-orchestrator caller is rejected before any mutation)
 - assignment state in task files
 - ack/response checks for response-required messages

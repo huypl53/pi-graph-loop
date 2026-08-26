@@ -153,7 +153,13 @@ transitions non-terminal nodes to `cancelled`, supersedes every assignment
 message, releases agent `activeTaskIds` + advisory edit locks, sends
 informational cancellation notices, and rejects all later updates with
 `TASK_CANCELLED`/`NODE_CANCELLED` (with later ACKs on superseded assignment
-records rejected via `ASSIGNMENT_SUPERSEDED`); an **initial-ready recovery
+records rejected via `ASSIGNMENT_SUPERSEDED`); **file-scope ownership preflight** on
+`swarm_assign_task`: the candidate node's effective write scope (node `allowedFiles` ->
+`allowedFilesFrom` inheritance -> task default, stamped on the attempt lease) is compared against
+every active attempt lease across all tasks under the swarm lock with a conservative deterministic
+glob predicate — overlap fails atomically with `ACTIVE_SCOPE_CONFLICT` (no state mutated), and
+leases release with audit `releasedAt`/`releaseReason` on terminal/reassign/rework/cancel
+(`file-ownership.test.mjs`); an **initial-ready recovery
 nudge** that surfaces a fresh
 task whose start node stays ready+unassigned past a short grace period to the
 orchestrator (bounded, idempotent, never auto-assigns); a repeatable

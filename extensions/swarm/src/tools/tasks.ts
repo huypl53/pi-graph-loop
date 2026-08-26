@@ -7,11 +7,11 @@ import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
 import { TERMINAL_NODE_STATUSES, CANCELLATION_REASON } from "../constants.ts";
-import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, validateTaskGraph } from "../taskgraph.ts";
+import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, validateTaskGraph, type EffectiveScope } from "../taskgraph.ts";
 import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, supersedeOpenAssignments, supersedeTaskAssignmentMessages } from "../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, now, safeId, textResult } from "../utils.ts";
-import { ensureDirs, paths, readState, readTaskByRef, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
+import { ensureDirs, paths, readState, readTaskByRef, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
 import { ensureOrchestrator, isOrchestratorAuthority } from "../identity.ts";
 import { findReusableAgent, spawnAgent } from "../agents.ts";
 import { reconcile, runtimeTaskWarnings } from "../reconcile.ts";
@@ -281,6 +281,55 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				if (!assignee) await failTaskTool(tp, p, "AGENT_NOT_FOUND", `Resolved agent is missing for node ${params.nodeId}.`, { taskId, nodeId: params.nodeId, received: { agentId: assigneeId } });
 				ensureAgentDefaults(assignee);
 
+				// ---- File-scope ownership preflight (roadmap issue 4) ----
+				// Before ANY mutation: compute the candidate node's effective write scope and compare it
+				// against every ACTIVE lease across all task.json files (scan under the same lock). A conflict
+				// fails with ACTIVE_SCOPE_CONFLICT and leaves task.json / swarm-state.json / mailboxes untouched.
+				// Self-exclusion: the candidate node's own current active lease is skipped so idempotent
+				// retries and same-node reassignment never conflict with themselves.
+				const candidateScope: EffectiveScope = resolveNodeScope(task, params.nodeId);
+				{
+					let conflict: { lease: { taskId: string; nodeId: string; assignee: string; attemptId: string; scope: EffectiveScope }; relation: string } | null = null;
+					let entries: string[] = [];
+					try { entries = await readdir(p.tasksDir); } catch {}
+					outer: for (const entry of entries) {
+						const otherTp = taskPaths(p, entry);
+						if (!existsSync(otherTp.taskJson)) continue;
+						let other: TaskState;
+						try { other = await readTaskState(otherTp.taskJson); } catch { continue; }
+						for (const lease of collectActiveLeases(other)) {
+							if (lease.taskId === taskId && lease.nodeId === params.nodeId) continue; // self-exclusion
+							const rel = scopesOverlap(candidateScope, lease.scope);
+							if (rel.overlap) { conflict = { lease, relation: rel.relation }; break outer; }
+						}
+					}
+					if (conflict) {
+						const rel = scopesOverlap(candidateScope, conflict.lease.scope) as { relation: string };
+						const reqFiles = "unresolved" in candidateScope ? [`(unresolved: ${candidateScope.reason})`] : candidateScope.files;
+						const confFiles = "unresolved" in conflict.lease.scope ? [`(unresolved: ${conflict.lease.scope.reason})`] : conflict.lease.scope.files;
+						const reqSource = "unresolved" in candidateScope ? "unresolved" : candidateScope.source;
+						const confSource = "unresolved" in conflict.lease.scope ? "unresolved" : conflict.lease.scope.source;
+						await traceTask(tp, "task.assign.conflict", {
+							taskId, nodeId: params.nodeId, requestedAssignee: assignee.id, requestedScope: reqFiles, requestedScopeSource: reqSource,
+							conflictingTaskId: conflict.lease.taskId, conflictingNodeId: conflict.lease.nodeId,
+							conflictingAssignee: conflict.lease.assignee, conflictingAttemptId: conflict.lease.attemptId,
+							conflictingScope: confFiles, conflictingScopeSource: confSource, relation: rel.relation,
+						});
+						await failTaskTool(tp, p, "ACTIVE_SCOPE_CONFLICT",
+							`Cannot assign node ${params.nodeId} of ${taskId}: its write scope overlaps the active assignment of node ${conflict.lease.nodeId} in task ${conflict.lease.taskId} (attempt ${conflict.lease.attemptId}, held by ${conflict.lease.assignee}). No state was modified.`,
+							{
+								taskId, nodeId: params.nodeId,
+								requestedAssignee: assignee.id, requestedScope: reqFiles, requestedScopeSource: reqSource,
+								conflictingTaskId: conflict.lease.taskId, conflictingNodeId: conflict.lease.nodeId,
+								conflictingAssignee: conflict.lease.assignee, conflictingAttemptId: conflict.lease.attemptId,
+								conflictingScope: confFiles, conflictingScopeSource: confSource, relation: rel.relation,
+								actionableHint: `Wait for node ${conflict.lease.nodeId} of ${conflict.lease.taskId} to reach a terminal state (its lease is released then), or narrow this node's allowedFiles so the write scopes are disjoint (e.g. a node-scoped file list instead of the task-wide default).`,
+							}
+						);
+					}
+				}
+				// ---- end ownership preflight ----
+
 				const prevStatus = node.status;
 				// Reassignment bookkeeping: free the previous assignee's active-task pointer.
 				if (node.assignee && node.assignee !== assignee.id) {
@@ -324,6 +373,9 @@ export function registerTasksTools(pi: ExtensionAPI) {
 							priorAttempt.status = "superseded";
 							priorAttempt.supersededAt = ts;
 							priorAttempt.supersededBy = attemptId;
+							// Lease release audit (issue 4): a superseded-by-reassign attempt releases its write-scope lease.
+							priorAttempt.releasedAt ||= ts;
+							priorAttempt.releaseReason = "reassign";
 							await traceTask(tp, "task.attempt.superseded", { taskId, nodeId: params.nodeId, priorAttemptId: priorAttempt.attemptId, supersededBy: attemptId, reason: "reassign" });
 						}
 					}
@@ -335,6 +387,11 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						assignedAt: ts,
 						status: "active" as const,
 						lastActivityAt: ts,
+						// Stamp the effective write scope at assignment time so ownership preflight + audits
+						// see what this lease actually held, even if the graph's scope config changes later.
+						// Unresolved inheritance is NOT stamped: absent scope makes later scans re-resolve live
+						// (which returns unresolved => conservatively overlapping), never a fake empty scope.
+						...("unresolved" in candidateScope ? {} : { scope: { source: candidateScope.source, sourceNodeId: candidateScope.sourceNodeId, files: candidateScope.files } }),
 					};
 					node.attemptHistory = [...(node.attemptHistory || []), newAttempt];
 					node.activeAttemptId = attemptId;
@@ -510,6 +567,9 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						activeAttempt.status = newStatus === "done" ? "completed" : newStatus;
 						activeAttempt.outcome = params.outcome || node.outcome || undefined;
 						activeAttempt.lastActivityAt = now();
+						// Lease release audit (issue 4): terminal attempt ends its write-scope lease.
+						activeAttempt.releasedAt ||= now();
+						activeAttempt.releaseReason = isOrch ? "orchestrator_override" : "terminal";
 						await traceTask(tp, "task.attempt.terminal", { taskId, nodeId: params.nodeId, attemptId: node.activeAttemptId, status: activeAttempt.status, outcome: activeAttempt.outcome });
 					}
 				}
@@ -540,6 +600,8 @@ export function registerTasksTools(pi: ExtensionAPI) {
 							if (activeAttempt && activeAttempt.status === "active") {
 								activeAttempt.status = "cancelled";
 								activeAttempt.lastActivityAt = now();
+								activeAttempt.releasedAt ||= now();
+								activeAttempt.releaseReason = "cancel";
 								revokedAttempts++;
 							}
 						}

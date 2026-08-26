@@ -335,17 +335,11 @@ fresh default-config tmux/Pi UAT evidence are stored in
 
 Automatic delivery retry is reasonable. Automatic reassign is not, unless a task explicitly opts into it.
 
-#### 8. File edit ownership / conflict policy
+#### 8. File edit ownership / conflict policy — **COMPLETE** (`file-ownership-parallel-conflict-policy-v2`)
 
 `allowedFiles` documents scope but does not prevent two parallel nodes from editing the same file.
 
-**Proposal:** an exclusive edit-lock policy:
-
-```text
-taskId + canonical file path → agentId + leaseId + acquiredAt + expiry
-```
-
-At minimum, reject parallel assignments whose write scopes overlap unless orchestrator explicitly overrides. Release locks on terminal, cancellation, and lease supersession.
+**Implemented (see `docs/swarm-task-graph.md` "File-scope ownership and parallel conflict policy"):** `swarm_assign_task` runs an atomic ownership preflight under the swarm lock. The candidate node's effective write scope (node `allowedFiles` -> `allowedFilesFrom` inheritance -> task default, stamped on the attempt lease) is compared against every active attempt lease across all tasks with a conservative deterministic glob predicate (no filesystem enumeration). Overlap fails with the stable code `ACTIVE_SCOPE_CONFLICT` before any mutation (task.json / swarm-state.json / mailboxes untouched). Leases are attempt-fenced and release auditable (`releasedAt`/`releaseReason`) on terminal, reassign, rework reopen, and cancellation. Legacy tasks stay readable; reconcile reports advisory `task_node_ownership_legacy` drift. No new public tools, no auto-takeover, no multi-orchestrator policy. Originally proposed edit-lock table superseded by the attempt-lease-scoped design above.
 
 ---
 

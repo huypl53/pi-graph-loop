@@ -595,6 +595,18 @@ swarm_capture_agent_pane
 
 `swarm_reconcile` is the recovery entrypoint for both mail and tasks: it retries failed/queued message injections, dead-letters expired/max-attempt messages, surfaces `ack_missing`, AND sweeps every `task.json` for closure drift + stale/nudge signals (mark-only; `mark=true` repairs status drift). It never auto-fails a node.
 
+## File-scope ownership and parallel conflict policy
+
+`swarm_assign_task` runs an **ownership preflight** before any mutation: the candidate node's effective write scope is compared against every ACTIVE attempt lease across ALL `task.json` files (scanned under the swarm lock). An overlap fails with the stable error code `ACTIVE_SCOPE_CONFLICT` (structured payload: `taskId`/`nodeId`/`requestedAssignee`/`requestedScope(+Source)`/`conflictingTaskId`/`conflictingNodeId`/`conflictingAssignee`/`conflictingAttemptId`/`conflictingScope(+Source)`/`relation`/`actionableHint`) and leaves task.json, swarm-state.json, mailboxes, and attempt history completely unmodified. The candidate node's own lease is excluded (idempotent retry / same-node reassign never self-conflicts).
+
+**Effective scope** resolution order: `node.allowedFiles` (source `node-explicit`) -> `node.allowedFilesFrom` resolved recursively within the same graph (source `node-inherited`, cycle/missing-safe: unresolved is treated as overlapping) -> `task.allowedFiles` (source `task-default`). The resolved scope is stamped on the attempt record at assignment time (`attemptHistory[].scope`) so audits see what the lease actually held.
+
+**Overlap predicate** is a pure, deterministic path/glob comparison — no filesystem enumeration. Grammar: `/`-separated project-relative segments; `**` = zero-or-more segments; a segment `*` = any single segment; intra-segment `*` (e.g. `*.ts`) matches within one segment. Literals overlap only on exact equality (`a` vs `a/b` is DISJOINT). Unsupported syntax (absolute, `..`, `?[]{}!`) returns `unknown` and is conservatively treated as overlap.
+
+**Lease lifecycle** (attempt-fenced, auditable via `releasedAt`/`releaseReason` on the attempt record): terminal node states release with `terminal` (or `orchestrator_override` when forced), reassign supersedes the prior holder with `reassign`, rework reopen releases the reopened node with `rework`, task cancellation revokes all live attempts with `cancel`. A stale/terminal/revoked attempt can never release or overwrite a newer holder (attempt fencing, see assignment-attempt-lease-fencing).
+
+**Legacy tasks** without `activeAttemptId`/`attemptHistory`/stamped scope remain readable; their scopes re-resolve live at preflight. `swarm_reconcile` reports such nodes as advisory `task_node_ownership_legacy` drift and never fabricates ownership metadata.
+
 `swarm_stop_agent` and `swarm_release_agent_task` are now **implemented** (along with the rest of the agent lifecycle surface: `swarm_register_agent`, `swarm_restart_agent`, `swarm_set_role`, `swarm_set_agent_paused`, `swarm_send_keys`, `swarm_attach_agent`). Only `swarm_gc_agents` remains **deferred** (see [Validation and cleanup implications](#validation-and-cleanup-implications)); use batch `swarm_stop_agent` and the admin `swarm_prune` (dry-run first) until it ships.
 
 ## New high-level tools
