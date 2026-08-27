@@ -205,6 +205,24 @@ export type OrchestratorReceiptEntry = {
 	fingerprint: string;
 };
 
+// Durable goal the orchestrator wants the swarm to advance toward (Issue 18). Set via
+// `swarm_set_goal` / `/swarm goal set <text>`; cleared via `swarm_mark_goal_done` / `/swarm goal done`.
+// While set and ALL non-orchestrator agents are runtimeStatus="idle" with zero active task nodes,
+// the orchestrator pump emits an idempotent idle-streak nudge (anti-loop: at most
+// MAX_CONSECUTIVE_NUDGES_DEFAULT consecutive, then a GOAL_NUDGE_BACKOFF_TICKS-tick back-off). Any
+// orchestrator turn that ends stopReason="stop" resets the consecutiveNoResolveNudges counter and
+// clears back-off (turn_end branch in hooks.ts).
+export type SwarmGoal = {
+	id: string;                         // stable goalId (e.g. "goal-<ms>-<rand6>")
+	text: string;                       // the goal text the orchestrator set
+	setAt: string;                      // ISO; durable on set
+	setBy: string;                      // agentId that set it (orchestrator in practice; recorded for audit)
+	consecutiveNoResolveNudges: number; // monotonic; reset on orchestrator turn_end {stop} resolve
+	lastNudgeAt?: string;               // ISO; set on every successful nudge emission
+	lastResolvedAt?: string;            // ISO; set on every successful counter reset
+	backoffTicksRemaining?: number;     // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
+};
+
 // In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent
 // record (not restart/register/pool-reuse) and removed when the engine either (a) detects a follow-up
 // delivery within the ORPHAN_SPAWN_WARNING_TIMEOUT_MS window or (b) the timer fires and emits
@@ -265,6 +283,15 @@ export type SwarmState = {
 	// follow-up delivery. Cleared on a follow-up delivery, by swarm_stop_agent, or by the watchdog
 	// itself when the timer fires. ReadState back-fills `[]` so pre-policy swarms boot cleanly.
 	recentSpawns?: RecentSpawn[];
+	// Durable swarm goal (Issue 18): set by the orchestrator via swarm_set_goal / /swarm goal set;
+	// cleared by swarm_mark_goal_done / /swarm goal done. While set + all non-orchestrator agents
+	// idle + no active task nodes, the orchestrator pump emits an idempotent idle-streak nudge with
+	// an anti-loop counter and 2-tick back-off. Optional; absent (== no goal) is the default. The
+	// readState back-fill intentionally leaves this field as-is on legacy swarms: a JSON file with
+	// no `goal` key parses to `undefined`, which is the correct initial state — a future maintainer
+	// MUST NOT add `st.goal ||= {}` here, since that would replace undefined with an empty object
+	// and crash `goal.id` access in the pump.
+	goal?: SwarmGoal;
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;

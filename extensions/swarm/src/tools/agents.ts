@@ -4,6 +4,7 @@ import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_M
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
+import { randomUUID } from "node:crypto";
 import { capturePane, isTmuxRunning, tmux } from "../tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "../session.ts";
 import { ensureDirs, identityPath, paths, readState, taskPaths, readTaskState, trace, withLock, writeState } from "../state.ts";
@@ -11,8 +12,7 @@ import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
 import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority, writeEffectiveIdentity } from "../identity.ts";
 import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
-import { ERR_ORCHESTRATOR_PANE_REJECTED, FAST_MODEL, FAST_PROVIDER } from "../constants.ts";
-import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
+import { ERR_ORCHESTRATOR_PANE_REJECTED, FAST_MODEL, FAST_PROVIDER } from "../constants.ts";import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 
 export function registerAgentsTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
@@ -492,6 +492,81 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				return { removed, refused };
 			});
 			return textResult(JSON.stringify({ agentId: safeId(params.agentId), ...result }, null, 2), result);
+		},
+	}))
+
+	// === Issue 18: swarm_set_goal + swarm_mark_goal_done tools ===
+	// The orchestrator's durable goal + the idle-streak nudge counter live on SwarmState.goal (see
+	// types.ts). Both tools are orchestrator-only (server-side requireOrchestratorAuthority). Setting
+	// a goal resets consecutiveNoResolveNudges to 0 AND clears back-off + lastNudgeAt + lastResolvedAt
+	// (a fresh goal never inherits the previous goal's counter / back-off). Marking done clears the
+	// entire entry (delete st.goal). The pump's evaluateIdleGoalNudgeLocked reads these fields under
+	// the same withLock used by the tools, so reads/writes serialise.
+	pi.registerTool(defineTool({
+		name: "swarm_set_goal",
+		label: "Swarm Set Goal",
+		description: "Persist a swarm-level goal. While a goal is set and every non-orchestrator agent is idle with no active task nodes, the orchestrator pump emits an idle-streak nudge (anti-loop: max MAX_CONSECUTIVE_NUDGES_DEFAULT consecutive, then 2-tick back-off). Orchestrator-only.",
+		promptGuidelines: ["Use `swarm_set_goal` to record the swarm's current goal in durable state. Resets the consecutiveNoResolveNudges counter; clears back-off.", "Pair with `swarm_mark_goal_done` when the goal is achieved or abandoned."],
+		parameters: Type.Object({
+			text: Type.String({ description: "Goal text (non-empty). Replaces any current goal and resets the nudge counter." }),
+			id: Type.Optional(Type.String({ description: "Optional explicit goalId. Omit to auto-generate." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			requireOrchestratorAuthority(currentAgentId(), "swarm_set_goal");
+			const text = String(params.text || "").trim();
+			if (!text) throw new Error("swarm_set_goal: text must be non-empty");
+			const requestedId = params.id ? safeId(String(params.id)) : `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const previousId = st.goal?.id;
+				const ts = now();
+				st.goal = {
+					id: requestedId,
+					text,
+					setAt: ts,
+					setBy: currentAgentId(),
+					consecutiveNoResolveNudges: 0,
+				};
+				// A fresh goal never inherits the previous goal's nudge state. Bound C-1 ensures the
+				// `goal` field was `undefined` (not {}) before this assignment — a JSON-absent key
+				// parses to undefined, which `st.goal = { ... }` cleanly replaces.
+				delete st.goal.lastNudgeAt;
+				delete st.goal.lastResolvedAt;
+				delete st.goal.backoffTicksRemaining;
+				await trace(p, "goal.set", { goalId: requestedId, previousId, setBy: currentAgentId(), length: text.length, via: "tool" });
+				await writeState(p, st);
+				return { goalId: requestedId, previousId };
+			});
+			return textResult(`Goal set: ${result.goalId}`, result);
+		},
+	}))
+
+	pi.registerTool(defineTool({
+		name: "swarm_mark_goal_done",
+		label: "Swarm Mark Goal Done",
+		description: "Clear the swarm-level goal and stop the idle-streak nudge loop. Orchestrator-only.",
+		promptGuidelines: ["Use `swarm_mark_goal_done` once the goal is achieved or abandoned — it stops the orchestrator pump's idle nudge entirely."],
+		parameters: Type.Object({
+			goalId: Type.Optional(Type.String({ description: "Optional goalId to clear (safety fence; clear fails if it does not match the current goal)." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = paths(ctx.cwd);
+			requireOrchestratorAuthority(currentAgentId(), "swarm_mark_goal_done");
+			const result = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				if (!st.goal) return { cleared: true, noop: true };
+				if (params.goalId && safeId(params.goalId) !== st.goal.id) {
+					throw new Error(`swarm_mark_goal_done: goalId ${params.goalId} does not match current goal ${st.goal.id}`);
+				}
+				const clearedId = st.goal.id;
+				const nudges = st.goal.consecutiveNoResolveNudges;
+				delete st.goal;
+				await trace(p, "goal.cleared", { goalId: clearedId, nudges, by: currentAgentId(), via: "tool" });
+				await writeState(p, st);
+				return { cleared: true, clearedId, nudges };
+			});
+			return textResult(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, result);
 		},
 	}))
 }

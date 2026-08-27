@@ -140,6 +140,16 @@ export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	// receipts for legacy `requiresAck: true` messages that are no longer actionable.
 	st.consumerReceipts ||= {};
 	st.consumerReceipts.orchestrator ||= { entries: {}, revision: 0 };
+	// === Binding C-1 (Issue 18 plan review): goal field back-fill ===
+	// The `goal` field on SwarmState is OPTIONAL. A pre-policy swarm-state.json file has no `goal` key
+	// (JSON parses absent keys to `undefined`), and undefined is the correct initial state — the pump
+	// early-returns on `!goal` before touching any goal field. Do NOT add `st.goal ||= {}` here: that
+	// would replace `undefined` with an empty object and crash `goal.id` access in the pump's
+	// evaluateIdleGoalNudgeLocked path. Leave this comment in place so a future maintainer does not
+	// copy the `consumerReceipts` pattern verbatim onto the goal field.
+	//
+	// (structurally identical to `orchestratorLeader?: OrchestratorLeader`, which is also additive
+	// and not back-filled — absent === vacant for that field too.)
 	// orchestratorLeader is additive (roadmap issue 8): absent === vacant. readState leaves the
 	// field as-is on legacy swarms so the first orchestrator-authoritative mutation claims it.
 	// Back-fill structured reuse metadata for agents persisted before these fields existed.

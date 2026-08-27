@@ -419,6 +419,39 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		}
 	});
 
+	// === Issue 18: Goal idle-streak resolve detection ===
+	// Registered AFTER the model-pool swap branch above so pi's per-event handler loop runs the
+	// resolve AFTER any in-process swap (binding C-2 of the plan review). Both handlers acquire the
+	// same withLock independently, so they serialise; source order ensures the resolve observes the
+	// post-swap state. This branch resets consecutiveNoResolveNudges on ANY orchestrator turn that
+	// ends stopReason="stop" + role="assistant" — the act of ending a turn (vs staying silent) is
+	// the resolve signal; we do not require an explicit ack or a result message. A turn_end
+	// {error} is intentionally NOT a resolve: tool/model failures are not "I addressed the goal".
+	// A non-orchestrator turn_end is also NOT a resolve: workers don't decide the goal.
+	pi.on("turn_end", async (event, ctx) => {
+		const msg: any = (event as any)?.message;
+		if (!msg || msg.role !== "assistant" || msg.stopReason !== "stop") return;
+		if (currentAgentId() !== "orchestrator") return;
+		const p = paths(ctx.cwd);
+		try {
+			await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const goal = st.goal;
+				if (!goal) return;
+				const nudges = goal.consecutiveNoResolveNudges;
+				const hadBackoff = Boolean(goal.backoffTicksRemaining && goal.backoffTicksRemaining > 0);
+				if (nudges === 0 && !hadBackoff) return; // nothing to resolve
+				goal.consecutiveNoResolveNudges = 0;
+				delete goal.backoffTicksRemaining;
+				goal.lastResolvedAt = new Date().toISOString();
+				await trace(p, "goal.nudge.resolved", { goalId: goal.id, nudges, hadBackoff, by: "turn_end" });
+				await writeState(p, st);
+			});
+		} catch (err: any) {
+			await trace(p, "goal.nudge.resolve_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		// Issue 16 (C2 + B1 fix): stamp the session's start time as a process-wide env var so
 		// RecentSpawn stamps + isSameOrchestratorLeader comparisons can detect pid recycling under a

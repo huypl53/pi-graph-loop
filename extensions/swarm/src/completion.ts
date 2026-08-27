@@ -40,6 +40,7 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "release", description: "Release a task from an agent: <id> [<task-id>] [--force]" },
 	{ name: "mailbox", description: "Mailbox maintenance: reset <id> --yes" },
 	{ name: "send", description: "Send a message: <to> <body>" },
+	{ name: "goal", description: "Orchestrator-only: set <text> | done [<goalId>] (durable swarm goal)" },
 	{ name: "trace", description: "Show trace file path" },
 	{ name: "capture", description: "Capture an agent's tmux pane: <id>" },
 	{ name: "identity", description: "reload|show an agent's identity" },

@@ -341,9 +341,63 @@ proof that work finished.
 
 ### Unified notification policy
 All recovery nudges share one semantic key space (`task:{taskId}:node:{nodeId}:nudge:...`,
-`task:{taskId}:nudge:initial-ready`), formatted by `formatNotifyKey`, and the same dedupe/cooldown/cap
-contract. Every message tells the recipient the concrete next action (the exact tool call) plus an
-alternative path (cancel/inspect).
+`task:{taskId}:nudge:initial-ready`, `goal:{goalId}:nudge:idle-streak`), formatted by `formatNotifyKey`,
+and the same dedupe/cooldown/cap contract. Every message tells the recipient the concrete next action
+(the exact tool call) plus an alternative path (cancel/inspect).
+
+### Goal idle-streak nudge (Issue 18)
+
+The orchestrator's durable goal plus an anti-loop nudge that fires when the swarm has nothing to do.
+
+- **Set the goal**: `/swarm goal set <text>` or `swarm_set_goal({ text })`. The orchestrator-only
+  tool/command stores `swarm-state.json.goal = { id, text, setAt, setBy, consecutiveNoResolveNudges }`.
+  Setting a new goal replaces the old one, resets `consecutiveNoResolveNudges` to 0, and clears any
+  back-off state (`backoffTicksRemaining`, `lastNudgeAt`, `lastResolvedAt`) so a new intent never
+  inherits the previous goal's counter.
+- **Idle predicate** (every pump tick, inside the existing `withLock` in `pumpOrchestratorMailbox`):
+  every non-orchestrator agent must be `runtimeStatus: "idle"` AND zero task nodes may be in
+  `assigned` or `in_progress` status across `tasks/<taskId>/task.json`. If either fails, no nudge.
+- **Anti-loop counter**: `consecutiveNoResolveNudges` resets to 0 on ANY orchestrator turn that ends
+  `stopReason: "stop"` AND `role: "assistant"` — the act of ending a turn (vs staying silent) is the
+  resolve signal. A `turn_end {error}` is intentionally NOT a resolve (tool/model failures are not
+  "I addressed the goal"); a non-orchestrator `turn_end` is also NOT a resolve (workers don't decide
+  the goal). The reset runs in a second `pi.on("turn_end", ...)` handler registered AFTER the
+  model-pool swap branch, so the resolve observes the post-swap state.
+- **Back-off**: once `consecutiveNoResolveNudges` reaches `MAX_CONSECUTIVE_NUDGES_DEFAULT` (3,
+  overridable via `PI_SWARM_MAX_NUDGES`), the pump enters a `GOAL_NUDGE_BACKOFF_TICKS`-tick (2)
+  back-off: each subsequent tick decrements `backoffTicksRemaining` without emitting. The tick that
+  drains the counter to 0 is the back-off exit gate and does NOT emit (avoids a one-tick
+  over-emit); the FOLLOWING tick may re-enter the `max_nudges` branch if the counter is still at
+  cap and re-arm the back-off. The pattern stabilises at "3 nudges → 2-tick back-off → repeat"
+  until the goal is resolved (counter reset) or cleared (`swarm_mark_goal_done`).
+- **Idempotency**: the nudge's semantic key is `goal:{goalId}:nudge:idle-streak`, validated via
+  `SAFE_ID_RE`. A fresh `swarm_set_goal` mints a new `goalId` so a fresh goal is a fresh emit slot.
+  Within the same goal, `findIdempotentMessage(st, "orchestrator", "orchestrator", key)` suppresses
+  duplicate emissions across concurrent ticks (matches the existing semantic-key dedupe pattern used
+  by `reconcileGraphAdvanceLocked` and `reconcileInitialReadyLocked`).
+- **Clear the goal**: `/swarm goal done [<goalId>]` or `swarm_mark_goal_done({ goalId? })`. Deletes
+  `state.goal` (no archive), traces `goal.cleared`. Optional `<goalId>` is a safety fence; the call
+  throws if it does not match the current goal.
+- **Trace events**:
+  - `goal.set` — durable write of `st.goal` (from tool or command).
+  - `goal.cleared` — `delete st.goal` (from tool or command).
+  - `goal.idle_nudge` — successful nudge emit; payload includes `goalId`, `consecutiveCount`, `max`,
+    `idleAgents`, `key`, `customType: "goal.idle_nudge"`.
+  - `goal.nudge.resolved` — `turn_end {stop}` reset of the counter; payload includes `goalId`,
+    `nudges` (counter pre-reset), `hadBackoff`, `by: "turn_end"`.
+  - `goal.nudge.backoff` — first tick after the counter reached `MAX`; payload includes `goalId`,
+    `nudges`, `max`, `backoffTicks`.
+  - `goal.nudge.backoff.skip` — subsequent skipped ticks while `backoffTicksRemaining > 0`.
+  - `goal.nudge.backoff.exhausted` — tick when the back-off counter hits 0 (does NOT emit).
+  - `goal.nudge.error` — caught exception wrapper (matches the existing `reconcileGraphAdvanceLocked`
+    / `reconcileInitialReadyLocked` try/catch pattern; a throw never kills the pump tick).
+- **Authoritative gate**: both `swarm_set_goal` and `swarm_mark_goal_done` call
+  `requireOrchestratorAuthority(currentAgentId(), "<tool>")` which throws
+  `ERR_ORCHESTRATOR_AUTHORITY_REQUIRED` for non-orchestrators. The `/swarm goal` slash command adds
+  an explicit `currentAgentId() !== "orchestrator"` notify (matches the `attention`/`remind`/`stop`
+  /`release` pattern).
+- **No new public schema**: only the two declared tools + the two slash command subcommands. No
+  new event hooks, no new env knobs beyond `PI_SWARM_MAX_NUDGES`.
 
 ### Recovery attention and bounded worker reminder (roadmap issue 5)
 

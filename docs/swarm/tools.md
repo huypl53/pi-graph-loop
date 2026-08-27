@@ -17,11 +17,11 @@ was a separate persistence layer and is no longer part of the core surface.
 
 | Domain | Count | Registration module |
 | --- | ---: | --- |
-| Agent lifecycle, observability, and recovery | 17 | `src/tools/agents.ts` |
+| Agent lifecycle, observability, and recovery | 19 | `src/tools/agents.ts` |
 | Messaging and reconcile | 5 | `src/tools/messages.ts` |
 | Task graph | 8 | `src/tools/tasks.ts` |
 | Retention / garbage collection | 1 | `src/tools/gc.ts` |
-| **Total** | **31** | `extensions/swarm/index.ts` |
+| **Total** | **33** | `extensions/swarm/index.ts` |
 
 ## Identity, visibility, and authority
 
@@ -123,6 +123,8 @@ needs structured parameters or machine-readable results.
 - `/swarm pool help` — canonical pool format reference
 - `/swarm pool preview-preflight [model] [provider]` — dry-run the spawn gate; reports classified errors before commit
 - `/swarm pool cooldown <provider/model> <ms>` / `/swarm pool clear <provider/model>` — manual bench control
+- `/swarm goal set <text>` — orchestrator-only; durably records the swarm's current goal (`st.goal`); while set, the orchestrator pump emits an idempotent idle-streak nudge whenever every non-orchestrator agent is `runtimeStatus: "idle"` with zero assigned/in-progress task nodes.
+- `/swarm goal done [<goalId>]` — orchestrator-only; clears the swarm goal and stops the idle-streak nudge loop entirely. Optional `<goalId>` argument is a safety fence (the call fails if it does not match the current goal).
 
 ### Grouped aliases
 
@@ -133,7 +135,7 @@ state or authorization path.
 - `/swarm-tasks list|graph|status|next|validate ...`
 - `/swarm-msg send <to> <message>`
 
-## Agent lifecycle, observability, and recovery (17)
+## Agent lifecycle, observability, and recovery (19)
 
 | Tool | What it does | Key inputs / operating notes |
 | --- | --- | --- |
@@ -154,6 +156,8 @@ state or authorization path.
 | `swarm_capture_agent_pane` | Captures pane history to `.pi/swarm/traces/tmux/`. | `agentId` required; use for runtime evidence/debugging. |
 | `swarm_dead_letters` | Lists terminal delivery failures. | Optional recipient/message filters and limit. |
 | `swarm_prune` | Marks dead panes stopped and can remove old stopped records. | **Orchestrator-only** (server-side `requireOrchestratorAuthority`); defaults to `dryRun=true`; run dry first. Does not delete mailboxes/traces. |
+| `swarm_set_goal` | Persists a swarm-level goal to `swarm-state.json.goal`. | **Orchestrator-only** (server-side `requireOrchestratorAuthority`). `text` required, `id` optional. Replaces any current goal and resets `consecutiveNoResolveNudges` + clears back-off. While set, the orchestrator pump emits an idempotent idle-streak nudge when every non-orchestrator agent is `runtimeStatus: "idle"` with zero assigned/in_progress task nodes. Pair with `swarm_mark_goal_done` when finished. |
+| `swarm_mark_goal_done` | Clears the swarm goal and stops the idle nudge loop entirely. | **Orchestrator-only** (server-side `requireOrchestratorAuthority`). Optional `goalId` is a safety fence (clear fails if it does not match the current goal). Idempotent: a clear with no active goal is a `noop`. |
 
 ## Messaging and reconcile (5)
 

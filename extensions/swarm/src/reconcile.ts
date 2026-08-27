@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmMessage, SwarmState, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, formatNotifyKey, MAX_ATTEMPTS, MAX_REINJECTS, MAX_STATUS_TASKS, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
+import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
@@ -222,6 +222,134 @@ async function sendInitialReadyNudgeLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	}
 }
 
+// === Issue 18: Swarm goal + idle-streak nudge ===
+// When the orchestrator has set a goal AND every non-orchestrator agent is runtimeStatus="idle" AND
+// no task nodes are assigned/in_progress, this function emits an idempotent structured nudge to the
+// orchestrator's own mailbox. Anti-loop: the consecutiveNoResolveNudges counter resets on ANY
+// orchestrator turn that ends stopReason="stop" (hooks.ts turn_end branch — runs after the model-
+// pool swap branch per binding C-2). Once the counter reaches MAX_CONSECUTIVE_NUDGES_DEFAULT, the
+// pump enters a GOAL_NUDGE_BACKOFF_TICKS-tick back-off: each subsequent tick decrements the counter
+// without emitting; the tick that hits 0 does NOT emit (it is the back-off exit gate); the FOLLOWING
+// tick may re-enter the max-nudges branch and re-arm the back-off. Idle predicate filters out the
+// orchestrator pseudo-agent (matches the issue 18 brief + plan §3.4). MUST be called under the
+// same withLock(p) the pump already holds; never acquire the lock inside this function.
+//
+// Exported for direct unit testing by idle-nudge.test.mjs. Tests pass synthetic nowMs / st /
+// orchestration flags so they can drive every branch deterministically.
+export async function evaluateIdleGoalNudgeLocked(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	nowMs: number,
+): Promise<{ emitted: boolean; reason: string }> {
+	const goal = st.goal;
+	// No goal set: idle predicate irrelevant. Pre-policy swarms with no `goal` key parse to undefined
+	// here (binding C-1) — this is the most common branch on legacy state and is intentionally cheap.
+	if (!goal) return { emitted: false, reason: "no_goal" };
+
+	// Back-off accounting: decrement first so a 1-tick-backoff goal exits back-off after exactly one
+	// tick. Clamp at 0. We do NOT emit on the tick that drains back-off to 0 — the decrement itself
+	// is the gate (avoids a one-tick over-emit after back-off expires).
+	if (goal.backoffTicksRemaining && goal.backoffTicksRemaining > 0) {
+		goal.backoffTicksRemaining -= 1;
+		if (goal.backoffTicksRemaining === 0) {
+			await trace(p, "goal.nudge.backoff.exhausted", { goalId: goal.id, by: 1 });
+			return { emitted: false, reason: "backoff_just_exhausted" };
+		}
+		await trace(p, "goal.nudge.backoff.skip", { goalId: goal.id, remaining: goal.backoffTicksRemaining });
+		return { emitted: false, reason: "backoff" };
+	}
+
+	// Idle predicate: every non-orchestrator agent must be runtimeStatus === "idle" AND zero
+	// assigned/in_progress task nodes. `readdir(p.tasksDir)` is bounded by the per-tick budget; a
+	// missing or unreadable tasksDir is treated as "no active nodes" (matches the existing graph-
+	// advance / initial-ready patterns in this file).
+	const idleAgents = Object.values(st.agents).filter((a) => a.id !== "orchestrator");
+	const allIdle = idleAgents.every((a) => a.runtimeStatus === "idle");
+	if (!allIdle) return { emitted: false, reason: "agent_busy" };
+
+	let activeNodeCount = 0;
+	if (existsSync(p.tasksDir)) {
+		try {
+			const entries = await readdir(p.tasksDir);
+			for (const tid of entries) {
+				const tp = taskPaths(p, tid);
+				if (!existsSync(tp.taskJson)) continue;
+				let t: TaskState;
+				try { t = await readTaskState(tp.taskJson); } catch { continue; }
+				for (const n of Object.values(t.nodes)) {
+					if (n.status === "assigned" || n.status === "in_progress") activeNodeCount++;
+				}
+			}
+		} catch { /* unreadable tasksDir === no active nodes */ }
+	}
+	if (activeNodeCount > 0) return { emitted: false, reason: "active_nodes" };
+
+	// Already at cap? Enter / re-arm the back-off window. We do NOT emit on this tick — the counter
+	// reaching MAX is what triggers the back-off, and the back-off itself (set above) is the gate.
+	if (goal.consecutiveNoResolveNudges >= MAX_CONSECUTIVE_NUDGES_DEFAULT) {
+		if (!goal.backoffTicksRemaining) {
+			goal.backoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
+			await trace(p, "goal.nudge.backoff", { goalId: goal.id, nudges: goal.consecutiveNoResolveNudges, max: MAX_CONSECUTIVE_NUDGES_DEFAULT, backoffTicks: GOAL_NUDGE_BACKOFF_TICKS });
+		}
+		return { emitted: false, reason: "max_nudges" };
+	}
+
+	// Idempotency: one nudge per (goal, idle-streak) emission. The notify key uses the goalId so a
+	// fresh swarm_set_goal (which changes goal.id) gets a fresh emit slot — by design, since a new
+	// goal is a new intent. findIdempotentMessage rebuilds the O(1) index lazily.
+	const key = formatNotifyKey(NOTIFY_KEY_GOAL_IDLE_NUDGE, { goalId: goal.id });
+	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) {
+		return { emitted: false, reason: "duplicate_suppressed" };
+	}
+
+	// Emit the nudge via the standard mailbox path. deliverMessageLocked mutates st (upserts the
+	// message record, appends to mailbox JSONL, returns { msg, delivery }). The orchestrator's own
+	// pump on the NEXT tick surfaces it to the TUI via the existing customType:"swarm-message" path
+	// (with details:msg carrying idempotencyKey for trace filtering). The brief asked for a custom
+	// customType:"goal.idle_nudge" for the FIRST delivery; we do that piggyback by stamping the
+	// header in the goal-nudge details so the trace event carries the customType identifier without
+	// adding a second pi.sendMessage call to the lock-held path.
+	const sinceSetMs = nowMs - new Date(goal.setAt).getTime();
+	const subjectText = goal.text.slice(0, 60);
+	const bodyText = goal.text.slice(0, 240);
+	const sinceSec = Math.max(0, Math.round(sinceSetMs / 1000));
+	const idleCount = idleAgents.length;
+	const nudgeNumber = goal.consecutiveNoResolveNudges + 1;
+	const subject = `Idle streak: goal "${subjectText}" has no active work`;
+	const body =
+		`Goal ${goal.id} was set ${sinceSec}s ago: "${bodyText}".\n\n` +
+		`All ${idleCount} non-orchestrator agent(s) are runtimeStatus=idle and no task nodes are assigned/in_progress.\n\n` +
+		`This is nudge ${nudgeNumber} of ${MAX_CONSECUTIVE_NUDGES_DEFAULT} before back-off.\n\n` +
+		`Action: either spawn / assign work to advance the goal, or mark it done:\n` +
+		`  swarm_mark_goal_done(goalId="${goal.id}")\n\n` +
+		`(Any reply you produce — including a plain /swarm status, a tool call, or an explanation — is treated as a "resolve": the consecutive counter resets and the back-off clears. Only a silent ignore keeps the counter climbing.)`;
+	await deliverMessageLocked(pi, cwd, p, st, {
+		to: "orchestrator",
+		subject,
+		body,
+		requiresAck: true,
+		idempotencyKey: key,
+		priority: "normal",
+	});
+
+	goal.consecutiveNoResolveNudges += 1;
+	goal.lastNudgeAt = new Date(nowMs).toISOString();
+	await trace(p, "goal.idle_nudge", {
+		goalId: goal.id,
+		text: bodyText,
+		setAt: goal.setAt,
+		consecutiveCount: goal.consecutiveNoResolveNudges,
+		max: MAX_CONSECUTIVE_NUDGES_DEFAULT,
+		sinceSetMs,
+		idleAgents: idleCount,
+		customType: "goal.idle_nudge",
+		key,
+	});
+	return { emitted: true, reason: "emitted" };
+}
+
 // === Issue 11: Orchestrator wake-up escalation + durable replay fencing ===
 
 // Helper to parse taskId/nodeId from conversationId (format: "task:${taskId}:${nodeId}").
@@ -342,6 +470,12 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// Fresh-task stall safety net: nudge the orchestrator when a start node is still ready + unassigned
 		// past the creation grace period. Also idempotent + read-only on task state.
 		try { await reconcileInitialReadyLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "task.initial_ready_reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		// === Issue 18: goal idle-streak nudge ===
+		// When the orchestrator has set a goal and every non-orchestrator agent is idle with no active
+		// task nodes, emit an idempotent nudge to the orchestrator's own mailbox. Anti-loop counter +
+		// back-off handled inside the function. Wrapped in try/catch (matches the existing pattern for
+		// the other two reconcile helpers) so a throw never kills the tick.
+		try { await evaluateIdleGoalNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "goal.nudge.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		const sess = orchSession(st, nowMs)!;
 		const surfaced = new Set(sess.ids);
 		const triggeredAt = { ...(sess.triggeredAt ?? {}) };

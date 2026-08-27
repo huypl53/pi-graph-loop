@@ -203,6 +203,25 @@ export const NOTIFY_KEY_SETTLE_STALE = "task:{taskId}:agent:{agentId}:nudge:sett
 // correctly. The trace shape is { ts, cid, total, counts: { reason -> n, ... } }.
 export const NOTIFY_KEY_PUMP_BATCH_SUPPRESSED = "swarm.pump.batch_suppressed";
 
+// === Issue 18: Swarm goal + idle-streak nudge ===
+// Max consecutive unresolved nudges before the pump enters a 2-tick back-off. Configurable via the
+// PI_SWARM_MAX_NUDGES env var (read at module-load time, mirrors the ORPHAN_SPAWN_WARNING_TIMEOUT_MS
+// pattern). Defaults to 3, matching the reliability-roadmap plan.
+export const MAX_CONSECUTIVE_NUDGES_DEFAULT =
+	Number(process.env.PI_SWARM_MAX_NUDGES) > 0
+		? Math.floor(Number(process.env.PI_SWARM_MAX_NUDGES))
+		: 3;
+
+// Back-off window after MAX_CONSECUTIVE_NUDGES_DEFAULT nudges without a resolve. The pump skips the
+// next N ticks (decrementing each tick) before re-evaluating; if the counter is still at cap and the
+// goal is still set + idle, the pump re-enters the back-off cycle.
+export const GOAL_NUDGE_BACKOFF_TICKS = 2;
+
+// Semantic dedupe key template for the goal idle-streak nudge. One nudge per (goal, idle-streak)
+// so the orchestrator mailbox never sees duplicate nudges for the same goal emission. Validated via
+// SAFE_ID_RE inside formatNotifyKey; the `goalId` substitution must satisfy /^[a-z0-9_-]+$/.
+export const NOTIFY_KEY_GOAL_IDLE_NUDGE = "goal:{goalId}:nudge:idle-streak";
+
 // Format a NOTIFY_KEY_* template with validated (safe-id) substitutions.
 export function formatNotifyKey(template: string, params: Record<string, string>): string {
 	let out = template;

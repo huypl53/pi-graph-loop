@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
+import { randomUUID } from "node:crypto";
 import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
 import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from "./tmux.ts";
 import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, checkStallNotificationStale, deriveNodeAttention, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
@@ -41,7 +42,7 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 	return out;
 }
 
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight] | pool cooldown <slot> <ms> | pool clear <slot>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal set <text> | goal done [<goalId>] (orchestrator-only swarm goal lifecycle) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -909,13 +910,66 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					ctx.ui.notify(`Mailbox reset for ${result.agentId}${isHereToken(requestedId) ? " (resolved from 'here')" : ""}. Archived ${result.lines} line(s) to ${relative(ctx.cwd, result.archive)}; cleared live mailbox ${relative(ctx.cwd, result.file)} and delivered ledger entries=${result.deliveredCleared}. If a session was stuck on parse errors, /reload or restart that pi session next.`, "warning");
 					return;
 				}
+				if (cmd === "goal") {
+					// Orchestrator-only goal lifecycle command (mirror of swarm_set_goal / swarm_mark_goal_done).
+					// Goal is the durable record the orchestrator's pump emits idle-streak nudges against
+					// (see docs/swarm/operations.md "Recovery nudges > Goal idle-streak nudge"). Setting a goal
+					// resets consecutiveNoResolveNudges + clears back-off. Marking done clears the entry.
+					if (currentAgentId() !== "orchestrator") {
+						ctx.ui.notify("goal is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+						return;
+					}
+					const sub = rest.shift();
+					if (sub === "set") {
+						const text = rest.join(" ").trim();
+						if (!text) { ctx.ui.notify("Usage: /swarm goal set <text>", "warning"); return; }
+						const st = await withLock(p, async () => {
+							const s = await readState(p, ctx.cwd);
+							const ts = now();
+							const goalId = `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
+							const previousId = s.goal?.id;
+							s.goal = {
+								id: goalId,
+								text,
+								setAt: ts,
+								setBy: "orchestrator",
+								consecutiveNoResolveNudges: 0,
+							};
+							delete s.goal.lastNudgeAt;
+							delete s.goal.lastResolvedAt;
+							delete s.goal.backoffTicksRemaining;
+							await trace(p, "goal.set", { goalId, previousId, via: "command", length: text.length });
+							await writeState(p, s);
+							return s.goal;
+						});
+						ctx.ui.notify(`Goal set: ${st.id} — "${st.text.slice(0, 80)}${st.text.length > 80 ? "…" : ""}"`, "info");
+						return;
+					}
+					if (sub === "done") {
+						const goalIdArg = rest.shift();
+						const result = await withLock(p, async () => {
+							const s = await readState(p, ctx.cwd);
+							if (!s.goal) return { cleared: true, noop: true };
+							if (goalIdArg && safeId(goalIdArg) !== s.goal.id) throw new Error(`goalId ${goalIdArg} does not match current goal ${s.goal.id}`);
+							const clearedId = s.goal.id;
+							const nudges = s.goal.consecutiveNoResolveNudges;
+							delete s.goal;
+							await trace(p, "goal.cleared", { goalId: clearedId, nudges, via: "command" });
+							await writeState(p, s);
+							return { cleared: true, clearedId, nudges };
+						});
+						ctx.ui.notify(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, "info");
+						return;
+					}
+					ctx.ui.notify("Usage: /swarm goal set <text> | /swarm goal done [<goalId>]", "warning");
+					return;
+				}
 				ctx.ui.notify(`Unknown /${commandName} command: ${cmd}`, "warning");
 			} catch (err: any) {
 				await trace(p, "error", { where: "command", command: cmd, commandName, message: err?.message || String(err), stack: err?.stack });
 				ctx.ui.notify(`Swarm error: ${err?.message || err}`, "error");
 			}
 		};
-
 	pi.registerCommand("swarm", {
 		description: SWARM_COMMAND_DESCRIPTION,
 		getArgumentCompletions: (argumentPrefix) => swarmArgumentCompletions(argumentPrefix),
