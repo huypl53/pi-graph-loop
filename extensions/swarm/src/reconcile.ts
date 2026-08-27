@@ -3,13 +3,14 @@ import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_M
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
-import type { IndexedTask, MessageResponseStatus, Paths, ReconcileAction, SwarmMessage, SwarmState, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, formatNotifyKey, MAX_ATTEMPTS, MAX_REINJECTS, MAX_STATUS_TASKS, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
+import { createHash } from "node:crypto";
+import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmMessage, SwarmState, TaskState } from "./types.ts";
+import { ACK_MISSING_MS, formatNotifyKey, MAX_ATTEMPTS, MAX_REINJECTS, MAX_STATUS_TASKS, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
 import { deliver, deliverMessageLocked, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
-import { ensureOrchestrator, readOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
+import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
@@ -221,6 +222,81 @@ async function sendInitialReadyNudgeLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	}
 }
 
+// === Issue 11: Orchestrator wake-up escalation + durable replay fencing ===
+
+// Helper to parse taskId/nodeId from conversationId (format: "task:${taskId}:${nodeId}").
+function parseTaskNodeRef(conversationId: string | undefined): { taskId?: string; nodeId?: string } | null {
+	if (!conversationId) return null;
+	const m = conversationId.match(/^task:([^:]+):([^:]+)$/);
+	if (!m) return null;
+	return { taskId: m[1], nodeId: m[2] };
+}
+
+// Actionability predicate for historical orchestrator PM messages (issue 11, §5). Returns { ok: false }
+// for messages that must NOT be surfaced: acked, dead_lettered, superseded, wrong recipient, task
+// terminal/cancelled/missing, node terminal/missing/reassigned, retrigger-budget-exhausted, or
+// informational already consumed. The `strictForMigration` flag treats retrigger-budget-exhausted as
+// non-actionable for the one-time migration back-fill (the budget resets per session). Exported
+// for reuse by the migration back-fill block.
+export function isActionableOrchestratorMessage(
+	rec: { id: string; to: string; requiresAck?: boolean; status?: string; ackedAt?: string; superseded?: any; conversationId?: string; idempotencyKey?: string },
+	taskIndex: Record<string, TaskState>,
+	nowMs: number,
+	retriggerCounts: Record<string, number>,
+	strictForMigration: boolean,
+): { ok: boolean; reason: string } {
+	if (rec.ackedAt) return { ok: false, reason: "acked" };
+	if (rec.status === "dead_letter") return { ok: false, reason: "dead_letter" };
+	if (rec.superseded) return { ok: false, reason: "superseded" };
+	if (rec.to !== "orchestrator") return { ok: false, reason: "wrong_recipient" };
+
+	// Task-scoped predicate (covers terminal task, cancelled, terminal node, reassigned node).
+	// Parse task/node reference from conversationId.
+	const taskNodeRef = parseTaskNodeRef(rec.conversationId);
+	if (taskNodeRef && taskNodeRef.taskId && taskNodeRef.nodeId) {
+		const task = taskIndex[taskNodeRef.taskId];
+		if (!task) return { ok: false, reason: "task_missing" };
+		if (task.status === "done") return { ok: false, reason: "task_done" };
+		if (task.status === "failed") return { ok: false, reason: "task_failed" };
+		if (task.status === "cancelled") return { ok: false, reason: "task_cancelled" };
+		const node = task.nodes[taskNodeRef.nodeId];
+		if (!node) return { ok: false, reason: "node_missing" };
+		if (TERMINAL_NODE_STATUSES.has(node.status)) return { ok: false, reason: "node_terminal" };
+		// Reassign race: a later assignment message carries a newer idempotencyKey for the same
+		// (task,node) and stamped `superseded` on the prior one. The rec-level superseded flag
+		// catches this — but if a stale message was written before the supersede record (race),
+		// cross-check by finding the latest assign handoff for the node.
+		const lastAssign = [...(task.handoffs || [])].reverse().find(h => h.toNode === taskNodeRef.nodeId && h.kind === "assign");
+		if (lastAssign && rec.idempotencyKey && (lastAssign as any).idempotencyKey && (lastAssign as any).idempotencyKey !== rec.idempotencyKey) {
+			return { ok: false, reason: "node_reassigned" };
+		}
+	}
+
+	// Bounded re-trigger gate: a requiresAck message that was surfaced but never acked gets
+	// a bounded number of fresh triggerTurns (PUMP_RETRIGGER_MAX). After that, suppress until
+	// the message is acked or removed.
+	if (rec.requiresAck && !rec.ackedAt) {
+		const retriggerCount = retriggerCounts[rec.id] ?? 0;
+		if (retriggerCount >= PUMP_RETRIGGER_MAX) {
+			// For migration back-fill, treat retrigger-budget-exhausted as non-actionable (the
+			// budget resets per session). For the standard pump, this is session-bounded.
+			if (strictForMigration) return { ok: false, reason: "retrigger_budget_exhausted" };
+			// In the live pump, we still allow it (the retriggerCount is session-bounded and
+			// resets on PID change).
+		}
+	}
+
+	return { ok: true, reason: "actionable" };
+}
+
+// Helper to compute a fingerprint for a message record (sha256(messageId:lastUpdatedAt)). Used by
+// the consumer receipt ledger to detect silent edits to message records between surfacing and
+// reincarnation.
+function fingerprintMessage(rec: { id: string; updatedAt?: string; createdAt?: string }): string {
+	const ts = rec.updatedAt || rec.createdAt || now();
+	return createHash("sha256").update(`${rec.id}:${ts}`).digest("hex");
+}
+
 export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reason: string) {
 	if (currentAgentId() !== "orchestrator") return { delivered: 0, ids: [] as string[] };
 	// Read idle once, up front. Non-TUI modes have no live agent loop to trigger, so they are treated as
@@ -244,6 +320,14 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 			}).catch(() => {});
 			return { toSurface: [] as SwarmMessage[], retriggered: 0 };
 		}
+		// === Issue 11 (rework): per-tick leader heartbeat ===
+		// The leader lease must stay alive between session_starts (otherwise the second-line defense
+		// above starts denying ticks within ORCHESTRATOR_LEADER_STALE_MS of the last session_start).
+		// Refresh it inside the existing withLock (atomic with the rest of the pump decision block;
+		// no extra file IO). heartbeatOrchestratorLeader is a no-op for the current pid when the
+		// lease is already held by it; if a competing pid claimed it between the read and the
+		// refresh, it throws ORCHESTRATOR_LEADER_DENIED, which is propagated to the watchdog catch.
+		heartbeatOrchestratorLeader(st, Date.now(), process.pid, "pump_tick");
 		// ensureOrchestrator (create-only post-issue-8): no heartbeat refresh, just materialises the
 		// pseudo-agent record for mailbox delivery. The heartbeat is owned by the gate.
 		ensureOrchestrator(st, ctx.cwd, p);
@@ -267,19 +351,107 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// second orchestrator lane cannot starve this PM process). Recent window bounds work; acked messages
 		// (ackedAt = "recipient processed it") are skipped. We no longer pre-filter surfaced here: surfaced
 		// vs triggered vs re-trigger is decided below, because surfacing must be gated on idle.
+
+		// === Issue 11: One-time migration back-fill (binding C4) ===
+		if ((st.consumerReceipts?.orchestrator?.revision ?? 0) === 0) {
+			const migrationEntries = st.consumerReceipts!.orchestrator!.entries!;
+			let written = 0;
+			let scanned = 0;
+			// Build task index for actionability predicate.
+			const taskIndex: Record<string, TaskState> = {};
+			if (existsSync(p.tasksDir)) {
+				try {
+					const entries = await readdir(p.tasksDir);
+					for (const taskId of entries) {
+						const tp = taskPaths(p, taskId);
+						if (!existsSync(tp.taskJson)) continue;
+						try { taskIndex[taskId] = await readTaskState(tp.taskJson); } catch { /* skip unreadable */ }
+					}
+				} catch { /* ignore readdir errors */ }
+			}
+			const retriggerCounts = orchSession(st, nowMs)!.retriggerCount || {};
+			for (const rec of Object.values(st.messages)) {
+				scanned++;
+				if (rec.to !== "orchestrator") continue;
+				if (!rec.requiresAck) continue;
+				// Use the actionability predicate; non-actionable messages get a receipt.
+				// Note: do NOT short-circuit on rec.ackedAt here — the predicate returns reason="acked"
+				// and we want the receipt entry written so a reincarnated consumer reads it.
+				const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ true);
+				if (!v.ok) {
+					migrationEntries[rec.id] = {
+						surfacedAt: rec.updatedAt || rec.createdAt,
+						ackedAt: rec.ackedAt,
+						requiresAck: true,
+						conversationId: rec.conversationId,
+						fingerprint: fingerprintMessage(rec),
+					};
+					written++;
+				}
+			}
+			st.consumerReceipts!.orchestrator!.revision = 1;
+			await trace(p, "notification.backfill.receipts_written", { written, scanned, ts: nowMs }).catch(() => {});
+		}
+
+		// === Issue 11: Durable dedupe gate + actionability filter (binding C4 + C5) ===
 		const deliveredOrch = new Set(st.delivered.orchestrator || []);
+		// Build task index for actionability predicate.
+		const taskIndex: Record<string, TaskState> = {};
+		if (existsSync(p.tasksDir)) {
+			try {
+				const entries = await readdir(p.tasksDir);
+				for (const taskId of entries) {
+					const tp = taskPaths(p, taskId);
+					if (!existsSync(tp.taskJson)) continue;
+					try { taskIndex[taskId] = await readTaskState(tp.taskJson); } catch { /* skip unreadable */ }
+				}
+			} catch { /* ignore readdir errors */ }
+		}
+		const retriggerCounts = orchSession(st, nowMs)!.retriggerCount || {};
 		const windowMsgs = (await readMailboxCached(p, "orchestrator"))
 			.slice(-PUMP_SCAN_WINDOW)
 			.filter((m) => {
 				const rec = st.messages[m.id];
-				if (rec?.ackedAt) return false;
-				// Informational orchestrator messages (requiresAck:false) are globally single-surface:
-				// once ANY orchestrator TUI session has actually surfaced them, or an explicit mailbox read
-				// marked them delivered, do not replay them to a later orchestrator process. Action-expected
-				// messages stay session-local + re-triggerable.
-				if (rec && rec.to === "orchestrator" && rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) return false;
-				return true;
+				if (!rec) return false;
+
+				// Durable dedupe gate (binding C4): check consumerReceipts first, then legacy delivered ledger, then per-pid surfaced.
+				if (st.consumerReceipts?.orchestrator?.entries?.[m.id]) return false;
+				if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) return false;
+				if (surfaced.has(m.id)) return false; // per-pid surfaced (retrigger bound)
+
+				// Actionability predicate (binding C5): skip non-actionable messages and batch-count suppressions.
+				const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ false);
+				return v.ok;
 			});
+
+		// === Issue 11: Per-tick batch suppression trace (binding C6) ===
+		// Count all suppressed messages by reason before the BUSY check. Emit on EVERY tick including total===0.
+		const suppressedCounts: Record<string, number> = {
+			acked: 0, dead_letter: 0, superseded: 0, task_done: 0, task_failed: 0, task_cancelled: 0,
+			node_terminal: 0, node_reassigned: 0, task_missing: 0, node_missing: 0,
+			wrong_recipient: 0, retrigger_budget_exhausted: 0, informational_already_consumed: 0,
+		};
+		const allMsgs = (await readMailboxCached(p, "orchestrator")).slice(-PUMP_SCAN_WINDOW);
+		for (const m of allMsgs) {
+			const rec = st.messages[m.id];
+			if (!rec || rec.to !== "orchestrator") continue;
+			if (st.consumerReceipts?.orchestrator?.entries?.[m.id]) { suppressedCounts.informational_already_consumed++; continue; }
+			if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) { suppressedCounts.informational_already_consumed++; continue; }
+			if (surfaced.has(m.id)) continue; // not suppressed - already surfaced this session
+			const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, false);
+			if (!v.ok) {
+				const key = v.reason === "retrigger_budget_exhausted" ? "retrigger_budget_exhausted" : v.reason;
+				suppressedCounts[key] = (suppressedCounts[key] || 0) + 1;
+			}
+		}
+		const totalSuppressed = Object.values(suppressedCounts).reduce((a, b) => a + b, 0);
+		await trace(p, "notification.batch.suppressed", {
+			ts: nowMs,
+			cid: String(process.pid),
+			reason: "per-tick baseline",
+			total: totalSuppressed,
+			counts: suppressedCounts,
+		}).catch(() => {});
 
 		// BUSY: defer entirely. Do NOT surface, do NOT mark surfaced, do NOT deliver a dead followUp. A
 		// followUp delivered while busy carries no triggerTurn, so it lands in context without prompting the
@@ -359,12 +531,44 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		const surfacedInfoIds = pending
 			.filter((m) => m.requiresAck === false)
 			.map((m) => m.id);
-		if (surfacedInfoIds.length) {
+		// === Issue 11: Write durable consumer receipt entries (binding C4 + C10) ===
+		// For action-expected messages, write a receipt entry so a reincarnated consumer knows it was
+		// surfaced. Bump revision immediately after write. For informational messages, the legacy delivered
+		// ledger remains authoritative (consumerReceipts only covers actionable).
+		const surfacedActionIds = pending
+			.filter((m) => m.requiresAck === true)
+			.map((m) => m.id);
+		if (surfacedInfoIds.length || surfacedActionIds.length) {
 			await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				const ts = now();
-				const ledgerIds = st.delivered.orchestrator || [];
-				st.delivered.orchestrator = Array.from(new Set([...ledgerIds, ...surfacedInfoIds]));
+				// Legacy informational ledger (unchanged).
+				if (surfacedInfoIds.length) {
+					const ledgerIds = st.delivered.orchestrator || [];
+					st.delivered.orchestrator = Array.from(new Set([...ledgerIds, ...surfacedInfoIds]));
+				}
+				// Durable consumer receipts for actionable messages.
+				if (surfacedActionIds.length) {
+					const entries = st.consumerReceipts!.orchestrator!.entries!;
+					let bumped = false;
+					for (const id of surfacedActionIds) {
+						const rec = st.messages[id];
+						if (!rec || rec.to !== "orchestrator" || rec.requiresAck !== true) continue;
+						// Write receipt only if not already present (TUI delivery idempotence).
+						if (entries[id]) continue;
+						entries[id] = {
+							surfacedAt: ts,
+							ackedAt: rec.ackedAt,
+							requiresAck: true,
+							conversationId: rec.conversationId,
+							fingerprint: fingerprintMessage(rec),
+						};
+						bumped = true;
+						}
+					// Bump revision immediately after entries mutation (binding C10).
+					if (bumped) st.consumerReceipts!.orchestrator!.revision = (st.consumerReceipts!.orchestrator!.revision || 0) + 1;
+				}
+				// Legacy informational surfacedAt stamp (unchanged).
 				for (const id of surfacedInfoIds) {
 					const rec = st.messages[id];
 					if (!rec || rec.to !== "orchestrator" || rec.requiresAck !== false || rec.surfacedAt) continue;

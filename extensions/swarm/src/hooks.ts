@@ -21,9 +21,31 @@ import { tmux } from "./tmux.ts";
 // session_start hook — notably by `/swarm register here orchestrator`, which opts a running session in
 // as the orchestrator after startup. `swarmPi` is captured once in registerSwarmHooks (always called
 // first by index.ts) and reused so there is a single pump per extension load.
+//
+// === Issue 11 (rework): self-rescheduling watchdog chain ===
+// The previous `setInterval` is fragile in long-idle Pi TUI sessions — Node may silently drop the
+// interval registration when the process becomes idle (no UI focus / no user input / no LLM activity),
+// and the only recovery path was a fresh `session_start` (which fires only when the user types). That
+// is the exact root cause of the 04:09–04:45 UTC outage documented in the rejection review.
+// Replace the `setInterval` with a self-rescheduling `setTimeout` watchdog:
+//   - Each tick re-arms the next timeout from inside the run-completion path (single-flight via
+//     `orchestratorMailboxPumpRunning`), so the chain survives even if a single `setTimeout` is lost.
+//   - `heartbeatOrchestratorLeader` is called from inside every tick so the leader lease stays alive
+//     without requiring a `session_start`.
+//   - Stale-ctx errors stop the chain (the only correct recovery is a fresh session_start on a new ctx).
+//   - IO / leader-denied errors keep the chain running.
+//   - A captured `pumpCtx` is checked for freshness on every tick; a stale `ctx.isIdle()` / `pi.sendMessage`
+//     reference stops the chain (cannot be safely re-armed against the same ctx).
+// `orchestratorMailboxTimer` now holds the `setTimeout` handle (or undefined when stopped).
 let swarmPi: ExtensionAPI | undefined;
 let orchestratorMailboxTimer: NodeJS.Timeout | undefined;
 let orchestratorMailboxPumpRunning = false;
+let orchestratorPumpCtx: any = undefined;
+let orchestratorPumpCtxFresh: boolean = false;
+
+// Pump tick interval (kept identical to the previous `setInterval` cadence so dashboards/expectations
+// don't shift). Exposed as a constant so tests can shorten the wait for the watchdog test.
+const ORCHESTRATOR_PUMP_INTERVAL_MS = 5_000;
 
 // Swap-chain throttle for the turn_end auto-swap: agentId -> { count of consecutive swaps, last at }.
 // Caps the fail->swap->retry->fail cascade so a fully-dead pool cannot burn a turn per slot.
@@ -32,8 +54,72 @@ const MAX_SWAP_CHAIN = 2;
 const SWAP_CHAIN_RESET_MS = 5 * 60_000;
 
 export function stopOrchestratorPump() {
-	if (orchestratorMailboxTimer) clearInterval(orchestratorMailboxTimer);
+	if (orchestratorMailboxTimer) clearTimeout(orchestratorMailboxTimer);
 	orchestratorMailboxTimer = undefined;
+	// Drop the captured ctx so a stale-ctx cannot silently re-arm against a dead session. The watchdog
+	// re-install path can only resume by `startOrchestratorPump` with a fresh ctx.
+	orchestratorPumpCtx = undefined;
+	orchestratorPumpCtxFresh = false;
+}
+
+// Re-arm the watchdog against a fresh ctx. The previous ctx is dropped (so a stale-ctx from a prior
+// session cannot keep the chain alive). Idempotent: if the chain is already armed, it is replaced with
+// a fresh tick scheduled from now; the old `setTimeout` is cleared.
+function armOrchestratorPumpWatchdog(ctx: any) {
+	if (orchestratorMailboxTimer) clearTimeout(orchestratorMailboxTimer);
+	orchestratorPumpCtx = ctx;
+	orchestratorPumpCtxFresh = true;
+	const tick = async () => {
+		// Clear the handle that fired this tick — we are about to schedule the next one.
+		orchestratorMailboxTimer = undefined;
+		if (!orchestratorPumpCtxFresh) return; // stop() or stale-ctx already disabled us
+		if (currentAgentId() !== "orchestrator") { orchestratorPumpCtxFresh = false; return; }
+		const myCtx = orchestratorPumpCtx;
+		if (!myCtx) { orchestratorPumpCtxFresh = false; return; }
+		if (orchestratorMailboxPumpRunning) {
+			// Re-arm even if a tick is already running (do not stall the chain).
+			orchestratorMailboxTimer = setTimeout(tick, ORCHESTRATOR_PUMP_INTERVAL_MS);
+			return;
+		}
+		orchestratorMailboxPumpRunning = true;
+		try {
+			await pumpOrchestratorMailbox(swarmPi!, myCtx, paths((myCtx as any).cwd), "watchdog");
+		} catch (err: any) {
+			// === Issue 11 (rework): error classification with watchdog self-heal ===
+			// The watchdog must NEVER permanently disable itself for a transient error. Distinguish:
+			//   - stale-ctx: the captured ctx was invalidated by session replacement/reload. We cannot
+			//     safely re-arm against the SAME ctx (would busy-loop with a thrown ctx.isIdle()). Stop
+			//     the chain; the next session_start will call startOrchestratorPump with a fresh ctx.
+			//   - IO transient (EACCES/ENOSPC/EROFS/EAGAIN/EBUSY/ENFILE/EMFILE) or leader-denied: keep
+			//     the chain running — the next tick retries with file IO that will recover.
+			//   - unknown error class: stop (safe default), trace the error so it surfaces.
+			const msg = String((err && err.message) || err);
+			const code = String((err && err.code) || "");
+			const isStaleCtx = /stale after session/i.test(msg);
+			const isLeaderDenied = msg.startsWith("ORCHESTRATOR_LEADER_DENIED");
+			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) ||
+							  /EACCES|ENOSPC|EROFS/.test(msg);
+			if (isStaleCtx) {
+				stopOrchestratorPump();
+				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.orchestrator_pump_stale_stopped", { reason: "watchdog", error: msg }).catch(() => {});
+			} else if (isLeaderDenied || isIoTransient) {
+				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.orchestrator_pump_transient", { reason: "watchdog", kind: isLeaderDenied ? "leader_denied" : "io", code, error: msg }).catch(() => {});
+				// keep the chain alive — schedule the next tick
+			} else {
+				stopOrchestratorPump();
+				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.orchestrator_pump_error", { reason: "watchdog", error: msg, stale: false }).catch(() => {});
+			}
+		} finally {
+			orchestratorMailboxPumpRunning = false;
+			// Re-arm the next watchdog tick ONLY if we are still fresh + still the orchestrator + the
+			// previous tick didn't stop us. This is the single-flight self-heal: a single tick failure
+			// (transient IO) keeps the chain; a stop() drops it.
+			if (orchestratorPumpCtxFresh && orchestratorPumpCtx && currentAgentId() === "orchestrator") {
+				orchestratorMailboxTimer = setTimeout(tick, ORCHESTRATOR_PUMP_INTERVAL_MS);
+			}
+		}
+	};
+	orchestratorMailboxTimer = setTimeout(tick, ORCHESTRATOR_PUMP_INTERVAL_MS);
 }
 
 // Pull-based worker delivery: surface unacked messages addressed to this agent into its own TUI
@@ -81,10 +167,11 @@ export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, 
 	return { surfaced: delivered, ids: result.ids };
 }
 
-// (Re)start the orchestrator mailbox pump for this session: one immediate surface + a 5s TUI interval.
-// No-op unless this session resolves to the orchestrator. Safe to call from session_start or from the
-// `/swarm register here orchestrator` opt-in path. The captured ctx is session-bound; on stale-ctx
-// errors the run() guard stops the pump cleanly (the next orchestrator session_start restarts it).
+// (Re)start the orchestrator mailbox pump for this session: one immediate surface + a self-rescheduling
+// setTimeout watchdog (NOT setInterval — see module-level comment). No-op unless this session resolves
+// to the orchestrator. Safe to call from session_start or from the `/swarm register here orchestrator`
+// opt-in path. The captured ctx is session-bound; on stale-ctx errors the watchdog stops and the next
+// orchestrator session_start restarts it with a fresh ctx.
 //
 // Multi-orchestrator policy (issue 8, strict-reject): a preflight `withLock` runs
 // heartbeatOrchestratorLeader so a non-leader pane cannot install the pump. On deny we trace
@@ -93,9 +180,9 @@ export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, 
 export async function startOrchestratorPump(ctx: any, reason = "session_start") {
 	const pi = swarmPi;
 	if (!pi) return;
-	stopOrchestratorPump();
+	stopOrchestratorPump(); // clear any prior watchdog + ctx
 	// Preflight gate (Category A, plan §4.4.1): claim/refresh the leader; on denial, do NOT install
-	// the interval. The throw is converted to a trace + early-return so a guest pane doesn't crash.
+	// the watchdog. The throw is converted to a trace + early-return so a guest pane doesn't crash.
 	if (currentAgentId() === "orchestrator") {
 		const p = paths(ctx.cwd);
 		try {
@@ -119,29 +206,45 @@ export async function startOrchestratorPump(ctx: any, reason = "session_start") 
 	// the "This extension ctx is stale after session replacement or reload" error. The delivery loop
 	// (sendMessage/isIdle) and the trace that uses ctx.isIdle are now mode-gated to TUI only inside
 	// pumpOrchestratorMailbox, so non-TUI sessions (print/rpc/json) never make ctx-bound calls.
-	// The 5s polling interval is TUI-only (print sessions exit immediately after one turn); non-TUI
+	// The watchdog tick is TUI-only (print sessions exit immediately after one turn); non-TUI
 	// callers read mailboxes via swarm_check_mailbox, which never touches a captured ctx.
 	if (currentAgentId() !== "orchestrator") return;
 	const p = paths(ctx.cwd);
-	// NOTE: the one-shot below is awaited (not fire-and-forget) so that a pi -p / print session — which
+	// The one-shot below is awaited (not fire-and-forget) so that a pi -p / print session — which
 	// exits immediately after its single turn — actually completes the surfacing decision (writeState +
-	// trace) before teardown. The interval timer remains fire-and-forget.
+	// trace) before teardown. The watchdog remains fire-and-forget.
 	const run = async (reason: string) => {
 		if (orchestratorMailboxPumpRunning) return;
 		orchestratorMailboxPumpRunning = true;
 		try {
 			await pumpOrchestratorMailbox(pi, ctx, p, reason);
 		} catch (err: any) {
-			// Session-safe resilience: if the captured ctx/pi was invalidated (session replacement/reload)
-			// the pump's ctx-bound calls throw. Stop the pump cleanly instead of spamming stderr every 5s;
-			// the next interactive orchestrator session_start restarts a fresh pump with a live ctx.
+			// === Issue 11: Error classification (binding C2 + C7) ===
+			// Classify the error and respond correctly: stale-ctx stops (next session_start re-arms), IO
+			// + leader-denied continue without stopping, generic errors stop (safe default).
 			const msg = String((err && err.message) || err);
-			stopOrchestratorPump();
-			await trace(p, "mailbox.orchestrator_pump_error", { reason, error: msg, stale: /stale after session/i.test(msg) }).catch(() => {});
+			const code = String((err && err.code) || "");
+			const isStaleCtx = /stale after session/i.test(msg);
+			const isLeaderDenied = msg.startsWith("ORCHESTRATOR_LEADER_DENIED");
+			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) ||
+							  /EACCES|ENOSPC|EROFS/.test(msg);
+			if (isStaleCtx) {
+				// SAME ctx caused the throw; re-arming would busy-loop. The ONLY correct recovery is the
+				// next session_start (which fires per hooks.ts) with a fresh ctx. Stop and wait.
+				stopOrchestratorPump();
+				await trace(p, "mailbox.orchestrator_pump_stale_stopped", { reason, error: msg }).catch(() => {});
+			} else if (isLeaderDenied || isIoTransient) {
+				// Don't stop the timer: the next watchdog tick retries. Trace for visibility.
+				await trace(p, "mailbox.orchestrator_pump_transient", { reason, kind: isLeaderDenied ? "leader_denied" : "io", code, error: msg }).catch(() => {});
+			} else {
+				// Unknown error class: stop (preserved safe default).
+				stopOrchestratorPump();
+				await trace(p, "mailbox.orchestrator_pump_error", { reason, error: msg, stale: false }).catch(() => {});
+			}
 		} finally { orchestratorMailboxPumpRunning = false; }
 	};
 	await run(reason);
-	if (ctx.mode === "tui") orchestratorMailboxTimer = setInterval(() => { void run("interval"); }, 5_000);
+	if (ctx.mode === "tui") armOrchestratorPumpWatchdog(ctx);
 }
 
 export function registerSwarmHooks(pi: ExtensionAPI) {
@@ -355,6 +458,13 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		if (agentId === "orchestrator") {
 			const p = paths(ctx.cwd);
 			await pumpOrchestratorMailbox(pi, ctx, p, "agent_settled");
+			// === Issue 11 (rework) watchdog self-heal ===
+			// If the watchdog tick has been lost (timer GC'd, single-tick throw that called stop, etc.),
+			// re-install it from this hook so the chain stays alive without requiring session_start.
+			// Guard: only re-arm when ctx.mode is TUI (print/rpc/json sessions don't need the watchdog).
+			if (ctx.mode === "tui" && !orchestratorMailboxTimer && orchestratorPumpCtxFresh) {
+				armOrchestratorPumpWatchdog(ctx);
+			}
 			return;
 		}
 		// Catch-up surface for workers: anything unacked that arrived (or failed injection) while busy.

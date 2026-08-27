@@ -130,6 +130,11 @@ export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	st.delivered ||= {};
 	st.orchestratorPumpSessions ||= {};
 	st.agents ||= {};
+	// Orchestrator durable consumer receipts (issue 11): back-fill so pre-policy swarms boot fine.
+	// The first pump against `revision === 0` runs a one-time migration back-fill that writes
+	// receipts for legacy `requiresAck: true` messages that are no longer actionable.
+	st.consumerReceipts ||= {};
+	st.consumerReceipts.orchestrator ||= { entries: {}, revision: 0 };
 	// orchestratorLeader is additive (roadmap issue 8): absent === vacant. readState leaves the
 	// field as-is on legacy swarms so the first orchestrator-authoritative mutation claims it.
 	// Back-fill structured reuse metadata for agents persisted before these fields existed.

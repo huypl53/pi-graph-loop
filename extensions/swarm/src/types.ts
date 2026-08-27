@@ -175,6 +175,20 @@ export type OrchestratorLeader = {
 	agentRecordId?: string;
 };
 
+// Durable recipient receipt entry for the orchestrator mailbox consumer (issue 11). Populated
+// when a TUI-side delivery succeeds (surfacedAt stamped) OR by the one-time migration back-fill
+// for legacy `requiresAck: true` messages that are no longer actionable. Per-message fingerprint
+// (sha256(messageId + lastUpdatedAt)) protects a reincarnated consumer against silent message
+// record edits. Primary dedupe gate for the orchestrator pump across PID recycle / restart.
+// conversationId stores the raw "task:taskId:nodeId" reference for later parsing.
+export type OrchestratorReceiptEntry = {
+	surfacedAt: string;
+	ackedAt?: string;
+	requiresAck: boolean;
+	conversationId?: string;
+	fingerprint: string;
+};
+
 export type SwarmState = {
 	version: number;
 	swarmId: string;
@@ -193,6 +207,17 @@ export type SwarmState = {
 	orchestratorPumpSessions?: Record<string, { ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string }>;
 	// Per-worker surfaced ledger for the session-start mailbox auto-surface (idempotent per message).
 	agentSurfaced?: Record<string, string[]>;
+	// Durable recipient receipt ledger for the orchestrator mailbox consumer (issue 11). Primary
+	// dedupe gate that survives PID restart/recycle; replaces the per-pid `orchestratorPumpSessions[*].ids`
+	// (which is now session-bounded and only counts retriggers). `revision` bumps on every write so a
+	// stale read can detect concurrent consumer activity; `0` = no writes yet (triggers one-time
+	// migration back-fill on first pump).
+	consumerReceipts?: {
+		orchestrator?: {
+			entries?: Record<string, OrchestratorReceiptEntry>;
+			revision?: number;
+		};
+	};
 	lastLoopReconcileAt?: string; // throttle for the loop-watcher reconcile (detect "plan recorded but graph still closed")
 	// Incremental mailbox read checkpoint for the orchestrator pump (issue B): byte offset already
 	// parsed per agent. Reset (full re-read) if the file shrank. Absent = no checkpoint yet.

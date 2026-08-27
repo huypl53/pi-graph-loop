@@ -161,6 +161,11 @@ export const NOTIFY_KEY_GRAPH_ADVANCE = "task:{taskId}:node:{nodeId}:nudge:assig
 // the session_shutdown site too via the same predicate gating.
 export const NOTIFY_KEY_SETTLE_STALE = "task:{taskId}:agent:{agentId}:nudge:settle-stale";
 
+// Orchestrator pump per-tick batch suppression trace key (issue 11 / binding C6). Emitted on
+// EVERY pump tick including total===0 so dashboards counting silent-tick baselines render
+// correctly. The trace shape is { ts, cid, total, counts: { reason -> n, ... } }.
+export const NOTIFY_KEY_PUMP_BATCH_SUPPRESSED = "swarm.pump.batch_suppressed";
+
 // Format a NOTIFY_KEY_* template with validated (safe-id) substitutions.
 export function formatNotifyKey(template: string, params: Record<string, string>): string {
 	let out = template;
