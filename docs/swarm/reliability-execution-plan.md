@@ -44,6 +44,7 @@ Bare `tsc` TS5097 caused by existing `.ts` import specifiers is not treated as a
 | 12 | Surface tension C6 micro-fix | Add explicit orchestrator-pane reject guard in `swarm_send_keys` so a future refactor cannot silently route raw keystrokes into the orchestrator host pane. No behavior change for valid worker→worker targets. | Complete: `surface-tension-c6-mic-fix` (`c0cdb3f`) |
 | 13 | Documentation staleness audit | Audit every `docs/swarm/*.md` page against current source of truth; produce per-page diff list; apply minimal additive fixes. | Complete: `docs-staleness-audit` (`495922e`). E4/E5 deferred to follow-up. |
 | 14 | Spawn-without-message engine warning | Detect operator error where `swarm_spawn_agent` returns but no `swarm_send_message` follows within a turn window. Emit a structured warning trace event (no new public tool, no hard error). Cancel on follow-up call or `swarm_assign_task` (which sends internally) or `stop_agent`. | Complete: `spawn-without-message-engine-warning` (`4547001`) |
+| 15 | Operations.md deferred edits + clearReason attribution | Apply deferred E4 + E5 from Issue 13 (operations.md:139 precedence sentence; operations.md:188 heading) AND add optional clearReason parameter to deliverMessageLocked so by='swarm_assign_task' is distinguishable from by='swarm_send_message'. | Complete: `operations-deferred-edits-and-clearreason` (`41e7f66`) |
 
 ## Cross-issue invariants
 
