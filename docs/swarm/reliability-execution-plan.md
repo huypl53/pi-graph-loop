@@ -43,7 +43,7 @@ Bare `tsc` TS5097 caused by existing `.ts` import specifiers is not treated as a
 | 11 | Orchestrator wake-up escalation | Escalating re-nudge (bounded, durable-state driven) plus optional leader-gated PM-pane wake-up via existing tmux injection when a ready node sits unassigned after the first nudge. | Complete: `orchestrator-wake-up-escalation` (`4daede3`) |
 | 12 | Surface tension C6 micro-fix | Add explicit orchestrator-pane reject guard in `swarm_send_keys` so a future refactor cannot silently route raw keystrokes into the orchestrator host pane. No behavior change for valid worker→worker targets. | Complete: `surface-tension-c6-mic-fix` (`c0cdb3f`) |
 | 13 | Documentation staleness audit | Audit every `docs/swarm/*.md` page against current source of truth; produce per-page diff list; apply minimal additive fixes. | In Progress: `docs-staleness-audit` |
-| 14 | Spawn-without-message engine warning | Detect operator error where `swarm_spawn_agent` returns but no `swarm_send_message` follows within a turn window. Emit a structured warning trace event (no new public tool, no hard error). Cancel on follow-up call or `swarm_assign_task` (which sends internally) or `stop_agent`. | Complete: `spawn-without-message-engine-warning` |
+| 14 | Spawn-without-message engine warning | Detect operator error where `swarm_spawn_agent` returns but no `swarm_send_message` follows within a turn window. Emit a structured warning trace event (no new public tool, no hard error). Cancel on follow-up call or `swarm_assign_task` (which sends internally) or `stop_agent`. | Complete: `spawn-without-message-engine-warning` (`4547001`) |
 
 ## Cross-issue invariants
 
