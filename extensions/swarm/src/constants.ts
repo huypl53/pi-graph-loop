@@ -145,6 +145,14 @@ export const PUMP_RETRIGGER_MAX = 3;
 
 export const MAX_STATUS_TASKS = 100;
 
+// Orphan-spawn watchdog timeout (Issue 14). When swarm_spawn_agent returns and no follow-up delivery
+// (swarm_send_message, swarm_assign_task which sends internally, or swarm_stop_agent) occurs within
+// this window, the engine emits a single `agent.spawn.orphan_warning` trace event — observable by ops
+// and dashboards via swarm_trace, never exposed as a new public tool. Override for testing via the
+// `PI_SWARM_ORPHAN_TIMEOUT_MS` env var (tests set it to ~50ms to exercise the timer path in real time).
+export const ORPHAN_SPAWN_WARNING_TIMEOUT_MS =
+	Number(process.env.PI_SWARM_ORPHAN_TIMEOUT_MS) > 0 ? Math.floor(Number(process.env.PI_SWARM_ORPHAN_TIMEOUT_MS)) : 30_000;
+
 // === Recovery notification policy (reliability-roadmap Phase 1) ===
 // Unified, actually-enforced dedupe/cooldown/cap contract for recovery nudges sent to the
 // orchestrator. `sendNotifyLocked` in reconcile.ts is the single enforcement point: a nudge is only

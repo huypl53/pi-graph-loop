@@ -297,6 +297,22 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 		}
 	}
 	await trace(p, delivery?.delivered ? (delivery.mailboxOnly ? "message.deliver.mailbox_only" : "message.inject.ok") : "message.inject.skip", { id: m.id, to: m.to, delivery, markedDelivered: Boolean(delivery?.delivered), status: st.messages[m.id]?.status });
+	// Orphan-spawn watchdog clear (Issue 14, B1 binding §2.2 + §2.3 collapse into one site here):
+	// any successful inbound delivery (tmux-injected OR mailbox-only) is sufficient to resolve the
+	// orphan — the agent now has a contractually visible message. A failed delivery does NOT clear
+	// the watch (we still want to warn if the spawn was orphaned). This covers BOTH
+	// swarm_send_message and swarm_assign_task (which calls deliverMessageLocked internally with
+	// the assignment message), so no edit to tools/tasks.ts is required. clearOrphanWatch is
+	// best-effort and idempotent. Dynamic import avoids a circular top-level import with
+	// agents.ts (agents.ts -> mailbox.ts for responseMissingRecords; mailbox.ts -> agents.ts for
+	// clearOrphanWatch only inside this code path). The function is small and Node ESM caches the
+	// resolution, so the per-call overhead is negligible.
+	if (delivery?.delivered) {
+		try {
+			const { clearOrphanWatch } = await import("./agents.ts");
+			await clearOrphanWatch(p, st, m.to, "swarm_send_message");
+		} catch { /* best-effort; never fail delivery on a watchdog bookkeeping error */ }
+	}
 	return { msg: m, delivery };
 }
 

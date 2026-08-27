@@ -246,6 +246,54 @@ stale record as recoverable state, not evidence that a worker may take over.
 4. run `swarm_reconcile`
 5. only force-update state when you understand why the task drifted
 
+## Orphan-spawn watchdog (Issue 14)
+
+The engine emits a structured trace event when `swarm_spawn_agent` mints a NEW agent record but no
+follow-up delivery (`swarm_send_message`, `swarm_assign_task` which sends internally, or
+`swarm_stop_agent`) occurs within `ORPHAN_SPAWN_WARNING_TIMEOUT_MS` (default **30 000 ms**). The
+warning is purely diagnostic — it is **not** a new public tool, **not** a hard error, and **not** a
+model-side gate. Ops and dashboards surface it via `swarm_trace` or the `events.jsonl` log.
+
+### Trace events
+
+| Event | When | Payload | Purpose |
+|---|---|---|---|
+| `agent.spawn.orphan_watch_start` | End of a successful fresh spawn | `{ agentId, deadlineAt, timeoutMs }` | Watchdog arm signal; lets ops confirm the timer is running |
+| `agent.spawn.orphan_cleared` | Follow-up delivery (or stop) before the deadline | `{ agentId, by, clearedBy, spawnedAt, deadlineAt }` where `by` is `swarm_send_message` / `swarm_assign_task` / `swarm_stop_agent` | Disambiguates averted orphans from real ones in dashboards |
+| `agent.spawn.orphan_warning` | Timer expired with no follow-up delivery | `{ agentId, spawnedAt, deadlineAt, ageMs, source }` | **The warning itself.** Observe via `swarm_trace` |
+| `agent.spawn.orphan_resolved_late` | Timer fired but an inbound message already exists | `{ agentId, resolver: "pre-existing-message", messageIds }` | Race-condition backstop; not a warning |
+
+### Where the watchdog does NOT arm
+
+The watchdog arms only on the **fresh-record** branch of `spawnAgent`. The reuse path is excluded:
+
+- `swarm_restart_agent` calls `spawnAgent` with `isNewRecord: false` (refresh, not new).
+- `swarm_register_agent` adopts an existing pane and never calls `spawnAgent`.
+- `swarm_assign_task` reuse lookup (`findReusableAgent`) does not call `spawnAgent` either.
+- Direct `swarm_spawn_agent` for an id whose record already exists (e.g. previously stopped) is treated
+  as refresh and skips the watchdog.
+
+A `swarm_spawn_agent` followed quickly by `swarm_send_message` (or `swarm_assign_task` with the new
+agent, or `swarm_stop_agent`) is **not** an orphan — the clear path runs inside the same lock as the
+delivery or stop and traces `agent.spawn.orphan_cleared` with the reason.
+
+### Configurable timeout
+
+Override the default 30 s window via the `PI_SWARM_ORPHAN_TIMEOUT_MS` env var. Tests use
+`PI_SWARM_ORPHAN_TIMEOUT_MS=50` to exercise the timer path in real time:
+
+```bash
+PI_SWARM_ORPHAN_TIMEOUT_MS=50 node extensions/swarm/spawn-orphan-warning.test.mjs
+```
+
+### v1 limitation
+
+The orphan entry persists in `swarm-state.json` (`recentSpawns[]`), but the timer handle lives in
+process-local memory (a module-level `Map`). A process restart **strands** any in-flight entries
+they never fire — they remain observable in the state file for forensics but produce no new warning.
+Rearming on restart is deferred to a follow-up; see `extensions/swarm/spawn-orphan-warning.test.mjs`
+for the test matrix and `docs/swarm/reliability-execution-plan.md` for issue-tracking history.
+
 ## Recovery nudges (Phase 1)
 
 Recovery nudges are orchestrator-bound messages that surface a concrete decision. They never

@@ -189,6 +189,18 @@ export type OrchestratorReceiptEntry = {
 	fingerprint: string;
 };
 
+// In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent
+// record (not restart/register/pool-reuse) and removed when the engine either (a) detects a follow-up
+// delivery within the ORPHAN_SPAWN_WARNING_TIMEOUT_MS window or (b) the timer fires and emits
+// `agent.spawn.orphan_warning` (or `orphan_resolved_late`). Persisted on SwarmState so process
+// restart can audit stranded entries; the in-process timer handle lives on a module-level Map
+// (NOT on this record) because NodeJS.Timeout is not JSON-serializable.
+export type RecentSpawn = {
+	agentId: string;
+	spawnedAt: string;     // ISO; mirrors agent.createdAt for the just-created record
+	deadlineAt: string;    // ISO; spawnedAt + ORPHAN_SPAWN_WARNING_TIMEOUT_MS
+};
+
 export type SwarmState = {
 	version: number;
 	swarmId: string;
@@ -226,6 +238,10 @@ export type SwarmState = {
 	// when the message count changes; consulted for O(1) idempotency lookups inside the lock.
 	idempotencyIndex?: Record<string, string>;
 	idempotencyIndexCount?: number; // messages.length when the index was built
+	// Orphan-spawn watchdog ledger (Issue 14): one entry per freshly-spawned agent awaiting a
+	// follow-up delivery. Cleared on a follow-up delivery, by swarm_stop_agent, or by the watchdog
+	// itself when the timer fires. ReadState back-fills `[]` so pre-policy swarms boot cleanly.
+	recentSpawns?: RecentSpawn[];
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;

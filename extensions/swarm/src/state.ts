@@ -129,6 +129,11 @@ export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	st.messages ||= {};
 	st.delivered ||= {};
 	st.orchestratorPumpSessions ||= {};
+	// Orphan-spawn watchdog ledger (Issue 14): back-fill `[]` so pre-policy swarms boot cleanly and
+	// downstream code can use `state.recentSpawns.find(...)` without a null guard. The watchdog
+	// itself re-arms timers lazily on the next spawn for any entries that survive a restart
+	// (v1 limitation: stranded entries are observable but not auto-rearmed — see operations.md).
+	st.recentSpawns ||= [];
 	st.agents ||= {};
 	// Orchestrator durable consumer receipts (issue 11): back-fill so pre-policy swarms boot fine.
 	// The first pump against `revision === 0` runs a one-time migration back-fill that writes

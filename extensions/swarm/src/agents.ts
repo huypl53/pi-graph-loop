@@ -3,15 +3,98 @@ import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_M
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import type { Paths, PreflightError, ReusableAgentMatch, SwarmAgent, SwarmState } from "./types.ts";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, FAST_MODEL, SPAWN_SETTLE_MS } from "./constants.ts";
+import type { Paths, PreflightError, RecentSpawn, ReusableAgentMatch, SwarmAgent, SwarmState } from "./types.ts";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, FAST_MODEL, ORPHAN_SPAWN_WARNING_TIMEOUT_MS, SPAWN_SETTLE_MS } from "./constants.ts";
 import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux } from "./tmux.ts";
-import { childPiArgs, currentModel, currentProvider } from "./session.ts";
+import { childPiArgs, currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { pickSlot, poolStatus, preflightSpawn, formatPreflightError } from "./pool.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, shellQuote, sleep } from "./utils.ts";
 import { identityPath, mailboxPath, paths, readState, trace, withLock, writeState } from "./state.ts";
 import { identityPrompt, writeEffectiveIdentity } from "./identity.ts";
 import { responseMissingRecords } from "./mailbox.ts";
+
+// Orphan-spawn watchdog (Issue 14): in-process timer handles keyed by agentId. Not serialized into
+// swarm-state.json because NodeJS.Timeout references cannot survive JSON.stringify (and a process
+// restart simply strands the entry — see docs/swarm/operations.md v1 limitation). Persistent state
+// lives on SwarmState.recentSpawns[] (readState back-fills `[]`); the map below is a hint to cancel
+// pending timers when the follow-up call clears the entry, NOT the source of truth.
+const ORPHAN_TIMERS = new Map<string, NodeJS.Timeout>();
+
+// Pure helper for tests / shared code: how many orphan-watch entries are currently armed in state.
+// Reflects the persistent ledger (NOT the in-process timer map) so it survives a process restart.
+export function recentSpawnCount(state: SwarmState): number {
+	return Array.isArray(state.recentSpawns) ? state.recentSpawns.length : 0;
+}
+
+// Fire path for the orphan-watch timer. Called from a setTimeout callback; acquires the swarm lock
+// before mutating state. Self-check scans st.messages for any inbound message addressed to the
+// agent with createdAt >= spawnedAt — if a delivery raced ahead, traces `orphan_resolved_late`
+// instead of `orphan_warning` (race backstop, see plan §4.3). Locking is intentionally idempotent:
+// a follow-up call that cleared the entry between timer fire and lock acquisition finds nothing
+// and returns silently.
+export async function fireOrphanWarning(p: Paths, agentId: string, spawnEntry: RecentSpawn) {
+	const deadlineAgeMs = Math.max(0, Date.now() - new Date(spawnEntry.deadlineAt).getTime());
+	const cleared = await withLock(p, async () => {
+		const st = await readState(p, p.root);
+		if (!Array.isArray(st.recentSpawns) || st.recentSpawns.length === 0) return { fired: false, reason: "empty" };
+		const idx = st.recentSpawns.findIndex((s) => s.agentId === agentId);
+		if (idx === -1) return { fired: false, reason: "cleared" };
+		// Race backstop: any inbound message at or after spawnedAt counts as resolved (the clear
+		// helper is best-effort; a third-party delivery path could close the orphan via a tool the
+		// helper does not yet cover). Scan once; exit silently if a message is found.
+		const inbound = Object.values(st.messages || {}).filter((m) => m.to === agentId && m.createdAt >= spawnEntry.spawnedAt);
+		if (inbound.length > 0) {
+			st.recentSpawns.splice(idx, 1);
+			await writeState(p, st);
+			await trace(p, "agent.spawn.orphan_resolved_late", { agentId, spawnedAt: spawnEntry.spawnedAt, deadlineAt: spawnEntry.deadlineAt, resolver: "pre-existing-message", messageIds: inbound.map((m) => m.id) }).catch(() => {});
+			return { fired: true, kind: "resolved_late" as const, messageIds: inbound.map((m) => m.id) };
+		}
+		st.recentSpawns.splice(idx, 1);
+		await writeState(p, st);
+		await trace(p, "agent.spawn.orphan_warning", { agentId, spawnedAt: spawnEntry.spawnedAt, deadlineAt: spawnEntry.deadlineAt, ageMs: deadlineAgeMs, source: "swarm_spawn_agent" }).catch(() => {});
+		return { fired: true, kind: "orphan_warning" as const };
+	});
+	// Best-effort: drop the in-process timer handle too (the persistent entry is already gone).
+	ORPHAN_TIMERS.delete(agentId);
+	return cleared;
+}
+
+// Arm site: push a fresh RecentSpawn onto the live SwarmState + set the in-process timer. Called
+// only from spawnAgent when isNewRecord is true (the fresh-record branch; reuse/restart/register
+// paths skip this entirely). Caller MUST hold the swarm lock and pass the live SwarmState reference.
+export function armOrphanWatch(p: Paths, st: SwarmState, agentId: string, ts: string) {
+	const deadlineAt = new Date(new Date(ts).getTime() + ORPHAN_SPAWN_WARNING_TIMEOUT_MS).toISOString();
+	const entry: RecentSpawn = { agentId, spawnedAt: ts, deadlineAt };
+	st.recentSpawns = Array.isArray(st.recentSpawns) ? st.recentSpawns : [];
+	st.recentSpawns.push(entry);
+	const timer = setTimeout(() => {
+		fireOrphanWarning(p, agentId, entry).catch(() => {});
+	}, ORPHAN_SPAWN_WARNING_TIMEOUT_MS);
+	// Don't keep the Node event loop alive solely for orphan watches; the timer is best-effort and
+	// the persistent entry in state is the source of truth across restarts.
+	if (typeof (timer as any)?.unref === "function") (timer as any).unref();
+	ORPHAN_TIMERS.set(agentId, timer);
+	void trace(p, "agent.spawn.orphan_watch_start", { agentId, deadlineAt, timeoutMs: ORPHAN_SPAWN_WARNING_TIMEOUT_MS }).catch(() => {});
+}
+
+// Clear site (Issue 14, B1 binding): removes the RecentSpawn entry from state, cancels the
+// in-process timer, and traces `agent.spawn.orphan_cleared` with the trigger reason. Called from
+// mailbox.deliverMessageLocked (any successful delivery to the agent) and stopAgent core
+// (intentional termination BEFORE killAgentPane). No-op if the agent has no entry (reuse path,
+// pre-policy swarm, or already cleared). Caller MUST hold the swarm lock and pass the live state
+// reference; the trace is best-effort and never throws.
+export type OrphanClearReason = "swarm_send_message" | "swarm_assign_task" | "swarm_stop_agent" | "preflight_message";
+
+export async function clearOrphanWatch(p: Paths, st: SwarmState, agentId: string, reason: OrphanClearReason) {
+	if (!Array.isArray(st.recentSpawns) || st.recentSpawns.length === 0) return { cleared: false, reason: "empty" };
+	const idx = st.recentSpawns.findIndex((s) => s.agentId === agentId);
+	if (idx === -1) return { cleared: false, reason: "not-found" };
+	const [removed] = st.recentSpawns.splice(idx, 1);
+	const t = ORPHAN_TIMERS.get(agentId);
+	if (t) { clearTimeout(t); ORPHAN_TIMERS.delete(agentId); }
+	await trace(p, "agent.spawn.orphan_cleared", { agentId, by: reason, clearedBy: currentAgentId(), spawnedAt: removed.spawnedAt, deadlineAt: removed.deadlineAt }).catch(() => {});
+	return { cleared: true, reason, removed };
+}
 
 // Kickoff preamble injected on spawn/restart when the agent's mailbox holds messages that are not yet
 // acked (failed/injected/intercepted without ackedAt). This closes the restart-mailbox gap: a respawned
@@ -28,9 +111,15 @@ export async function mailboxKickoffPrompt(p: Paths, st: SwarmState, id: string)
 	} catch { return ""; }
 }
 
-export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string }) {
+export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string; isNewRecord?: boolean }) {
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
 	if (state.agents[id]?.status === "running") throw new Error(`Agent already exists and is running: ${id}`);
+	// Orphan-spawn watchdog (Issue 14): decide whether this invocation mints a NEW agent record.
+	// Excludes restart (restartAgent sets existing.status="stopped" before calling), re-spawn of an
+	// existing stopped id (the operator knows the id and intends to refresh, not orphan), pool reuse
+	// (findReusableAgent never calls spawnAgent), and register/register-adopt (different function).
+	// The flag is explicit so tests can drive the fresh-vs-refresh distinction deterministically.
+	const isNewRecord = input.isNewRecord ?? (state.agents[id] === undefined);
 	// Preflight: validate settings + pool eligibility + tmux prereqs BEFORE we commit a swarm-state
 	// record. Read-only — never mutates settings or pool health; surfaces classified errors so the
 	// operator gets an actionable message instead of a half-spawned window. The tmux session probe
@@ -116,6 +205,12 @@ export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state:
 	await writeEffectiveIdentity(cwd, p, state, agent, { reason: "spawn" });
 	const identityRelPath = relative(cwd, identityFile);
 	await trace(p, "agent.spawn.ok", { agentId: id, tmuxTarget: target, model, provider, role: input.role, identity: identityRelPath });
+	// Orphan-spawn watchdog arm (Issue 14): only on the fresh-record path. restartAgent passes
+	// isNewRecord=false explicitly; direct re-spawn of an existing stopped id also skips (the
+	// default derives from `state.agents[id] === undefined` and will be false). The arm pushes a
+	// RecentSpawn onto state.recentSpawns[] AND schedules the in-process timer; if the spawn throws
+	// before this point the watchdog was never armed so no cleanup is required.
+	if (isNewRecord) armOrphanWatch(p, state, id, ts);
 	await sleep(SPAWN_SETTLE_MS);
 	const snapshot = await capturePane(pi, p, id, target, "spawn-after");
 	const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${await mailboxKickoffPrompt(p, state, id)}${identityPrompt(cwd, identityRelPath)}`;
@@ -301,7 +396,11 @@ export async function stopAgent(pi: ExtensionAPI, p: Paths, state: SwarmState, a
 	if (!opts.force && agent.activeTaskIds.length) {
 		throw new Error(`Refusing to stop ${agentId}: active tasks [${agent.activeTaskIds.join(", ")}]. Reassign or release them, or pass force=true.`);
 	}
+	// Orphan-spawn watchdog clear (Issue 14, B5 binding): cancel BEFORE killAgentPane so the timer
+	// cannot fire mid-stop and emit a stale orphan_warning trace for an agent being intentionally
+	// terminated. clearOrphanWatch is a no-op when the agent has no entry (e.g. reuse path).
 	const ts = now();
+	await clearOrphanWatch(p, state, agentId, "swarm_stop_agent").catch(() => {});
 	let kill = { killed: false, method: "skipped" as string };
 	if (opts.killPane !== false) kill = await killAgentPane(pi, p, agent);
 	agent.status = "stopped";
@@ -351,7 +450,10 @@ export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, stat
 			}
 		}
 	}
-	const r = await spawnAgent(pi, cwd, p, state, { id: agentId, role: existing.role, roleKind, model, provider, initialPrompt: opts.initialPrompt });
+	// isNewRecord:false because restart reuses an existing record (existing.status was set to
+	// "stopped" above so the spawn guard accepts the overwrite). The orphan-watch watchdog must NOT
+	// fire on a restart — the agent was already known to other agents and has a durable id.
+	const r = await spawnAgent(pi, cwd, p, state, { id: agentId, role: existing.role, roleKind, model, provider, initialPrompt: opts.initialPrompt, isNewRecord: false });
 	await trace(p, "agent.restart.ok", { agentId, target: r.agent.tmuxTarget, killMethod: kill.method, model: r.agent.model, provider: r.agent.provider });
 	return { kill, ...r };
 }
