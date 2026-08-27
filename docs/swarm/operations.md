@@ -255,12 +255,42 @@ follow-up delivery (`swarm_send_message`, `swarm_assign_task` which sends intern
 warning is purely diagnostic — it is **not** a new public tool, **not** a hard error, and **not** a
 model-side gate. Ops and dashboards surface it via `swarm_trace` or the `events.jsonl` log.
 
+### Pre-flight auto-clear (Issue 16)
+
+When the same orchestrator session that called `swarm_spawn_agent` follows up with
+`swarm_assign_task` resolving to the freshly-spawned agentId within
+`PREFLIGHT_ASSIGN_GRACE_MS` (default `max(5_000, ORPHAN_SPAWN_WARNING_TIMEOUT_MS - 1_000)` =
+**29 000 ms** at production defaults), the orphan watch is **pre-cleared** before the timer fires:
+
+- The in-process timer is cancelled and the `recentSpawns[]` entry is removed.
+- `agent.spawn.orphan_cleared` is emitted with `by: "swarm_assign_task"` and `reason: "preflight"`
+  (distinct from the late-delivery backstop which carries `reason: "delivery"`).
+- The `spawnedByPid` and `spawnedBySessionStartedAt` stamps carried on the entry are surfaced in
+  the trace payload for ops correlation.
+
+Same-orchestrator detection uses `process.pid` + `process.env.PI_SWARM_SESSION_STARTED_AT` stamped
+**unconditionally** onto the entry at `armOrphanWatch` time (so it works on the operator's first
+tool call after PM opt-in, when the leader record may still be vacant). A foreign orchestrator
+session invoking `swarm_assign_task` against the fresh record does **not** preempt — the warning
+fires normally, because the spawn was not followed by the spawning orchestrator's intended use.
+
+The existing delivery-side `clearReason="swarm_assign_task"` path inside `deliverMessageLocked`
+remains intact as a late-clear backstop; if pre-clear already removed the entry, the delivery-side
+clear is a no-op. True orphans (no follow-up) still trip the warning after the full timeout.
+
+Override the grace window for tests via `PI_SWARM_PREFLIGHT_GRACE_MS` (must be set BEFORE module
+import):
+
+```bash
+PI_SWARM_ORPHAN_TIMEOUT_MS=50 PI_SWARM_PREFLIGHT_GRACE_MS=10 node extensions/swarm/spawn-orphan-warning.test.mjs
+```
+
 ### Trace events
 
 | Event | When | Payload | Purpose |
 |---|---|---|---|
 | `agent.spawn.orphan_watch_start` | End of a successful fresh spawn | `{ agentId, deadlineAt, timeoutMs }` | Watchdog arm signal; lets ops confirm the timer is running |
-| `agent.spawn.orphan_cleared` | Follow-up delivery (or stop) before the deadline | `{ agentId, by, clearedBy, spawnedAt, deadlineAt }` where `by` is `swarm_send_message` / `swarm_assign_task` / `swarm_stop_agent` | Disambiguates averted orphans from real ones in dashboards |
+| `agent.spawn.orphan_cleared` | Follow-up delivery (or pre-flight assign) before the deadline | `{ agentId, by, reason, clearedBy, spawnedAt, deadlineAt, spawnedByPid, spawnedBySessionStartedAt }` where `by` is `swarm_send_message` / `swarm_assign_task` / `swarm_stop_agent` and `reason` is `preflight` (Issue 16) or `delivery` (Issue 14 backstop) | Disambiguates averted orphans from real ones in dashboards; preflight vs delivery split tells ops how many were prevented by the auto-clear path |
 | `agent.spawn.orphan_warning` | Timer expired with no follow-up delivery | `{ agentId, spawnedAt, deadlineAt, ageMs, source }` | **The warning itself.** Observe via `swarm_trace` |
 | `agent.spawn.orphan_resolved_late` | Timer fired but an inbound message already exists | `{ agentId, resolver: "pre-existing-message", messageIds }` | Race-condition backstop; not a warning |
 

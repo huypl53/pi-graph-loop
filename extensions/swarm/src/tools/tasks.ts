@@ -6,14 +6,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
-import { TERMINAL_NODE_STATUSES, CANCELLATION_REASON } from "../constants.ts";
+import { TERMINAL_NODE_STATUSES, CANCELLATION_REASON, PREFLIGHT_ASSIGN_GRACE_MS } from "../constants.ts";
 import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
 import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, supersedeOpenAssignments, supersedeTaskAssignmentMessages } from "../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, now, safeId, textResult } from "../utils.ts";
 import { ensureDirs, paths, readState, readTaskByRef, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
 import { ensureOrchestrator, heartbeatOrchestratorLeader, isOrchestratorAuthority, requireOrchestratorAuthority } from "../identity.ts";
-import { findReusableAgent, spawnAgent } from "../agents.ts";
+import { findReusableAgent, spawnAgent, clearOrphanWatch, isSameOrchestratorLeader } from "../agents.ts";
 import { reconcile, runtimeTaskWarnings } from "../reconcile.ts";
 import { tmux } from "../tmux.ts";
 
@@ -287,6 +287,24 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const assignee = assigneeId ? st.agents[assigneeId] : undefined;
 				if (!assignee) await failTaskTool(tp, p, "AGENT_NOT_FOUND", `Resolved agent is missing for node ${params.nodeId}.`, { taskId, nodeId: params.nodeId, received: { agentId: assigneeId } });
 				ensureAgentDefaults(assignee);
+
+				// ---- Preflight auto-clear (Issue 16) ----
+				// When this assign resolves to a freshly-spawned agent AND the caller is the same
+				// orchestrator session that armed the spawn entry AND the spawn was within the grace
+				// window, cancel the orphan watchdog early so a slow assign never trips the warning.
+				// This is a no-op when any predicate fails — true orphans and cross-orchestrator
+				// assigns fall through to the normal timer path. The delivery-side
+				// clearReason='swarm_assign_task' backstop inside deliverMessageLocked remains intact.
+				if (Array.isArray(st.recentSpawns) && st.recentSpawns.length > 0) {
+					const entry = st.recentSpawns.find((s) => s.agentId === assignee.id);
+					if (entry) {
+						const ageMs = Date.now() - new Date(entry.spawnedAt).getTime();
+						const callerLeader = { pid: process.pid, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || undefined };
+						if (ageMs < PREFLIGHT_ASSIGN_GRACE_MS && isSameOrchestratorLeader(entry, callerLeader)) {
+							await clearOrphanWatch(p, st, assignee.id, "swarm_assign_task", "preflight");
+						}
+					}
+				}
 
 				// ---- File-scope ownership preflight (roadmap issue 4) ----
 				// Before ANY mutation: compute the candidate node's effective write scope and compare it

@@ -153,6 +153,28 @@ export const MAX_STATUS_TASKS = 100;
 export const ORPHAN_SPAWN_WARNING_TIMEOUT_MS =
 	Number(process.env.PI_SWARM_ORPHAN_TIMEOUT_MS) > 0 ? Math.floor(Number(process.env.PI_SWARM_ORPHAN_TIMEOUT_MS)) : 30_000;
 
+// Pre-flight auto-clear window for Issue 16. When swarm_assign_task resolves to a fresh agentId AND
+// the same orchestrator session that armed the spawn entry calls swarm_assign_task within this
+// window, the orphan watch is pre-cleared and the timer is cancelled.
+//
+// Default relationship: PREFLIGHT_ASSIGN_GRACE_MS = max(5_000, ORPHAN_SPAWN_WARNING_TIMEOUT_MS - 1_000).
+//   - The 1_000 ms safety margin keeps the pre-clear strictly inside the warning window so the
+//     timer can never fire for a same-orchestrator flow under any test/env combination of the
+//     two env vars.
+//   - The 5_000 ms floor guarantees a useful grace even when an operator dials
+//     ORPHAN_SPAWN_WARNING_TIMEOUT_MS very low for testing (e.g. PI_SWARM_ORPHAN_TIMEOUT_MS=50).
+//   - For the production defaults (ORPHAN_SPAWN_WARNING_TIMEOUT_MS = 30_000) the grace window
+//     becomes 29_000 ms — large enough to absorb slow CI / container spawn latencies without
+//     tripping the warning.
+//
+// Override for tests via PI_SWARM_PREFLIGHT_GRACE_MS (set BEFORE module import; the module-load-
+// time read happens once, same as PI_SWARM_ORPHAN_TIMEOUT_MS).
+const RAW_PREFLIGHT_GRACE_MS =
+	Number(process.env.PI_SWARM_PREFLIGHT_GRACE_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_PREFLIGHT_GRACE_MS))
+		: Math.max(5_000, ORPHAN_SPAWN_WARNING_TIMEOUT_MS - 1_000);
+export const PREFLIGHT_ASSIGN_GRACE_MS = RAW_PREFLIGHT_GRACE_MS;
+
 // === Recovery notification policy (reliability-roadmap Phase 1) ===
 // Unified, actually-enforced dedupe/cooldown/cap contract for recovery nudges sent to the
 // orchestrator. `sendNotifyLocked` in reconcile.ts is the single enforcement point: a nudge is only

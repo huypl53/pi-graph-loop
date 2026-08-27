@@ -22,7 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 process.env.PI_SWARM_ORPHAN_TIMEOUT_MS = "50";
 
 // Direct imports of the cores + types we exercise. Real handlers, real lock, real state.
-const { spawnAgent, stopAgent, restartAgent, fireOrphanWarning, armOrphanWatch, clearOrphanWatch, recentSpawnCount } = await import(join(here, "src", "agents.ts"));
+const { spawnAgent, stopAgent, restartAgent, fireOrphanWarning, armOrphanWatch, clearOrphanWatch, recentSpawnCount, isSameOrchestratorLeader } = await import(join(here, "src", "agents.ts"));
 const { enqueueAndDeliver } = await import(join(here, "src", "mailbox.ts"));
 const { paths, withLock, readState, writeState } = await import(join(here, "src", "state.ts"));
 
@@ -281,6 +281,162 @@ console.log("\n[6] Race backstop: message exists at fire time -> orphan_resolved
 	ok("orphan_resolved_late reports messageIds", Array.isArray(resolved?.messageIds) && resolved.messageIds.length > 0);
 	ok("NO agent.spawn.orphan_warning trace (race backstop)", eventNames(events, "agent.spawn.orphan_warning").length === 0);
 	ok("recentSpawns cleared after race resolution", recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
+	rmSync(cwd, { recursive: true, force: true });
+}
+
+console.log("\n[7] Preflight clear: spawn + same-orchestrator assign within grace window");
+{
+	const cwd = freshScratch("preflight");
+	const p = paths(cwd);
+	await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		st.agents["orchestrator"] ||= {
+			id: "orchestrator", role: "PM", roleKind: "orchestrator", roleKindExplicit: true,
+			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
+			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
+			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+		};
+		await spawnAgent(pi, cwd, p, st, { id: "preflight-1", role: "Worker", initialPrompt: "go" });
+		await writeState(p, st);
+	});
+	// Verify the stamp is on the entry (C1 fix proves this works even without the leader seed).
+	const entry = await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		return st.recentSpawns?.find((s) => s.agentId === "preflight-1");
+	});
+	ok("entry stamped with spawnedByPid=process.pid", entry?.spawnedByPid === process.pid);
+	// B2 fix: loose shape assertion (matches [7a]'s style). The arm-time fallback ISO
+	// string and the test setup fallback ISO string are different timestamps; we only
+	// assert the field exists and is a non-empty ISO string.
+	ok("entry stamped with spawnedBySessionStartedAt (ISO string, non-empty)",
+		typeof entry?.spawnedBySessionStartedAt === "string" &&
+		entry.spawnedBySessionStartedAt.length > 0 &&
+		!Number.isNaN(Date.parse(entry.spawnedBySessionStartedAt)));
+	// B3 fix: re-anchor callerLeader from the actual entry stamp so the helper's
+	// positive-direction assertion doesn't depend on env-var preset. This matches
+	// test [8]'s pattern of deriving the comparison tuple from the real stamped
+	// value rather than from the test-setup fallback ISO.
+	const callerLeader = { pid: process.pid, sessionStartedAt: entry?.spawnedBySessionStartedAt };
+	ok("isSameOrchestratorLeader returns true for matching pid+sessionStartedAt",
+		isSameOrchestratorLeader(entry, callerLeader) === true);
+	// Drive the pre-clear site directly.
+	await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		await clearOrphanWatch(p, st, "preflight-1", "swarm_assign_task", "preflight");
+		await writeState(p, st);
+	});
+	ok("preflight-1 removed from recentSpawns after pre-clear",
+		recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
+	await wait(TIMER_MARGIN_MS); // 250ms >> 50ms timer
+	const events = readEvents(cwd);
+	ok("orphan_watch_start trace present", eventNames(events, "agent.spawn.orphan_watch_start").length === 1);
+	ok("orphan_cleared trace present (by swarm_assign_task, reason preflight)",
+		eventNames(events, "agent.spawn.orphan_cleared").length === 1);
+	const cleared = eventNames(events, "agent.spawn.orphan_cleared")[0];
+	ok("orphan_cleared.by === swarm_assign_task", cleared?.by === "swarm_assign_task");
+	ok("orphan_cleared.reason === preflight", cleared?.reason === "preflight");
+	ok("orphan_cleared.spawnedByPid stamped", cleared?.spawnedByPid === process.pid);
+	ok("NO orphan_warning trace", eventNames(events, "agent.spawn.orphan_warning").length === 0);
+	rmSync(cwd, { recursive: true, force: true });
+}
+
+console.log("\n[7a] Preflight clear: spawn as orchestrator's first tool call (leader was vacant at arm time)");
+{
+	const cwd = freshScratch("preflight-vacant");
+	const p = paths(cwd);
+	// Do NOT seed st.orchestratorLeader — production "first tool call" case.
+	// The spawn-time stamp must still match the assign-time caller (same process).
+	await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		st.agents["orchestrator"] ||= {
+			id: "orchestrator", role: "PM", roleKind: "orchestrator", roleKindExplicit: true,
+			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
+			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
+			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+		};
+		await spawnAgent(pi, cwd, p, st, { id: "preflight-vacant-1", role: "Worker", initialPrompt: "go" });
+		await writeState(p, st);
+	});
+	// Verify the entry IS stamped from process.pid even though the leader was vacant.
+	const entry = await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		return st.recentSpawns?.find((s) => s.agentId === "preflight-vacant-1");
+	});
+	ok("entry stamped with spawnedByPid=process.pid despite vacant leader (C1 fix)",
+		entry?.spawnedByPid === process.pid);
+	ok("entry stamped with spawnedBySessionStartedAt despite vacant leader",
+		typeof entry?.spawnedBySessionStartedAt === "string" &&
+		entry.spawnedBySessionStartedAt.length > 0);
+	ok("isSameOrchestratorLeader returns true (same process, no leader needed)",
+		isSameOrchestratorLeader(entry, { pid: process.pid, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT }) === true);
+	// Drive the pre-clear site.
+	await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		await clearOrphanWatch(p, st, "preflight-vacant-1", "swarm_assign_task", "preflight");
+		await writeState(p, st);
+	});
+	ok("entry removed after pre-clear",
+		recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
+	await wait(TIMER_MARGIN_MS);
+	const events = readEvents(cwd);
+	ok("orphan_watch_start trace present", eventNames(events, "agent.spawn.orphan_watch_start").length === 1);
+	ok("orphan_cleared trace present (reason preflight)",
+		eventNames(events, "agent.spawn.orphan_cleared").length === 1);
+	const cleared = eventNames(events, "agent.spawn.orphan_cleared")[0];
+	ok("orphan_cleared.reason === preflight", cleared?.reason === "preflight");
+	ok("NO orphan_warning trace", eventNames(events, "agent.spawn.orphan_warning").length === 0);
+	rmSync(cwd, { recursive: true, force: true });
+}
+
+console.log("\n[8] Cross-orchestrator assign does NOT pre-clear");
+{
+	const cwd = freshScratch("cross-orch");
+	const p = paths(cwd);
+	const foreignLeader = {
+		pid: 999_001,                                            // DIFFERENT pid (foreign orchestrator)
+		sessionStartedAt: new Date().toISOString(),
+	};
+	await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		st.agents["orchestrator"] ||= {
+			id: "orchestrator", role: "PM", roleKind: "orchestrator", roleKindExplicit: true,
+			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
+			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
+			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+		};
+		await spawnAgent(pi, cwd, p, st, { id: "cross-orch-1", role: "Worker", initialPrompt: "go" });
+		await writeState(p, st);
+	});
+	// Override the entry's stamp to simulate a foreign orchestrator's spawn (different pid + session).
+	await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		const e = st.recentSpawns?.find((s) => s.agentId === "cross-orch-1");
+		if (e) {
+			e.spawnedByPid = foreignLeader.pid;
+			e.spawnedBySessionStartedAt = foreignLeader.sessionStartedAt;
+		}
+		await writeState(p, st);
+	});
+	ok("cross-orch-1 armed in recentSpawns",
+		recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 1);
+	const entry = await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		return st.recentSpawns.find((s) => s.agentId === "cross-orch-1");
+	});
+	const callerLeader = { pid: process.pid, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || undefined };
+	ok("isSameOrchestratorLeader returns false for foreign pid",
+		isSameOrchestratorLeader(entry, callerLeader) === false);
+	// N1 strengthening: also verify the helper returns true when caller DOES match.
+	ok("isSameOrchestratorLeader returns true when caller matches the stamp",
+		isSameOrchestratorLeader(entry, foreignLeader) === true);
+	await wait(TIMER_MARGIN_MS);
+	const events = readEvents(cwd);
+	ok("orphan_warning fires (foreign orchestrator did not pre-clear)",
+		eventNames(events, "agent.spawn.orphan_warning").length === 1);
+	ok("NO orphan_cleared trace (foreign orchestrator cannot clear)",
+		eventNames(events, "agent.spawn.orphan_cleared").length === 0);
+	ok("recentSpawns cleared after warning fired",
+		recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
 	rmSync(cwd, { recursive: true, force: true });
 }
 
