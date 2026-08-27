@@ -1,14 +1,40 @@
 // === swarm/constants.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { join, dirname, relative, sep } from "node:path";
 import type { TaskNodeStatus } from "./types.ts";
-import { reconcile } from "./reconcile.ts";
-import { reconcileLoopNudgesLocked } from "./loop.ts";
 
 export const EXT = "swarm";
+
+// Cancellation reason: stamped on supersession records + traces when an orchestrator cancels a task.
+// Stable, never interpolated — used as a search key in audits.
+export const CANCELLATION_REASON = "task_cancellation";
+// Per-message supersession `by` value: also stable, search-friendly.
+export const MESSAGE_SUPERSEDED_BY_TASK_CANCELLATION = CANCELLATION_REASON;
 
 export const STATE_VERSION = 1;
 
 export const LOCK_STALE_MS = 60_000;
+
+// Multi-orchestrator leader staleness TTL (roadmap issue 8, strict-reject). A leader whose
+// lastHeartbeatAt is older than this is considered dead and may be replaced by a fresh claim.
+// Defaults to LOCK_STALE_MS so the leader lease shares the lock-staleness contract; this is a
+// deliberate trade-off documented in operations.md (60s crash-recovery blind spot).
+export const ORCHESTRATOR_LEADER_STALE_MS = LOCK_STALE_MS;
+
+// Stable error code for the orchestrator-leader gate. Surfaced verbatim by every category A/B
+// call site so callers / ops can act on it. NOT a new model-facing tool.
+export const ERR_ORCHESTRATOR_LEADER_DENIED = "ORCHESTRATOR_LEADER_DENIED";
+
+// Stable error code for orchestrator-authority-required tools that today have no authority check.
+// Thrown by tools that this issue elevates to orchestrator-only (swarm_create_task,
+// swarm_stop_agent, swarm_release_agent_task, swarm_reconcile(mark=true)). NOT a new tool.
+export const ERR_ORCHESTRATOR_AUTHORITY_REQUIRED = "ORCHESTRATOR_AUTHORITY_REQUIRED";
+
+// Stable error code for the orchestrator-pane reject guard in swarm_send_keys (issue 12 C6 micro-fix).
+// Thrown when the resolved tmux target equals the orchestrator record's tmuxTarget (typically
+// "unknown"), so a future refactor cannot silently route raw keystrokes into the orchestrator host
+// pane. Principle-based: fires on target equality, not on agentId, so ghost agents mis-stamped to
+// "unknown" are also rejected. NOT a new tool.
+export const ERR_ORCHESTRATOR_PANE_REJECTED = "ORCHESTRATOR_PANE_REJECTED";
 
 export const SEND_SETTLE_MS = 700;
 
@@ -26,6 +52,11 @@ export const FAST_MODEL = "gpt-5.4-mini";
 
 export const FAST_PROVIDER = "openai";
 
+// Model pool defaults.
+export const POOL_COOLDOWN_MS = 15 * 60 * 1000; // bench a failing slot for 15 minutes
+
+export const POOL_MAX_RETRIES = 2; // consecutive failures before cooldown
+
 // Identity used for an anonymous swarm session that neither sets PI_SWARM_AGENT_ID nor opts in as the
 // orchestrator. Such a session is inert for swarm coordination (no agent record, no orchestrator pump,
 // no orchestrator heartbeat refresh); it is a stable, clearly-non-orchestrator id so tool defaults
@@ -33,22 +64,25 @@ export const FAST_PROVIDER = "openai";
 export const SWARM_GUEST_ID = "swarm-guest";
 
 export const NODE_ICON: Record<TaskNodeStatus, string> = {
-	done: "✓", ready: "●", assigned: "●", in_progress: "●", blocked: "⚠", failed: "✗", skipped: "⊘", pending: "○",
+	done: "✓", ready: "●", assigned: "●", in_progress: "●", blocked: "⚠", failed: "✗", skipped: "⊘", pending: "○", cancelled: "⊗",
 };
 
 export const SAFE_ID_RE = /^[a-z0-9_-]+$/;
 
-// Allowed non-orchestrator node status transitions. Terminal states (done/failed/skipped) cannot
+// Allowed non-orchestrator node status transitions. Terminal states (done/failed/skipped/cancelled) cannot
 // regress without an orchestrator override. The orchestrator bypasses this map entirely.
+// `cancelled` is reachable from every non-terminal state by an orchestrator-explicit cancelTask
+// (a worker CANNOT cancel; cancelTask requires orchestrator authority + force). Workers attempting to
+// transition INTO cancelled are rejected with NODE_TRANSITION_FORBIDDEN.
 export const ALLOWED_NODE_TRANSITIONS: Record<string, Set<string>> = {
-	pending: new Set(["ready", "assigned", "blocked", "skipped", "failed"]),
-	ready: new Set(["assigned", "blocked", "skipped"]),
-	assigned: new Set(["in_progress", "done", "failed", "blocked", "ready"]),
-	in_progress: new Set(["done", "failed", "blocked"]),
-	blocked: new Set(["assigned", "in_progress", "ready", "skipped"]),
+	pending: new Set(["ready", "assigned", "blocked", "skipped", "failed", "cancelled"]),
+	ready: new Set(["assigned", "blocked", "skipped", "cancelled"]),
+	assigned: new Set(["in_progress", "done", "failed", "blocked", "ready", "cancelled"]),
+	in_progress: new Set(["done", "failed", "blocked", "cancelled"]),
+	blocked: new Set(["assigned", "in_progress", "ready", "skipped", "cancelled"]),
 };
 
-export const TERMINAL_NODE_STATUSES = new Set<TaskNodeStatus>(["done", "failed", "skipped"]);
+export const TERMINAL_NODE_STATUSES = new Set<TaskNodeStatus>(["done", "failed", "skipped", "cancelled"]);
 
 export const METRIC_ID_RE = /^[a-z0-9_-]+$/;
 
@@ -79,6 +113,12 @@ export const TASK_NUDGE_MS = 30 * 60 * 1000; // in_progress node with no activit
 
 export const ACK_MISSING_MS = 300_000; // delivered-but-unacked assignment -> ack_missing (mirrors mailbox)
 
+// Worker reminder policy (reliability roadmap issue 5). After confirmed assignment receipt/processing
+// (durable ack `seen`/`processing`) and this long without progress, the node becomes reminder-eligible.
+// At most ONE reminder per attempt, permanently — there is no cooldown re-send; a fresh reminder is
+// only possible after a reassign/rework mints a new attempt. The reminder is informational only.
+export const REMINDER_NO_PROGRESS_MS = 60 * 60 * 1000;
+
 // Cooldown for the agent_settled->orchestrator "settled with open work" notify, so repeated settles in
 // a window don't multiply into a message storm. Loop-safe: notify targets the mailbox-only
 // orchestrator (never the worker), and is rate-limited per agent via persisted lastSettleNotifyAt.
@@ -103,10 +143,51 @@ export const PUMP_RETRIGGER_DELAY_MS = 60 * 1000;
 
 export const PUMP_RETRIGGER_MAX = 3;
 
-// Loop-watcher reconcile cadence. The orchestrator pump runs reconcileLoopNudgesLocked at most this often:
-// it scans loop-enabled tasks and nudges the orchestrator when a plan is recorded but the task graph is still
-// closed (the harness never reopens the graph — the orchestrator does). Bounded so a busy pump doesn't
-// re-scan task.json files every tick.
-export const LOOP_RECONCILE_INTERVAL_MS = 30 * 1000;
-
 export const MAX_STATUS_TASKS = 100;
+
+// Orphan-spawn watchdog timeout (Issue 14). When swarm_spawn_agent returns and no follow-up delivery
+// (swarm_send_message, swarm_assign_task which sends internally, or swarm_stop_agent) occurs within
+// this window, the engine emits a single `agent.spawn.orphan_warning` trace event — observable by ops
+// and dashboards via swarm_trace, never exposed as a new public tool. Override for testing via the
+// `PI_SWARM_ORPHAN_TIMEOUT_MS` env var (tests set it to ~50ms to exercise the timer path in real time).
+export const ORPHAN_SPAWN_WARNING_TIMEOUT_MS =
+	Number(process.env.PI_SWARM_ORPHAN_TIMEOUT_MS) > 0 ? Math.floor(Number(process.env.PI_SWARM_ORPHAN_TIMEOUT_MS)) : 30_000;
+
+// === Recovery notification policy (reliability-roadmap Phase 1) ===
+// Unified, actually-enforced dedupe/cooldown/cap contract for recovery nudges sent to the
+// orchestrator. `sendNotifyLocked` in reconcile.ts is the single enforcement point: a nudge is only
+// sent when (a) a message with the same semantic key is not already open, (b) the sender-level
+// cooldown for that key template has elapsed, and (c) the per-task nudge cap is not exceeded.
+
+// Grace period: a freshly created task whose start node is ready + unassigned may stay quiet this
+// long before the initial-ready nudge fires.
+export const TASK_INITIAL_READY_GRACE_MS = 60_000;
+
+export const NOTIFY_DEFAULT_COOLDOWN_MS = 300_000; // 5 minutes between nudges of the same template
+
+export const NOTIFY_DEFAULT_MAX_NUDGES = 3; // per task+template cap before we stop reminding
+
+// Semantic dedupe key templates. Templates are formatted by formatNotifyKey (never interpolated at
+// runtime) so every code path shares one identifier space and cannot accidentally collide or drift.
+export const NOTIFY_KEY_INITIAL_READY = "task:{taskId}:nudge:initial-ready";
+export const NOTIFY_KEY_GRAPH_ADVANCE = "task:{taskId}:node:{nodeId}:nudge:assign";
+// Lifecycle-fencing (issue 9): per-(task,agent) dedupe for the agent_settled -> orchestrator
+// "settled with open assignment(s)" notify so repeated settles in a window don't storm. Reused by
+// the session_shutdown site too via the same predicate gating.
+export const NOTIFY_KEY_SETTLE_STALE = "task:{taskId}:agent:{agentId}:nudge:settle-stale";
+
+// Orchestrator pump per-tick batch suppression trace key (issue 11 / binding C6). Emitted on
+// EVERY pump tick including total===0 so dashboards counting silent-tick baselines render
+// correctly. The trace shape is { ts, cid, total, counts: { reason -> n, ... } }.
+export const NOTIFY_KEY_PUMP_BATCH_SUPPRESSED = "swarm.pump.batch_suppressed";
+
+// Format a NOTIFY_KEY_* template with validated (safe-id) substitutions.
+export function formatNotifyKey(template: string, params: Record<string, string>): string {
+	let out = template;
+	for (const [k, v] of Object.entries(params)) {
+		if (!SAFE_ID_RE.test(v)) throw new Error(`UNSAFE_NOTIFY_KEY_PARAM: ${k}=${v}`);
+		out = out.replace(`{${k}}`, v);
+	}
+	if (out.includes("{")) throw new Error(`UNRESOLVED_NOTIFY_KEY_PARAM: ${out}`);
+	return out;
+}

@@ -4,7 +4,8 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { MessageRecord, MessageResponseStatus, MessageStatus, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
-import { SEND_SETTLE_MS } from "./constants.ts";
+import type { OrphanClearReason } from "./agents.ts";
+import { SEND_SETTLE_MS, MAX_REINJECTS } from "./constants.ts";
 import { appendJsonl, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
 import { buildSystemDelivery } from "./delivery.ts";
 import { capturePane, isPanePiLike, sendToPane, tmux } from "./tmux.ts";
@@ -43,12 +44,14 @@ export function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status
 	};
 }
 
+export function isResponseTrackingActive(rec: Pick<MessageRecord, "status" | "lastAck" | "requiresResponse">) {
+	return rec.requiresResponse && rec.status !== "dead_letter" && rec.status !== "queued" && (rec.status !== "failed" || Boolean(rec.lastAck));
+}
+
 export function responseMissingRecords(st: SwarmState, agentId: string) {
 	return Object.values(st.messages || {}).filter((m) =>
 		m.to === agentId &&
-		m.requiresResponse &&
-		m.status !== "dead_letter" &&
-		m.status !== "failed" &&
+		isResponseTrackingActive(m) &&
 		m.response?.status !== "verified" &&
 		m.response?.status !== "waived"
 	);
@@ -174,28 +177,49 @@ export async function readMailbox(p: Paths, agentId: string): Promise<SwarmMessa
 	return out;
 }
 
+function buildInjectionProbe(state: SwarmState, msg: SwarmMessage, outcome: "success" | "failure", attempts: number, reinjects: number) {
+	const related = Object.values(state.messages || {}).filter((rec) => rec.to === msg.to && rec.id !== msg.id);
+	const successes = related.filter((rec) => rec.status === "injected" || rec.status === "mailbox_delivered" || rec.status === "intercepted").length;
+	const failures = related.filter((rec) => rec.status === "failed" && !rec.lastAck).length;
+	const total = successes + failures + 1;
+	const failureRate = Number(((failures + (outcome === "failure" ? 1 : 0)) / total).toFixed(3));
+	const successRate = Number(((successes + (outcome === "success" ? 1 : 0)) / total).toFixed(3));
+	return { attempt: attempts, reinjects, retryBudget: MAX_REINJECTS, outcome, successes, failures, failureRate, successRate };
+}
+
 export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg: SwarmMessage) {
 	const agent = state.agents[msg.to];
-	if (!agent) return { delivered: false, reason: "unknown agent" };
+	if (!agent) {
+		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "failure", reason: "unknown agent", probe: buildInjectionProbe(state, msg, "failure", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+		return { delivered: false, reason: "unknown agent" };
+	}
 	// Mailbox-only recipients (e.g. the orchestrator pseudo-agent) have no swarm tmux pane. The
 	// message is already persisted in the mailbox; treat this as successful mailbox delivery, not
 	// a tmux injection failure. The recipient surfaces it via the orchestrator auto-pump
 	// (pumpOrchestratorMailbox, on session_start/agent_settled/interval) or swarm_check_mailbox;
 	// callers must NOT pre-mark it delivered (see deliverMessageLocked) so the pump can surface it.
 	if (!agent.tmuxTarget || agent.tmuxTarget === "unknown") {
+		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "success", reason: "mailbox-only", probe: buildInjectionProbe(state, msg, "success", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
 		return { delivered: true, mailboxOnly: true, reason: "recipient has no tmux pane (mailbox-only)" };
 	}
-	if (agent.status !== "running") return { delivered: false, reason: "target agent not running" };
+	if (agent.status !== "running") {
+		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "failure", reason: "target agent not running", probe: buildInjectionProbe(state, msg, "failure", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+		return { delivered: false, reason: "target agent not running" };
+	}
 	// Issue D: a live pane that is NOT running pi (e.g. the shell after a crash/exit) must not be marked
 	// delivered — send-keys would just type the base64 line into a dead prompt. Keep it retryable
 	// ({delivered:false}) so reconcile re-injects once real pi is back, and use panePiLike for re-inject
 	// eligibility too. Fail-open on unknown commands (see isPanePiLike).
 	const panePi = await isPanePiLike(pi, agent.tmuxTarget);
-	if (!panePi.piLike) return { delivered: false, reason: `pane alive but not running pi (pane_current_command=${panePi.command || "?"})` };
+	if (!panePi.piLike) {
+		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "failure", reason: `pane alive but not running pi (pane_current_command=${panePi.command || "?"})`, probe: buildInjectionProbe(state, msg, "failure", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+		return { delivered: false, reason: `pane alive but not running pi (pane_current_command=${panePi.command || "?"})` };
+	}
 	const before = await capturePane(pi, p, msg.to, agent.tmuxTarget, `deliver-${msg.id}-before`);
 	await sendToPane(pi, agent.tmuxTarget, buildSystemDelivery(msg));
 	await sleep(SEND_SETTLE_MS);
 	const after = await capturePane(pi, p, msg.to, agent.tmuxTarget, `deliver-${msg.id}-after`);
+	await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "success", reason: "tmux send-keys succeeded", probe: buildInjectionProbe(state, msg, "success", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
 	return { delivered: true, mailboxOnly: false, before, after };
 }
 
@@ -203,7 +227,7 @@ export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg
 // orchestrator pseudo-agent) and appends to the recipient mailbox; it does NOT read/write state or
 // acquire the lock. Callers that already hold the swarm lock (task tools that send within one atomic
 // operation) use this directly and writeState once afterward.
-export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string }): Promise<{ msg: SwarmMessage; delivery: any }> {
+export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string; clearReason?: OrphanClearReason }): Promise<{ msg: SwarmMessage; delivery: any }> {
 	const to = safeId(params.to);
 	const from = currentAgentId();
 	if (to === "orchestrator") ensureOrchestrator(st, cwd, p);
@@ -274,10 +298,26 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 		}
 	}
 	await trace(p, delivery?.delivered ? (delivery.mailboxOnly ? "message.deliver.mailbox_only" : "message.inject.ok") : "message.inject.skip", { id: m.id, to: m.to, delivery, markedDelivered: Boolean(delivery?.delivered), status: st.messages[m.id]?.status });
+	// Orphan-spawn watchdog clear (Issue 14, B1 binding §2.2 + §2.3 collapse into one site here):
+	// any successful inbound delivery (tmux-injected OR mailbox-only) is sufficient to resolve the
+	// orphan — the agent now has a contractually visible message. A failed delivery does NOT clear
+	// the watch (we still want to warn if the spawn was orphaned). This covers BOTH
+	// swarm_send_message and swarm_assign_task (which calls deliverMessageLocked internally with
+	// the assignment message), so no edit to tools/tasks.ts is required. clearOrphanWatch is
+	// best-effort and idempotent. Dynamic import avoids a circular top-level import with
+	// agents.ts (agents.ts -> mailbox.ts for responseMissingRecords; mailbox.ts -> agents.ts for
+	// clearOrphanWatch only inside this code path). The function is small and Node ESM caches the
+	// resolution, so the per-call overhead is negligible.
+	if (delivery?.delivered) {
+		try {
+			const { clearOrphanWatch } = await import("./agents.ts");
+			await clearOrphanWatch(p, st, m.to, params.clearReason ?? "swarm_send_message");
+		} catch { /* best-effort; never fail delivery on a watchdog bookkeeping error */ }
+	}
 	return { msg: m, delivery };
 }
 
-export async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string }) {
+export async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string; clearReason?: OrphanClearReason }) {
 	return withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const r = await deliverMessageLocked(pi, cwd, p, st, params);
@@ -327,4 +367,52 @@ export async function supersedeOpenAssignments(p: Paths, st: SwarmState, task: T
 		await trace(p, "message.supersede_failed", { taskId: task.taskId, nodeId, newMsgId, error: String((err as Error)?.message || err) });
 	}
 	return supersededIds;
+}
+
+// Mark every assignment-class message related to a task as superseded (per-node assignment message
+// ids from node.assignmentMessageId + handoff-assign message ids). Cancellation notices are
+// informational (requiresAck:false/requiresResponse:false) so the worker cannot generate response
+// debt on an obsolete assignment, but late progress ACKs are still rejected via the supersede
+// guard in swarm_ack_message. Returns the count of messages that were newly superseded.
+// Read-only on intent: mutates only MessageRecord.superseded fields + emits trace events; does not
+// touch messages.delivered, agent.activeTaskIds (handled separately), or node state.
+export async function supersedeTaskAssignmentMessages(p: Paths, st: SwarmState, task: TaskState, reason: string, by: string): Promise<{ supersededIds: string[]; skipped: number }> {
+	const supersededIds: string[] = [];
+	let skipped = 0;
+	const ts = now();
+	const trySupersede = async (mid: string | undefined, nodeId: string) => {
+		if (!mid) return;
+		if (mid.startsWith("__")) return; // never touch synthetic markers
+		const rec = st.messages[mid];
+		if (!rec) { skipped++; return; }
+		if (rec.status === "failed" || rec.status === "dead_letter") { skipped++; return; }
+		if (rec.superseded) { skipped++; return; }
+		rec.superseded = { at: ts, by, supersededBy: reason };
+		rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: "waived" as MessageResponseStatus, waivedAt: ts, waivedBy: by, lastError: undefined };
+		rec.updatedAt = ts;
+		supersededIds.push(mid);
+		await trace(p, "message.superseded", { id: mid, supersededBy: reason, taskId: task.taskId, nodeId, by });
+	};
+	// 1. Current assignment message ids on every node (canonical, set by swarm_assign_task).
+	for (const [nodeId, node] of Object.entries(task.nodes)) {
+		await trySupersede(node.assignmentMessageId, nodeId);
+	}
+	// 2. Historical assignment handoffs. `task.handoffs` is scoped to this task by construction
+	//    (only swarm_assign_task and swarm_task_message push to it, both keyed by taskId in the
+	//    message envelope), and historical assign entries do NOT carry `taskId` on the handoff row
+	//    itself — so we scope by membership in this task's `nodes` rather than by a handoff-row
+	//    taskId predicate. Superseding a prior assignment for the SAME task by construction is
+	//    exactly the right behavior; cancellation must supersede every historical assign handoff
+	//    for this task, not just the most-recent node.assignmentMessageId. This matches the
+	//    per-node behavior of supersedeOpenAssignments.
+	const nodeIds = new Set(Object.keys(task.nodes));
+	for (const h of task.handoffs || []) {
+		const rec = h as Record<string, unknown>;
+		if (rec.kind !== "assign") continue;
+		const messageId = typeof rec.messageId === "string" ? rec.messageId : undefined;
+		if (!messageId) continue;
+		const toNode = typeof rec.toNode === "string" && nodeIds.has(rec.toNode) ? rec.toNode : "(historical)";
+		await trySupersede(messageId, toNode);
+	}
+	return { supersededIds, skipped };
 }

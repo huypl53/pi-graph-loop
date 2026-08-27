@@ -9,9 +9,9 @@ import { currentAgentId, currentModel, currentProvider } from "../session.ts";
 import { ensureDirs, identityPath, paths, readState, taskPaths, readTaskState, trace, withLock, writeState } from "../state.ts";
 import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
-import { overridePath, writeEffectiveIdentity } from "../identity.ts";
+import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority, writeEffectiveIdentity } from "../identity.ts";
 import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
-import { FAST_MODEL, FAST_PROVIDER } from "../constants.ts";
+import { ERR_ORCHESTRATOR_PANE_REJECTED, FAST_MODEL, FAST_PROVIDER } from "../constants.ts";
 import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 
 export function registerAgentsTools(pi: ExtensionAPI) {
@@ -87,6 +87,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
+			requireOrchestratorAuthority(currentAgentId(), "swarm_prune");
 			const dryRun = params.dryRun !== false;
 			const markDead = params.markDead !== false;
 			const removeStopped = Boolean(params.removeStopped);
@@ -159,8 +160,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				await trace(p, "agent.spawn.request", { requestedBy: currentAgentId(), ...params });
-				const model = params.model === "fast" ? FAST_MODEL : params.model || currentModel();
-				const provider = params.provider || (params.model === "fast" ? FAST_PROVIDER : currentProvider(model));
+				// Explicit model / 'fast' preset pin the slot; otherwise spawnAgent consults the
+				// model pool (if configured) before falling back to the single default.
+				const model = params.model === "fast" ? FAST_MODEL : params.model || undefined;
+				const provider = params.provider || (params.model === "fast" ? FAST_PROVIDER : undefined);
 				const r = await spawnAgent(pi, ctx.cwd, p, st, { ...params, model, provider });
 				await writeState(p, st);
 				return { swarmId: st.swarmId, tmuxSession: st.tmuxSession, ...r };
@@ -322,8 +325,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
+			requireOrchestratorAuthority(currentAgentId(), "swarm_stop_agent");
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
+				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "stop_agent");
 				const r = await stopAgent(pi, p, st, safeId(params.agentId), { force: params.force, killPane: params.killPane });
 				await writeState(p, st);
 				return r;
@@ -336,7 +341,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		name: "swarm_restart_agent",
 		label: "Swarm Restart",
 		description: "Stop and respawn a fresh pi at the SAME id so mailbox, identity, and history persist. Reuses the recorded role/model/provider. Useful after a crash or to clear context.",
-		promptGuidelines: ["Use `swarm_restart_agent` to reset an agent's pi process without losing its swarm identity/mailbox. This force-stops first (any active tasks are released to the fresh process)."],
+		promptGuidelines: ["Use `swarm_restart_agent` to reset an agent's pi process without losing its swarm identity/mailbox. This force-stops first (any active tasks are released to the fresh process). Default kills the pane; pass `killPane=false` to keep it alive (the agent record still flips to `running`). The freshly started pi reuses the same id, mailbox, and identity."],
 		parameters: Type.Object({
 			agentId: Type.String({ description: "Agent id to restart." }),
 			model: Type.Optional(Type.String({ description: "Optional model override for the respawned pi (defaults to the agent's recorded model)." })),
@@ -360,7 +365,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		name: "swarm_set_role",
 		label: "Swarm Set Role",
 		description: "Change an agent's role/roleKind/capabilities at runtime and regenerate + inject its identity, WITHOUT respawning. roleKind is re-derived from the new role unless roleKind is explicitly passed (then pinned).",
-		promptGuidelines: ["Use `swarm_set_role` to repurpose an idle agent for a different role instead of spawning a new one."],
+		promptGuidelines: ["Use `swarm_set_role` to repurpose an idle agent for a different role instead of spawning a new one. After a role change the agent may leave the reuse pool for the previous role kind and enter it for the new one; subsequent `swarm_assign_task` reuse calls will pick it up under the new role."],
 		parameters: Type.Object({
 			agentId: Type.String({ description: "Agent id to repurpose." }),
 			role: Type.Optional(Type.String({ description: "New role/instructions text." })),
@@ -407,7 +412,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		name: "swarm_send_keys",
 		label: "Swarm Send Keys",
 		description: "Send raw tmux keys to an agent's pane: interrupt (C-c), dismiss, navigate, or type text. Non-literal mode interprets tmux key names; literal mode sends exact text. Powerful/destructive — use to unstick a runaway agent.",
-		promptGuidelines: ["Use `swarm_send_keys` to send raw tmux input to an agent pane, e.g. C-c to interrupt. Prefer the normal mailbox/identity tools for coordination; this is an escape hatch."],
+		promptGuidelines: ["Use `swarm_send_keys` to send raw tmux input to an agent pane, e.g. C-c to interrupt. Prefer the normal mailbox/identity tools for coordination; this is an escape hatch. Targets another agent's pane by id — never use to send keys into the orchestrator pane from a worker."],
 		parameters: Type.Object({
 			agentId: Type.String({ description: "Agent id whose pane to send keys to." }),
 			keys: Type.String({ description: "Keys to send. Non-literal: space-separated tmux key names (C-c, Up, Enter). Literal: exact text." }),
@@ -419,6 +424,17 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			const st = await readState(p, ctx.cwd);
 			const agent = st.agents[safeId(params.agentId)];
 			if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
+			// Issue 12 C6 micro-fix: principle-based orchestrator-pane reject guard. Fires when the
+			// resolved tmux target equals the orchestrator record's tmuxTarget (typically "unknown"),
+			// so a future refactor cannot silently route raw keystrokes into the orchestrator host
+			// pane. Principle-based (target equality, not id) so ghost agents mis-stamped to "unknown"
+			// are also rejected. Read-only — no state mutation on rejection.
+			const orchestrator = st.agents["orchestrator"];
+			const orchestratorTarget = orchestrator?.tmuxTarget;
+			if (agent.tmuxTarget && orchestratorTarget && agent.tmuxTarget === orchestratorTarget) {
+				await trace(p, "agent.send_keys.rejected", { agentId: agent.id, resolvedTarget: agent.tmuxTarget, orchestratorTarget, by: currentAgentId() });
+				throw new Error(`${ERR_ORCHESTRATOR_PANE_REJECTED}: swarm_send_keys target ${agent.tmuxTarget} equals the orchestrator record's tmuxTarget; refusing to inject keystrokes into the orchestrator host pane (agentId=${agent.id}).`);
+			}
 			await sendKeys(pi, p, agent.tmuxTarget, params.keys, { literal: params.literal, enter: params.enter });
 			await trace(p, "agent.send_keys", { agentId: agent.id, target: agent.tmuxTarget, literal: Boolean(params.literal), enter: Boolean(params.enter) });
 			return textResult(`Sent keys to ${agent.id} (${agent.tmuxTarget}).`, { agent });
@@ -453,8 +469,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
+			requireOrchestratorAuthority(currentAgentId(), "swarm_release_agent_task");
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
+				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "release_agent_task");
 				const agent = st.agents[safeId(params.agentId)];
 				if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
 				const candidate = (agent.activeTaskIds || []).slice().filter((tid) => !params.taskId || tid === safeId(params.taskId));

@@ -16,6 +16,71 @@ export type MessageResponseStatus = "not_required" | "missing" | "sent" | "verif
 export type SwarmSettings = {
 	defaultModel?: string;
 	defaultProvider?: string;
+	// Model pool: multiple model/provider candidates with weights and rotation. When present,
+	// spawn/restart pick from the pool (respecting health/cooldown) instead of the single default.
+	modelPool?: ModelSlot[];
+	rotation?: RotationConfig;
+};
+
+export type ModelSlot = {
+	model: string;
+	provider?: string;
+	weight?: number; // default 1; 0 = fallback-only (used only when all weighted slots are down)
+	label?: string;
+};
+
+export type RotationStrategy = "weighted" | "round-robin" | "sticky";
+
+// Classify a provider/turn error message. Quota/auth failures are the rotation triggers;
+// transient errors are tolerated a few times before benching.
+export type ProviderErrorKind = "quota" | "auth" | "rate_limit" | "transient" | "unknown";
+
+export function classifyProviderError(message: string): ProviderErrorKind {
+	const m = (message || "").toLowerCase();
+	if (/quota|insufficient|billing|balance|exceeded your current quota|prepaid/.test(m)) return "quota";
+	if (/rate.?limit|too many requests|429|overloaded/.test(m)) return "rate_limit";
+	if (/invalid api key|unauthorized|forbidden|401|403|authentication|api key/.test(m)) return "auth";
+	if (/timeout|timed out|econnrefused|econnreset|enotfound|5\d\d|network|connection/.test(m)) return "transient";
+	return "unknown";
+}
+
+export type RotationConfig = {
+	strategy?: RotationStrategy; // default weighted
+	cooldownMs?: number; // default 15min: a failing slot is benched this long after maxRetries
+	maxRetries?: number; // default 2 consecutive failures before cooldown
+};
+
+// Preflight classification — used by `preflightSpawn` and surfaced verbatim by spawn/restart
+// callers. Each `kind` carries enough context for `formatPreflightError` to render a concrete
+// corrective action. New variants must be added in lock-step with the formatter switch in pool.ts.
+export type PreflightError =
+	| { kind: "unknown_model"; model: string; suggestion: string }
+	| { kind: "provider_not_found"; provider: string; suggestion: string }
+	| { kind: "pool_exhausted"; message: string; suggestion: string }
+	| { kind: "tmux_not_running"; message: string; suggestion: string }
+	| { kind: "tmux_create_failed"; message: string; suggestion: string }
+	| { kind: "invalid_settings"; message: string; suggestion: string; errors: string[] };
+
+export type PreflightResult =
+	| { ok: true; resolved: { model: string; provider: string; fromPool: boolean } }
+	| { ok: false; error: PreflightError };
+
+// Persisted per-slot health, keyed by `${provider}/${model}`. Stored in .pi/swarm/pool-state.json.
+export type PoolSlotHealth = {
+	failures: number;
+	lastError?: string;
+	lastErrorAt?: string;
+	// True when the recorded error was deduplicated (pi-internal retry of the same incident within
+	// 30s did not bump the streak). Informational only.
+	deduped?: boolean;
+	cooldownUntil?: string; // ISO; slot excluded from picking while in the future
+	benchStreak?: number; // consecutive benches without an intervening success (drives exponential backoff)
+};
+
+export type PoolHealthState = {
+	slots: Record<string, PoolSlotHealth>;
+	// round-robin cursor (index into the configured slot list)
+	rrCursor?: number;
 };
 
 export type MessageRecord = {
@@ -53,6 +118,7 @@ export type MessageRecord = {
 	replyTo?: string;
 	lastError?: string;
 	lastAck?: { by: string; status: string; note?: string; resultMessageId?: string; at: string };
+	subject?: string;
 	ttlMs?: number;
 	idempotencyKey?: string;
 	// Set when a newer assignment supersedes this open assignment message (idempotency/supersede fix).
@@ -97,6 +163,44 @@ export type SwarmAgent = {
 	updatedAt: string;
 };
 
+// Multi-orchestrator policy (roadmap issue 8, strict-reject): a single durable leader record on
+// SwarmState identifies the live orchestrator. Every orchestrator-authoritative mutation must
+// refresh lastHeartbeatAt via heartbeatOrchestratorLeader; a second concurrent orchestrator is
+// rejected with ORCHESTRATOR_LEADER_DENIED. Absent or stale = vacant.
+export type OrchestratorLeader = {
+	pid: number;
+	sessionStartedAt: string;
+	claimedAt: string;
+	lastHeartbeatAt: string;
+	agentRecordId?: string;
+};
+
+// Durable recipient receipt entry for the orchestrator mailbox consumer (issue 11). Populated
+// when a TUI-side delivery succeeds (surfacedAt stamped) OR by the one-time migration back-fill
+// for legacy `requiresAck: true` messages that are no longer actionable. Per-message fingerprint
+// (sha256(messageId + lastUpdatedAt)) protects a reincarnated consumer against silent message
+// record edits. Primary dedupe gate for the orchestrator pump across PID recycle / restart.
+// conversationId stores the raw "task:taskId:nodeId" reference for later parsing.
+export type OrchestratorReceiptEntry = {
+	surfacedAt: string;
+	ackedAt?: string;
+	requiresAck: boolean;
+	conversationId?: string;
+	fingerprint: string;
+};
+
+// In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent
+// record (not restart/register/pool-reuse) and removed when the engine either (a) detects a follow-up
+// delivery within the ORPHAN_SPAWN_WARNING_TIMEOUT_MS window or (b) the timer fires and emits
+// `agent.spawn.orphan_warning` (or `orphan_resolved_late`). Persisted on SwarmState so process
+// restart can audit stranded entries; the in-process timer handle lives on a module-level Map
+// (NOT on this record) because NodeJS.Timeout is not JSON-serializable.
+export type RecentSpawn = {
+	agentId: string;
+	spawnedAt: string;     // ISO; mirrors agent.createdAt for the just-created record
+	deadlineAt: string;    // ISO; spawnedAt + ORPHAN_SPAWN_WARNING_TIMEOUT_MS
+};
+
 export type SwarmState = {
 	version: number;
 	swarmId: string;
@@ -104,11 +208,28 @@ export type SwarmState = {
 	tmuxSession: string;
 	agents: Record<string, SwarmAgent>;
 	delivered: Record<string, string[]>;
+	// Multi-orchestrator leader lease (issue 8). Addditive; readState back-fills undefined for
+	// pre-policy swarms so first mutation claims vacant. See identity.ts:readOrchestratorLeader /
+	// heartbeatOrchestratorLeader / claimOrchestratorLeader for the gate semantics.
+	orchestratorLeader?: OrchestratorLeader;
 	// Per-session surfaced-id ledgers for the orchestrator auto-pump, keyed by consumer pid. Each
 	// orchestrator-context session (the long-lived PM, a validation `pi -p` run, another PM lane) tracks
 	// the ids IT has surfaced, so one session cannot mark a notification consumed and starve a different
 	// PM session. Separate from `delivered` (the check_mailbox/ack ledger).
 	orchestratorPumpSessions?: Record<string, { ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string }>;
+	// Per-worker surfaced ledger for the session-start mailbox auto-surface (idempotent per message).
+	agentSurfaced?: Record<string, string[]>;
+	// Durable recipient receipt ledger for the orchestrator mailbox consumer (issue 11). Primary
+	// dedupe gate that survives PID restart/recycle; replaces the per-pid `orchestratorPumpSessions[*].ids`
+	// (which is now session-bounded and only counts retriggers). `revision` bumps on every write so a
+	// stale read can detect concurrent consumer activity; `0` = no writes yet (triggers one-time
+	// migration back-fill on first pump).
+	consumerReceipts?: {
+		orchestrator?: {
+			entries?: Record<string, OrchestratorReceiptEntry>;
+			revision?: number;
+		};
+	};
 	lastLoopReconcileAt?: string; // throttle for the loop-watcher reconcile (detect "plan recorded but graph still closed")
 	// Incremental mailbox read checkpoint for the orchestrator pump (issue B): byte offset already
 	// parsed per agent. Reset (full re-read) if the file shrank. Absent = no checkpoint yet.
@@ -117,6 +238,10 @@ export type SwarmState = {
 	// when the message count changes; consulted for O(1) idempotency lookups inside the lock.
 	idempotencyIndex?: Record<string, string>;
 	idempotencyIndexCount?: number; // messages.length when the index was built
+	// Orphan-spawn watchdog ledger (Issue 14): one entry per freshly-spawned agent awaiting a
+	// follow-up delivery. Cleared on a follow-up delivery, by swarm_stop_agent, or by the watchdog
+	// itself when the timer fires. ReadState back-fills `[]` so pre-policy swarms boot cleanly.
+	recentSpawns?: RecentSpawn[];
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;
@@ -144,9 +269,73 @@ export type SwarmMessage = {
 
 export type TaskStatus = "draft" | "ready" | "in_progress" | "blocked" | "reviewing" | "validating" | "done" | "failed" | "cancelled";
 
-export type TaskNodeStatus = "pending" | "ready" | "assigned" | "in_progress" | "blocked" | "done" | "failed" | "skipped";
+// Durable attention classification for a task node (roadmap issue 5). Derived PURELY from
+// persisted state (task graph, assignment attempt, mailbox records) — never from tmux/process/
+// pane idle state. Advisory only: categories never mutate node status or infer outcome.
+export type AttentionCategory =
+	| "transport_unavailable"
+	| "delivery_failed"
+	| "dead_letter"
+	| "ack_missing"
+	| "response_missing"
+	| "stale_assignment"
+	| "unassigned_ready"
+	| "no_progress"
+	| "reminder_eligible"
+	| "reminder_sent"
+	| "superseded"
+	| "cancelled"
+	| "terminal"
+	| "none";
+
+export type NodeAttention = {
+	category: AttentionCategory;
+	evidence: string[];
+	// True when ALL reminder-eligibility rules hold right now (attempt-fenced, receipt confirmed,
+	// no-progress interval elapsed, budget unconsumed). Advisory; sending is a separate explicit step.
+	workerReminderEligible: boolean;
+	// True when the category requires an explicit orchestrator choice (assign/escalate/reassign).
+	orchestratorDecision: boolean;
+};
+
+export type TaskNodeStatus = "pending" | "ready" | "assigned" | "in_progress" | "blocked" | "done" | "failed" | "skipped" | "cancelled";
 
 export type TaskGateStatus = "open" | "passed" | "failed" | "waived";
+
+// Worker reminder record (reliability roadmap issue 5). Additive: legacy attempts simply lack the
+// field, and its presence never changes task semantics — a reminder is informational only.
+export type ReminderRecord = {
+	reminderId: string;
+	sentAt: string;
+	messageId: string;          // the reminder message sent to the assignee
+	attemptId: string;          // ties the reminder to one attempt lease
+	noProgressSince: string;    // anchor timestamp evidence at send time
+};
+
+export type TaskNodeAttempt = {
+	attemptId: string;           // Unique lease identity (UUID), server-generated
+	attemptNumber: number;       // Monotonic counter (1, 2, 3...)
+	assignmentMessageId: string; // Message that carried this assignment
+	assignee: string;            // Agent who was assigned
+	assignedAt: string;           // ISO timestamp
+	supersededAt?: string;       // When this attempt was superseded (if applicable)
+	supersededBy?: string;        // Attempt ID or "<rework>" that superseded this one
+	status: "active" | "superseded" | "completed" | "failed" | "cancelled" | "skipped";
+	outcome?: string;             // Final outcome if terminal
+	lastActivityAt?: string;      // Last update timestamp
+	// Additive lease-audit fields (file-ownership policy, roadmap issue 4). `status` remains the
+	// authoritative lifecycle field; these are optional audit annotations only.
+	releasedAt?: string;          // When the attempt's write-scope lease ended (any reason)
+	releaseReason?: "reassign" | "rework" | "terminal" | "cancel" | "orchestrator_override";
+	// Bounded worker reminder (roadmap issue 5): at most one per attempt, permanently. Presence of
+	// this record means the one-reminder budget for this attempt is consumed; it never mutates node
+	// status/outcome/readiness and creates no ack/response debt (the message requiresAck:false and
+	// requiresResponse:false by construction).
+	reminder?: ReminderRecord;
+	// Effective write scope stamped at assignment time; used by the ownership preflight to detect
+	// overlapping active write scopes across all tasks. Absent on pre-policy attempts (readable legacy).
+	scope?: { source: "node-explicit" | "node-inherited" | "task-default"; sourceNodeId?: string; files: string[] };
+};
 
 export type TaskNode = {
 	status: TaskNodeStatus;
@@ -167,6 +356,10 @@ export type TaskNode = {
 	terminal?: boolean;
 	lastActivityAt?: string;
 	staleAt?: string;
+	// NEW: Active attempt identity (set on assignment, cleared on reassign/rework)
+	activeAttemptId?: string;
+	// NEW: Audit history of all attempts (never cleared, append-only)
+	attemptHistory?: TaskNodeAttempt[];
 };
 
 export type TaskEdge = {
@@ -434,6 +627,11 @@ export type IterationBest = {
 
 // Internal reusable-agent lookup used by task tooling (not a public worker tool).
 // Recommends the idle, healthy, tmux-alive agent with the fewest active tasks.
+// `matchKind` is the rationale for inclusion (roadmap issue 10, reuse-misroute fix):
+//   "exact" = role-kind check + capabilities intersect cleanly
+//   "substring-collapsed" = re-derived roleKind matches but agent id contains a different role keyword
+//                           (caller may want to log/skip these)
+//   "fallback" = no role-kind match; matched via capabilities or agentId escape-hatch
 export type ReusableAgentMatch = {
 	agentId: string;
 	roleKind: string;
@@ -442,6 +640,7 @@ export type ReusableAgentMatch = {
 	tmuxAlive: boolean;
 	activeTaskIds: string[];
 	capabilities: string[];
+	matchKind?: "exact" | "substring-collapsed" | "fallback";
 };
 
 export type ReconcileAction = { messageId: string; action: string; reason: string; taskId?: string; nodeId?: string };

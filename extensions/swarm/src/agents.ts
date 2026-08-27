@@ -3,21 +3,153 @@ import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_M
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import type { Paths, ReusableAgentMatch, SwarmAgent, SwarmState } from "./types.ts";
-import { SPAWN_SETTLE_MS } from "./constants.ts";
+import type { Paths, PreflightError, RecentSpawn, ReusableAgentMatch, SwarmAgent, SwarmState } from "./types.ts";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, FAST_MODEL, ORPHAN_SPAWN_WARNING_TIMEOUT_MS, SPAWN_SETTLE_MS } from "./constants.ts";
 import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux } from "./tmux.ts";
-import { childPiArgs, currentModel, currentProvider } from "./session.ts";
+import { childPiArgs, currentAgentId, currentModel, currentProvider } from "./session.ts";
+import { pickSlot, poolStatus, preflightSpawn, formatPreflightError } from "./pool.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, shellQuote, sleep } from "./utils.ts";
-import { identityPath, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
+import { identityPath, mailboxPath, paths, readState, trace, withLock, writeState } from "./state.ts";
 import { identityPrompt, writeEffectiveIdentity } from "./identity.ts";
 import { responseMissingRecords } from "./mailbox.ts";
 
-export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string }) {
+// Orphan-spawn watchdog (Issue 14): in-process timer handles keyed by agentId. Not serialized into
+// swarm-state.json because NodeJS.Timeout references cannot survive JSON.stringify (and a process
+// restart simply strands the entry — see docs/swarm/operations.md v1 limitation). Persistent state
+// lives on SwarmState.recentSpawns[] (readState back-fills `[]`); the map below is a hint to cancel
+// pending timers when the follow-up call clears the entry, NOT the source of truth.
+const ORPHAN_TIMERS = new Map<string, NodeJS.Timeout>();
+
+// Pure helper for tests / shared code: how many orphan-watch entries are currently armed in state.
+// Reflects the persistent ledger (NOT the in-process timer map) so it survives a process restart.
+export function recentSpawnCount(state: SwarmState): number {
+	return Array.isArray(state.recentSpawns) ? state.recentSpawns.length : 0;
+}
+
+// Fire path for the orphan-watch timer. Called from a setTimeout callback; acquires the swarm lock
+// before mutating state. Self-check scans st.messages for any inbound message addressed to the
+// agent with createdAt >= spawnedAt — if a delivery raced ahead, traces `orphan_resolved_late`
+// instead of `orphan_warning` (race backstop, see plan §4.3). Locking is intentionally idempotent:
+// a follow-up call that cleared the entry between timer fire and lock acquisition finds nothing
+// and returns silently.
+export async function fireOrphanWarning(p: Paths, agentId: string, spawnEntry: RecentSpawn) {
+	const deadlineAgeMs = Math.max(0, Date.now() - new Date(spawnEntry.deadlineAt).getTime());
+	const cleared = await withLock(p, async () => {
+		const st = await readState(p, p.root);
+		if (!Array.isArray(st.recentSpawns) || st.recentSpawns.length === 0) return { fired: false, reason: "empty" };
+		const idx = st.recentSpawns.findIndex((s) => s.agentId === agentId);
+		if (idx === -1) return { fired: false, reason: "cleared" };
+		// Race backstop: any inbound message at or after spawnedAt counts as resolved (the clear
+		// helper is best-effort; a third-party delivery path could close the orphan via a tool the
+		// helper does not yet cover). Scan once; exit silently if a message is found.
+		const inbound = Object.values(st.messages || {}).filter((m) => m.to === agentId && m.createdAt >= spawnEntry.spawnedAt);
+		if (inbound.length > 0) {
+			st.recentSpawns.splice(idx, 1);
+			await writeState(p, st);
+			await trace(p, "agent.spawn.orphan_resolved_late", { agentId, spawnedAt: spawnEntry.spawnedAt, deadlineAt: spawnEntry.deadlineAt, resolver: "pre-existing-message", messageIds: inbound.map((m) => m.id) }).catch(() => {});
+			return { fired: true, kind: "resolved_late" as const, messageIds: inbound.map((m) => m.id) };
+		}
+		st.recentSpawns.splice(idx, 1);
+		await writeState(p, st);
+		await trace(p, "agent.spawn.orphan_warning", { agentId, spawnedAt: spawnEntry.spawnedAt, deadlineAt: spawnEntry.deadlineAt, ageMs: deadlineAgeMs, source: "swarm_spawn_agent" }).catch(() => {});
+		return { fired: true, kind: "orphan_warning" as const };
+	});
+	// Best-effort: drop the in-process timer handle too (the persistent entry is already gone).
+	ORPHAN_TIMERS.delete(agentId);
+	return cleared;
+}
+
+// Arm site: push a fresh RecentSpawn onto the live SwarmState + set the in-process timer. Called
+// only from spawnAgent when isNewRecord is true (the fresh-record branch; reuse/restart/register
+// paths skip this entirely). Caller MUST hold the swarm lock and pass the live SwarmState reference.
+export function armOrphanWatch(p: Paths, st: SwarmState, agentId: string, ts: string) {
+	const deadlineAt = new Date(new Date(ts).getTime() + ORPHAN_SPAWN_WARNING_TIMEOUT_MS).toISOString();
+	const entry: RecentSpawn = { agentId, spawnedAt: ts, deadlineAt };
+	st.recentSpawns = Array.isArray(st.recentSpawns) ? st.recentSpawns : [];
+	st.recentSpawns.push(entry);
+	const timer = setTimeout(() => {
+		fireOrphanWarning(p, agentId, entry).catch(() => {});
+	}, ORPHAN_SPAWN_WARNING_TIMEOUT_MS);
+	// Don't keep the Node event loop alive solely for orphan watches; the timer is best-effort and
+	// the persistent entry in state is the source of truth across restarts.
+	if (typeof (timer as any)?.unref === "function") (timer as any).unref();
+	ORPHAN_TIMERS.set(agentId, timer);
+	void trace(p, "agent.spawn.orphan_watch_start", { agentId, deadlineAt, timeoutMs: ORPHAN_SPAWN_WARNING_TIMEOUT_MS }).catch(() => {});
+}
+
+// Clear site (Issue 14, B1 binding): removes the RecentSpawn entry from state, cancels the
+// in-process timer, and traces `agent.spawn.orphan_cleared` with the trigger reason. Called from
+// mailbox.deliverMessageLocked (any successful delivery to the agent) and stopAgent core
+// (intentional termination BEFORE killAgentPane). No-op if the agent has no entry (reuse path,
+// pre-policy swarm, or already cleared). Caller MUST hold the swarm lock and pass the live state
+// reference; the trace is best-effort and never throws.
+export type OrphanClearReason = "swarm_send_message" | "swarm_assign_task" | "swarm_stop_agent" | "preflight_message";
+
+export async function clearOrphanWatch(p: Paths, st: SwarmState, agentId: string, reason: OrphanClearReason) {
+	if (!Array.isArray(st.recentSpawns) || st.recentSpawns.length === 0) return { cleared: false, reason: "empty" };
+	const idx = st.recentSpawns.findIndex((s) => s.agentId === agentId);
+	if (idx === -1) return { cleared: false, reason: "not-found" };
+	const [removed] = st.recentSpawns.splice(idx, 1);
+	const t = ORPHAN_TIMERS.get(agentId);
+	if (t) { clearTimeout(t); ORPHAN_TIMERS.delete(agentId); }
+	await trace(p, "agent.spawn.orphan_cleared", { agentId, by: reason, clearedBy: currentAgentId(), spawnedAt: removed.spawnedAt, deadlineAt: removed.deadlineAt }).catch(() => {});
+	return { cleared: true, reason, removed };
+}
+
+// Kickoff preamble injected on spawn/restart when the agent's mailbox holds messages that are not yet
+// acked (failed/injected/intercepted without ackedAt). This closes the restart-mailbox gap: a respawned
+// agent previously "awaited tasks" with no prompt to read its mailbox, so approvals delivered while the
+// pane was down (failed injection, retried by reconcile later) sat unread while the agent idled.
+export async function mailboxKickoffPrompt(p: Paths, st: SwarmState, id: string): Promise<string> {
+	try {
+		const pending = Object.values(st.messages || {}).filter((r) =>
+			r.to === id && !r.ackedAt && r.status !== "dead_letter" && !r.superseded,
+		);
+		if (!pending.length) return "";
+		const lines = pending.slice(-10).map((r) => `- ${r.id}${r.subject ? " (subject not stored; see mailbox)" : ""} from ${r.from}, status=${r.status}, requiresAck=${r.requiresAck}`).join("\n");
+		return `\n\n[PI-SWARM MAILBOX PENDING]\nYour mailbox has ${pending.length} undelivered/unacked message(s). Read them NOW with swarm_check_mailbox (they may contain work or approvals sent while you were down/restarting) and ack/handle per protocol. Recent:\n${lines}\n[/PI-SWARM MAILBOX PENDING]`;
+	} catch { return ""; }
+}
+
+export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, input: { id?: string; role: string; roleKind?: string; model?: string; provider?: string; initialPrompt?: string; isNewRecord?: boolean }) {
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
 	if (state.agents[id]?.status === "running") throw new Error(`Agent already exists and is running: ${id}`);
-	const model = input.model || currentModel();
-	const provider = input.provider || currentProvider(model);
-	const providerFallback = !input.provider && provider === DEFAULT_PROVIDER && model !== DEFAULT_MODEL && model !== FAST_MODEL;
+	// Orphan-spawn watchdog (Issue 14): decide whether this invocation mints a NEW agent record.
+	// Excludes restart (restartAgent sets existing.status="stopped" before calling), re-spawn of an
+	// existing stopped id (the operator knows the id and intends to refresh, not orphan), pool reuse
+	// (findReusableAgent never calls spawnAgent), and register/register-adopt (different function).
+	// The flag is explicit so tests can drive the fresh-vs-refresh distinction deterministically.
+	const isNewRecord = input.isNewRecord ?? (state.agents[id] === undefined);
+	// Preflight: validate settings + pool eligibility + tmux prereqs BEFORE we commit a swarm-state
+	// record. Read-only — never mutates settings or pool health; surfaces classified errors so the
+	// operator gets an actionable message instead of a half-spawned window. The tmux session probe
+	// here is best-effort; spawnAgent itself still attempts new-session fallback below.
+	const preflight = await preflightSpawn(p, { model: input.model, provider: input.provider, tmuxSession: state.tmuxSession });
+	if (preflight.ok === false) {
+		// Discriminated union: TS narrows preflight to { ok: false; error: PreflightError } here.
+		const err: PreflightError = preflight.error;
+		throw new Error(formatPreflightError(err));
+	}
+	// Model resolution: explicit input wins; otherwise the model pool (if configured) picks a
+	// healthy slot via weighted/rr/sticky rotation; otherwise the single default.
+	let model = input.model;
+	let provider = input.provider;
+	let poolReason: string | undefined;
+	if (!model) {
+		const picked = await pickSlot(p, { stickyKey: id });
+		if (picked) {
+			model = picked.slot.model;
+			provider = picked.slot.provider || currentProvider(model);
+			poolReason = picked.reason;
+		} else {
+			model = currentModel();
+			provider = currentProvider(model);
+		}
+	} else {
+		provider = provider || currentProvider(model);
+	}
+	if (poolReason) await trace(p, "pool.spawn_pick", { agentId: id, slot: `${provider}/${model}`, reason: poolReason }).catch(() => {});
+	const providerFallback = !input.provider && !poolReason && provider === DEFAULT_PROVIDER && model !== DEFAULT_MODEL && model !== FAST_MODEL;
 	if (providerFallback) await trace(p, "agent.spawn.provider_fallback", { agentId: id, model, provider, note: "no provider configured for model; fell back to DEFAULT_PROVIDER at spawn boundary" }).catch(() => {});
 	const window = id;
 	const target = `${state.tmuxSession}:${window}.0`;
@@ -73,9 +205,15 @@ export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state:
 	await writeEffectiveIdentity(cwd, p, state, agent, { reason: "spawn" });
 	const identityRelPath = relative(cwd, identityFile);
 	await trace(p, "agent.spawn.ok", { agentId: id, tmuxTarget: target, model, provider, role: input.role, identity: identityRelPath });
+	// Orphan-spawn watchdog arm (Issue 14): only on the fresh-record path. restartAgent passes
+	// isNewRecord=false explicitly; direct re-spawn of an existing stopped id also skips (the
+	// default derives from `state.agents[id] === undefined` and will be false). The arm pushes a
+	// RecentSpawn onto state.recentSpawns[] AND schedules the in-process timer; if the spawn throws
+	// before this point the watchdog was never armed so no cleanup is required.
+	if (isNewRecord) armOrphanWatch(p, state, id, ts);
 	await sleep(SPAWN_SETTLE_MS);
 	const snapshot = await capturePane(pi, p, id, target, "spawn-after");
-	const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${identityPrompt(cwd, identityRelPath)}`;
+	const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${await mailboxKickoffPrompt(p, state, id)}${identityPrompt(cwd, identityRelPath)}`;
 	await sendToPane(pi, target, kickoff);
 	return { agent, snapshot, identity: identityFile };
 }
@@ -228,7 +366,7 @@ export async function registerAgent(pi: ExtensionAPI, cwd: string, p: Paths, sta
 	const identityRelPath = relative(cwd, identityPath(p, id));
 	let injected = false;
 	if (input.inject !== false && tmuxAlive) {
-		const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${identityPrompt(cwd, identityRelPath)}`;
+		const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${await mailboxKickoffPrompt(p, state, id)}${identityPrompt(cwd, identityRelPath)}`;
 		try { await sendToPane(pi, target, kickoff); injected = true; }
 		catch (err: any) { await trace(p, "agent.register.inject_failed", { agentId: id, target, error: String((err as Error)?.message || err) }); }
 	}
@@ -258,7 +396,11 @@ export async function stopAgent(pi: ExtensionAPI, p: Paths, state: SwarmState, a
 	if (!opts.force && agent.activeTaskIds.length) {
 		throw new Error(`Refusing to stop ${agentId}: active tasks [${agent.activeTaskIds.join(", ")}]. Reassign or release them, or pass force=true.`);
 	}
+	// Orphan-spawn watchdog clear (Issue 14, B5 binding): cancel BEFORE killAgentPane so the timer
+	// cannot fire mid-stop and emit a stale orphan_warning trace for an agent being intentionally
+	// terminated. clearOrphanWatch is a no-op when the agent has no entry (e.g. reuse path).
 	const ts = now();
+	await clearOrphanWatch(p, state, agentId, "swarm_stop_agent").catch(() => {});
 	let kill = { killed: false, method: "skipped" as string };
 	if (opts.killPane !== false) kill = await killAgentPane(pi, p, agent);
 	agent.status = "stopped";
@@ -271,9 +413,10 @@ export async function stopAgent(pi: ExtensionAPI, p: Paths, state: SwarmState, a
 }
 
 // Stop + respawn a fresh pi at the SAME id (so mailbox, identity, and history persist). Reuses the
-// recorded role/model/provider. For an agent originally registered to an external pane, restart creates
+// recorded role/model/provider unless a new model is passed OR the recorded slot has been benched by
+// the pool (health cooldown) — in that case the pool picks a replacement slot for the failover.
 // a fresh swarm-managed window named <id> (the external pane cannot be reliably re-pi'd). Lock-free core.
-export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, agentId: string, opts: { initialPrompt?: string; model?: string; provider?: string } = {}) {
+export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, agentId: string, opts: { initialPrompt?: string; model?: string; provider?: string; rotateFromSlot?: string } = {}) {
 	const existing = state.agents[agentId];
 	if (!existing) throw new Error(`Unknown swarm agent: ${agentId}`);
 	ensureAgentDefaults(existing);
@@ -281,9 +424,37 @@ export async function restartAgent(pi: ExtensionAPI, cwd: string, p: Paths, stat
 	existing.status = "stopped"; // satisfy spawnAgent's "already running" guard before it overwrites the record
 	existing.updatedAt = now();
 	await trace(p, "agent.restart.kill", { agentId, ...kill });
+	// Preflight (restart): same checks as spawn, but before we commit to a new spawn. Pool failover
+	// already plans a replacement slot; preflight catches the case where the replacement is also bad
+	// (e.g. all slots benched, tmux down) so we fail fast instead of leaving a half-restarted agent.
+	const preflight = await preflightSpawn(p, { model: opts.model, provider: opts.provider, tmuxSession: state.tmuxSession });
+	if (preflight.ok === false) {
+		// Discriminated union: TS narrows preflight to { ok: false; error: PreflightError } here.
+		const err: PreflightError = preflight.error;
+		throw new Error(formatPreflightError(err));
+	}
 	const roleKind = existing.roleKindExplicit ? existing.roleKind : undefined;
-	const r = await spawnAgent(pi, cwd, p, state, { id: agentId, role: existing.role, roleKind, model: opts.model || existing.model, provider: opts.provider || existing.provider, initialPrompt: opts.initialPrompt });
-	await trace(p, "agent.restart.ok", { agentId, target: r.agent.tmuxTarget, killMethod: kill.method });
+	// Pool failover: if the caller signals the old slot failed (rotateFromSlot = slot key), or the
+	// recorded slot is currently benched, let spawnAgent re-pick from the pool instead of reusing it.
+	let model = opts.model;
+	let provider = opts.provider;
+	if (!model) {
+		const status = await poolStatus(p);
+		const benched = status.slots.find((s) => s.model === existing.model && (s.provider || "(default)") === (existing.provider || "(default)"));
+		if (benched && (opts.rotateFromSlot || benched.inCooldown)) {
+			const picked = await pickSlot(p, { stickyKey: agentId, avoidKey: benched.key });
+			if (picked) {
+				model = picked.slot.model;
+				provider = picked.slot.provider || currentProvider(picked.slot.model);
+				await trace(p, "pool.failover", { agentId, from: benched.key, to: `${provider}/${model}`, reason: picked.reason }).catch(() => {});
+			}
+		}
+	}
+	// isNewRecord:false because restart reuses an existing record (existing.status was set to
+	// "stopped" above so the spawn guard accepts the overwrite). The orphan-watch watchdog must NOT
+	// fire on a restart — the agent was already known to other agents and has a durable id.
+	const r = await spawnAgent(pi, cwd, p, state, { id: agentId, role: existing.role, roleKind, model, provider, initialPrompt: opts.initialPrompt, isNewRecord: false });
+	await trace(p, "agent.restart.ok", { agentId, target: r.agent.tmuxTarget, killMethod: kill.method, model: r.agent.model, provider: r.agent.provider });
 	return { kill, ...r };
 }
 
@@ -344,26 +515,121 @@ export function attachTarget(agent: SwarmAgent) {
 	};
 }
 
-export async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: { roleKind?: string; capabilities?: string[]; requireIdle?: boolean; requireTmuxAlive?: boolean; includeBusy?: boolean }): Promise<{ matches: ReusableAgentMatch[]; recommended?: string }> {
+// Same-task active-lease guard (roadmap issue 10): when the caller passes `excludeTaskId`,
+// skip an agent that is ALREADY actively working on that task. An agent that has settled
+// (runtimeStatus === "idle") with a stale activeTaskIds pointer is OK — the existing
+// reclaim path (reconcile, /swarm release) handles that, not the reuse predicate. The
+// carve-out prevents churn when a worker briefly settles between tool calls and the
+// reuse lookup misroutes around it.
+type MatchOpts = {
+	roleKind?: string;
+	capabilities?: string[];
+	requireIdle?: boolean;
+	requireTmuxAlive?: boolean;
+	includeBusy?: boolean;
+	excludeTaskId?: string;
+	// Escape-hatch: an exact agentId bypasses the role-kind + active-lease gate. Used by
+	// swarm_assign_task(agentId=...) to honor an explicit caller request even when reuse
+	// would otherwise skip the agent. We do NOT honor escape-hatch capabilities here — the
+	// caller passes them through normal opts.capabilities.
+	agentId?: string;
+};
+
+// Pure predicate: no I/O, no tmux probes. Given the live SwarmState and an options object,
+// returns every agent that COULD match the reuse contract (excluding runtime liveness). The
+// wrapper `findReusableAgent` runs this, then enriches each match with `tmuxAlive` for the
+// scoring sort. Extracted so the reuse-misroute test can exercise the role-kind /
+// active-lease / escape-hatch rules directly without a mock pi.
+export function matchReusableAgents(st: SwarmState, opts: MatchOpts = {}): ReusableAgentMatch[] {
 	const wantKind = opts.roleKind;
 	const wantCaps = new Set((opts.capabilities || []).map((c) => c.toLowerCase()));
+	const escapeAgentId = opts.agentId ? safeId(opts.agentId) : undefined;
+	const excludeTaskId = opts.excludeTaskId;
+	const hasCapsRequest = wantCaps.size > 0;
 	const matches: ReusableAgentMatch[] = [];
 	for (const agent of Object.values(st.agents)) {
 		if (agent.id === "orchestrator") continue; // never reuse the human-driven orchestrator
 		ensureAgentDefaults(agent);
 		if (agent.paused) continue; // paused/drain: parked but not killed — excluded from the reuse pool
-		if (wantKind && agent.roleKind !== wantKind) continue;
-		if (wantCaps.size && !agent.capabilities.map((c) => c.toLowerCase()).some((c) => wantCaps.has(c))) continue;
+		// Escape-hatch (Issue 10 §3.2 step 3): an explicit agentId bypasses the role-kind check AND
+		// the same-task active-lease guard AND the includeBusy / maxConcurrentTasks cap so a
+		// deliberate caller request always wins. Paused + responseMissing are still hard-excluded
+		// (safety invariants, not reuse-policy gates).
+		const isEscape = escapeAgentId !== undefined && escapeAgentId === agent.id;
+		// Re-derive the agent's role-kind so a stale or never-set roleKind field cannot drift
+		// matching. The OR with the recorded roleKind field catches two cases:
+		//   (a) stale roleKind on a pinned agent (re-derive wins)
+		//   (b) substring collision (e.g. `plan-reviewer` roleKind="reviewer" field, but the
+		//       inferred kind from id is "planner" — for `planner` reuse this agent must NOT be
+		//       selected; for `reviewer` reuse the field matches AND the inference also matches,
+		//       so it stays a valid match)
+		const rederived = inferRoleKind(agent.id, agent.role);
+		// Capability match (escape-hatch #2): at least one of the requested capabilities is
+		// present. Capabilities are an additive escape-hatch that BYPASSES the role-kind check
+		// (so a tester with `review` capability can fill a reviewer-kind request) but does NOT
+		// bypass paused / responseMissing / same-task active-lease guard (caller safety).
+		const capsMatch = hasCapsRequest && agent.capabilities.map((c) => c.toLowerCase()).some((c) => wantCaps.has(c));
+		let matchKind: "exact" | "substring-collapsed" | "fallback" | undefined;
+		if (isEscape) {
+			matchKind = "fallback";
+		} else if (wantKind) {
+			const fieldMatches = agent.roleKind === wantKind;
+			const inferredMatches = rederived === wantKind;
+			if (fieldMatches && inferredMatches) {
+				matchKind = "exact";
+			} else if (fieldMatches && !inferredMatches) {
+				matchKind = "substring-collapsed";
+			} else if (!fieldMatches && inferredMatches) {
+				matchKind = "exact";
+			} else {
+				// Neither field nor inferred matches the wanted kind. The agent may still match
+				// via the capabilities escape-hatch; if not, exclude below.
+				matchKind = capsMatch ? "fallback" : undefined;
+			}
+		} else {
+			matchKind = capsMatch ? "fallback" : undefined;
+		}
+		if (!matchKind) continue;
+		// Same-task active-lease guard: skip if the agent currently has an active lease on
+		// excludeTaskId AND is not idle. The idle carve-out lets reclaim handle stale pointers
+		// instead of duplicating the reclaim logic here. Escape-hatch bypasses this guard.
+		if (!isEscape && excludeTaskId && agent.activeTaskIds.includes(excludeTaskId) && agent.runtimeStatus !== "idle") continue;
 		const responseMissing = responseMissingRecords(st, agent.id).length;
 		if (responseMissing > 0) continue;
 		const idle = agent.runtimeStatus === "idle";
 		if (opts.requireIdle && !idle) continue;
-		if (!opts.includeBusy && !idle && agent.activeTaskIds.length >= agent.maxConcurrentTasks) continue;
-		const tmuxAlive = agent.tmuxTarget && agent.tmuxTarget !== "unknown" ? await isTmuxRunning(pi, agent.tmuxTarget) : false;
+		// Escape-hatch bypasses the includeBusy + maxConcurrentTasks cap so the caller request
+		// always wins (the caller has explicit information about the agent it wants).
+		if (!isEscape && !opts.includeBusy && !idle && agent.activeTaskIds.length >= agent.maxConcurrentTasks) continue;
+		matches.push({ agentId: agent.id, roleKind: agent.roleKind, runtimeStatus: agent.runtimeStatus, health: agent.health, tmuxAlive: false, activeTaskIds: agent.activeTaskIds, capabilities: agent.capabilities, matchKind });
+	}
+	return matches;
+}
+
+export async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: MatchOpts & { isTmuxAlive?: (agent: SwarmAgent) => Promise<boolean> }): Promise<{ matches: ReusableAgentMatch[]; recommended?: string }> {
+	// The pure predicate does the role-kind + active-lease + escape-hatch work; we layer
+	// tmux liveness on top via the optional `isTmuxAlive` adapter (default: real tmux probe).
+	// This split lets `matchReusableAgents` be unit-tested without a mock pi.
+	const isAlive = opts.isTmuxAlive || (async (agent: SwarmAgent) => agent.tmuxTarget && agent.tmuxTarget !== "unknown" ? await isTmuxRunning(pi, agent.tmuxTarget) : false);
+	const candidates = matchReusableAgents(st, opts);
+	const matches: ReusableAgentMatch[] = [];
+	for (const m of candidates) {
+		const agent = st.agents[m.agentId];
+		if (!agent) continue;
+		const tmuxAlive = await isAlive(agent);
 		if (opts.requireTmuxAlive && !tmuxAlive) continue;
-		matches.push({ agentId: agent.id, roleKind: agent.roleKind, runtimeStatus: agent.runtimeStatus, health: agent.health, tmuxAlive, activeTaskIds: agent.activeTaskIds, capabilities: agent.capabilities });
+		matches.push({ ...m, tmuxAlive });
 	}
 	const score = (m: ReusableAgentMatch) => (m.runtimeStatus === "idle" ? 0 : 1) + (m.health === "healthy" ? 0 : 2) + (m.tmuxAlive ? 0 : 4) + m.activeTaskIds.length;
 	matches.sort((a, b) => score(a) - score(b));
+	// reuse.match_kind trace (roadmap issue 10): surface every substring-collapsed or fallback
+	// match so callers/ops can audit why a non-exact match was selected. Pure informational;
+	// never mutates state. Uses st.cwd to derive paths — every caller holds the same cwd via
+	// ctx.cwd, so this is consistent.
+	try {
+		const p = paths(st.cwd);
+		const kinds = matches.reduce<Record<string, number>>((acc, m) => { acc[m.matchKind || "exact"] = (acc[m.matchKind || "exact"] || 0) + 1; return acc; }, {});
+		await trace(p, "reuse.match_kind", { roleKind: opts.roleKind || null, excludeTaskId: opts.excludeTaskId || null, counts: kinds, recommended: matches[0]?.agentId || null }).catch(() => {});
+	} catch { /* trace is informational; never fail reuse on it */ }
 	return { matches, recommended: matches[0]?.agentId };
 }

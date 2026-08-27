@@ -1,12 +1,91 @@
 # Swarm tooling reference
 
-This page groups the public swarm surface by purpose. It is intentionally shorter than the full legacy reference.
+This is the public reference for the swarm extension's **31 registered `swarm_*`
+tools** and `/swarm` command surface. It describes the source-of-truth runtime
+behavior in `extensions/swarm/`; it is not a promise that a role instruction in
+an identity card is an authorization boundary.
 
-For full parameter-by-parameter details, see [`../swarm.md`](../swarm.md).
+For lifecycle and runtime-file concepts, read [architecture](./architecture.md)
+and [operations](./operations.md). For task-graph semantics, read
+[`../swarm-task-graph.md`](../swarm-task-graph.md).
+
+> **Note:** task artifacts and `task.json.sharedContext` remain supported and are
+durable task-graph state. The removed metric/run/memory/iteration/loop subsystem
+was a separate persistence layer and is no longer part of the core surface.
+
+## Tool inventory
+
+| Domain | Count | Registration module |
+| --- | ---: | --- |
+| Agent lifecycle, observability, and recovery | 17 | `src/tools/agents.ts` |
+| Messaging and reconcile | 5 | `src/tools/messages.ts` |
+| Task graph | 8 | `src/tools/tasks.ts` |
+| Retention / garbage collection | 1 | `src/tools/gc.ts` |
+| **Total** | **31** | `extensions/swarm/index.ts` |
+
+## Identity, visibility, and authority
+
+### Tool visibility
+
+A session resolves to one of three identities:
+
+- **Guest**: neither `PI_SWARM_AGENT_ID` nor `PI_SWARM_IS_ORCHESTRATOR` is set.
+  All `swarm_*` tools are removed from its active tool set. Built-in tools are
+  unaffected.
+- **Registered agent**: `PI_SWARM_AGENT_ID=<id>` is set. All 31 swarm tools are
+  active.
+- **Orchestrator**: `PI_SWARM_IS_ORCHESTRATOR=1` is set, or the agent id is
+  explicitly `orchestrator`. All 31 swarm tools are active.
+
+This is identity gating implemented with `pi.setActiveTools` in
+`extensions/swarm/src/tools/gating.ts`. The `/swarm` command remains available
+for guests so an operator can use `/swarm register here <role>` and re-enable
+swarm tools in-process.
+
+### Important authority caveat
+
+Visibility is identity-based (see above) but several destructive tools also enforce
+server-side authority at execution time. As of Issue 10 the destructive subset
+(`swarm_prune`, `swarm_gc`, `swarm_assign_task`, `swarm_update_task(force=true)`,
+`swarm_update_task(cancelTask=true)`, `swarm_stop_agent`, `swarm_release_agent_task`)
+rejects non-orchestrator callers with `ORCHESTRATOR_AUTHORITY_REQUIRED` (or the
+specialized `FORCE_FORBIDDEN`/`CANCEL_FORBIDDEN` for the `force`/`cancelTask` paths
+on `swarm_update_task`) before any state mutation. Other swarm tools remain open to
+any registered agent and use the description / `promptGuidelines` as the contract.
+
+The following identity checks are also enforced today:
+
+- `swarm_ack_message` normally lets only the message recipient acknowledge a
+  message; the orchestrator may act on another recipient's message and may
+  waive a superseded assignment.
+- `swarm_update_task` normally requires the current agent to own the assigned
+  node.
+- Guest sessions do not receive swarm tools through normal model tool
+  visibility.
+
+### Destructive or high-impact operations
+
+Run these from the orchestrator after inspecting state first:
+
+- process/pane control: `swarm_spawn_agent`, `swarm_register_agent`,
+  `swarm_stop_agent`, `swarm_restart_agent`, `swarm_set_role`,
+  `swarm_send_keys`;
+- global state mutation: `swarm_assign_task`, `swarm_update_task(force=true)`,
+  `swarm_reconcile(mark=true)`, `swarm_prune`, `swarm_gc(dryRun=false)`;
+- destructive task cancellation: `swarm_update_task(cancelTask=true, force=true)`.
+
+Both `swarm_prune` and `swarm_gc` are orchestrator-only after Issue 10 (server-side
+`requireOrchestratorAuthority`); other listed tools are operator-led by description
+but not currently hard-gated. Prefer the non-mutating inspection tool before every
+one of these operations.
 
 ## `/swarm` commands
 
-### Setup and visibility
+Use slash commands for short human-driven operations. Use tools when an agent
+needs structured parameters or machine-readable results.
+
+### Setup and inspection
+
 - `/swarm init`
 - `/swarm status`
 - `/swarm list`
@@ -14,17 +93,11 @@ For full parameter-by-parameter details, see [`../swarm.md`](../swarm.md).
 - `/swarm trace`
 - `/swarm capture <id>`
 - `/swarm graph <task-id> [text|mermaid|json]`
+- `/swarm flow <task-id> [--events N]` — read-only task graph, agent lanes, and
+  recent events; opens an interactive Flow dialog in TUI mode.
 
-### Grouped slash-command aliases
-These are thin aliases over the same `/swarm` handlers; they do not introduce a second code path.
+### Lifecycle commands
 
-- `/swarm-agents list|status|spawn|register|panes|stop|restart|role|pause|resume|sendkey|attach|release|identity ...`
-- `/swarm-tasks list|graph|status|next|validate ...`
-- `/swarm-msg send <to> <message>`
-- `/swarm-loop status <task-id>`
-- `/swarm-loop plan <task-id> <summary...>`
-
-### Agent lifecycle
 - `/swarm spawn <id> [role]`
 - `/swarm register <here|tmux-target> <id> [role…] [flags]`
 - `/swarm stop <id> [--force] [--no-kill]`
@@ -34,110 +107,145 @@ These are thin aliases over the same `/swarm` handlers; they do not introduce a 
 - `/swarm sendkey <id> <keys…> [--literal] [--enter]`
 - `/swarm attach <id>`
 - `/swarm release <id> [<task-id>] [--force]`
-- `/swarm mailbox reset <id|here> --yes`
+- `/swarm mailbox reset <id|here> --yes` — emergency repair; archives the live
+  mailbox, clears the mailbox JSONL and its delivered ledger, but preserves
+  message records in `swarm-state.json`.
+- `/swarm send <to> <message>`
+- `/swarm attention [<#|task-id>]` — orchestrator-only, read-only durable recovery attention report
+  (task graph + assignment attempts + mailbox state; never tmux/pane state). Advisory only.
+- `/swarm remind <task-id> <node-id>` — orchestrator-only; the ONLY sending surface for the bounded
+  worker reminder. One per attempt, permanently; requires durable receipt ack (`seen`/`processing`),
+  the `REMINDER_NO_PROGRESS_MS` (60 min) no-progress interval, and the current active attempt.
+  `requiresAck:false`/`requiresResponse:false` — no ack/response debt; never mutates node state.
+- `/swarm pool list` — slot health + rotation status
+- `/swarm pool show` — full config view (pool OR implicit singleton fallback); never edits `.pi/settings.json`
+- `/swarm pool validate` — structural check (empty model, duplicates, bad weight, bad rotation); read-only
+- `/swarm pool help` — canonical pool format reference
+- `/swarm pool preview-preflight [model] [provider]` — dry-run the spawn gate; reports classified errors before commit
+- `/swarm pool cooldown <provider/model> <ms>` / `/swarm pool clear <provider/model>` — manual bench control
 
-### Loop planning
-- `/swarm loop status <task-id>`
-- `/swarm loop plan <task-id> <summary…>`
+### Grouped aliases
 
-## Guest tool visibility (identity gating)
+The aliases below use the same command handlers; they do not create another
+state or authorization path.
 
-A session that neither sets `PI_SWARM_AGENT_ID` nor opts in as the orchestrator resolves to the
-anonymous `swarm-guest` identity. Such a guest is a plain coding session — it does **not** expose the
-swarm tool surface to the model. Tool visibility is identity-gated at runtime via `pi.setActiveTools`
-(see `extensions/swarm/src/tools/gating.ts`), not by conditional registration: every tool still
-registers unconditionally, but the active set is toggled by identity in `session_start`.
+- `/swarm-agents list|status|spawn|register|panes|stop|restart|role|pause|resume|sendkey|attach|release|mailbox|identity ...`
+- `/swarm-tasks list|graph|status|next|validate ...`
+- `/swarm-msg send <to> <message>`
 
-- **Guest** (`swarm-guest`): all `swarm_*` tools are removed from the active set (their definitions and
-  `promptGuidelines` disappear from the system prompt). Built-in/non-swarm tools are untouched.
-- **Registered agent** (`PI_SWARM_AGENT_ID=<id>`) and **orchestrator** (`PI_SWARM_IS_ORCHESTRATOR=1`):
-  swarm tools are ensured present in the active set.
-- **Opt-in escape hatch**: the `/swarm` slash command is unaffected by tool gating, so a guest can still
-  run `/swarm register here <role>` (or `/swarm register here orchestrator`). That command adopts the
-  identity in-process and re-applies gating, so the swarm tools re-appear immediately for the next turn
-  — no `/reload` needed.
+## Agent lifecycle, observability, and recovery (17)
 
-Gating is idempotent and never adds/removes non-swarm tools. It is advisory: a failure to read/set the
-active set is swallowed rather than failing the session.
+| Tool | What it does | Key inputs / operating notes |
+| --- | --- | --- |
+| `swarm_agent_status` | Reports lifecycle, tmux liveness, health, active work, and mailbox counters. | Optional `agentId`. First call when diagnosing a worker. |
+| `swarm_list_agents` | Lists persisted agent records, targets, models, roles, and mailboxes. | Read-only. Verify an id before sending or changing it. |
+| `swarm_spawn_agent` | Starts a fresh pi worker in a swarm tmux window. | `role` required; optional `id`, `roleKind`, model/provider, initial prompt. Uses configured model pool/defaults. |
+| `swarm_register_agent` | Adopts or retargets an existing tmux pane. | `tmuxTarget` and `role` required. Cannot register the reserved `orchestrator` id through this tool. |
+| `swarm_stop_agent` | Marks an agent stopped and normally kills its pane/window. | Refuses active work unless `force=true`; use `killPane=false` to keep the pane. |
+| `swarm_restart_agent` | Stops then respawns at the same stable id. | Preserves mailbox and identity history; may release active task pointers. Default kills the pane; pass `killPane=false` to keep it alive (the agent record still flips to `running`). The freshly started pi reuses the same id, mailbox, and identity. |
+| `swarm_set_role` | Changes role, role kind, and capabilities; regenerates identity. | At least one of role, role kind, or capabilities is required. |
+| `swarm_set_agent_paused` | Drains an agent from reuse without killing it. | `paused=true` prevents assignment selection; `false` resumes. |
+| `swarm_send_keys` | Sends raw tmux keys to a registered pane. | Escape hatch for interrupt/dismiss/type. Use `literal` and `enter` deliberately. The tool refuses to send keys if the resolved tmux target equals the orchestrator record's `tmuxTarget` (typically `"unknown"`), throwing `ORCHESTRATOR_PANE_REJECTED`. This is a principle-based guard: it fires on target equality, not on `agentId`, so it stays correct if any agent's record is ever mis-stamped to the orchestrator's target. |
+| `swarm_attach_agent` | Returns tmux attach/select commands for a pane. | Read-only convenience output. |
+| `swarm_release_agent_task` | Removes stale `activeTaskIds` pointers. | Only terminal/missing task pointers are released unless `force=true`; does not change task nodes. |
+| `swarm_agent_identity` | Reads or regenerates an effective agent identity card. | Optional `agentId`, `refresh`; generated card plus optional override. |
+| `swarm_reload_identity` | Rebuilds identity and asks a live pane to reread it. | Optional note; injection is best effort when pane is alive. |
+| `swarm_trace` | Reads structured swarm trace events. | Optional `limit`; inspect delivery/spawn failures. |
+| `swarm_capture_agent_pane` | Captures pane history to `.pi/swarm/traces/tmux/`. | `agentId` required; use for runtime evidence/debugging. |
+| `swarm_dead_letters` | Lists terminal delivery failures. | Optional recipient/message filters and limit. |
+| `swarm_prune` | Marks dead panes stopped and can remove old stopped records. | **Orchestrator-only** (server-side `requireOrchestratorAuthority`); defaults to `dryRun=true`; run dry first. Does not delete mailboxes/traces. |
 
-## Tool groups
+## Messaging and reconcile (5)
 
-### Agent lifecycle tools
-Use for spawn/adopt/restart/role control.
+| Tool | What it does | Key inputs / operating notes |
+| --- | --- | --- |
+| `swarm_send_message` | Appends a durable message and attempts tmux injection. | `to`, `body`; use `requiresResponse=true` for result-bearing work and `idempotencyKey` for retries. |
+| `swarm_check_mailbox` | Reads a mailbox, defaulting to the caller's identity. | Optional `pendingOnly`, `markDelivered`, `limit`. Do not poll another agent's mailbox as a substitute for a handoff. |
+| `swarm_ack_message` | Records `seen`, `processing`, `done`, or `failed`. | A `requiresResponse` message needs a validated result message before `done`. ACK is lifecycle state, not the work result. |
+| `swarm_message_status` | Shows delivery/ACK/response lifecycle records. | Filter by message, recipient, or lifecycle status. |
+| `swarm_reconcile` | Repairs delivery visibility and surfaces/stamps task drift or staleness. | Scope by `agentId` for mailbox-only sweep. Prefer `dryRun=true`; `mark=true` persists derived task-status repairs. It never auto-fails a node. |
 
-- `swarm_spawn_agent`
-- `swarm_register_agent`
-- `swarm_list_agents`
-- `swarm_agent_status`
-- `swarm_stop_agent`
-- `swarm_restart_agent`
-- `swarm_set_role`
-- `swarm_set_agent_paused`
-- `swarm_send_keys`
-- `swarm_attach_agent`
-- `swarm_release_agent_task`
-- `swarm_agent_identity`
-- `swarm_reload_identity`
+### Message completion protocol
 
-`/swarm mailbox reset <id|here> --yes` is a **human-initiated emergency repair command**. It archives the current mailbox file under `.pi/swarm/traces/mailbox-resets/`, clears the live mailbox JSONL, and clears the `delivered[agentId]` ledger. It does **not** delete message records from `swarm-state.json`; follow with `/reload` or a session restart if the pane was stuck on mailbox parse errors. `here` resolves the current pane's swarm identity and refuses when the pane is not adopted as a swarm agent/orchestrator.
+For an assignment or any message requiring a response:
 
-### Messaging and delivery tools
-Use for mailbox coordination, ack tracking, and repair.
+1. recipient calls `swarm_ack_message(..., status="seen"|"processing")`;
+2. recipient performs work and sends a result with `swarm_send_message` using
+   `replyTo=<original-message-id>`, or uses `swarm_task_message`;
+3. recipient calls `swarm_ack_message(..., status="done",
+   resultMessageId=<result-message-id>)`.
 
-- `swarm_send_message`
-- `swarm_check_mailbox`
-- `swarm_ack_message`
-- `swarm_message_status`
-- `swarm_reconcile`
-- `swarm_dead_letters`
-- `swarm_trace`
-- `swarm_capture_agent_pane`
-- `swarm_prune` (admin cleanup)
+If the original delivery had already failed tmux injection, a later `processing`
+ACK still moves the message into the response-tracked recovery path; it is not
+considered resolved until `done` includes a verified result message. This
+preserves a durable response link and prevents a completed ACK from being
+mistaken for an actual work result.
 
-### Task graph tools
-Use for durable graph execution and handoff.
+## Task graph tools (8)
 
-- `swarm_create_task`
-- `swarm_task_status`
-- `swarm_validate_graph`
-- `swarm_print_graph`
-- `swarm_next_nodes`
-- `swarm_assign_task`
-- `swarm_update_task`
-- `swarm_task_message`
+`task.json` is the source of truth. Use graph tools for workflow state; use
+mail tools for discussion without advancing a graph.
 
-Detailed semantics live in [`../swarm-task-graph.md`](../swarm-task-graph.md).
+| Tool | What it does | Key inputs / operating notes |
+| --- | --- | --- |
+| `swarm_create_task` | Creates a durable graph, task markdown, event stream, and artifact directory. | `title`, `goal`; supports feature-dev defaults or custom `nodes`, `edges`, gates, allowed files, validation commands, and shared context. |
+| `swarm_task_status` | Summarizes task/node/gate state. | Set `includeArtifacts=true` and/or `runtime=true` for evidence and liveness warnings. |
+| `swarm_validate_graph` | Validates graph structure and optionally runtime consistency. | Supply `taskId` or direct task file path; `runtime=true` checks agents/messages. |
+| `swarm_print_graph` | Prints text, Mermaid, or JSON graph view. | Select `format=text|mermaid|json`. Read-only. |
+| `swarm_next_nodes` | Computes ready/current nodes and suggests reusable agents. | Read-only; `autoAssign` is reserved and does not mutate. |
+| `swarm_assign_task` | Assigns a ready node, updates assignment bookkeeping, and delivers an assignment message. | `taskId`, `nodeId`; optional exact agent, `autoSpawn`, isolated spawn, and reply target. Orchestrator operation. Runs the file-scope ownership preflight: an overlapping active write scope across any task fails atomically with `ACTIVE_SCOPE_CONFLICT` (no state mutated). |
+| `swarm_update_task` | Updates an assigned node, outcome, evidence artifact, gates, or shared context. | Normal path requires the assigned agent and legal lifecycle transition. `done` with outgoing edges requires a matching `outcome`. `force=true` and `cancelTask` are **orchestrator-only** (server-side identity check; a non-orchestrator caller is rejected with `FORCE_FORBIDDEN` / `CANCEL_FORBIDDEN` before any mutation). `cancelTask=true` (with force) cancels the whole task: revokes every active attempt, transitions non-terminal nodes to `cancelled`, supersedes every assignment message, and releases agent `activeTaskIds` + advisory edit locks. A cancelled task rejects all later updates with `TASK_CANCELLED` (or `NODE_CANCELLED`) even from the orchestrator — re-open is a separately-designed policy. After cancellation, later ACKs on superseded assignment records are rejected with `ASSIGNMENT_SUPERSEDED`. |
+| `swarm_task_message` | Sends a task-scoped handoff/discussion and records it. | `taskId`, `fromNode`, `to`, `body`; optional target node and artifact refs. It does **not** advance a node. |
 
-### Metric / memory / iteration tools
-Use for evidence-backed optimization workflows.
+### Normal graph execution
 
-- `swarm_metric_define`
-- `swarm_metric_get`
-- `swarm_run_record`
-- `swarm_run_get`
-- `swarm_run_compare`
-- `swarm_memory_propose`
-- `swarm_memory_search`
-- `swarm_memory_accept`
-- `swarm_iteration_create`
-- `swarm_iteration_record`
-- `swarm_iteration_status`
-- `swarm_iteration_context`
+1. Orchestrator creates a task with `swarm_create_task`.
+2. Inspect `swarm_next_nodes` and assign a ready node with `swarm_assign_task`.
+3. Assignee acknowledges the delivery, performs the work, and calls
+   `swarm_update_task` for its own node.
+4. Orchestrator inspects `swarm_next_nodes` again and assigns the newly-ready
+   work.
+5. Use `swarm_task_status(runtime=true)`, `swarm_validate_graph`, then
+   `swarm_reconcile(dryRun=true)` if execution stalls.
 
-Detailed semantics live in [`../swarm-memory.md`](../swarm-memory.md) and [`../swarm-new-project-setup.md`](../swarm-new-project-setup.md).
+Read [`../swarm-task-graph.md`](../swarm-task-graph.md) for branch outcomes,
+gates, closure, and rework semantics.
 
-### Loop tools
-Use for the opt-in V1.5 post-close proposal loop.
+## Retention / garbage collection (1)
 
-- `swarm_loop_status`
-- `swarm_loop_plan`
+| Tool | What it does | Key inputs / operating notes |
+| --- | --- | --- |
+| `swarm_gc` | Prunes only terminal messages beyond a retained recent window and caps delivered ledgers. | **Orchestrator-only** after Issue 10. Defaults to `dryRun=true`; use `keepMessages` to retain the newest messages. It never drops queued, injected, failed, or ACK-incomplete messages. |
 
-Detailed semantics live in [`../swarm-task-graph.md`](../swarm-task-graph.md#task-graph-iteration-proposal-loop-v15).
+`swarm_gc` is bounded maintenance, not an incident-repair tool. Use
+`swarm_reconcile` first when delivery or task state is actionable.
 
-## Which surface to use
+## Recommended operating paths
 
-- Use `/swarm ...` for quick human-driven TUI operations.
-- Use tools for structured automation and richer parameters.
-- Use task tools for durable workflow state.
-- Use message tools for discussion/handoff without advancing graph state.
-- Use reconcile before manual repair.
+### A worker received an assignment
+
+1. `swarm_check_mailbox(pendingOnly=true)`.
+2. `swarm_ack_message(status="processing")`.
+3. Read assignment task/artifacts and work only within the node's declared
+   boundaries.
+4. Send a result message or task handoff.
+5. `swarm_update_task` only for the caller's assigned node.
+6. `swarm_ack_message(status="done", resultMessageId=...)`.
+
+### Delivery is missing or a pane looks stuck
+
+1. `swarm_message_status` and `swarm_agent_status`.
+2. `swarm_capture_agent_pane` and inspect trace events.
+3. `swarm_reconcile(dryRun=true)`.
+4. Apply repair only after understanding the reported action; use
+   `swarm_reconcile(mark=true)` for status drift or lifecycle tools for a
+   confirmed dead pane.
+
+### A task is stalled
+
+1. `swarm_task_status(taskId, runtime=true)`.
+2. `swarm_validate_graph(taskId, runtime=true)`.
+3. `swarm_next_nodes(taskId)`.
+4. `swarm_reconcile(dryRun=true)`.
+5. Use `swarm_release_agent_task` only after reconcile confirms stale task
+   pointers; reassign from the orchestrator.

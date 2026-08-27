@@ -1,5 +1,7 @@
 # Swarm multi-agent edge cases & risk analysis
 
+> **Legacy analysis.** This note was written against an older swarm surface that included the experimentation subsystem and `loop.ts`. The current core no longer ships those tools or `/swarm loop`; keep this document only as historical risk analysis.
+
 Phân tích sâu dựa trên source `extensions/swarm/src/` (đọc trực tiếp: `agents.ts`, `mailbox.ts`, `delivery.ts`, `reconcile.ts`, `taskgraph.ts`, `loop.ts`, `hooks.ts`, `tmux.ts`, `state.ts`, `session.ts`, `constants.ts`, `gc.ts`). Mục tiêu: liệt kê các tình huống xấu khi **nhiều swarm agent chạy đồng thời**, xung đột tiềm năng, điểm nghẽn message, và rủi ro của tích hợp tmux — kèm mức độ nghiêm trọng và gợi ý mitigate.
 
 Mỗi mục có tham chiếu `file:line` (theo file tại thời điểm phân tích) để dễ truy ngược.

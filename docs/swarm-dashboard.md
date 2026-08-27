@@ -8,7 +8,7 @@ The generated page also includes a **floating outline** on wide screens and ever
 
 It prioritizes four sections: **per-iteration metric improvement**, **task-graph node flow**, **agent conversation**, and **inspector/raw details**, while still showing memory/evidence, runs, and trace events.
 
-Data loaders are shared with [`scripts/swarm_iteration_watch.sh`](../scripts/swarm_iteration_watch.py) (the text/Markdown reviewer), so the two tools reflect one data model.
+The dashboard reads the same `.pi/swarm` state files directly as the terminal reviewers and task UAT flows, so the visual and textual views stay aligned without a separate iteration watcher.
 
 ## Quick start
 
@@ -75,8 +75,8 @@ A sticky header shows a **mode/refresh banner** (`role=status`, `aria-live=polit
 
 ## Relationship to the other tools
 
-- `scripts/swarm_iteration_watch.sh` — text + Markdown/Mermaid **terminal** reviewer for the same state (live watch or one-shot). Use it in the terminal; use the dashboard for a visual/browser review.
-- `scripts/swarm_iteration_demo.sh` — creates isolated demo state you can point `--cwd` at.
+- Use terminal/task UAT flows for text-based review of the same swarm state; use the dashboard for a visual/browser review.
+- For isolated review data, point `--cwd` at a demo or test workspace such as `.pi/swarm-uat/runs/.../cwd`.
 
 ## Validation gates
 

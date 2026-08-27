@@ -1,12 +1,14 @@
 # Swarm setup for a new project: N-iteration loops, graph flow, and metric gates
 
-This guide is the concrete operator playbook for using pi-swarm in a new project when you want a bounded optimization loop:
+> **Legacy / archived guide.** This page documents the removed experimentation subsystem (`swarm_metric_*`, `swarm_run_*`, `swarm_memory_*`, `swarm_iteration_*`, and the former loop-oriented task-graph wrapper). The core swarm extension no longer ships those tools or `/swarm loop`; keep this page only as historical context and for reading old state files.
+
+This guide is the historical operator playbook for using pi-swarm in a new project when you want a bounded optimization loop:
 
 - define a project-specific metric/quality gate;
 - create a task graph that runs **N explicit iterations**;
 - record each candidate run with evidence;
 - carry active evidence-backed memory into the next iteration;
-- review the loop in the dashboard/watcher.
+- review the state in the dashboard; the former watcher flow is now archived.
 
 V1 intentionally has **no daemon and no native graph cycles**. A loop is either:
 
@@ -380,8 +382,8 @@ open dashboard.html
 Use:
 
 ```bash
-scripts/swarm_iteration_watch.sh --cwd . --once
-scripts/swarm_iteration_watch.sh --cwd . --format markdown --out review.md
+scripts/swarm_dashboard.sh --cwd . --once --out dashboard.html
+scripts/swarm_dashboard.sh --cwd . --task project-quality-loop-graph-001 --out dashboard.html
 ```
 
 The dashboard shows:
@@ -409,8 +411,4 @@ You must choose `N`, unroll the graph or repeat explicit iteration calls, and en
 
 ## 9. Task-graph iteration proposal loop (V1.5) — a different, opt-in loop
 
-This setup doc covers the **metric-contract** iteration loop (`swarm_iteration_*`), which optimizes runs against a metric. Separately, the swarm also has an **opt-in task-graph proposal loop** for a different need: after a task *closes terminal-done*, collect improvement proposals from a fixed agent pool and let the orchestrator synthesize the next plan.
-
-It is **opt-in per task** — set `loop.enabled = true` on `task.json` (via `swarm_create_task(loop: {...})`). Tasks without it are completely unaffected. There is no daemon and no automatic cycle; the orchestrator records the plan with `swarm_loop_plan` and the next iteration is a new task.
-
-See [Task-graph iteration proposal loop (V1.5)](swarm-task-graph.md#task-graph-iteration-proposal-loop-v15) for the full flow, file layout, and tools (`swarm_loop_status`, `swarm_loop_plan`, `/swarm loop`).
+This setup doc is preserved as a historical walkthrough for the **metric-contract** iteration loop (`swarm_iteration_*`). The former opt-in task-graph proposal loop was removed from the packaged swarm core and is no longer part of the supported surface.

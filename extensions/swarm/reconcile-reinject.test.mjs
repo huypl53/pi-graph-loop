@@ -10,6 +10,9 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const mod = await import(join(here, "index.ts"));
 const factory = mod.default;
+const { reconcile } = await import(join(here, "src/reconcile.ts"));
+const { pruneState } = await import(join(here, "src/gc.ts"));
+const { paths } = await import(join(here, "src/state.ts"));
 const scratch = join(tmpdir(), `swarm-reinject-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 mkdirSync(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
@@ -51,6 +54,36 @@ const { findIdempotentMessage } = await import(join(here, "src/mailbox.ts")).cat
 	writeFileSync(file, lines.join("\n") + "\n" + JSON.stringify({ id: "msg-new", from: "a", to: "orchestrator", body: "x", swarmId: "s", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date().toISOString(), requiresAck: true, headers: {} }) + "\n");
 	const b3 = await readMailboxCached(p, "orchestrator");
 	ok("cache invalidates on append", b3.length === 201 && b3 !== b1);
+}
+
+// --- TTL issue: actionable unacked messages must not dead-letter on expiry ---
+{
+	const stateFile = join(scratch, ".pi/swarm/swarm-state.json");
+	const old = new Date(Date.now() - 20 * 60_000).toISOString(); // old enough to trip TTL
+	const msgId = "msg-repro-ttl";
+	const state = {
+		version: 1, swarmId: "s", cwd: scratch, tmuxSession: "sess",
+		agents: {}, delivered: { orchestrator: [] },
+		messages: {
+			[msgId]: { id: msgId, from: "orchestrator", to: "worker-1", status: "queued", createdAt: old, updatedAt: old, attempts: 0, requiresAck: true, ttlMs: 1 },
+		},
+		createdAt: old, updatedAt: old,
+	};
+	writeFileSync(stateFile, JSON.stringify(state));
+
+	const pi = { exec: async () => ({ code: 1, stdout: "", stderr: "" }), sendMessage: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} };
+	const result = await reconcile(pi, scratch, paths(scratch), { dryRun: false, mark: false });
+	const after = JSON.parse(readFileSync(stateFile, "utf8"));
+	ok("ttl-expired actionable not dead_lettered", after.messages[msgId].status !== "dead_letter");
+	ok("ttl-expired actionable remains queued", after.messages[msgId].status === "queued");
+	ok("ttl-expired actionable ttl_stale surfaced", result.actions.some((a) => a.action === "ttl_stale"));
+
+	after.messages[msgId] = { ...after.messages[msgId], status: "acked", ackedAt: old, updatedAt: old, lastAck: { by: "worker-1", status: "done", at: old } };
+	writeFileSync(stateFile, JSON.stringify(after, null, 2));
+	const postAck = JSON.parse(readFileSync(stateFile, "utf8"));
+	const gcRes = pruneState(postAck, { keepMessages: 0 });
+	ok("acked done becomes removable after TTL defer", gcRes.removed === 1);
+	ok("acked done removed from state", !postAck.messages[msgId]);
 }
 
 // --- Issue A: reconcile re-injects injected-but-unacked (old) messages, bounded ---

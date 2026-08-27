@@ -17,14 +17,12 @@ Implementation modules:
 - `extensions/swarm/src/utils.ts` — pure helpers
 - `extensions/swarm/src/state.ts` — paths, locks, file IO, traces
 - `extensions/swarm/src/taskgraph.ts` — graph rules and closure logic
-- `extensions/swarm/src/metric.ts` — metric/run/memory/iteration logic
 - `extensions/swarm/src/delivery.ts` — message semantics and retryability
 - `extensions/swarm/src/session.ts` — orchestrator/model/session detection
 - `extensions/swarm/src/identity.ts` — generated identity cards and overrides
 - `extensions/swarm/src/tmux.ts` — tmux integration and pane capture
 - `extensions/swarm/src/mailbox.ts` — mailbox append/read helpers
 - `extensions/swarm/src/agents.ts` — lifecycle operations
-- `extensions/swarm/src/loop.ts` — V1.5 loop state
 - `extensions/swarm/src/reconcile.ts` — repair sweeps and PM notifications
 - `extensions/swarm/src/hooks.ts` — session hooks and mailbox pump
 - `extensions/swarm/src/command.ts` — `/swarm` command surface
@@ -56,7 +54,9 @@ Checklist:
 2. keep tool handlers thin; they should validate and delegate
 3. update task status/print/validation behavior as needed
 4. document branch/outcome semantics in `docs/swarm-task-graph.md`
-5. add scenario or regression coverage
+5. if the rule re-opens failed work via a declared `rework` edge, keep the reopened node state explicit (`ready`) rather than inventing a hidden reset path
+6. if the rule adds a forced/authoritative mutation, gate it through `isOrchestratorAuthority()` at the real mutation boundary — never trust caller-supplied parameters as authority
+7. add scenario or regression coverage
 
 ### If you add a new runtime file
 Checklist:
@@ -74,17 +74,45 @@ Checklist:
 - Do not handwave evidence rules for run/memory promotion.
 - Do not let `/swarm` command help become the only documentation of a feature.
 
+## Orchestrator-authoritative mutations
+
+Some mutations are only safe when the current identity is the active orchestrator leader.
+The check is two-part:
+
+1. **authority** — `isOrchestratorAuthority(currentAgentId())` must be true for the caller;
+2. **leadership** — the durable `SwarmState.orchestratorLeader` record must be claimed/heartbeated
+   by the current pid before the mutation proceeds.
+
+Apply the gate at the real mutation boundary, not just in UI wrappers.
+Create-only paths can materialize the orchestrator record without refreshing heartbeat; that is
+how a fresh PM session becomes visible without claiming extra authority.
+
+Required examples in this issue family:
+- `swarm_create_task`
+- `swarm_assign_task`
+- `swarm_stop_agent`
+- `swarm_release_agent_task`
+- `swarm_reconcile(mark=true)`
+- `swarm_prune` (Issue 10: added to the orchestrator-only set; previously description-only)
+- `swarm_gc` (Issue 10: added to the orchestrator-only set; previously description-only)
+- `/swarm stop`
+- `/swarm release`
+
 ## Where new code usually belongs
 
 | Change | Primary module(s) |
 | --- | --- |
 | spawn/restart/register/pause/role changes | `src/agents.ts`, `src/identity.ts`, `src/hooks.ts` |
+| model pool, rotation, preflight, config discoverability | `src/pool.ts` |
+| task cancellation / supersession / late-update fencing | `src/tools/tasks.ts`, `src/taskgraph.ts`, `src/mailbox.ts`, `src/types.ts` |
+| lifecycle-notification fencing (stall + closure predicates) | `src/taskgraph.ts` (predicates), `src/hooks.ts`, `src/reconcile.ts`, `src/command.ts`, `src/tools/tasks.ts` (emitter sites) |
 | mailbox append/read/inject/ack | `src/mailbox.ts`, `src/delivery.ts`, `src/reconcile.ts` |
 | graph transitions/closure/validation | `src/taskgraph.ts` |
 | slash command UX | `src/command.ts` |
-| metric/run/memory/iteration | `src/metric.ts` |
-| loop proposal planning | `src/loop.ts` |
 | paths/locks/traces/runtime layout | `src/state.ts` |
+| graph closure/ownership/evidence | `src/taskgraph.ts` |
+| message delivery and retries | `src/delivery.ts` |
+| agent lifecycle and tmux integration | `src/agents.ts`, `src/tmux.ts` |
 | tmux behavior | `src/tmux.ts` |
 
 ## Documentation update checklist
@@ -102,7 +130,7 @@ When you change behavior, update docs in this order:
 Preferred validation layers:
 - focused regression tests under `extensions/swarm/*.test.mjs` or `*.validate.mjs`
 - typecheck of `extensions/swarm/index.ts`
-- scenario scripts such as `scripts/swarm_task_uat.sh` or `scripts/swarm_iteration_demo.sh`
+- scenario scripts such as `scripts/swarm_task_uat.sh`
 - fresh interactive tmux/pi validation for extension behavior changes
 
 For docs-only changes, it is acceptable to skip interactive validation, but say so explicitly in the final report.

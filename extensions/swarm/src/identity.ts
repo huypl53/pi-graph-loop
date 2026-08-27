@@ -4,11 +4,50 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Paths, SwarmAgent, SwarmState } from "./types.ts";
-import { MEMORY_POLICY_DOC } from "./constants.ts";
-import { currentModel, currentProvider } from "./session.ts";
+import { ERR_ORCHESTRATOR_AUTHORITY_REQUIRED, ERR_ORCHESTRATOR_LEADER_DENIED, MEMORY_POLICY_DOC, ORCHESTRATOR_LEADER_STALE_MS } from "./constants.ts";
+import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { identityPath, mailboxPath, paths, trace } from "./state.ts";
 import { now, safeId } from "./utils.ts";
 import { tmux } from "./tmux.ts";
+
+// Centralized authority check used by every server-side mutation that depends on identity. Phase 1
+// deliberately keeps this strict (orchestrator-only); expanded admin roles live in a later roadmap
+// issue. Any tool that allows `force`/cancellation must consult this helper instead of trusting
+// caller-supplied parameters.
+export function isOrchestratorAuthority(agentId: string = currentAgentId()): boolean {
+	return agentId === "orchestrator";
+}
+
+export type OrchestratorLeaderState =
+	| { kind: "claimed"; leader: { pid: number; sessionStartedAt: string; claimedAt: string; lastHeartbeatAt: string; agentRecordId?: string }; ageMs: number }
+	| { kind: "stale"; leader: { pid: number; sessionStartedAt: string; claimedAt: string; lastHeartbeatAt: string; agentRecordId?: string }; ageMs: number }
+	| { kind: "vacant" };
+
+export function readOrchestratorLeader(st: SwarmState, nowMs: number): OrchestratorLeaderState {
+	const l = st.orchestratorLeader;
+	if (!l) return { kind: "vacant" };
+	const ageMs = nowMs - new Date(l.lastHeartbeatAt).getTime();
+	return ageMs > ORCHESTRATOR_LEADER_STALE_MS ? { kind: "stale", leader: l, ageMs } : { kind: "claimed", leader: l, ageMs };
+}
+
+export function claimOrchestratorLeader(st: SwarmState, nowMs: number, me: number) {
+	const cur = readOrchestratorLeader(st, nowMs);
+	if (cur.kind === "claimed" && cur.leader.pid !== me) return { kind: "denied" as const, currentLeader: cur.leader, ageMs: cur.ageMs };
+	const ts = new Date(nowMs).toISOString();
+	st.orchestratorLeader = { pid: me, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || ts, claimedAt: ts, lastHeartbeatAt: ts, agentRecordId: "orchestrator" };
+	return { kind: "claimed" as const, leader: st.orchestratorLeader };
+}
+
+export function heartbeatOrchestratorLeader(st: SwarmState, nowMs: number, me: number, _source: string) {
+	const cur = readOrchestratorLeader(st, nowMs);
+	if (cur.kind === "claimed" && cur.leader.pid !== me) throw new Error(`${ERR_ORCHESTRATOR_LEADER_DENIED}: live orchestrator leader pid=${cur.leader.pid} (heartbeat ${cur.ageMs}ms ago). Refusing to mutate from pid=${me}.`);
+	const ts = new Date(nowMs).toISOString();
+	st.orchestratorLeader = { pid: me, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || (cur.kind === "vacant" ? ts : cur.leader.sessionStartedAt), claimedAt: cur.kind === "vacant" ? ts : cur.leader.claimedAt, lastHeartbeatAt: ts, agentRecordId: "orchestrator" };
+}
+
+export function requireOrchestratorAuthority(me: string, action: string): void {
+	if (!isOrchestratorAuthority(me)) throw new Error(`${ERR_ORCHESTRATOR_AUTHORITY_REQUIRED}: ${action} requires orchestrator authority (caller=${me}).`);
+}
 
 // The orchestrator is a human-driven coordinating session with no dedicated swarm tmux pane.
 // Ensure it always has a routable pseudo-agent record + mailbox so swarm_send_message(to=orchestrator)

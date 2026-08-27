@@ -5,16 +5,18 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
 import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from "./tmux.ts";
-import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
+import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, checkStallNotificationStale, deriveNodeAttention, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
+import { buildFlowSnapshot } from "./observability.ts";
+import { openFlowDialog, pickFlowTask } from "./flow-dialog.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
-import { enqueueAndDeliver } from "./mailbox.ts";
-import { ensureDirs, identityPath, loopStateFile, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "./state.ts";
+import { enqueueAndDeliver, deliverMessageLocked, findIdempotentMessage } from "./mailbox.ts";
+import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
-import { loopStatusSnapshot, recordLoopPlan } from "./loop.ts";
-import { ensureOrchestrator, overridePath } from "./identity.ts";
+import { claimOrchestratorLeader, ensureOrchestrator, overridePath } from "./identity.ts";
 import { startOrchestratorPump } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
+import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError } from "./pool.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
@@ -39,9 +41,55 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 	return out;
 }
 
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|id> [runtime] | next <#|id> (ready nodes + suggested agent) | validate <#|id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | loop status <task-id> | loop plan <task-id> <summary>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight] | pool cooldown <slot> <ms> | pool clear <slot>";
 
-type ScopedSwarmCommandName = "swarm" | "swarm-agents" | "swarm-tasks" | "swarm-msg" | "swarm-loop";
+// Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
+// on-disk shape with the validation result so the show line never reports a stale `source`.
+type RawShape = ReturnType<typeof classifySwarmSettings>;
+function classificationShape(validation: { ok: boolean; shape: RawShape }, classified: RawShape): RawShape {
+	return validation.shape || classified;
+}
+
+// Canonical pool-help text — kept as a single constant so /swarm pool help, docs/swarm/operations.md,
+// and tests all reference the same source. Pure documentation, no mutation.
+const POOL_HELP_TEXT = `Model pool configuration (canonical format)
+
+{
+  "swarm": {
+    "modelPool": [
+      { "model": "gpt-5.4-mini", "provider": "openai", "weight": 50 },
+      { "model": "claude-sonnet-4", "provider": "anthropic", "weight": 30 },
+      { "model": "glm-5.1", "provider": "zai-coding-cn", "weight": 0 }
+    ],
+    "rotation": { "strategy": "weighted", "cooldownMs": 900000, "maxRetries": 2 }
+  }
+}
+
+Slot fields
+  model     required, non-empty string
+  provider  optional; defaults to provider registry
+  weight    non-negative number; default 1; 0 = fallback-only (used when all weighted slots are benched)
+
+Rotation fields
+  strategy     weighted | round-robin | sticky (default: weighted)
+  cooldownMs   bench duration after maxRetries failures (default: 900000 = 15min)
+  maxRetries   consecutive failures before bench (default: 2)
+
+Legacy singleton (still supported, observable as an implicit singleton pool):
+
+{
+  "swarm": {
+    "defaultModel": "glm-5.1",
+    "defaultProvider": "zai-coding-cn"
+  }
+}
+
+Top-level \`swarm\` is preferred; \`extensions.swarm\` is accepted for backward compatibility.
+
+Discover: /swarm pool show    Validate: /swarm pool validate    Preflight probe: /swarm pool preview-preflight
+See: docs/swarm/operations.md (Model pool configuration)`;
+
+type ScopedSwarmCommandName = "swarm" | "swarm-agents" | "swarm-tasks" | "swarm-msg";
 
 function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
 	switch (commandName) {
@@ -51,8 +99,6 @@ function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
 			return "Usage: /swarm-tasks <list|graph|status|next|validate> ...";
 		case "swarm-msg":
 			return "Usage: /swarm-msg send <to> <message>";
-		case "swarm-loop":
-			return "Usage: /swarm-loop <status|plan> <task-id> ...";
 		default:
 			return "Usage: /swarm ...";
 	}
@@ -74,7 +120,6 @@ function normalizeScopedSwarmArgs(commandName: ScopedSwarmCommandName, args: str
 		return null;
 	}
 	if (commandName === "swarm-msg") return cmd === "send" ? [cmd, ...rest].join(" ") : null;
-	if (commandName === "swarm-loop") return ["status", "plan"].includes(cmd) ? ["loop", cmd, ...rest].join(" ") : null;
 	return null;
 }
 
@@ -142,6 +187,66 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					await writeFile(outFile, `${out}\n`, "utf8");
 					await traceTask(tp, "task.print", { taskId: task.taskId, format });
 					ctx.ui.notify(`Wrote ${format} graph for #${hit.index} ${task.taskId} to ${relative(ctx.cwd, outFile)}`, "info");
+					return;
+				}
+				if (cmd === "flow") {
+					// Read-only observatory snapshot: task graph, agent lanes, and recent events.
+					// In TUI mode, /swarm flow opens the picker or dialog overlay. Non-TUI remains the
+					// existing text snapshot path for compatibility and tests.
+					const arg = rest.shift();
+					let events = 20;
+					let badFlag: string | null = null;
+					for (let i = 0; i < rest.length; i++) {
+						const t = rest[i];
+						if (t === "--events") {
+							const raw = rest[++i];
+							const n = Number(raw);
+							if (!raw || !Number.isInteger(n) || n <= 0) { badFlag = `Invalid --events value: ${raw ?? "(missing)"}`; break; }
+							events = Math.min(100, n);
+							continue;
+						}
+						badFlag = `Unknown flow flag: ${t}`;
+						break;
+					}
+					if (badFlag) { ctx.ui.notify(`${badFlag}\n\nUsage: /swarm flow <#|task-id> [--events N]`, "warning"); return; }
+					if (ctx.mode === "tui" && ctx.hasUI) {
+						if (!arg) {
+							// Picker: resolved + dialog opened inside openFlowPicker; returns selected task-id (best-effort).
+							const picked = await pickFlowTask(ctx, ctx.cwd, p);
+							if (!picked) return;
+							await openFlowDialog(ctx, ctx.cwd, p, picked.task, picked.tp, { eventLimit: events });
+							return;
+						}
+						const { hit, list, missReason, ambiguous } = await resolveTaskArg(p, arg);
+						if (!hit) {
+							const hint = ambiguous ? `Ambiguous "${arg}" matches: ${ambiguous.join(", ")}` : (missReason || "task not found");
+							ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
+							return;
+						}
+						await openFlowDialog(ctx, ctx.cwd, p, hit.task, hit.tp, { eventLimit: events });
+						return;
+					}
+					if (!arg) {
+						const list = await listTasksIndexed(p);
+						ctx.ui.notify(`${renderTasksIndexedList(list)}\n\nUsage: /swarm flow <#|task-id> [--events N]`, "info");
+						return;
+					}
+					const { hit, list, missReason, ambiguous } = await resolveTaskArg(p, arg);
+					if (!hit) {
+						const hint = ambiguous ? `Ambiguous "${arg}" matches: ${ambiguous.join(", ")}` : (missReason || "task not found");
+						ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
+						return;
+					}
+					const task = hit.task;
+					const tp = hit.tp;
+					const st = await readState(p, ctx.cwd);
+					const out = await buildFlowSnapshot(p, ctx.cwd, task, tp, st, events, hit.index);
+					const graphsDir = join(p.traces, "graphs");
+					await mkdir(graphsDir, { recursive: true });
+					const outFile = join(graphsDir, `${safeId(task.taskId)}.flow.txt`);
+					await writeFile(outFile, `${out}\n`, "utf8");
+					await traceTask(tp, "task.flow.read", { taskId: task.taskId, via: "command", events, index: hit.index });
+					ctx.ui.notify(`${out}\n\n#${hit.index} ${task.taskId} (written to ${relative(ctx.cwd, outFile)})`.slice(0, 4000), "info");
 					return;
 				}
 				if (cmd === "tasks") {
@@ -219,13 +324,153 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					for (const nodeId of actionable) {
 						const node = task.nodes[nodeId];
 						const kind = inferRoleKind(nodeId, node.role);
-						const found = await findReusableAgent(pi, st, { roleKind: kind, requireIdle: false, includeBusy: false });
+						const found = await findReusableAgent(pi, st, { roleKind: kind, requireIdle: false, includeBusy: false, excludeTaskId: task.taskId });
 						await trace(p, "agent.find", { taskId: task.taskId, nodeId, roleKind: kind, recommended: found.recommended });
 						lines.push(`  ${nodeId} (${node.role}) -> ${found.recommended || "(no reusable agent; spawn needed)"}`);
 					}
 					await traceTask(tp, "task.next_nodes", { taskId: task.taskId, ready: actionable, current, via: "command" });
 					ctx.ui.notify(lines.join("\n"), "info");
 					return;
+				}
+				if (cmd === "attention") {
+				// Orchestrator-gated, READ-ONLY recovery attention report (roadmap issue 5). Pure durable
+				// derivation from task graph + assignment attempts + mailbox state; never sends, never mutates.
+				if (currentAgentId() !== "orchestrator") {
+					ctx.ui.notify("attention is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+					return;
+				}
+				const arg = rest.shift();
+				const list = await listTasksIndexed(p);
+				const targets = arg ? (await resolveTaskArg(p, arg)) : { list };
+				if (arg && !targets.hit) {
+					const hint = targets.ambiguous ? `Ambiguous "${arg}" matches: ${targets.ambiguous.join(", ")}` : (targets.missReason || "task not found");
+					ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
+					return;
+				}
+				const scope = targets.hit ? [{ task: targets.hit.task, tp: targets.hit.tp }] : list.map((t) => ({ task: t.task, tp: t.tp }));
+				const st = await readState(p, ctx.cwd);
+				const nowMs = Date.now();
+				const lines: string[] = [arg ? `Attention report — task ${targets.hit!.task.taskId}` : `Attention report — ${scope.length} task(s)`];
+				let actionable = 0, reminders = 0, escalations = 0;
+				for (const { task, tp } of scope) {
+					const nodeLines: string[] = [];
+					for (const [nodeId, node] of Object.entries(task.nodes)) {
+						const att = deriveNodeAttention(st, task, nodeId, nowMs);
+						if (att.category === "none" || att.category === "terminal") continue;
+						if (att.workerReminderEligible) reminders++;
+						if (att.orchestratorDecision) escalations++;
+						actionable++;
+						nodeLines.push(`  ${nodeId} (${node.status}, assignee ${node.assignee || "-"}) → ${att.category}${att.workerReminderEligible ? ` — /swarm remind ${task.taskId} ${nodeId}` : ""}`);
+						for (const e of att.evidence) nodeLines.push(`      • ${e}`);
+					}
+					if (nodeLines.length) lines.push(``, `${task.taskId} (${task.status}):`, ...nodeLines);
+				}
+				lines.push("", `Summary: ${actionable} node signal(s); reminder-eligible: ${reminders}; orchestrator decisions: ${escalations}. Advisory only — nothing is auto-reassigned, cancelled, or completed.`);
+				await trace(p, "swarm.attention", { by: currentAgentId(), tasks: scope.length, actionable, reminders, escalations });
+				ctx.ui.notify(lines.join("\n"), "info");
+				return;
+				}
+				if (cmd === "remind") {
+				// Orchestrator-gated, the ONLY sending surface for bounded worker reminders (issue 5).
+				// Idempotent + attempt-fenced: at most one reminder per attempt, permanently; requires
+				// confirmed receipt (durable ack seen/processing) + no-progress interval; never mutates node
+				// status/outcome/readiness and creates no ack/response debt.
+				if (currentAgentId() !== "orchestrator") {
+					ctx.ui.notify("remind is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+					return;
+				}
+				const taskIdRaw = rest.shift();
+				const nodeId = rest.shift();
+				if (!taskIdRaw || !nodeId) { ctx.ui.notify("Usage: /swarm remind <task-id> <node-id> (orchestrator-only; see /swarm attention for eligibility)", "warning"); return; }
+				const taskId = safeId(taskIdRaw);
+				const tp = taskPaths(p, taskId);
+				if (!existsSync(tp.taskJson)) { ctx.ui.notify(`No task ${taskId}`, "warning"); return; }
+				const outcome = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					const nowMs = Date.now();
+					// Re-read under lock: the attempt may have been superseded while the operator typed.
+					const task = await readTaskState(tp.taskJson);
+					const node = task.nodes[nodeId];
+					if (!node) return { sent: false, reason: `node ${nodeId} does not exist in ${taskId}` };
+					const att = deriveNodeAttention(st, task, nodeId, nowMs);
+					if (att.category !== "reminder_eligible" || !att.workerReminderEligible) {
+						return { sent: false, reason: `not eligible: ${att.category} — ${att.evidence.join("; ")}` };
+					}
+					// Attempt-locality guard: receipt must be a durable processing/seen ack on the CURRENT
+					// assignment message. A prior (superseded) attempt's acked message is not receipt of the
+					// current assignment, and handoff traffic is not assignment traffic.
+					const currentMsg = st.messages[node.assignmentMessageId!];
+					if (!currentMsg || !(currentMsg.lastAck?.status === "seen" || currentMsg.lastAck?.status === "processing")) {
+						return { sent: false, reason: `not eligible: receipt not confirmed on current assignment ${node.assignmentMessageId} (lastAck ${currentMsg?.lastAck?.status || "none"})` };
+					}
+					const attemptId = node.activeAttemptId as string;
+					const attempt = (node.attemptHistory || []).find((a: any) => a.attemptId === attemptId);
+					if (!attempt || attempt.status !== "active") return { sent: false, reason: `not eligible: attempt ${attemptId} is ${attempt?.status || "missing"}` };
+					const assignee = node.assignee || attempt.assignee;
+					if (!assignee) return { sent: false, reason: `not eligible: node ${nodeId} has no assignee` };
+					const msg = st.messages[node.assignmentMessageId!];
+					const anchorMs = Math.max(
+						msg?.lastAck?.at ? new Date(msg.lastAck.at).getTime() : 0,
+						node.lastActivityAt ? new Date(node.lastActivityAt).getTime() : 0,
+						attempt.lastActivityAt ? new Date(attempt.lastActivityAt).getTime() : 0,
+						new Date(attempt.assignedAt).getTime(),
+					);
+					// Idempotency fence: one reminder message per attempt, ever. Crash between the mailbox append
+					// and the task.json write is repaired here on the next invocation.
+					const key = `task:${taskId}:node:${nodeId}:attempt:${attemptId}:reminder`;
+					const existing = findIdempotentMessage(st, "orchestrator", assignee, key);
+					if (existing || attempt.reminder) {
+						const reminderId = attempt.reminder?.reminderId || existing?.id || "unknown";
+						let repaired = false;
+						if (!attempt.reminder && existing) {
+							// Crash repair: message exists durably but the attempt record was never written.
+							attempt.reminder = { reminderId, sentAt: existing.createdAt, messageId: existing.id, attemptId, noProgressSince: new Date(anchorMs).toISOString() };
+							repaired = true;
+							await writeTaskState(tp, task);
+						}
+						return { sent: false, reason: `already sent for attempt ${attemptId} (reminder message ${attempt.reminder?.messageId || existing?.id})`, repaired };
+					}
+					// Lifecycle-fencing (issue 9, site 9): per-node staleness check before emitting the reminder.
+					// Defense-in-depth (the reminder is already attempt-fenced and receipt-confirmed by the
+					// eligibility gate above). Suppresses reminders for nodes that have since become terminal,
+					// reassigned, or otherwise no longer match the assignee we're addressing.
+					const remindStaleCheck = checkStallNotificationStale(st, task, nodeId, assignee, Date.now());
+					if (remindStaleCheck.stale) {
+						await traceTask(tp, "notification.stale.suppressed", { site: "swarm_remind.reminder", taskId, nodeId, to: assignee, reason: remindStaleCheck.reason, evidence: remindStaleCheck.evidence });
+						return { sent: false, reason: `stale: ${remindStaleCheck.reason} (${remindStaleCheck.evidence.join("; ")})` };
+					}
+					// Send the reminder: informational only, no ack/response debt by construction.
+					const { msg: rmsg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, {
+						to: assignee,
+						subject: `Reminder: node ${nodeId} of ${taskId} awaiting progress`,
+						body: `You acknowledged the assignment for task ${taskId}, node ${nodeId} (${node.role}), but there has been no durable progress since ${new Date(anchorMs).toISOString()} (${Math.round((nowMs - anchorMs) / 60000)} minutes).\n\nRequired actions (choose one):\n1. If complete: swarm_update_task(taskId="${taskId}", nodeId="${nodeId}", status="done", outcome="<result>")\n2. If blocked: swarm_update_task(taskId="${taskId}", nodeId="${nodeId}", status="blocked", note="<reason>")\n3. If still working: continue, and update the node when finished.\n\nThis reminder is informational; it does not change your task status, assignment, or create any reply obligation. At most one reminder is sent per attempt.`,
+						requiresAck: false,
+						requiresResponse: false,
+						priority: "normal",
+						idempotencyKey: key,
+					});
+					// Persist the reminder record (message-first crash ordering: the idempotency key is the
+					// durable fence; a crash before this write is repaired above on the next invocation).
+					const taskNow = await readTaskState(tp.taskJson);
+					const attemptNow = (taskNow.nodes[nodeId].attemptHistory || []).find((a: any) => a.attemptId === attemptId);
+					if (attemptNow && !attemptNow.reminder) {
+						attemptNow.reminder = {
+							reminderId: rmsg.id,
+							sentAt: rmsg.createdAt,
+							messageId: rmsg.id,
+							attemptId,
+							noProgressSince: new Date(anchorMs).toISOString(),
+						};
+						await writeTaskState(tp, taskNow);
+					}
+					// Persist the message record/delivery mutation (deliverMessageLocked mutates st in memory only).
+					await writeState(p, st);
+					await traceTask(tp, "reminder.sent", { taskId, nodeId, attemptId, messageId: rmsg.id, assignee, anchor: new Date(anchorMs).toISOString(), injected: Boolean(delivery?.delivered) });
+					return { sent: true, messageId: rmsg.id, attemptId, assignee, injected: Boolean(delivery?.delivered) || delivery?.reused === true, reason: delivery?.reason };
+				});
+				if (outcome.sent) ctx.ui.notify(`Reminder sent: message ${outcome.messageId} → ${outcome.assignee} (attempt ${outcome.attemptId}; injected=${outcome.injected}). Informational only; one per attempt, ever.`, "info");
+				else ctx.ui.notify(`Reminder NOT sent: ${outcome.reason}${outcome.repaired ? " (crash-repaired the attempt reminder record)" : ""}`, "warning");
+				return;
 				}
 				if (cmd === "validate") {
 					// Structural + optional runtime validation. Mirrors swarm_validate_graph.
@@ -260,7 +505,8 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm spawn <id> [role]", "warning"); return; }
 					const role = rest.join(" ") || id;
-					const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const model = currentModel(); const r = await spawnAgent(pi, ctx.cwd, p, st, { id, role, model, provider: currentProvider(model) }); await writeState(p, st); return r; });
+					// No explicit model here: spawnAgent consults the model pool (if configured) before the default.
+					const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await spawnAgent(pi, ctx.cwd, p, st, { id, role }); await writeState(p, st); return r; });
 					ctx.ui.notify(`Spawned ${result.agent.id} at ${result.agent.tmuxTarget}`, "info");
 					return;
 				}
@@ -306,9 +552,17 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							}
 						}
 						if (isCurrent) {
-							// Explicit PM opt-in: set the canonical env vars so isOrchestratorSession()/currentAgentId()
-							// resolve to "orchestrator", ensure the mailbox-only orchestrator record, surface pending
-							// nudges via the PM pump, and update the footer. This makes the pane a REAL orchestrator.
+							// Explicit PM opt-in: gate BEFORE setting env vars so a second live orchestrator cannot
+							// steal the role. The leader claim is state-backed; on denial we keep the pane inert.
+							const claim = await withLock(p, async () => {
+								const st = await readState(p, ctx.cwd);
+								return claimOrchestratorLeader(st, Date.now(), process.pid);
+							});
+							if (claim.kind === "denied") {
+								ctx.ui.notify(`Orchestrator already active on pid ${claim.currentLeader.pid} (heartbeat ${Math.round(claim.ageMs / 1000)}s ago); this pane cannot become the PM.`, "warning");
+								await trace(p, "agent.orchestrator_optin.denied", { currentLeaderPid: claim.currentLeader.pid, ageMs: claim.ageMs });
+								return;
+							}
 							process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
 							process.env.PI_SWARM_AGENT_ID = "orchestrator";
 							applySwarmToolGating(pi); // re-enable the swarm tool surface now that this pane is the PM
@@ -363,6 +617,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				if (cmd === "stop") {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm stop <id> [--force] [--no-kill]", "warning"); return; }
+					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("stop is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
 					const flags = parseFlags(rest);
 					try {
 						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await stopAgent(pi, p, st, safeId(id), { force: flags.force, killPane: flags.kill }); await writeState(p, st); return r; });
@@ -377,6 +632,116 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await restartAgent(pi, ctx.cwd, p, st, safeId(id)); await writeState(p, st); return r; });
 						ctx.ui.notify(`Restarted ${result.agent.id} at ${result.agent.tmuxTarget} (kill=${result.kill.method})`, "info");
 					} catch (err: any) { ctx.ui.notify(`Restart failed: ${err?.message || err}`, "warning"); }
+					return;
+				}
+				if (cmd === "pool") {
+					const sub = rest.shift();
+					if (!sub || sub === "list") {
+						const status = await poolStatus(p);
+						if (!status.slots.length) { ctx.ui.notify("No model pool configured. Add `modelPool` under `swarm` (or extensions.swarm) in .pi/settings.json.", "warning"); return; }
+						const lines = [`Model pool (${status.rotation.strategy}, cooldown ${Math.round(status.rotation.cooldownMs / 60000)}min, maxRetries ${status.rotation.maxRetries}):`];
+						for (const s of status.slots) {
+							const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m` : "ok";
+							const err = s.health?.lastError ? ` lastError=${s.health.lastError.slice(0, 60)}` : "";
+							lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${err}`);
+						}
+						ctx.ui.notify(lines.join("\n"), "info");
+						return;
+					}
+					if (sub === "cooldown" || sub === "clear") {
+						const key = rest.shift();
+						if (!key) { ctx.ui.notify("Usage: /swarm pool cooldown <provider/model> <ms> | /swarm pool clear <provider/model>", "warning"); return; }
+						if (sub === "cooldown") {
+							const msRaw = rest.shift();
+							if (!msRaw || !/^\d+$/.test(msRaw)) { ctx.ui.notify("Cooldown requires a duration in ms", "warning"); return; }
+							const ok = await setSlotCooldown(p, key, parseInt(msRaw, 10));
+							ctx.ui.notify(ok ? `Slot ${key} cooldown set to ${msRaw}ms` : `Unknown slot key: ${key} (see /swarm pool list)`, ok ? "info" : "warning");
+						} else {
+							const ok = await setSlotCooldown(p, key, null);
+							ctx.ui.notify(ok ? `Slot ${key} cooldown cleared` : `Unknown slot key: ${key} (see /swarm pool list)`, ok ? "info" : "warning");
+						}
+						return;
+					}
+					if (sub === "show") {
+						// Read-only model-pool (or implicit singleton) view — never touches .pi/settings.json.
+						// Output describes BOTH the explicit pool shape (when configured) AND the singleton
+						// fallback the user would get if the pool were empty/all-benched, so the operator
+						// can verify their config matches the canonical format before any spawn.
+						const validation = validateSwarmSettings();
+						const shape = classificationShape(validation, classifySwarmSettings());
+						const shapeSource = shape.kind === "empty" ? "defaults" : (shape as any).source || "defaults";
+						const lines: string[] = [];
+						const singleton = implicitSingletonPool();
+						const status = await poolStatus(p);
+						if (status.slots.length) {
+							lines.push(`Model pool: configured (${status.slots.length} slot${status.slots.length === 1 ? "" : "s"}, source=${shapeSource})`);
+							for (const s of status.slots) {
+								const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m` : (s.weight === 0 ? "ok (fallback-only)" : "ok");
+								const err = s.health?.lastError ? ` lastError=${s.health.lastError.slice(0, 60)}` : "";
+								lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${err}`);
+							}
+							lines.push(`Rotation: strategy=${status.rotation.strategy}, cooldown=${Math.round(status.rotation.cooldownMs / 60000)}min, maxRetries=${status.rotation.maxRetries}`);
+						} else {
+							lines.push(`Model pool: not configured — using implicit singleton (source=${singleton.source})`);
+							lines.push(`  ${(singleton.slots[0].provider || "(default)")}/${singleton.slots[0].model}  weight=1  (fallback-only when pool is empty)`);
+							lines.push(`Rotation: not configured (strategy defaults to weighted)`);
+						}
+						lines.push("");
+						lines.push("Discover config: /swarm pool help  |  Validate: /swarm pool validate");
+						await trace(p, "pool.show", { by: currentAgentId(), shape: shape.kind, slots: status.slots.length, ok: validation.ok });
+						ctx.ui.notify(lines.join("\n"), validation.ok ? "info" : "warning");
+						return;
+					}
+					if (sub === "validate") {
+						// Read-only structural check; never edits .pi/settings.json.
+						const v = validateSwarmSettings();
+						const lines: string[] = [];
+						if (v.ok) {
+							lines.push("Config validation: PASSED");
+							if (v.shape.kind === "empty") lines.push("  - No swarm config (using defaults).");
+							else if (v.shape.kind === "singleton") lines.push(`  - Singleton config: model=${(v.shape as any).defaultModel || "(unset)"}, provider=${(v.shape as any).defaultProvider || "(unset)"}`);
+							else if (v.shape.kind === "explicit-pool") lines.push(`  - Explicit pool with ${(v.shape as any).slots} slot(s).`);
+							else if (v.shape.kind === "both") lines.push(`  - Both: ${(v.shape as any).slots} pool slot(s) + singleton fallback.`);
+							lines.push("  - No duplicates, all weights/cooldownMs/maxRetries are well-formed.");
+							await trace(p, "pool.validate", { by: currentAgentId(), ok: true, shape: v.shape.kind });
+							ctx.ui.notify(lines.join("\n"), "info");
+						} else {
+							lines.push(`Config validation: FAILED (${v.errors.length} issue${v.errors.length === 1 ? "" : "s"})`);
+							for (const e of v.errors) lines.push(`  \u2717 ${e.field || "config"}: ${e.message}`);
+							lines.push("");
+							lines.push("Fix in .pi/settings.json (under `swarm` or `extensions.swarm`), then run /swarm pool validate again.");
+							await trace(p, "pool.validate", { by: currentAgentId(), ok: false, shape: v.shape.kind, errors: v.errors.length });
+							ctx.ui.notify(lines.join("\n"), "warning");
+						}
+						return;
+					}
+					if (sub === "help") {
+						// Canonical format reference — pure documentation in a notify. Never edits settings.
+						ctx.ui.notify(POOL_HELP_TEXT, "info");
+						return;
+					}
+					if (sub === "preview-preflight" || sub === "preflight") {
+						// Manual preflight probe — read-only. Reports what the next spawnAgent/restartAgent
+						// WOULD do, including classified errors if any. Lets the operator dry-run the gate
+						// without actually committing an agent record.
+						const { preflightSpawn } = await import("./pool.ts");
+						const preflight = await preflightSpawn(p, { model: rest[0], provider: rest[1], tmuxSession: (await readState(p, ctx.cwd)).tmuxSession });
+						const lines: string[] = [];
+						if (preflight.ok === true) {
+							lines.push(`Preflight: PASSED`);
+							lines.push(`  model=${preflight.resolved.model}`);
+							lines.push(`  provider=${preflight.resolved.provider}`);
+							lines.push(`  fromPool=${preflight.resolved.fromPool}`);
+							ctx.ui.notify(lines.join("\n"), "info");
+						} else {
+							// Discriminated union: preflight is narrowed to { ok: false; error: PreflightError } here.
+							lines.push(`Preflight: FAILED`);
+							lines.push(formatPreflightError((preflight as { ok: false; error: import("./types.ts").PreflightError }).error));
+							ctx.ui.notify(lines.join("\n"), "warning");
+						}
+						return;
+					}
+					ctx.ui.notify("Usage: /swarm pool [list|show|validate|help|preview-preflight] | /swarm pool cooldown <provider/model> <ms> | /swarm pool clear <provider/model>", "warning");
 					return;
 				}
 				if (cmd === "role") {
@@ -424,6 +789,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				if (cmd === "release") {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm release <id> [<task-id>] [--force]", "warning"); return; }
+					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("release is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
 					const flags = parseFlags(rest);
 					const taskId = flags.rest[0];
 					let failed: string | null = null;
@@ -543,33 +909,6 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					ctx.ui.notify(`Mailbox reset for ${result.agentId}${isHereToken(requestedId) ? " (resolved from 'here')" : ""}. Archived ${result.lines} line(s) to ${relative(ctx.cwd, result.archive)}; cleared live mailbox ${relative(ctx.cwd, result.file)} and delivered ledger entries=${result.deliveredCleared}. If a session was stuck on parse errors, /reload or restart that pi session next.`, "warning");
 					return;
 				}
-				if (cmd === "loop") {
-					// V1.5 iteration proposal loop: read-only status and orchestrator plan synthesis.
-					const sub = rest.shift();
-					const taskId = rest.shift();
-					if (sub === "status") {
-						if (!taskId) { ctx.ui.notify("Usage: /swarm loop status <task-id>", "warning"); return; }
-						const snap = await loopStatusSnapshot(p, ctx.cwd, taskId);
-						if (!snap.enabled || !snap.loop) {
-							if (snap.enabled && !snap.started) ctx.ui.notify(`Task ${taskId} has an enabled loop but it has not started (close terminal-done to begin).`, "info");
-							else ctx.ui.notify(`Task ${taskId} has no enabled iteration loop.`, "info");
-							return;
-						}
-						const props = snap.proposals || [];
-						ctx.ui.notify(`Loop ${taskId}: round ${snap.loop.currentRound} phase=${snap.loop.phase}. Proposals: ${props.map((x) => `${x.agentId}=${x.status}`).join(", ") || "(none)"}. State: ${snap.paths.loopStateFile}`, "info");
-						return;
-					}
-					if (sub === "plan") {
-						if (!taskId) { ctx.ui.notify("Usage: /swarm loop plan <task-id> <summary...>", "warning"); return; }
-						const summaryText = rest.join(" ");
-						if (!summaryText) { ctx.ui.notify("Usage: /swarm loop plan <task-id> <summary...>", "warning"); return; }
-						const r = await recordLoopPlan(pi, ctx.cwd, p, taskId, { summary: summaryText });
-						ctx.ui.notify(`Recorded next-iteration plan for ${taskId} (round ${r.round}) at ${r.artifact}; phase=${r.phase}.`, "info");
-						return;
-					}
-					ctx.ui.notify("Usage: /swarm loop status <task-id> | loop plan <task-id> <summary...>", "warning");
-					return;
-				}
 				ctx.ui.notify(`Unknown /${commandName} command: ${cmd}`, "warning");
 			} catch (err: any) {
 				await trace(p, "error", { where: "command", command: cmd, commandName, message: err?.message || String(err), stack: err?.stack });
@@ -596,10 +935,5 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 		description: "Messaging shortcut for swarm: send <to> <message>",
 		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-msg", argumentPrefix),
 		handler: async (args, ctx) => runCommand(args, ctx, "swarm-msg"),
-	});
-	pi.registerCommand("swarm-loop", {
-		description: "Loop shortcut for swarm: status <task-id> | plan <task-id> <summary>",
-		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-loop", argumentPrefix),
-		handler: async (args, ctx) => runCommand(args, ctx, "swarm-loop"),
 	});
 }

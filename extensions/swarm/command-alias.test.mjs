@@ -23,7 +23,7 @@ factory(pi);
 let fail = 0;
 const ok = (name, cond) => { if (cond) console.log("  ok  ", name); else { fail++; console.error("  FAIL", name); } };
 
-for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg", "swarm-loop"]) {
+for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg"]) {
 	ok(`${name} registered`, typeof cmds[name]?.handler === "function");
 }
 
@@ -42,6 +42,18 @@ const ctx = {
 await cmds.swarm.handler("init", ctx);
 ok("/swarm init notifies ready", notes.at(-1)?.msg?.includes("ready"));
 
+// Slash-command RBAC: worker identity must be denied the admin-only stop/release surfaces.
+const prevAgent = process.env.PI_SWARM_AGENT_ID;
+const prevOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+process.env.PI_SWARM_AGENT_ID = "worker-01";
+process.env.PI_SWARM_IS_ORCHESTRATOR = "";
+await cmds.swarm.handler("stop worker-01", ctx);
+ok("/swarm stop denied for worker", /orchestrator-only/.test(notes.at(-1)?.msg || ""));
+await cmds.swarm.handler("release worker-01", ctx);
+ok("/swarm release denied for worker", /orchestrator-only/.test(notes.at(-1)?.msg || ""));
+process.env.PI_SWARM_AGENT_ID = prevAgent;
+process.env.PI_SWARM_IS_ORCHESTRATOR = prevOrch;
+
 await cmds["swarm-agents"].handler("list", ctx);
 ok("/swarm-agents list delegates to list", /agents, tmux/.test(notes.at(-1)?.msg || ""));
 
@@ -51,8 +63,6 @@ ok("/swarm-tasks list delegates to tasks list", /No tasks found/.test(notes.at(-
 await cmds["swarm-msg"].handler("", ctx);
 ok("/swarm-msg empty shows usage", /Usage: \/swarm-msg send/.test(notes.at(-1)?.msg || ""));
 
-await cmds["swarm-loop"].handler("", ctx);
-ok("/swarm-loop empty shows usage", /Usage: \/swarm-loop/.test(notes.at(-1)?.msg || ""));
 
 rmSync(cwd, { recursive: true, force: true });
 if (fail) { console.error(`\nCOMMAND ALIAS FAIL (${fail})`); process.exit(1); }

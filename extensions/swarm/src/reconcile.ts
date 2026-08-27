@@ -3,17 +3,17 @@ import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_M
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
-import type { IndexedTask, MessageResponseStatus, Paths, ReconcileAction, SwarmMessage, SwarmState, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, LOOP_RECONCILE_INTERVAL_MS, MAX_ATTEMPTS, MAX_REINJECTS, MAX_STATUS_TASKS, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
+import { createHash } from "node:crypto";
+import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmMessage, SwarmState, TaskState } from "./types.ts";
+import { ACK_MISSING_MS, formatNotifyKey, MAX_ATTEMPTS, MAX_REINJECTS, MAX_STATUS_TASKS, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
-import { computeReadyNodes, computeTaskStatus } from "./taskgraph.ts";
+import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
-import { deliver, deliverMessageLocked, findIdempotentMessage, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
-import { ensureOrchestrator } from "./identity.ts";
+import { deliver, deliverMessageLocked, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
+import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
-import { ackLoopNudgeLocked, reconcileLoopNudgesLocked } from "./loop.ts";
 
 export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task: TaskState): Promise<string[]> {
 	const warnings: string[] = [];
@@ -53,6 +53,13 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 			for (const [file, lock] of Object.entries(task.editLocks)) if (lock?.nodeId === id) warnings.push(`terminal node ${id} still holds editLock for ${file}`);
 		}
 	}
+	// Attention derivation (roadmap issue 5): durable, pane-free recovery classification per node.
+	// Advisory only — appended to the existing runtime=true warnings surface, zero schema change.
+	for (const [id, node] of Object.entries(task.nodes)) {
+		const att = deriveNodeAttention(st, task, id, nowMs);
+		if (!att.workerReminderEligible) continue;
+		warnings.push(`attention: node ${id} → ${att.category} (assignee ${node.assignee || "?"}) — ${att.evidence.join("; ")} — orchestrator may send one bounded reminder via /swarm remind ${task.taskId} ${id}`);
+	}
 	if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
 		for (const agent of Object.values(st.agents)) {
 			ensureAgentDefaults(agent);
@@ -80,8 +87,7 @@ export function orchSession(st: SwarmState, nowMs: number): { ids: string[]; tri
 // node being ready-but-unassigned, it nudges the orchestrator with the exact assign call. Idempotent per
 // (task,node); auto-acked once the node is assigned/terminal. The harness never assigns (the orchestrator
 // is the actor) — it only surfaces the stall and the fix. Assumes the caller holds the state lock.
-async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, nodeId: string, role: string): Promise<void> {
-	const key = `task:${taskId}:node:${nodeId}:nudge:assign`;
+async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, nodeId: string, role: string, key: string): Promise<void> {
 	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) return; // idempotent: one assign nudge per node
 	try {
 		await deliverMessageLocked(pi, cwd, p, st, {
@@ -96,9 +102,18 @@ async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	}
 }
 
+function ackOrchestratorNudgeLocked(st: SwarmState, key: string, nowMs: number, note: string): void {
+	const rec = findIdempotentMessage(st, "orchestrator", "orchestrator", key) || Object.values(st.messages || {}).find((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+	if (rec && rec.requiresAck && !rec.ackedAt) {
+		const at = new Date(nowMs).toISOString();
+		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "orchestrator", status: "done", note, at } };
+		st.delivered["orchestrator"] = Array.from(new Set([...(st.delivered["orchestrator"] || []), rec.id]));
+	}
+}
+
 // Watcher entry point for mid-graph stalls. For every active (in_progress) task, find actionable nodes
 // (ready but unassigned) and nudge; ack any outstanding assign nudge whose node is no longer stalled.
-// Runs in the same throttled tick as the loop watcher. Read-only on task state (never assigns).
+// Read-only on task state (never assigns).
 async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<void> {
 	if (!existsSync(p.tasksDir)) return;
 	let entries: string[] = [];
@@ -116,16 +131,170 @@ async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string, p: Pat
 			...cr.current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
 		]);
 		for (const nodeId of Object.keys(task.nodes)) {
-			const key = `task:${taskId}:node:${nodeId}:nudge:assign`;
+			const key = formatNotifyKey(NOTIFY_KEY_GRAPH_ADVANCE, { taskId, nodeId });
 			const node = task.nodes[nodeId];
 			if (actionable.has(nodeId) && !node.assignee && !TERMINAL_NODE_STATUSES.has(node.status)) {
-				await sendGraphAdvanceNudgeLocked(pi, cwd, p, st, taskId, nodeId, node.role || "worker");
+				// Lifecycle-fencing (issue 9, site 4): per-node staleness check before emitting a graph-advance
+				// nudge. A node that has since become terminal / reassigned / closed must not be force-assigned
+				// from this safety-net (the historical "force-assign unready nodes" bug). The predicate also
+				// guards against nudging for a node whose assignee drifted (orchestrator pseudo-agent stays a
+				// fine notify target — no filter on agentId=orchestrator here, since this nudge is addressed
+				// to the orchestrator rather than a worker).
+				const staleCheck = checkStallNotificationStale(st, task, nodeId, node.assignee || "orchestrator", nowMs);
+				if (staleCheck.stale) {
+					await trace(p, "notification.stale.suppressed", { site: "reconcile.graph_advance_nudge", taskId, nodeId, reason: staleCheck.reason, evidence: staleCheck.evidence });
+					ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node stale");
+					continue;
+				}
+				await sendGraphAdvanceNudgeLocked(pi, cwd, p, st, taskId, nodeId, node.role || "worker", key);
 			} else {
 				// Node assigned / terminal / not yet ready -> clear any outstanding assign nudge for it.
-				ackLoopNudgeLocked(st, key, nowMs, "auto-acked: node assigned/left ready");
+				ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node assigned/left ready");
 			}
 		}
 	}
+}
+
+// Initial-ready watcher (reliability-roadmap Phase 1, P0 #2): for every freshly created task whose
+// start node remains READY + unassigned beyond TASK_INITIAL_READY_GRACE_MS, send exactly one
+// idempotent action-required nudge to the orchestrator. Never auto-assigns, never auto-spawns, and
+// auto-clears as soon as the node leaves the `ready`+unassigned state. Honors the shared semantic
+// dedupe + per-task cap policy (NOTIFY_DEFAULT_MAX_NUDGES). Runs alongside the graph-advance watcher.
+export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<void> {
+	if (!existsSync(p.tasksDir)) return;
+	let entries: string[] = [];
+	try { entries = await readdir(p.tasksDir); } catch { return; }
+	for (const taskId of entries) {
+		const tp = taskPaths(p, taskId);
+		if (!existsSync(tp.taskJson)) continue;
+		let task: TaskState;
+		try { task = await readTaskState(tp.taskJson); } catch { continue; }
+		// Only act on tasks that have never progressed past the very first node. `in_progress` is handled
+		// by the graph-advance watcher; terminal states have no actionable start node.
+		if (task.status !== "ready") continue;
+		const startId = task.start;
+		const startNode = task.nodes[startId];
+		if (!startNode) continue;
+		if (startNode.status !== "ready" || startNode.assignee) continue;
+		const createdAt = task.createdAt ? new Date(task.createdAt).getTime() : nowMs;
+		const age = nowMs - createdAt;
+		const key = formatNotifyKey(NOTIFY_KEY_INITIAL_READY, { taskId });
+		if (age < TASK_INITIAL_READY_GRACE_MS) {
+			ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: still within grace period");
+			continue;
+		}
+		// Cap: stop nudging once the orchestrator has ignored the same key MAX times.
+		const existing = Object.values(st.messages || {}).filter((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+		if (existing.length >= NOTIFY_DEFAULT_MAX_NUDGES) continue;
+		if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) continue;
+		// Cooldown: never re-send within NOTIFY_DEFAULT_COOLDOWN_MS of the last send for the same key.
+		const last = existing.map((r) => r.createdAt || "").sort().pop() || "";
+		if (last && nowMs - new Date(last).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) continue;
+		// Lifecycle-fencing (issue 9, site 5): per-node staleness check before the initial-ready nudge.
+		// Task status="ready" already rules out conditions (1)/(2) — but we still run the predicate so a
+		// cancelled attempt, assignee drift, or agent-stopped transition can short-circuit the emit. The
+		// start node's "assignee" here is always undefined (filtered above), so the predicate agentId
+		// placeholder is "orchestrator" (the only recipient of this nudge anyway).
+		const staleCheck = checkStallNotificationStale(st, task, startId, startNode.assignee || "orchestrator", nowMs);
+		if (staleCheck.stale) {
+			await trace(p, "notification.stale.suppressed", { site: "reconcile.initial_ready_nudge", taskId, nodeId: startId, reason: staleCheck.reason, evidence: staleCheck.evidence });
+			ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node stale");
+			continue;
+		}
+		await sendInitialReadyNudgeLocked(pi, cwd, p, st, task, startId, key);
+	}
+}
+
+async function sendInitialReadyNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, task: TaskState, startId: string, key: string): Promise<void> {
+	const taskId = task.taskId;
+	const startNode = task.nodes[startId];
+	const role = startNode.role || "worker";
+	try {
+		await deliverMessageLocked(pi, cwd, p, st, {
+			to: "orchestrator",
+			subject: `Task ${taskId} start node is ready but unassigned`,
+			body: `Task ${taskId} ("${task.title || taskId}") was created ${Math.max(1, Math.round((Date.now() - new Date(task.createdAt || Date.now()).getTime()) / 60000))} minute(s) ago but its start node \`${startId}\` (${role}) is still ready and unassigned.\n\nAction required:\n  swarm_assign_task(taskId="${taskId}", nodeId="${startId}")\n\nAlternative actions:\n  swarm_assign_task(taskId="${taskId}", nodeId="${startId}", force=true)   # orchestrator-only override\n  swarm_update_task(taskId="${taskId}", nodeId="${startId}", cancelTask=true, force=true)   # orchestrator-only cancel\n\n(Auto-clears once ${startId} is assigned or the task leaves the ready state.)`,
+			requiresAck: true,
+			idempotencyKey: key,
+		});
+	} catch (err: any) {
+		await trace(p, "task.initial_ready_nudge_failed", { taskId, nodeId: startId, error: String((err as Error)?.message || err) }).catch(() => {});
+	}
+}
+
+// === Issue 11: Orchestrator wake-up escalation + durable replay fencing ===
+
+// Helper to parse taskId/nodeId from conversationId (format: "task:${taskId}:${nodeId}").
+function parseTaskNodeRef(conversationId: string | undefined): { taskId?: string; nodeId?: string } | null {
+	if (!conversationId) return null;
+	const m = conversationId.match(/^task:([^:]+):([^:]+)$/);
+	if (!m) return null;
+	return { taskId: m[1], nodeId: m[2] };
+}
+
+// Actionability predicate for historical orchestrator PM messages (issue 11, §5). Returns { ok: false }
+// for messages that must NOT be surfaced: acked, dead_lettered, superseded, wrong recipient, task
+// terminal/cancelled/missing, node terminal/missing/reassigned, retrigger-budget-exhausted, or
+// informational already consumed. The `strictForMigration` flag treats retrigger-budget-exhausted as
+// non-actionable for the one-time migration back-fill (the budget resets per session). Exported
+// for reuse by the migration back-fill block.
+export function isActionableOrchestratorMessage(
+	rec: { id: string; to: string; requiresAck?: boolean; status?: string; ackedAt?: string; superseded?: any; conversationId?: string; idempotencyKey?: string },
+	taskIndex: Record<string, TaskState>,
+	nowMs: number,
+	retriggerCounts: Record<string, number>,
+	strictForMigration: boolean,
+): { ok: boolean; reason: string } {
+	if (rec.ackedAt) return { ok: false, reason: "acked" };
+	if (rec.status === "dead_letter") return { ok: false, reason: "dead_letter" };
+	if (rec.superseded) return { ok: false, reason: "superseded" };
+	if (rec.to !== "orchestrator") return { ok: false, reason: "wrong_recipient" };
+
+	// Task-scoped predicate (covers terminal task, cancelled, terminal node, reassigned node).
+	// Parse task/node reference from conversationId.
+	const taskNodeRef = parseTaskNodeRef(rec.conversationId);
+	if (taskNodeRef && taskNodeRef.taskId && taskNodeRef.nodeId) {
+		const task = taskIndex[taskNodeRef.taskId];
+		if (!task) return { ok: false, reason: "task_missing" };
+		if (task.status === "done") return { ok: false, reason: "task_done" };
+		if (task.status === "failed") return { ok: false, reason: "task_failed" };
+		if (task.status === "cancelled") return { ok: false, reason: "task_cancelled" };
+		const node = task.nodes[taskNodeRef.nodeId];
+		if (!node) return { ok: false, reason: "node_missing" };
+		if (TERMINAL_NODE_STATUSES.has(node.status)) return { ok: false, reason: "node_terminal" };
+		// Reassign race: a later assignment message carries a newer idempotencyKey for the same
+		// (task,node) and stamped `superseded` on the prior one. The rec-level superseded flag
+		// catches this — but if a stale message was written before the supersede record (race),
+		// cross-check by finding the latest assign handoff for the node.
+		const lastAssign = [...(task.handoffs || [])].reverse().find(h => h.toNode === taskNodeRef.nodeId && h.kind === "assign");
+		if (lastAssign && rec.idempotencyKey && (lastAssign as any).idempotencyKey && (lastAssign as any).idempotencyKey !== rec.idempotencyKey) {
+			return { ok: false, reason: "node_reassigned" };
+		}
+	}
+
+	// Bounded re-trigger gate: a requiresAck message that was surfaced but never acked gets
+	// a bounded number of fresh triggerTurns (PUMP_RETRIGGER_MAX). After that, suppress until
+	// the message is acked or removed.
+	if (rec.requiresAck && !rec.ackedAt) {
+		const retriggerCount = retriggerCounts[rec.id] ?? 0;
+		if (retriggerCount >= PUMP_RETRIGGER_MAX) {
+			// For migration back-fill, treat retrigger-budget-exhausted as non-actionable (the
+			// budget resets per session). For the standard pump, this is session-bounded.
+			if (strictForMigration) return { ok: false, reason: "retrigger_budget_exhausted" };
+			// In the live pump, we still allow it (the retriggerCount is session-bounded and
+			// resets on PID change).
+		}
+	}
+
+	return { ok: true, reason: "actionable" };
+}
+
+// Helper to compute a fingerprint for a message record (sha256(messageId:lastUpdatedAt)). Used by
+// the consumer receipt ledger to detect silent edits to message records between surfacing and
+// reincarnation.
+function fingerprintMessage(rec: { id: string; updatedAt?: string; createdAt?: string }): string {
+	const ts = rec.updatedAt || rec.createdAt || now();
+	return createHash("sha256").update(`${rec.id}:${ts}`).digest("hex");
 }
 
 export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reason: string) {
@@ -135,24 +304,44 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 	const idleAtStart = ctx.mode === "tui" ? ctx.isIdle() : false;
 	const result = await withLock(p, async () => {
 		const st = await readState(p, ctx.cwd);
+		// Second-line defense (issue 8 §4.4.8): even if env vars were set by a path the preflight
+		// couldn't catch (e.g. an edge that skipped the gate), a non-leader pid must not run the
+		// pump. Read the leader record INSIDE the existing withLock (atomic with the rest of the
+		// pump decision block; no extra file IO); on deny, trace + return empty without firing
+		// nudges or stamping any surfaced set. This check piggybacks on the per-tick readState.
+		const leaderCheck = readOrchestratorLeader(st, Date.now());
+		if (leaderCheck.kind !== "claimed" || leaderCheck.leader.pid !== process.pid) {
+			await trace(p, "orchestrator.pump.denied", {
+				reason,
+				currentLeaderPid: leaderCheck.kind === "claimed" ? leaderCheck.leader.pid : null,
+				state: leaderCheck.kind,
+				callerPid: process.pid,
+				heartbeatAgeMs: leaderCheck.kind !== "vacant" ? leaderCheck.ageMs : null,
+			}).catch(() => {});
+			return { toSurface: [] as SwarmMessage[], retriggered: 0 };
+		}
+		// === Issue 11 (rework): per-tick leader heartbeat ===
+		// The leader lease must stay alive between session_starts (otherwise the second-line defense
+		// above starts denying ticks within ORCHESTRATOR_LEADER_STALE_MS of the last session_start).
+		// Refresh it inside the existing withLock (atomic with the rest of the pump decision block;
+		// no extra file IO). heartbeatOrchestratorLeader is a no-op for the current pid when the
+		// lease is already held by it; if a competing pid claimed it between the read and the
+		// refresh, it throws ORCHESTRATOR_LEADER_DENIED, which is propagated to the watchdog catch.
+		heartbeatOrchestratorLeader(st, Date.now(), process.pid, "pump_tick");
+		// ensureOrchestrator (create-only post-issue-8): no heartbeat refresh, just materialises the
+		// pseudo-agent record for mailbox delivery. The heartbeat is owned by the gate.
 		ensureOrchestrator(st, ctx.cwd, p);
 		const nowMs = Date.now();
 		// Prune dead sessions (not pumped within TTL) to bound growth from transient validation pids.
 		for (const [k, v] of Object.entries(st.orchestratorPumpSessions!)) {
 			if (k !== String(process.pid) && nowMs - new Date(v.lastAt).getTime() > PUMP_SESSION_TTL_MS) delete st.orchestratorPumpSessions![k];
 		}
-		// Harness-as-watcher: throttled loop reconcile — detect "plan recorded but task graph still closed"
-		// (and auto-ack once reopened). Runs every tick but scans task.json files at most every
-		// LOOP_RECONCILE_INTERVAL_MS. The harness never changes task/loop state; it only nudges the
-		// orchestrator (an agent) to act. Placed before the mailbox read so freshly-created nudges surface
-		// in the same tick.
-		if (!st.lastLoopReconcileAt || nowMs - new Date(st.lastLoopReconcileAt).getTime() > LOOP_RECONCILE_INTERVAL_MS) {
-			st.lastLoopReconcileAt = new Date(nowMs).toISOString();
-			try { await reconcileLoopNudgesLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "loop.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
-			// Mid-graph stall safety net: nudge the orchestrator to assign any ready-but-unassigned node in an
-			// in_progress task (the loop watcher drives iteration boundaries; this drives the nodes in between).
-			try { await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
-		}
+		// Mid-graph stall safety net: nudge the orchestrator to assign any ready-but-unassigned node in an
+		// in_progress task. The nudge is idempotent, so it is safe to run on every pump tick.
+		try { await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		// Fresh-task stall safety net: nudge the orchestrator when a start node is still ready + unassigned
+		// past the creation grace period. Also idempotent + read-only on task state.
+		try { await reconcileInitialReadyLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "task.initial_ready_reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		const sess = orchSession(st, nowMs)!;
 		const surfaced = new Set(sess.ids);
 		const triggeredAt = { ...(sess.triggeredAt ?? {}) };
@@ -162,19 +351,107 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// second orchestrator lane cannot starve this PM process). Recent window bounds work; acked messages
 		// (ackedAt = "recipient processed it") are skipped. We no longer pre-filter surfaced here: surfaced
 		// vs triggered vs re-trigger is decided below, because surfacing must be gated on idle.
+
+		// === Issue 11: One-time migration back-fill (binding C4) ===
+		if ((st.consumerReceipts?.orchestrator?.revision ?? 0) === 0) {
+			const migrationEntries = st.consumerReceipts!.orchestrator!.entries!;
+			let written = 0;
+			let scanned = 0;
+			// Build task index for actionability predicate.
+			const taskIndex: Record<string, TaskState> = {};
+			if (existsSync(p.tasksDir)) {
+				try {
+					const entries = await readdir(p.tasksDir);
+					for (const taskId of entries) {
+						const tp = taskPaths(p, taskId);
+						if (!existsSync(tp.taskJson)) continue;
+						try { taskIndex[taskId] = await readTaskState(tp.taskJson); } catch { /* skip unreadable */ }
+					}
+				} catch { /* ignore readdir errors */ }
+			}
+			const retriggerCounts = orchSession(st, nowMs)!.retriggerCount || {};
+			for (const rec of Object.values(st.messages)) {
+				scanned++;
+				if (rec.to !== "orchestrator") continue;
+				if (!rec.requiresAck) continue;
+				// Use the actionability predicate; non-actionable messages get a receipt.
+				// Note: do NOT short-circuit on rec.ackedAt here — the predicate returns reason="acked"
+				// and we want the receipt entry written so a reincarnated consumer reads it.
+				const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ true);
+				if (!v.ok) {
+					migrationEntries[rec.id] = {
+						surfacedAt: rec.updatedAt || rec.createdAt,
+						ackedAt: rec.ackedAt,
+						requiresAck: true,
+						conversationId: rec.conversationId,
+						fingerprint: fingerprintMessage(rec),
+					};
+					written++;
+				}
+			}
+			st.consumerReceipts!.orchestrator!.revision = 1;
+			await trace(p, "notification.backfill.receipts_written", { written, scanned, ts: nowMs }).catch(() => {});
+		}
+
+		// === Issue 11: Durable dedupe gate + actionability filter (binding C4 + C5) ===
 		const deliveredOrch = new Set(st.delivered.orchestrator || []);
+		// Build task index for actionability predicate.
+		const taskIndex: Record<string, TaskState> = {};
+		if (existsSync(p.tasksDir)) {
+			try {
+				const entries = await readdir(p.tasksDir);
+				for (const taskId of entries) {
+					const tp = taskPaths(p, taskId);
+					if (!existsSync(tp.taskJson)) continue;
+					try { taskIndex[taskId] = await readTaskState(tp.taskJson); } catch { /* skip unreadable */ }
+				}
+			} catch { /* ignore readdir errors */ }
+		}
+		const retriggerCounts = orchSession(st, nowMs)!.retriggerCount || {};
 		const windowMsgs = (await readMailboxCached(p, "orchestrator"))
 			.slice(-PUMP_SCAN_WINDOW)
 			.filter((m) => {
 				const rec = st.messages[m.id];
-				if (rec?.ackedAt) return false;
-				// Informational orchestrator messages (requiresAck:false) are globally single-surface:
-				// once ANY orchestrator TUI session has actually surfaced them, or an explicit mailbox read
-				// marked them delivered, do not replay them to a later orchestrator process. Action-expected
-				// messages stay session-local + re-triggerable.
-				if (rec && rec.to === "orchestrator" && rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) return false;
-				return true;
+				if (!rec) return false;
+
+				// Durable dedupe gate (binding C4): check consumerReceipts first, then legacy delivered ledger, then per-pid surfaced.
+				if (st.consumerReceipts?.orchestrator?.entries?.[m.id]) return false;
+				if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) return false;
+				if (surfaced.has(m.id)) return false; // per-pid surfaced (retrigger bound)
+
+				// Actionability predicate (binding C5): skip non-actionable messages and batch-count suppressions.
+				const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ false);
+				return v.ok;
 			});
+
+		// === Issue 11: Per-tick batch suppression trace (binding C6) ===
+		// Count all suppressed messages by reason before the BUSY check. Emit on EVERY tick including total===0.
+		const suppressedCounts: Record<string, number> = {
+			acked: 0, dead_letter: 0, superseded: 0, task_done: 0, task_failed: 0, task_cancelled: 0,
+			node_terminal: 0, node_reassigned: 0, task_missing: 0, node_missing: 0,
+			wrong_recipient: 0, retrigger_budget_exhausted: 0, informational_already_consumed: 0,
+		};
+		const allMsgs = (await readMailboxCached(p, "orchestrator")).slice(-PUMP_SCAN_WINDOW);
+		for (const m of allMsgs) {
+			const rec = st.messages[m.id];
+			if (!rec || rec.to !== "orchestrator") continue;
+			if (st.consumerReceipts?.orchestrator?.entries?.[m.id]) { suppressedCounts.informational_already_consumed++; continue; }
+			if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) { suppressedCounts.informational_already_consumed++; continue; }
+			if (surfaced.has(m.id)) continue; // not suppressed - already surfaced this session
+			const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, false);
+			if (!v.ok) {
+				const key = v.reason === "retrigger_budget_exhausted" ? "retrigger_budget_exhausted" : v.reason;
+				suppressedCounts[key] = (suppressedCounts[key] || 0) + 1;
+			}
+		}
+		const totalSuppressed = Object.values(suppressedCounts).reduce((a, b) => a + b, 0);
+		await trace(p, "notification.batch.suppressed", {
+			ts: nowMs,
+			cid: String(process.pid),
+			reason: "per-tick baseline",
+			total: totalSuppressed,
+			counts: suppressedCounts,
+		}).catch(() => {});
 
 		// BUSY: defer entirely. Do NOT surface, do NOT mark surfaced, do NOT deliver a dead followUp. A
 		// followUp delivered while busy carries no triggerTurn, so it lands in context without prompting the
@@ -254,12 +531,44 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		const surfacedInfoIds = pending
 			.filter((m) => m.requiresAck === false)
 			.map((m) => m.id);
-		if (surfacedInfoIds.length) {
+		// === Issue 11: Write durable consumer receipt entries (binding C4 + C10) ===
+		// For action-expected messages, write a receipt entry so a reincarnated consumer knows it was
+		// surfaced. Bump revision immediately after write. For informational messages, the legacy delivered
+		// ledger remains authoritative (consumerReceipts only covers actionable).
+		const surfacedActionIds = pending
+			.filter((m) => m.requiresAck === true)
+			.map((m) => m.id);
+		if (surfacedInfoIds.length || surfacedActionIds.length) {
 			await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				const ts = now();
-				const ledgerIds = st.delivered.orchestrator || [];
-				st.delivered.orchestrator = Array.from(new Set([...ledgerIds, ...surfacedInfoIds]));
+				// Legacy informational ledger (unchanged).
+				if (surfacedInfoIds.length) {
+					const ledgerIds = st.delivered.orchestrator || [];
+					st.delivered.orchestrator = Array.from(new Set([...ledgerIds, ...surfacedInfoIds]));
+				}
+				// Durable consumer receipts for actionable messages.
+				if (surfacedActionIds.length) {
+					const entries = st.consumerReceipts!.orchestrator!.entries!;
+					let bumped = false;
+					for (const id of surfacedActionIds) {
+						const rec = st.messages[id];
+						if (!rec || rec.to !== "orchestrator" || rec.requiresAck !== true) continue;
+						// Write receipt only if not already present (TUI delivery idempotence).
+						if (entries[id]) continue;
+						entries[id] = {
+							surfacedAt: ts,
+							ackedAt: rec.ackedAt,
+							requiresAck: true,
+							conversationId: rec.conversationId,
+							fingerprint: fingerprintMessage(rec),
+						};
+						bumped = true;
+						}
+					// Bump revision immediately after entries mutation (binding C10).
+					if (bumped) st.consumerReceipts!.orchestrator!.revision = (st.consumerReceipts!.orchestrator!.revision || 0) + 1;
+				}
+				// Legacy informational surfacedAt stamp (unchanged).
 				for (const id of surfacedInfoIds) {
 					const rec = st.messages[id];
 					if (!rec || rec.to !== "orchestrator" || rec.requiresAck !== false || rec.surfacedAt) continue;
@@ -311,6 +620,20 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 		}
 		// Only non-terminal tasks can have live stale/nudge signals.
 		if (storedClosed) continue;
+		// Advisory ownership drift (issue 4): active leases with no stamped write scope (legacy tasks
+		// predating the ownership policy) are readable and functional, but cannot participate in
+		// overlap preflight reliably — report as advisory drift; never fabricate ownership metadata.
+		for (const [nodeId, node] of Object.entries(task.nodes)) {
+			if (node.status !== "assigned" && node.status !== "in_progress") continue;
+			if (!node.activeAttemptId || !Array.isArray(node.attemptHistory)) {
+				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_ownership_legacy", reason: `active node ${nodeId} has no attempt ownership metadata (legacy task; first new assignment bootstraps the lease schema)`, taskId, nodeId });
+				continue;
+			}
+			const attempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
+			if (attempt && attempt.status === "active" && !attempt.scope) {
+				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_ownership_legacy", reason: `active attempt ${attempt.attemptId} has no stamped write scope (pre-policy lease; scope re-resolves live at preflight)`, taskId, nodeId });
+			}
+		}
 		for (const [nodeId, node] of Object.entries(task.nodes)) {
 			if (node.status !== "assigned" && node.status !== "in_progress") continue;
 			const staleReasons: string[] = [];
@@ -337,7 +660,15 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 					if (options.nowMs - sinceMs > ACK_MISSING_MS) nudgeReasons.push(`assignment message ${msgId} ack_missing`);
 				}
 			}
-			if (!staleReasons.length && !nudgeReasons.length) continue;
+			if (!staleReasons.length && !nudgeReasons.length) {
+				// Attention derivation (issue 5): report-only reminder eligibility. Reconcile NEVER sends;
+				// the pointer names the one explicit orchestrator surface that can.
+				const att = deriveNodeAttention(st, task, nodeId, options.nowMs);
+				if (att.workerReminderEligible) {
+					actions.push({ messageId: `${taskId}/${nodeId}`, action: "reminder_eligible", reason: `${att.evidence.join("; ")}; one bounded reminder may be sent via /swarm remind ${taskId} ${nodeId} (orchestrator-only, informational)`, taskId, nodeId });
+				}
+				continue;
+			}
 			if (staleReasons.length) {
 				if (!options.dryRun && !node.staleAt) { node.staleAt = now(); dirty = true; await traceTask(tp, "task.stale.reconcile", { taskId, nodeId, assignee: node.assignee, reasons: staleReasons }); }
 				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_stale", reason: staleReasons.join("; "), taskId, nodeId });
@@ -354,13 +685,14 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { agentId?: string; dryRun?: boolean; mark?: boolean }) {
 	const result = await withLock(p, async () => {
 		const st = await readState(p, cwd);
+		if (options.mark) requireOrchestratorAuthority(currentAgentId(), "swarm_reconcile(mark=true)");
 		const nowMs = Date.now();
 		const actions: Array<{ messageId: string; action: string; reason: string }> = [];
 		const targetAgentId = options.agentId ? safeId(options.agentId) : undefined;
 
 		for (const [msgId, rec] of Object.entries(st.messages)) {
 			if (rec.status === "dead_letter") continue;
-			if (rec.requiresResponse && rec.status !== "queued" && rec.status !== "failed" && rec.response?.status !== "verified" && rec.response?.status !== "waived") {
+			if (isResponseTrackingActive(rec) && rec.response?.status !== "verified" && rec.response?.status !== "waived") {
 				const agent = st.agents[rec.to];
 				if (!options.dryRun) {
 					rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: rec.response?.status === "sent" ? "sent" : "missing", missingAt: rec.response?.missingAt || now(), lastError: `response_missing: awaiting verified result from ${rec.to}` };
@@ -377,10 +709,17 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 			const ageMs = nowMs - new Date(rec.createdAt).getTime();
 			const expired = rec.ttlMs !== undefined ? ageMs > rec.ttlMs : false;
 			const maxAttempts = rec.attempts >= MAX_ATTEMPTS;
+			const actionable = Boolean((rec.requiresAck && !rec.ackedAt) || (rec.requiresResponse && rec.response?.status !== "verified" && rec.response?.status !== "waived"));
 			const agent = st.agents[rec.to];
 			const hasTmuxPane = Boolean(agent?.tmuxTarget) && agent.tmuxTarget !== "unknown";
 			const agentRunning = agent?.status === "running" && hasTmuxPane ? await isTmuxRunning(pi, agent.tmuxTarget!) : false;
 			const mailboxOnly = Boolean(agent) && !hasTmuxPane;
+
+			if (expired && actionable && !maxAttempts) {
+				if (!options.dryRun) await trace(p, "reconcile.ttl.defer_actionable", { id: msgId, to: rec.to, ageMs, ttlMs: rec.ttlMs, requiresAck: rec.requiresAck, requiresResponse: rec.requiresResponse });
+				actions.push({ messageId: msgId, action: "ttl_stale", reason: `TTL expired but message is still actionable; awaiting explicit resolve from ${rec.to}` });
+				continue;
+			}
 
 			if (expired || maxAttempts) {
 				if (!options.dryRun) {

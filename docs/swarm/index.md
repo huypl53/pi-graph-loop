@@ -9,6 +9,8 @@ Use it when you need to understand, extend, or debug swarm without reading one l
 ### I want to use swarm
 - [Architecture overview](./architecture.md) — mental model, runtime, invariants
 - [Operations guide](./operations.md) — quickstart, runtime files, debugging, validation entrypoints
+  - Start with [Model pool configuration](./operations.md#model-pool-multi-provider-rotation)
+    (canonical format, legacy singleton, discover/show/validate commands, preflight)
 - [Tooling reference](./tools.md) — grouped tools and `/swarm` commands
 
 ### I want to change swarm
@@ -19,10 +21,10 @@ Use it when you need to understand, extend, or debug swarm without reading one l
 ### I need detailed legacy/reference material
 - [`../swarm.md`](../swarm.md) — consolidated reference doc kept for compatibility
 - [`../swarm-task-graph.md`](../swarm-task-graph.md) — detailed task graph design and semantics
-- [`../swarm-memory.md`](../swarm-memory.md) — run / memory / evidence protocol
+- [`../swarm-memory.md`](../swarm-memory.md) — legacy memory / iteration / loop reference
 - [`../swarm-new-project-setup.md`](../swarm-new-project-setup.md) — setup recipe for a new project
 - [`../swarm-graph-uat-scenario.md`](../swarm-graph-uat-scenario.md) — UAT scenario and review flow
-- [`../swarm-iteration-demo.md`](../swarm-iteration-demo.md) — iteration demo scenario
+- [`../swarm-iteration-demo.md`](../swarm-iteration-demo.md) — legacy iteration demo scenario
 
 ## Recommended reading order for contributors
 1. [Architecture overview](./architecture.md)
@@ -35,4 +37,5 @@ Use it when you need to understand, extend, or debug swarm without reading one l
 - Keep root `README.md` short and package-oriented.
 - Keep `extensions/swarm/README.md` focused on the code map and contributor entrypoints.
 - Keep `docs/swarm.md` as a compatibility/reference page, not the only place new concepts are explained.
-- When adding a new subsystem, lifecycle state, or tool, update both the relevant focused doc here and the implementation-facing notes in `extensions/swarm/README.md`.
+- When adding a new subsystem or tool, update both the relevant focused doc here
+  and the implementation-facing notes in `extensions/swarm/README.md`.

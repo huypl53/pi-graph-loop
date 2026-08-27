@@ -93,7 +93,58 @@ ok("opt-in end: swarm tools re-enabled", swarmActive().length === swarmCount, `$
 
 console.log("\n[6] Slash COMMAND is still registered for a guest (escape hatch intact)");
 ok("/swarm command registered", commands.includes("swarm"));
-ok("scoped /swarm-* commands registered", ["swarm-agents", "swarm-tasks", "swarm-msg", "swarm-loop"].every((c) => commands.includes(c)), `[${commands.join(",")}]`);
+ok("scoped /swarm-* commands registered", ["swarm-agents", "swarm-tasks", "swarm-msg"].every((c) => commands.includes(c)), `[${commands.join(",")}]`);
+
+// Re-seed a writable scratch (the cwd above was wiped at end of [4] in some failures; use a fresh one).
+const gateScratch = mkdtempSync(join(tmpdir(), "swarm-gate-prune-"));
+const mkGateCtx = () => ({ cwd: gateScratch, mode: "tui", hasUI: false, ui: { setStatus() {} }, isIdle: () => false });
+
+console.log("\n[7] ROLE-GATED destructive tools (Issue 10) reject non-orchestrator callers");
+{
+	const savedId = process.env.PI_SWARM_AGENT_ID;
+	const savedOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+
+	// Seed a minimal swarm-state.json so prune/gc can read+write it.
+	await import("node:fs/promises").then((fs) => fs.mkdir(join(gateScratch, ".pi/swarm"), { recursive: true }));
+	const seedState = { version: 1, swarmId: "swarm-test", cwd: gateScratch, tmuxSession: "test", agents: {}, delivered: {}, messages: {}, orchestratorPumpSessions: {} };
+	await import("node:fs/promises").then((fs) => fs.writeFile(join(gateScratch, ".pi/swarm/swarm-state.json"), JSON.stringify(seedState, null, 2)));
+
+	const pruneTool = toolDefs.get("swarm_prune");
+	const gcTool = toolDefs.get("swarm_gc");
+
+	// --- (a) non-orchestrator caller is rejected BEFORE any state mutation ---
+	process.env.PI_SWARM_AGENT_ID = "worker";
+	delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+	const denyPrune = await pruneTool.execute("call", { dryRun: false, removeStopped: false, markDead: false }, undefined, undefined, mkGateCtx()).then(
+		() => "ALLOWED",
+		(err) => String(err?.message || err),
+	);
+	ok("non-orchestrator: swarm_prune rejected with ORCHESTRATOR_AUTHORITY_REQUIRED", denyPrune.includes("ORCHESTRATOR_AUTHORITY_REQUIRED"), denyPrune);
+	const denyGc = await gcTool.execute("call", { dryRun: false }, undefined, undefined, mkGateCtx()).then(
+		() => "ALLOWED",
+		(err) => String(err?.message || err),
+	);
+	ok("non-orchestrator: swarm_gc rejected with ORCHESTRATOR_AUTHORITY_REQUIRED", denyGc.includes("ORCHESTRATOR_AUTHORITY_REQUIRED"), denyGc);
+
+	// --- (b) orchestrator caller is allowed (dry-run default) ---
+	delete process.env.PI_SWARM_AGENT_ID;
+	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	const allowPrune = await pruneTool.execute("call", {}, undefined, undefined, mkGateCtx()).then(
+		(r) => r?.content?.[0]?.text || "ALLOWED",
+		(err) => `DENIED:${String(err?.message || err)}`,
+	);
+	ok("orchestrator: swarm_prune dry-run default succeeds", /Swarm Prune|dryRun/.test(allowPrune), allowPrune.slice(0, 80));
+	const allowGc = await gcTool.execute("call", {}, undefined, undefined, mkGateCtx()).then(
+		(r) => r?.content?.[0]?.text || "ALLOWED",
+		(err) => `DENIED:${String(err?.message || err)}`,
+	);
+	ok("orchestrator: swarm_gc dry-run default succeeds", /dry run|applied/.test(allowGc), allowGc.slice(0, 80));
+
+	// Restore
+	if (savedId === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = savedId;
+	if (savedOrch === undefined) delete process.env.PI_SWARM_IS_ORCHESTRATOR; else process.env.PI_SWARM_IS_ORCHESTRATOR = savedOrch;
+	rmSync(gateScratch, { recursive: true, force: true });
+}
 
 rmSync(cwd, { recursive: true, force: true });
 console.log(`\nTOOL-GATING ${fail ? "FAIL" : "PASS"} (${pass} passed, ${fail} failed)`);
