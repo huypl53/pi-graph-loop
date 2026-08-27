@@ -109,6 +109,7 @@ Useful tools:
 - `swarm_set_agent_paused` (drain from reuse without killing the pane)
 - `swarm_send_keys` (raw tmux keys to a pane — interrupt/dismiss/type)
 - `swarm_attach_agent` (tmux attach/select commands for a pane)
+- `/swarm mailbox reset <id|here> --yes` — emergency mailbox reset; archives live mailbox + clears delivered ledger (preserves message records in `swarm-state.json`).
 - `swarm_release_agent_task` (clear a stale active-task pointer)
 - `swarm_list_agents`
 - `swarm_agent_status`

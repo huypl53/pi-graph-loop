@@ -129,7 +129,7 @@ needs structured parameters or machine-readable results.
 The aliases below use the same command handlers; they do not create another
 state or authorization path.
 
-- `/swarm-agents list|status|spawn|register|panes|stop|restart|role|pause|resume|sendkey|attach|release|identity ...`
+- `/swarm-agents list|status|spawn|register|panes|stop|restart|role|pause|resume|sendkey|attach|release|mailbox|identity ...`
 - `/swarm-tasks list|graph|status|next|validate ...`
 - `/swarm-msg send <to> <message>`
 

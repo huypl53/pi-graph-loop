@@ -44,7 +44,7 @@ orchestrator pi session
   traces/tmux/*.txt             pane captures and snapshots
   metrics/                      legacy metric contracts (preserved, unsupported)
   runs/                         legacy run records (preserved, unsupported)
-  memory/                       legacy memory records (preserved, unsupported)
+  memory/                       legacy memory records (preserved, unsupported) — actively `mkdir`-kept by `src/state.ts` paths init so legacy `swarm-state.json` reads stay consistent
   iterations/                   legacy iteration sessions (preserved, unsupported)
   loops/                        legacy loop state (preserved, unsupported)
 ```
