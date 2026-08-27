@@ -53,6 +53,36 @@ const swapChain = new Map<string, { count: number; at: number }>();
 const MAX_SWAP_CHAIN = 2;
 const SWAP_CHAIN_RESET_MS = 5 * 60_000;
 
+// === Issue 17 (model-pool-respect-pi-retries): engine-retry gate ===
+// The pi engine retries a failed provider request up to `retry.maxRetries` (default 3) times with
+// exponential backoff (2s, 4s, 8s — see @earendil-works/pi-coding-agent/docs/settings.md). The
+// engine does NOT forward `auto_retry_*` events to extensions (allowlist-gated in
+// agent-session.js:_emitExtensionEvent), so we observe retries indirectly: each retry attempt
+// re-enters via `agent.continue()` and emits a fresh `turn_end { stopReason: "error" }` with the
+// same providerKey + errorMessage. We count consecutive same-error turn_ends; when the count
+// reaches ENGINE_MAX_RETRIES (or the burst ages past ENGINE_RETRY_WINDOW_MS after the last error),
+// we conclude the engine has exhausted retries and let the swap path fire.
+//
+// NOTE: these constants are inlined here because `constants.ts` is currently out of scope for
+// Issue 17 (owned by Issue 16 follow-up). When constants.ts is reopened, move ENGINE_MAX_RETRIES
+// and ENGINE_RETRY_WINDOW_MS to constants.ts and re-import them here. The values mirror pi's
+// defaults and are stable.
+const ENGINE_MAX_RETRIES = 3;            // mirrors pi's default retry.maxRetries
+const ENGINE_RETRY_WINDOW_MS = 14_000;   // pi's retry budget = 2s + 4s + 8s = 14s (baseDelay * (2^N - 1) for N=maxRetries=3)
+
+// Per-agent engine-retry incident. Same shape as EngineRetryIncident in types.ts; we keep the
+// runtime value here as a plain object for fast Map.set / Map.get inside the hot path. Cleared on
+// session_start, session_shutdown, agent_settled, and any successful turn_end (the engine recovered
+// on a later retry attempt). NEVER persisted — persistence would create a stuck "exhausted" gate
+// across restarts that have lost the engine retry context.
+const engineRetryIncidents = new Map<string, {
+	providerKey: string;
+	errorMessage: string;
+	firstSeenAt: number;
+	lastSeenAt: number;
+	count: number;
+}>();
+
 export function stopOrchestratorPump() {
 	if (orchestratorMailboxTimer) clearTimeout(orchestratorMailboxTimer);
 	orchestratorMailboxTimer = undefined;
@@ -273,6 +303,15 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		if (msg.stopReason === "stop") {
 			const okSlot: ModelSlot = { model: String(msg.model || ctx.model?.id || ""), provider: String(msg.provider || ctx.model?.provider || "") || undefined };
 			if (okSlot.model) await recordSlotSuccess(p, okSlot).catch(() => {});
+			// Issue 17: a successful turn after a burst of engine retries means the engine RECOVERED.
+			// Clear any open incident for this agent so the next failure starts a fresh observation.
+			// Without this, a stale incident would survive and the next error turn_end would miscount
+			// against the previous burst.
+			if (engineRetryIncidents.has(agentId)) {
+				const incident = engineRetryIncidents.get(agentId);
+				engineRetryIncidents.delete(agentId);
+				await trace(p, "pool.engine_retry_recovered", { agentId, providerKey: incident?.providerKey, count: incident?.count ?? 0 }).catch(() => {});
+			}
 			return;
 		}
 		if (msg.stopReason !== "error") return;
@@ -297,6 +336,57 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		}
 		const currentSlot: ModelSlot = { model: String(msg.model || ctx.model?.id || ""), provider: String(msg.provider || ctx.model?.provider || "") || undefined };
 		if (!currentSlot.model) return;
+		// === Issue 17: engine-retry gate ===
+		// The pi engine retries a failed provider request up to ENGINE_MAX_RETRIES times with
+		// exponential backoff before giving up. Each retry emits a fresh turn_end {error} with the
+		// SAME providerKey + errorMessage. We count consecutive same-error turn_ends within
+		// ENGINE_RETRY_WINDOW_MS; only when the count reaches ENGINE_MAX_RETRIES do we conclude the
+		// engine has exhausted retries on this slot and allow the swap path to fire. Below the
+		// threshold, we trace the gated event and return — no swap, no bench, no streak bump.
+		// A different providerKey OR errorMessage OR a gap > ENGINE_RETRY_WINDOW_MS starts a FRESH
+		// incident (the old one aged out via the window check, not via a timer that could miss).
+		const providerKey = slotKey(currentSlot);
+		const normErr = errorText.slice(0, 200);
+		const prevIncident = engineRetryIncidents.get(agentId);
+		let engineExhausted = false;
+		let incidentCount = 1;
+		if (prevIncident
+			&& prevIncident.providerKey === providerKey
+			&& prevIncident.errorMessage === normErr
+			&& (nowMs - prevIncident.lastSeenAt) <= ENGINE_RETRY_WINDOW_MS) {
+			prevIncident.count++;
+			prevIncident.lastSeenAt = nowMs;
+			incidentCount = prevIncident.count;
+			if (prevIncident.count >= ENGINE_MAX_RETRIES) engineExhausted = true;
+		} else {
+			engineRetryIncidents.set(agentId, {
+				providerKey,
+				errorMessage: normErr,
+				firstSeenAt: nowMs,
+				lastSeenAt: nowMs,
+				count: 1,
+			});
+		}
+		if (!engineExhausted) {
+			// Transient within the engine's retry budget — DO NOT swap, DO NOT bench, DO NOT pollute
+			// the streak. Trace for visibility and return. The engine may still recover on a later
+			// retry; if it does, the successful turn_end clears the incident (see `stop` branch).
+			await trace(p, "pool.swap_gated_by_engine_retry", {
+				agentId,
+				providerKey,
+				kind,
+				count: incidentCount,
+				windowMs: ENGINE_RETRY_WINDOW_MS,
+				threshold: ENGINE_MAX_RETRIES,
+				error: normErr.slice(0, 120),
+			}).catch(() => {});
+			return;
+		}
+		// Engine exhausted: this is the terminal strike. Clear the incident so the next failure
+		// (on the new slot, after the swap) starts a fresh observation. Trace the exhaustion so
+		// dashboards can distinguish "engine retried and recovered" from "engine gave up".
+		engineRetryIncidents.delete(agentId);
+		await trace(p, "pool.engine_retry_exhausted", { agentId, providerKey, kind, count: incidentCount }).catch(() => {});
 		await recordProviderError(p, currentSlot, kind, errorText).catch(() => {});
 		const picked = await pickSlot(p, { stickyKey: agentId, avoidKey: slotKey(currentSlot) }).catch(() => undefined);
 		if (!picked) {
@@ -330,9 +420,25 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		// Issue 16 (C2 + B1 fix): stamp the session's start time as a process-wide env var so
+		// RecentSpawn stamps + isSameOrchestratorLeader comparisons can detect pid recycling under a
+		// different session. Guarded so a second session_start in the same process (e.g. after
+		// /reload) doesn't churn the value mid-flight. Lives at the top of registerSwarmHooks's
+		// session_start handler (NOT index.ts, which has no pi.on(...) and would create
+		// non-deterministic ordering with this handler).
+		if (!process.env.PI_SWARM_SESSION_STARTED_AT) {
+			process.env.PI_SWARM_SESSION_STARTED_AT = new Date().toISOString();
+		}
+		// Issue 17 (binding C1 — symmetry): clear the per-agent engine-retry incident on session_start.
+		// A stale incident from a prior session cannot survive a fresh session (the engine retry context
+		// is lost across restarts); clearing here prevents a stuck "exhausted" gate from leaking forward.
+		// The Map is keyed by agentId so we only delete the entry for THIS session's agent (other agents'
+		// incidents are process-shared state and survive; their sessions are independent processes).
+		const agentIdEarly = currentAgentId();
+		if (agentIdEarly !== SWARM_GUEST_ID) engineRetryIncidents.delete(agentIdEarly);
 		const p = paths(ctx.cwd);
 		await ensureDirs(p);
-		const agentId = currentAgentId();
+		const agentId = agentIdEarly;
 		const guest = agentId === SWARM_GUEST_ID;
 		// Identity-gated tool visibility: a guest session loses the swarm tool surface (it is a plain coding
 		// session, not a swarm participant); registered agents and the orchestrator keep it. The /swarm slash
@@ -455,6 +561,10 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		const agentId = currentAgentId();
+		// Issue 17: clear any open engine-retry incident on settle. A settled agent is not in a retry
+		// window (the engine either resolved the last turn or gave up before settling). Stale incidents
+		// from a burst that ended mid-settle must not leak forward into the next failure.
+		engineRetryIncidents.delete(agentId);
 		if (agentId === "orchestrator") {
 			const p = paths(ctx.cwd);
 			await pumpOrchestratorMailbox(pi, ctx, p, "agent_settled");
@@ -608,8 +718,15 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		const agentId = currentAgentId();
 		if (agentId === "orchestrator") {
 			stopOrchestratorPump();
+			// Issue 17 (binding C1 — symmetry with session_start): clear any open incident for the
+			// orchestrator on shutdown. Defense-in-depth — the process is going away anyway, but
+			// explicit symmetry keeps the invariant visible to readers.
+			engineRetryIncidents.delete(agentId);
 			return;
 		}
+		// Issue 17 (binding C1 — symmetry with session_start): clear any open incident for this agent
+		// on shutdown so the next session_start (in this or another process) starts with an empty map.
+		engineRetryIncidents.delete(agentId);
 		const p = paths(ctx.cwd);
 		await ensureDirs(p);
 		await withLock(p, async () => {

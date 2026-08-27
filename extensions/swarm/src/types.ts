@@ -83,6 +83,22 @@ export type PoolHealthState = {
 	rrCursor?: number;
 };
 
+// Per-agent engine-retry observation (Issue 17 model-pool-respect-pi-retries). The pi engine
+// retries a failed provider request up to retry.maxRetries (default 3) times before giving up.
+// The extension cannot subscribe to engine retry events directly (`auto_retry_*` is not in the
+// extension event allowlist — see agent-session.js:_emitExtensionEvent). Instead we count
+// consecutive `turn_end { stopReason: "error" }` events on the SAME providerKey + errorMessage
+// within ENGINE_RETRY_WINDOW_MS; when the count reaches ENGINE_MAX_RETRIES (or the burst ages out),
+// we conclude the engine has exhausted retries on this slot and gate the swap path on that signal.
+// In-process only — never persisted. See pool-retry.test.mjs for fixture coverage.
+export type EngineRetryIncident = {
+	providerKey: string;    // `${provider}/${model}` of the slot being retried by the engine
+	errorMessage: string;   // normalized (slice 0..200) for comparison
+	firstSeenAt: number;    // ms epoch — first turn_end {error} for this incident
+	lastSeenAt: number;     // ms epoch — most recent turn_end {error} for this incident
+	count: number;          // number of consecutive turn_end {error} events in this incident
+};
+
 export type MessageRecord = {
 	id: string;
 	from: string;
@@ -199,6 +215,13 @@ export type RecentSpawn = {
 	agentId: string;
 	spawnedAt: string;     // ISO; mirrors agent.createdAt for the just-created record
 	deadlineAt: string;    // ISO; spawnedAt + ORPHAN_SPAWN_WARNING_TIMEOUT_MS
+	// Issue 16: identity of the spawning orchestrator session, stamped unconditionally at
+	// armOrphanWatch time. The pre-clear predicate in swarm_assign_task compares these against
+	// process.pid + process.env.PI_SWARM_SESSION_STARTED_AT at compare time. Both fields are
+	// optional only for backward-compat reads of legacy state (no production code path leaves
+	// them undefined for entries armed after this change).
+	spawnedByPid?: number;
+	spawnedBySessionStartedAt?: string;
 };
 
 export type SwarmState = {
