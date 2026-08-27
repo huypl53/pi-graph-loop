@@ -44,13 +44,16 @@ swarm tools in-process.
 
 ### Important authority caveat
 
-Current visibility is **not role-based RBAC**. A planner, implementer, tester,
-or reviewer that is a registered agent receives the same swarm tool inventory
-as the orchestrator. Identity cards and tool descriptions express intended use,
-but most control-plane tools do not yet enforce that intended role at execution
-time.
+Visibility is identity-based (see above) but several destructive tools also enforce
+server-side authority at execution time. As of Issue 10 the destructive subset
+(`swarm_prune`, `swarm_gc`, `swarm_assign_task`, `swarm_update_task(force=true)`,
+`swarm_update_task(cancelTask=true)`, `swarm_stop_agent`, `swarm_release_agent_task`)
+rejects non-orchestrator callers with `ORCHESTRATOR_AUTHORITY_REQUIRED` (or the
+specialized `FORCE_FORBIDDEN`/`CANCEL_FORBIDDEN` for the `force`/`cancelTask` paths
+on `swarm_update_task`) before any state mutation. Other swarm tools remain open to
+any registered agent and use the description / `promptGuidelines` as the contract.
 
-The following checks are enforced today:
+The following identity checks are also enforced today:
 
 - `swarm_ack_message` normally lets only the message recipient acknowledge a
   message; the orchestrator may act on another recipient's message and may
@@ -59,12 +62,6 @@ The following checks are enforced today:
   node.
 - Guest sessions do not receive swarm tools through normal model tool
   visibility.
-
-> **Review note:** `swarm_update_task(force=true)` currently treats `force` as
-> an orchestrator override. Consequently, a registered non-orchestrator can
-> bypass normal node ownership and transition checks by supplying `force: true`.
-> Treat `force`, lifecycle tools, assignment, reconciliation, and GC as
-> human/orchestrator operations until server-side RBAC is added.
 
 ### Destructive or high-impact operations
 
@@ -77,7 +74,10 @@ Run these from the orchestrator after inspecting state first:
   `swarm_reconcile(mark=true)`, `swarm_prune`, `swarm_gc(dryRun=false)`;
 - destructive task cancellation: `swarm_update_task(cancelTask=true, force=true)`.
 
-Prefer the non-mutating inspection tool before every one of these operations.
+Both `swarm_prune` and `swarm_gc` are orchestrator-only after Issue 10 (server-side
+`requireOrchestratorAuthority`); other listed tools are operator-led by description
+but not currently hard-gated. Prefer the non-mutating inspection tool before every
+one of these operations.
 
 ## `/swarm` commands
 
@@ -142,7 +142,7 @@ state or authorization path.
 | `swarm_spawn_agent` | Starts a fresh pi worker in a swarm tmux window. | `role` required; optional `id`, `roleKind`, model/provider, initial prompt. Uses configured model pool/defaults. |
 | `swarm_register_agent` | Adopts or retargets an existing tmux pane. | `tmuxTarget` and `role` required. Cannot register the reserved `orchestrator` id through this tool. |
 | `swarm_stop_agent` | Marks an agent stopped and normally kills its pane/window. | Refuses active work unless `force=true`; use `killPane=false` to keep the pane. |
-| `swarm_restart_agent` | Stops then respawns at the same stable id. | Preserves mailbox and identity history; may release active task pointers. |
+| `swarm_restart_agent` | Stops then respawns at the same stable id. | Preserves mailbox and identity history; may release active task pointers. Default kills the pane; pass `killPane=false` to keep it alive (the agent record still flips to `running`). The freshly started pi reuses the same id, mailbox, and identity. |
 | `swarm_set_role` | Changes role, role kind, and capabilities; regenerates identity. | At least one of role, role kind, or capabilities is required. |
 | `swarm_set_agent_paused` | Drains an agent from reuse without killing it. | `paused=true` prevents assignment selection; `false` resumes. |
 | `swarm_send_keys` | Sends raw tmux keys to a registered pane. | Escape hatch for interrupt/dismiss/type. Use `literal` and `enter` deliberately. |
@@ -153,7 +153,7 @@ state or authorization path.
 | `swarm_trace` | Reads structured swarm trace events. | Optional `limit`; inspect delivery/spawn failures. |
 | `swarm_capture_agent_pane` | Captures pane history to `.pi/swarm/traces/tmux/`. | `agentId` required; use for runtime evidence/debugging. |
 | `swarm_dead_letters` | Lists terminal delivery failures. | Optional recipient/message filters and limit. |
-| `swarm_prune` | Marks dead panes stopped and can remove old stopped records. | Administrative cleanup. Defaults to `dryRun=true`; run dry first. Does not delete mailboxes/traces. |
+| `swarm_prune` | Marks dead panes stopped and can remove old stopped records. | **Orchestrator-only** (server-side `requireOrchestratorAuthority`); defaults to `dryRun=true`; run dry first. Does not delete mailboxes/traces. |
 
 ## Messaging and reconcile (5)
 
@@ -215,7 +215,7 @@ gates, closure, and rework semantics.
 
 | Tool | What it does | Key inputs / operating notes |
 | --- | --- | --- |
-| `swarm_gc` | Prunes only terminal messages beyond a retained recent window and caps delivered ledgers. | Defaults to `dryRun=true`; use `keepMessages` to retain the newest messages. It never drops queued, injected, failed, or ACK-incomplete messages. |
+| `swarm_gc` | Prunes only terminal messages beyond a retained recent window and caps delivered ledgers. | **Orchestrator-only** after Issue 10. Defaults to `dryRun=true`; use `keepMessages` to retain the newest messages. It never drops queued, injected, failed, or ACK-incomplete messages. |
 
 `swarm_gc` is bounded maintenance, not an incident-repair tool. Use
 `swarm_reconcile` first when delivery or task state is actionable.

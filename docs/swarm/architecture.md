@@ -145,7 +145,9 @@ These rules should stay stable unless there is an intentional design change.
 - durable task transitions and ownership checks
 - **file-scope ownership preflight: `swarm_assign_task` rejects overlapping active write scopes with `ACTIVE_SCOPE_CONFLICT` before any mutation**
 - **orchestrator-only authority for `force=true` and `cancelTask`** (server-side identity check; a non-orchestrator caller is rejected before any mutation)
+- **destructive tools are server-side gated to `PI_SWARM_AGENT_ID=orchestrator`** — `swarm_prune`, `swarm_gc`, `swarm_assign_task`, `swarm_update_task(force=…)`, `swarm_stop_agent`, `swarm_release_agent_task` all reject non-orchestrator callers with `ORCHESTRATOR_AUTHORITY_REQUIRED` (or `FORCE_FORBIDDEN`/`CANCEL_FORBIDDEN` for the `force`/`cancelTask` paths) before any state mutation
 - **strict single-orchestrator leadership: `ORCHESTRATOR_LEADER_DENIED` rejects a second live pid on gated tool and command paths**
+- **reuse predicate (`matchReusableAgents`) tightens role-kind matching** by re-deriving roleKind from id+role text (Issue 10, Issue 7 misroute fix), honors a same-task active-lease guard (`excludeTaskId`) with an idle carve-out so reclaim stays the right gate, and respects explicit `agentId` / `capabilities` escape-hatches; every substring-collapsed or fallback match emits a `reuse.match_kind` trace for auditability
 - assignment state in task files
 - ack/response checks for response-required messages
 - append-only message/task state

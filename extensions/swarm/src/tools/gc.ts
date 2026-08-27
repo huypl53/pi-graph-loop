@@ -4,6 +4,8 @@ import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { paths, readState, trace, withLock, writeState } from "../state.ts";
 import { pruneState, DEFAULT_KEEP_MESSAGES, type PruneOptions } from "../gc.ts";
 import { textResult } from "../utils.ts";
+import { currentAgentId } from "../session.ts";
+import { requireOrchestratorAuthority } from "../identity.ts";
 
 export function registerGcTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
@@ -20,6 +22,7 @@ export function registerGcTools(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
+			requireOrchestratorAuthority(currentAgentId(), "swarm_gc");
 			const dryRun = params.dryRun !== false; // default true
 			const opts: PruneOptions = { keepMessages: typeof params.keepMessages === "number" ? params.keepMessages : DEFAULT_KEEP_MESSAGES };
 			const result = await withLock(p, async () => {

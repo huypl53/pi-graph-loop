@@ -366,10 +366,26 @@ export function checkStallNotificationStale(
 			evidence.push(`superseded_attempt: attempt ${attempt.attemptId} status=${attempt.status}`);
 			return { stale: true, reason: "superseded_attempt", evidence };
 		}
+		// Last attempt's assignee stopped/unhealthy beyond grace: the node's work is orphaned — an
+		// assign-nudge for it is stale until a fresh assignment (or deliberate reassignment) happens.
+		// Applies when the node currently has no assignee (released) and the nudge targets the PM.
+		const lastAttempt = attempt || node.attemptHistory.at(-1);
+		if (!node.assignee && lastAttempt?.assignee) {
+			const prior = st.agents[lastAttempt.assignee];
+			if (prior && (prior.status === "stopped" || prior.health === "unhealthy")) {
+				const assignedAt = lastAttempt.assignedAt ? new Date(lastAttempt.assignedAt).getTime() : 0;
+				const age = nowMs - assignedAt;
+				if (age > SETTLE_NOTIFY_COOLDOWN_MS) {
+					evidence.push(`orphaned_attempt_assignee_stopped: ${lastAttempt.assignee} ${prior.status}/${prior.health}, attempt age=${Math.round(age / 1000)}s > grace`);
+					return { stale: true, reason: "agent_stopped", evidence };
+				}
+			}
+		}
 	}
 
-	// (5) Assignee drift
-	if (node.assignee !== agentId) {
+	// (5) Assignee drift — the "orchestrator" agentId is a placeholder used by watchers that nudge the
+	// PM about an UNASSIGNED node (initial-ready, graph-advance); there is no assignee to drift from.
+	if (node.assignee !== agentId && agentId !== "orchestrator") {
 		evidence.push(`assignee_drift: node assignee=${node.assignee || "(unassigned)"} but notifying agent=${agentId}`);
 		return { stale: true, reason: "assignee_drift", evidence };
 	}

@@ -9,7 +9,7 @@ import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux } f
 import { childPiArgs, currentModel, currentProvider } from "./session.ts";
 import { pickSlot, poolStatus, preflightSpawn, formatPreflightError } from "./pool.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, shellQuote, sleep } from "./utils.ts";
-import { identityPath, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
+import { identityPath, mailboxPath, paths, readState, trace, withLock, writeState } from "./state.ts";
 import { identityPrompt, writeEffectiveIdentity } from "./identity.ts";
 import { responseMissingRecords } from "./mailbox.ts";
 
@@ -413,26 +413,121 @@ export function attachTarget(agent: SwarmAgent) {
 	};
 }
 
-export async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: { roleKind?: string; capabilities?: string[]; requireIdle?: boolean; requireTmuxAlive?: boolean; includeBusy?: boolean }): Promise<{ matches: ReusableAgentMatch[]; recommended?: string }> {
+// Same-task active-lease guard (roadmap issue 10): when the caller passes `excludeTaskId`,
+// skip an agent that is ALREADY actively working on that task. An agent that has settled
+// (runtimeStatus === "idle") with a stale activeTaskIds pointer is OK — the existing
+// reclaim path (reconcile, /swarm release) handles that, not the reuse predicate. The
+// carve-out prevents churn when a worker briefly settles between tool calls and the
+// reuse lookup misroutes around it.
+type MatchOpts = {
+	roleKind?: string;
+	capabilities?: string[];
+	requireIdle?: boolean;
+	requireTmuxAlive?: boolean;
+	includeBusy?: boolean;
+	excludeTaskId?: string;
+	// Escape-hatch: an exact agentId bypasses the role-kind + active-lease gate. Used by
+	// swarm_assign_task(agentId=...) to honor an explicit caller request even when reuse
+	// would otherwise skip the agent. We do NOT honor escape-hatch capabilities here — the
+	// caller passes them through normal opts.capabilities.
+	agentId?: string;
+};
+
+// Pure predicate: no I/O, no tmux probes. Given the live SwarmState and an options object,
+// returns every agent that COULD match the reuse contract (excluding runtime liveness). The
+// wrapper `findReusableAgent` runs this, then enriches each match with `tmuxAlive` for the
+// scoring sort. Extracted so the reuse-misroute test can exercise the role-kind /
+// active-lease / escape-hatch rules directly without a mock pi.
+export function matchReusableAgents(st: SwarmState, opts: MatchOpts = {}): ReusableAgentMatch[] {
 	const wantKind = opts.roleKind;
 	const wantCaps = new Set((opts.capabilities || []).map((c) => c.toLowerCase()));
+	const escapeAgentId = opts.agentId ? safeId(opts.agentId) : undefined;
+	const excludeTaskId = opts.excludeTaskId;
+	const hasCapsRequest = wantCaps.size > 0;
 	const matches: ReusableAgentMatch[] = [];
 	for (const agent of Object.values(st.agents)) {
 		if (agent.id === "orchestrator") continue; // never reuse the human-driven orchestrator
 		ensureAgentDefaults(agent);
 		if (agent.paused) continue; // paused/drain: parked but not killed — excluded from the reuse pool
-		if (wantKind && agent.roleKind !== wantKind) continue;
-		if (wantCaps.size && !agent.capabilities.map((c) => c.toLowerCase()).some((c) => wantCaps.has(c))) continue;
+		// Escape-hatch (Issue 10 §3.2 step 3): an explicit agentId bypasses the role-kind check AND
+		// the same-task active-lease guard AND the includeBusy / maxConcurrentTasks cap so a
+		// deliberate caller request always wins. Paused + responseMissing are still hard-excluded
+		// (safety invariants, not reuse-policy gates).
+		const isEscape = escapeAgentId !== undefined && escapeAgentId === agent.id;
+		// Re-derive the agent's role-kind so a stale or never-set roleKind field cannot drift
+		// matching. The OR with the recorded roleKind field catches two cases:
+		//   (a) stale roleKind on a pinned agent (re-derive wins)
+		//   (b) substring collision (e.g. `plan-reviewer` roleKind="reviewer" field, but the
+		//       inferred kind from id is "planner" — for `planner` reuse this agent must NOT be
+		//       selected; for `reviewer` reuse the field matches AND the inference also matches,
+		//       so it stays a valid match)
+		const rederived = inferRoleKind(agent.id, agent.role);
+		// Capability match (escape-hatch #2): at least one of the requested capabilities is
+		// present. Capabilities are an additive escape-hatch that BYPASSES the role-kind check
+		// (so a tester with `review` capability can fill a reviewer-kind request) but does NOT
+		// bypass paused / responseMissing / same-task active-lease guard (caller safety).
+		const capsMatch = hasCapsRequest && agent.capabilities.map((c) => c.toLowerCase()).some((c) => wantCaps.has(c));
+		let matchKind: "exact" | "substring-collapsed" | "fallback" | undefined;
+		if (isEscape) {
+			matchKind = "fallback";
+		} else if (wantKind) {
+			const fieldMatches = agent.roleKind === wantKind;
+			const inferredMatches = rederived === wantKind;
+			if (fieldMatches && inferredMatches) {
+				matchKind = "exact";
+			} else if (fieldMatches && !inferredMatches) {
+				matchKind = "substring-collapsed";
+			} else if (!fieldMatches && inferredMatches) {
+				matchKind = "exact";
+			} else {
+				// Neither field nor inferred matches the wanted kind. The agent may still match
+				// via the capabilities escape-hatch; if not, exclude below.
+				matchKind = capsMatch ? "fallback" : undefined;
+			}
+		} else {
+			matchKind = capsMatch ? "fallback" : undefined;
+		}
+		if (!matchKind) continue;
+		// Same-task active-lease guard: skip if the agent currently has an active lease on
+		// excludeTaskId AND is not idle. The idle carve-out lets reclaim handle stale pointers
+		// instead of duplicating the reclaim logic here. Escape-hatch bypasses this guard.
+		if (!isEscape && excludeTaskId && agent.activeTaskIds.includes(excludeTaskId) && agent.runtimeStatus !== "idle") continue;
 		const responseMissing = responseMissingRecords(st, agent.id).length;
 		if (responseMissing > 0) continue;
 		const idle = agent.runtimeStatus === "idle";
 		if (opts.requireIdle && !idle) continue;
-		if (!opts.includeBusy && !idle && agent.activeTaskIds.length >= agent.maxConcurrentTasks) continue;
-		const tmuxAlive = agent.tmuxTarget && agent.tmuxTarget !== "unknown" ? await isTmuxRunning(pi, agent.tmuxTarget) : false;
+		// Escape-hatch bypasses the includeBusy + maxConcurrentTasks cap so the caller request
+		// always wins (the caller has explicit information about the agent it wants).
+		if (!isEscape && !opts.includeBusy && !idle && agent.activeTaskIds.length >= agent.maxConcurrentTasks) continue;
+		matches.push({ agentId: agent.id, roleKind: agent.roleKind, runtimeStatus: agent.runtimeStatus, health: agent.health, tmuxAlive: false, activeTaskIds: agent.activeTaskIds, capabilities: agent.capabilities, matchKind });
+	}
+	return matches;
+}
+
+export async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: MatchOpts & { isTmuxAlive?: (agent: SwarmAgent) => Promise<boolean> }): Promise<{ matches: ReusableAgentMatch[]; recommended?: string }> {
+	// The pure predicate does the role-kind + active-lease + escape-hatch work; we layer
+	// tmux liveness on top via the optional `isTmuxAlive` adapter (default: real tmux probe).
+	// This split lets `matchReusableAgents` be unit-tested without a mock pi.
+	const isAlive = opts.isTmuxAlive || (async (agent: SwarmAgent) => agent.tmuxTarget && agent.tmuxTarget !== "unknown" ? await isTmuxRunning(pi, agent.tmuxTarget) : false);
+	const candidates = matchReusableAgents(st, opts);
+	const matches: ReusableAgentMatch[] = [];
+	for (const m of candidates) {
+		const agent = st.agents[m.agentId];
+		if (!agent) continue;
+		const tmuxAlive = await isAlive(agent);
 		if (opts.requireTmuxAlive && !tmuxAlive) continue;
-		matches.push({ agentId: agent.id, roleKind: agent.roleKind, runtimeStatus: agent.runtimeStatus, health: agent.health, tmuxAlive, activeTaskIds: agent.activeTaskIds, capabilities: agent.capabilities });
+		matches.push({ ...m, tmuxAlive });
 	}
 	const score = (m: ReusableAgentMatch) => (m.runtimeStatus === "idle" ? 0 : 1) + (m.health === "healthy" ? 0 : 2) + (m.tmuxAlive ? 0 : 4) + m.activeTaskIds.length;
 	matches.sort((a, b) => score(a) - score(b));
+	// reuse.match_kind trace (roadmap issue 10): surface every substring-collapsed or fallback
+	// match so callers/ops can audit why a non-exact match was selected. Pure informational;
+	// never mutates state. Uses st.cwd to derive paths — every caller holds the same cwd via
+	// ctx.cwd, so this is consistent.
+	try {
+		const p = paths(st.cwd);
+		const kinds = matches.reduce<Record<string, number>>((acc, m) => { acc[m.matchKind || "exact"] = (acc[m.matchKind || "exact"] || 0) + 1; return acc; }, {});
+		await trace(p, "reuse.match_kind", { roleKind: opts.roleKind || null, excludeTaskId: opts.excludeTaskId || null, counts: kinds, recommended: matches[0]?.agentId || null }).catch(() => {});
+	} catch { /* trace is informational; never fail reuse on it */ }
 	return { matches, recommended: matches[0]?.agentId };
 }

@@ -93,6 +93,8 @@ Required examples in this issue family:
 - `swarm_stop_agent`
 - `swarm_release_agent_task`
 - `swarm_reconcile(mark=true)`
+- `swarm_prune` (Issue 10: added to the orchestrator-only set; previously description-only)
+- `swarm_gc` (Issue 10: added to the orchestrator-only set; previously description-only)
 - `/swarm stop`
 - `/swarm release`
 

@@ -586,6 +586,11 @@ export type IterationBest = {
 
 // Internal reusable-agent lookup used by task tooling (not a public worker tool).
 // Recommends the idle, healthy, tmux-alive agent with the fewest active tasks.
+// `matchKind` is the rationale for inclusion (roadmap issue 10, reuse-misroute fix):
+//   "exact" = role-kind check + capabilities intersect cleanly
+//   "substring-collapsed" = re-derived roleKind matches but agent id contains a different role keyword
+//                           (caller may want to log/skip these)
+//   "fallback" = no role-kind match; matched via capabilities or agentId escape-hatch
 export type ReusableAgentMatch = {
 	agentId: string;
 	roleKind: string;
@@ -594,6 +599,7 @@ export type ReusableAgentMatch = {
 	tmuxAlive: boolean;
 	activeTaskIds: string[];
 	capabilities: string[];
+	matchKind?: "exact" | "substring-collapsed" | "fallback";
 };
 
 export type ReconcileAction = { messageId: string; action: string; reason: string; taskId?: string; nodeId?: string };

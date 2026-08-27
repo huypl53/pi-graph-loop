@@ -324,7 +324,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					for (const nodeId of actionable) {
 						const node = task.nodes[nodeId];
 						const kind = inferRoleKind(nodeId, node.role);
-						const found = await findReusableAgent(pi, st, { roleKind: kind, requireIdle: false, includeBusy: false });
+						const found = await findReusableAgent(pi, st, { roleKind: kind, requireIdle: false, includeBusy: false, excludeTaskId: task.taskId });
 						await trace(p, "agent.find", { taskId: task.taskId, nodeId, roleKind: kind, recommended: found.recommended });
 						lines.push(`  ${nodeId} (${node.role}) -> ${found.recommended || "(no reusable agent; spawn needed)"}`);
 					}

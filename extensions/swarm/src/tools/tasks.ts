@@ -220,7 +220,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			for (const nodeId of actionable) {
 				const node = task.nodes[nodeId];
 				const kind = inferRoleKind(nodeId, node.role);
-				const found = await findReusableAgent(pi, st, { roleKind: kind, requireIdle: false, includeBusy: false });
+				const found = await findReusableAgent(pi, st, { roleKind: kind, requireIdle: false, includeBusy: false, excludeTaskId: taskId });
 				await trace(p, "agent.find", { taskId, nodeId, roleKind: kind, recommended: found.recommended, candidates: found.matches.length });
 				suggestions.push({ nodeId, role: node.role, suggestedAssignee: found.recommended, candidates: found.matches });
 			}
@@ -278,7 +278,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					// Orchestrator-role nodes (e.g. commit) are owned by the orchestrator pseudo-agent.
 					assigneeId = "orchestrator";
 				} else {
-					const found = await findReusableAgent(pi, st, { roleKind: expectedKind, requireIdle: false, requireTmuxAlive: false, includeBusy: false });
+					const found = await findReusableAgent(pi, st, { roleKind: expectedKind, requireIdle: false, requireTmuxAlive: false, includeBusy: false, excludeTaskId: taskId });
 					candidates = found.matches;
 					if (found.recommended) assigneeId = found.recommended;
 					else if (params.autoSpawn || params.spawnIsolated) { const r = await spawnAgent(pi, ctx.cwd, p, st, { id: `${expectedKind}-01`, role: node.role }); assigneeId = r.agent.id; spawned = true; }

@@ -504,6 +504,15 @@ Keep a small role-based core and move diagnostics/admin operations behind comman
 | Orchestrator | Create task, inspect status/next nodes, assign, update, reconcile. |
 | Admin/debug | Agent lifecycle/pool, raw tmux input, traces, GC, low-level recovery. |
 
+Issue 10 closes this loop by hard-gating `swarm_prune` and `swarm_gc` (the only two
+remaining destructive tools without an authority check) and tightening
+`findReusableAgent` role-kind matching (Issue 7 misroute): the pure predicate
+`matchReusableAgents(st, opts)` re-derives roleKind from id+role text to avoid the
+`plan-reviewer` vs `reviewer-01` collapse, honors a same-task active-lease guard
+(`excludeTaskId`) with an idle carve-out so reclaim stays the right gate, and
+respects explicit `agentId` and `capabilities` escape-hatches. Every substring-collapsed
+or fallback match emits a `reuse.match_kind` trace for auditability.
+
 Recovery operations should use explicit semantics instead of generic dangerous forced mutation. Candidate command-only actions:
 
 ```text

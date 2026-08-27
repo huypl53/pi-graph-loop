@@ -87,6 +87,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = paths(ctx.cwd);
+			requireOrchestratorAuthority(currentAgentId(), "swarm_prune");
 			const dryRun = params.dryRun !== false;
 			const markDead = params.markDead !== false;
 			const removeStopped = Boolean(params.removeStopped);
@@ -340,7 +341,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		name: "swarm_restart_agent",
 		label: "Swarm Restart",
 		description: "Stop and respawn a fresh pi at the SAME id so mailbox, identity, and history persist. Reuses the recorded role/model/provider. Useful after a crash or to clear context.",
-		promptGuidelines: ["Use `swarm_restart_agent` to reset an agent's pi process without losing its swarm identity/mailbox. This force-stops first (any active tasks are released to the fresh process)."],
+		promptGuidelines: ["Use `swarm_restart_agent` to reset an agent's pi process without losing its swarm identity/mailbox. This force-stops first (any active tasks are released to the fresh process). Default kills the pane; pass `killPane=false` to keep it alive (the agent record still flips to `running`). The freshly started pi reuses the same id, mailbox, and identity."],
 		parameters: Type.Object({
 			agentId: Type.String({ description: "Agent id to restart." }),
 			model: Type.Optional(Type.String({ description: "Optional model override for the respawned pi (defaults to the agent's recorded model)." })),
@@ -364,7 +365,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		name: "swarm_set_role",
 		label: "Swarm Set Role",
 		description: "Change an agent's role/roleKind/capabilities at runtime and regenerate + inject its identity, WITHOUT respawning. roleKind is re-derived from the new role unless roleKind is explicitly passed (then pinned).",
-		promptGuidelines: ["Use `swarm_set_role` to repurpose an idle agent for a different role instead of spawning a new one."],
+		promptGuidelines: ["Use `swarm_set_role` to repurpose an idle agent for a different role instead of spawning a new one. After a role change the agent may leave the reuse pool for the previous role kind and enter it for the new one; subsequent `swarm_assign_task` reuse calls will pick it up under the new role."],
 		parameters: Type.Object({
 			agentId: Type.String({ description: "Agent id to repurpose." }),
 			role: Type.Optional(Type.String({ description: "New role/instructions text." })),
@@ -411,7 +412,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		name: "swarm_send_keys",
 		label: "Swarm Send Keys",
 		description: "Send raw tmux keys to an agent's pane: interrupt (C-c), dismiss, navigate, or type text. Non-literal mode interprets tmux key names; literal mode sends exact text. Powerful/destructive — use to unstick a runaway agent.",
-		promptGuidelines: ["Use `swarm_send_keys` to send raw tmux input to an agent pane, e.g. C-c to interrupt. Prefer the normal mailbox/identity tools for coordination; this is an escape hatch."],
+		promptGuidelines: ["Use `swarm_send_keys` to send raw tmux input to an agent pane, e.g. C-c to interrupt. Prefer the normal mailbox/identity tools for coordination; this is an escape hatch. Targets another agent's pane by id — never use to send keys into the orchestrator pane from a worker."],
 		parameters: Type.Object({
 			agentId: Type.String({ description: "Agent id whose pane to send keys to." }),
 			keys: Type.String({ description: "Keys to send. Non-literal: space-separated tmux key names (C-c, Up, Enter). Literal: exact text." }),

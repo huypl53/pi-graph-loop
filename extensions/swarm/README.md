@@ -117,11 +117,15 @@ Useful tools:
 - `swarm_ack_message`
 - `swarm_message_status`
 - `swarm_reconcile` (mail + task sweep; `mark=true` repairs task status drift)
-- `swarm_prune`
+- `swarm_prune` (orchestrator-only after Issue 10; dry-run by default)
 - `swarm_dead_letters`
 - `swarm_trace`
 - `swarm_capture_agent_pane`
 - `swarm_agent_identity`
+
+> Tools marked **orchestrator-only** in `docs/swarm/tools.md` (e.g. `swarm_prune`,
+> `swarm_gc`) reject non-orchestrator callers with a server-side error before any state
+> mutation.
 
 Task-graph tools:
 
