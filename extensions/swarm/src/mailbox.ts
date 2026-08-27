@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { MessageRecord, MessageResponseStatus, MessageStatus, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
+import type { OrphanClearReason } from "./agents.ts";
 import { SEND_SETTLE_MS, MAX_REINJECTS } from "./constants.ts";
 import { appendJsonl, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
 import { buildSystemDelivery } from "./delivery.ts";
@@ -226,7 +227,7 @@ export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg
 // orchestrator pseudo-agent) and appends to the recipient mailbox; it does NOT read/write state or
 // acquire the lock. Callers that already hold the swarm lock (task tools that send within one atomic
 // operation) use this directly and writeState once afterward.
-export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string }): Promise<{ msg: SwarmMessage; delivery: any }> {
+export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string; clearReason?: OrphanClearReason }): Promise<{ msg: SwarmMessage; delivery: any }> {
 	const to = safeId(params.to);
 	const from = currentAgentId();
 	if (to === "orchestrator") ensureOrchestrator(st, cwd, p);
@@ -310,13 +311,13 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	if (delivery?.delivered) {
 		try {
 			const { clearOrphanWatch } = await import("./agents.ts");
-			await clearOrphanWatch(p, st, m.to, "swarm_send_message");
+			await clearOrphanWatch(p, st, m.to, params.clearReason ?? "swarm_send_message");
 		} catch { /* best-effort; never fail delivery on a watchdog bookkeeping error */ }
 	}
 	return { msg: m, delivery };
 }
 
-export async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string }) {
+export async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string; clearReason?: OrphanClearReason }) {
 	return withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const r = await deliverMessageLocked(pi, cwd, p, st, params);

@@ -427,7 +427,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				if (assignStaleCheck.stale) {
 					await traceTask(tp, "notification.stale.suppressed", { site: "swarm_assign_task.assignment", taskId, nodeId: params.nodeId, reason: assignStaleCheck.reason, evidence: assignStaleCheck.evidence });
 					const fencedKey = `${idempotencyKey}:fenced`;
-					const { msg: fmsg, delivery: fdelivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: assignee.id, body: `Assignment to node ${params.nodeId} of ${task.taskId} is stale (${assignStaleCheck.reason}: ${assignStaleCheck.evidence.join("; ")}). The assignment record persists but no canonical assignment message was sent.`, subject: `Task ${task.taskId} / node ${params.nodeId} assignment FENCED`, conversationId, requiresAck: false, requiresResponse: false, idempotencyKey: fencedKey });
+					const { msg: fmsg, delivery: fdelivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: assignee.id, body: `Assignment to node ${params.nodeId} of ${task.taskId} is stale (${assignStaleCheck.reason}: ${assignStaleCheck.evidence.join("; ")}). The assignment record persists but no canonical assignment message was sent.`, subject: `Task ${task.taskId} / node ${params.nodeId} assignment FENCED`, conversationId, requiresAck: false, requiresResponse: false, idempotencyKey: fencedKey, clearReason: "swarm_assign_task" });
 					const activeAttemptFenced = node.attemptHistory?.find((a: any) => a.attemptId === attemptId);
 					if (activeAttemptFenced) activeAttemptFenced.assignmentMessageId = fmsg.id;
 					node.assignmentMessageId = fmsg.id;
@@ -438,7 +438,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					await traceTask(tp, "task.assign.fenced", { taskId, nodeId: params.nodeId, assignee: assignee.id, messageId: fmsg.id, reason: assignStaleCheck.reason });
 					return { task, tp, msg: fmsg, delivery: fdelivery, candidates, assigneeId: assignee.id, fenced: true, reason: assignStaleCheck.reason };
 				}
-				const { msg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: assignee.id, body, subject: `Task ${task.taskId} / node ${params.nodeId} assigned`, conversationId, requiresAck: true, requiresResponse: true, idempotencyKey });
+				const { msg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, { to: assignee.id, body, subject: `Task ${task.taskId} / node ${params.nodeId} assigned`, conversationId, requiresAck: true, requiresResponse: true, idempotencyKey, clearReason: "swarm_assign_task" });
 				// Update attempt record with the actual message ID
 				const activeAttempt = node.attemptHistory?.find((a: any) => a.attemptId === attemptId);
 				if (activeAttempt) activeAttempt.assignmentMessageId = msg.id;
@@ -685,6 +685,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 								conversationId: `cancel:${task.taskId}`,
 								requiresAck: false,
 								requiresResponse: false,
+								clearReason: "swarm_assign_task",
 							});
 						} catch (err: any) {
 							await traceTask(tp, "task.cancel.notify_failed", { taskId, to: assigneeId, error: String((err as Error)?.message || err) });

@@ -179,12 +179,14 @@ console.log("\n[3] Cancel via assignment: spawn then deliver_message -> cleared,
 		await writeState(p, st);
 	});
 	// Deliver an "assignment" message — the body is irrelevant for this test.
-	await enqueueAndDeliver(pi, cwd, p, { to: "assign-1", body: "TASK ASSIGNMENT: do X" });
+	await enqueueAndDeliver(pi, cwd, p, { to: "assign-1", body: "TASK ASSIGNMENT: do X", clearReason: "swarm_assign_task" });
 	ok("assign-1 removed from recentSpawns after assignment message", recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
 	await wait(TIMER_MARGIN_MS);
 	const events = readEvents(cwd);
 	ok("agent.spawn.orphan_watch_start trace present", eventNames(events, "agent.spawn.orphan_watch_start").length === 1);
 	ok("agent.spawn.orphan_cleared trace present", eventNames(events, "agent.spawn.orphan_cleared").length === 1);
+	const clearedAssign = eventNames(events, "agent.spawn.orphan_cleared")[0];
+	ok("orphan_cleared reports by=swarm_assign_task", clearedAssign?.by === "swarm_assign_task");
 	ok("NO agent.spawn.orphan_warning trace", eventNames(events, "agent.spawn.orphan_warning").length === 0);
 	rmSync(cwd, { recursive: true, force: true });
 }

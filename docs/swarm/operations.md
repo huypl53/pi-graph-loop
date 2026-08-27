@@ -136,8 +136,7 @@ Rotation fields:
 A settings file with only `defaultModel`/`defaultProvider` is treated as a 1-slot
 implicit singleton pool (no rotation, no cooldown). The same `poolStatus`,
 `pickSlot`, and preflight code paths apply; the user is never asked to migrate
-manually. Top-level `swarm` is preferred; `extensions.swarm` is accepted for
-backward compatibility.
+manually. Read precedence (src/session.ts:34-37): `extensions.swarm` is read first; top-level `swarm` is used only when `extensions.swarm` is absent or not an object.
 
 #### Discover your config (read-only)
 
@@ -184,6 +183,8 @@ prints the action directly so the operator never has to guess the fix.
 - Traces: `pool.slot_failure`, `pool.swap`, `pool.swap_failed`, `pool.swap_no_candidate`, `pool.swap_chain_capped`, `pool.swap_model_not_found`, `pool.slot_success`, `pool.turn_error_unclassified` (`.pi/swarm/traces/`).
 - Commands: `/swarm pool list`, `/swarm pool cooldown <provider/model> <ms>`, `/swarm pool clear <provider/model>`, `/swarm pool show`, `/swarm pool validate`, `/swarm pool help`, `/swarm pool preview-preflight`.
 - Without `modelPool`, the single `defaultModel`/`defaultProvider` behavior is unchanged.
+
+### Inspect or change agent roles
 
 - `swarm_agent_identity`
 - `swarm_reload_identity`
