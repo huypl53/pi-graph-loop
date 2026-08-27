@@ -57,6 +57,14 @@ export const POOL_COOLDOWN_MS = 15 * 60 * 1000; // bench a failing slot for 15 m
 
 export const POOL_MAX_RETRIES = 2; // consecutive failures before cooldown
 
+// === Issue 17: engine-retry gate constants (extracted to constants.ts in Issue 19) ===
+// The pi engine retries a failed provider request up to retry.maxRetries (default 3) times with
+// exponential backoff (2s, 4s, 8s — see @earendil-works/pi-coding-agent/docs/settings.md). These
+// constants size the engine-retry gate in hooks.ts. Values mirror pi's defaults and are stable;
+// engine policy belongs to the engine, so we do not read retry.maxRetries at runtime.
+export const ENGINE_MAX_RETRIES = 3;            // mirrors pi's default retry.maxRetries
+export const ENGINE_RETRY_WINDOW_MS = 14_000;   // pi's retry budget = baseDelay * (2^N - 1) for N=maxRetries=3
+
 // Identity used for an anonymous swarm session that neither sets PI_SWARM_AGENT_ID nor opts in as the
 // orchestrator. Such a session is inert for swarm coordination (no agent record, no orchestrator pump,
 // no orchestrator heartbeat refresh); it is a stable, clearly-non-orchestrator id so tool defaults

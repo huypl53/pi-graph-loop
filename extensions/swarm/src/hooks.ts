@@ -2,7 +2,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname, relative, sep } from "node:path";
 import type { MessageResponseStatus, Paths } from "./types.ts";
-import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_KEY_SETTLE_STALE, formatNotifyKey } from "./constants.ts";
+import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_KEY_SETTLE_STALE, ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, formatNotifyKey } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
 import type { ModelSlot } from "./types.ts";
 import { classifyProviderError } from "./types.ts";
@@ -53,6 +53,36 @@ const swapChain = new Map<string, { count: number; at: number }>();
 const MAX_SWAP_CHAIN = 2;
 const SWAP_CHAIN_RESET_MS = 5 * 60_000;
 
+// Exposed for /swarm pool rotate now — manual override is operator-accountable for the same
+// chain cap as the auto-swap path. Called by command.ts after a successful manual setModel so
+// the next auto-swap on the new slot can still hit the cap if the new slot is also dead.
+// Mirrors the reset semantics used inside the auto-swap branch (a quiet gap > SWAP_CHAIN_RESET_MS
+// starts a fresh chain). Returns the new count for testability.
+export function bumpSwapChain(agentId: string, nowMs = Date.now()): number {
+	const chain = swapChain.get(agentId) || { count: 0, at: 0 };
+	if (nowMs - chain.at > SWAP_CHAIN_RESET_MS) chain.count = 0;
+	chain.count += 1;
+	chain.at = nowMs;
+	swapChain.set(agentId, chain);
+	return chain.count;
+}
+
+// Exposed for tests + manual-rotate introspection so a caller can ask "did the manual path honor
+// the swap-chain cap?" without poking the module-local Map directly.
+export function getSwapChainCount(agentId: string, nowMs = Date.now()): number {
+	const chain = swapChain.get(agentId);
+	if (!chain) return 0;
+	if (nowMs - chain.at > SWAP_CHAIN_RESET_MS) return 0;
+	return chain.count;
+}
+
+// Exposed for tests only — clears the swap-chain entry for a given agent so each fixture can
+// start with a clean chain count. NOT used in production (the in-process chain is intentionally
+// persistent across orchestrator turns within a single session).
+export function _resetSwapChainForTests(agentId: string) {
+	swapChain.delete(agentId);
+}
+
 // === Issue 17 (model-pool-respect-pi-retries): engine-retry gate ===
 // The pi engine retries a failed provider request up to `retry.maxRetries` (default 3) times with
 // exponential backoff (2s, 4s, 8s — see @earendil-works/pi-coding-agent/docs/settings.md). The
@@ -63,12 +93,8 @@ const SWAP_CHAIN_RESET_MS = 5 * 60_000;
 // reaches ENGINE_MAX_RETRIES (or the burst ages past ENGINE_RETRY_WINDOW_MS after the last error),
 // we conclude the engine has exhausted retries and let the swap path fire.
 //
-// NOTE: these constants are inlined here because `constants.ts` is currently out of scope for
-// Issue 17 (owned by Issue 16 follow-up). When constants.ts is reopened, move ENGINE_MAX_RETRIES
-// and ENGINE_RETRY_WINDOW_MS to constants.ts and re-import them here. The values mirror pi's
-// defaults and are stable.
-const ENGINE_MAX_RETRIES = 3;            // mirrors pi's default retry.maxRetries
-const ENGINE_RETRY_WINDOW_MS = 14_000;   // pi's retry budget = 2s + 4s + 8s = 14s (baseDelay * (2^N - 1) for N=maxRetries=3)
+// Issue 19: ENGINE_MAX_RETRIES + ENGINE_RETRY_WINDOW_MS moved to constants.ts so they share a
+// single source of truth with the rest of the gate/pool constants. The values are unchanged.
 
 // Per-agent engine-retry incident. Same shape as EngineRetryIncident in types.ts; we keep the
 // runtime value here as a plain object for fast Map.set / Map.get inside the hot path. Cleared on
@@ -82,6 +108,21 @@ const engineRetryIncidents = new Map<string, {
 	lastSeenAt: number;
 	count: number;
 }>();
+
+// Exposed for tests + the `/swarm pool rotate` manual-override path so a caller can verify the
+// engine-retry gate owns its own incident lifecycle (manual override does NOT clear it). Returns
+// a plain copy so callers cannot mutate the module-local Map.
+export function getEngineRetryIncident(agentId: string) {
+	const inc = engineRetryIncidents.get(agentId);
+	if (!inc) return undefined;
+	return {
+		providerKey: inc.providerKey,
+		errorMessage: inc.errorMessage,
+		firstSeenAt: inc.firstSeenAt,
+		lastSeenAt: inc.lastSeenAt,
+		count: inc.count,
+	};
+}
 
 export function stopOrchestratorPump() {
 	if (orchestratorMailboxTimer) clearTimeout(orchestratorMailboxTimer);
@@ -406,7 +447,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			return;
 		}
 		const okSwap = await pi.setModel(target).catch(() => false);
-		if (okSwap) { swapChain.set(agentId, { count: chain.count + 1, at: nowMs }); }
+		if (okSwap) { bumpSwapChain(agentId, nowMs); }
 		await trace(p, okSwap ? "pool.swap" : "pool.swap_failed", { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), kind, reason: picked.reason, target: `${target.provider}/${target.id}` }).catch(() => {});
 		if (okSwap) {
 			// Tell the agent (and the transcript) what happened so it can retry the failed work

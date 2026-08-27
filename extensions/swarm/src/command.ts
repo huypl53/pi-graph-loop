@@ -15,9 +15,10 @@ import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState,
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
 import { claimOrchestratorLeader, ensureOrchestrator, overridePath } from "./identity.ts";
-import { startOrchestratorPump } from "./hooks.ts";
+import { startOrchestratorPump, bumpSwapChain } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
-import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError } from "./pool.ts";
+import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError, pickSlot, slotKey, effectiveConfig } from "./pool.ts";
+import type { ModelSlot } from "./types.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
@@ -42,7 +43,7 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 	return out;
 }
 
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal set <text> | goal done [<goalId>] (orchestrator-only swarm goal lifecycle) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight] | pool cooldown <slot> <ms> | pool clear <slot>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal set <text> | goal done [<goalId>] (orchestrator-only swarm goal lifecycle) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -742,7 +743,88 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						}
 						return;
 					}
-					ctx.ui.notify("Usage: /swarm pool [list|show|validate|help|preview-preflight] | /swarm pool cooldown <provider/model> <ms> | /swarm pool clear <provider/model>", "warning");
+					if (sub === "rotate") {
+					// === Issue 19: manual /swarm pool rotate override ===
+					// Orchestrator-only escape hatch for the engine-retry gate (Issue 17). Two subcommands:
+					//   `now`  — bypass the gate and force-swap the current slot to a healthy alternative.
+					//            Traces pool.swap_forced_by_manual_override and bumps the swap-chain counter
+					//            via bumpSwapChain(agentId) from hooks.ts (a swap happened — operator is
+					//            accountable for the same MAX_SWAP_CHAIN=2 cap as the auto-swap path).
+					//   `next` — bench the current slot for `rotation.cooldownMs` so the NEXT normal
+					//            pickSlot() skips it; the agent keeps its current model for this turn.
+					//            Traces pool.bench_forced_by_manual_override. Does NOT call setModel.
+					// Authority gate mirrors `/swarm goal|attention|remind|stop|release`. Guest sessions
+					// (PI_SWARM_AGENT_ID=swarm-guest) are naturally refused by the currentAgentId() check.
+					if (currentAgentId() !== "orchestrator") {
+						ctx.ui.notify("rotate is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+						return;
+					}
+					const action = rest.shift();
+					if (action !== "now" && action !== "next") {
+						ctx.ui.notify("Usage: /swarm pool rotate now | /swarm pool rotate next\n  rotate: now (force-swap current agent) | next (bench current slot, let next pick skip)", "warning");
+						return;
+					}
+					const { slots, rotation } = effectiveConfig();
+					if (!slots.length) {
+						ctx.ui.notify("No model pool configured. Add `modelPool` under `swarm` (or `extensions.swarm`) in .pi/settings.json.", "warning");
+						return;
+					}
+					const agentId = currentAgentId();
+					const currentModelId = ctx.model?.id || currentModel();
+					const currentProviderId = (ctx.model?.provider && ctx.model.provider.trim()) ? ctx.model.provider : currentProvider(currentModelId);
+					if (!currentModelId) {
+						await trace(p, "pool.manual_rotate_no_current_slot", { agentId, action, reason: "ctx.model.id is empty" }).catch(() => {});
+						ctx.ui.notify("Cannot determine the current slot from ctx.model. This pane is not running on a model pool slot — nothing to rotate.", "warning");
+						return;
+					}
+					const currentSlot: ModelSlot = { model: currentModelId, provider: currentProviderId };
+					if (action === "now") {
+						// `now` — force-swap the current slot. Bypasses the engine-retry gate entirely.
+						// Operator is accountable for the swap-chain cap (a swap happened).
+						const picked = await pickSlot(p, { stickyKey: agentId, avoidKey: slotKey(currentSlot) }).catch(() => undefined);
+						if (!picked) {
+							await trace(p, "pool.manual_rotate_no_alternative", { agentId, from: slotKey(currentSlot), action: "now" }).catch(() => {});
+							ctx.ui.notify("No healthy alternative slot. All eligible slots are benched — /swarm pool list to see, or /swarm pool clear <provider/model> to unbench.", "warning");
+							return;
+						}
+						const target = picked.slot.provider
+							? ctx.modelRegistry?.find?.(picked.slot.provider, picked.slot.model)
+							: undefined;
+						if (!target) {
+							await trace(p, "pool.manual_rotate_model_not_found", { agentId, slot: slotKey(picked.slot), action: "now", hint: picked.slot.provider ? "model not registered under the slot's provider" : "pool slot has no explicit provider; add one in settings.json modelPool" }).catch(() => {});
+							ctx.ui.notify(`Manual rotate refused: picked slot ${slotKey(picked.slot)} has no resolvable model registry entry. /swarm pool list to inspect.`, "warning");
+							return;
+						}
+						const okSwap = await pi.setModel(target).catch(() => false);
+						if (!okSwap) {
+							await trace(p, "pool.swap_failed", { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), kind: "manual_override", reason: picked.reason, target: `${target.provider}/${target.id}` }).catch(() => {});
+							ctx.ui.notify(`Manual rotate failed: setModel refused for ${target.provider}/${target.id}.`, "warning");
+							return;
+						}
+						await trace(p, "pool.swap_forced_by_manual_override", { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), reason: picked.reason, target: `${target.provider}/${target.id}` }).catch(() => {});
+						// Issue 19 Q1: manual override is operator-accountable for the same MAX_SWAP_CHAIN=2
+						// cap as the auto-swap path. Call bumpSwapChain AFTER a successful setModel so a
+						// dead new slot cannot cascade unlimited manual rotations. Mirrors hooks.ts:405.
+						bumpSwapChain(agentId);
+						pi.sendMessage({
+							customType: "swarm-message",
+							content: `[PI-SWARM MODEL POOL] Operator forced manual rotation: previous slot ${slotKey(currentSlot)} was swapped to ${slotKey(picked.slot)} (bypassing engine-retry gate). Your context and mailbox are intact. Continue your current task on the new model.`,
+							display: true,
+						}, ctx.isIdle?.() ? { triggerTurn: true } : { deliverAs: "followUp" });
+						ctx.ui.notify(`Manual rotation: ${slotKey(currentSlot)} -> ${slotKey(picked.slot)} (gate bypassed; reason: ${picked.reason}).`, "info");
+						return;
+					}
+					// `next` — bench the current slot for rotation.cooldownMs so the next pickSlot() skips it.
+					// NO setModel call: the agent keeps its current model for this turn. The next normal
+					// turn_end (or next auto-swap on exhaustion) will pick a different slot organically.
+					// We do NOT call recordProviderError (the operator's bench is a deliberate decision,
+					// not a provider error) and we do NOT bump the swap-chain counter (no swap happened).
+					await setSlotCooldown(p, slotKey(currentSlot), rotation.cooldownMs);
+					await trace(p, "pool.bench_forced_by_manual_override", { agentId, slot: slotKey(currentSlot), cooldownMs: rotation.cooldownMs }).catch(() => {});
+					ctx.ui.notify(`Bench forced: ${slotKey(currentSlot)} is now benched for ${Math.round(rotation.cooldownMs / 60000)}min. Next auto-swap/pickSlot will skip it; current model remains for this turn.`, "info");
+					return;
+				}
+				ctx.ui.notify("Usage: /swarm pool [list|show|validate|help|preview-preflight|rotate] | /swarm pool cooldown <provider/model> <ms> | /swarm pool clear <provider/model> | /swarm pool rotate now | /swarm pool rotate next", "warning");
 					return;
 				}
 				if (cmd === "role") {
