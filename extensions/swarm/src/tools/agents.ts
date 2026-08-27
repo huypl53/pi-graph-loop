@@ -11,7 +11,7 @@ import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
 import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority, writeEffectiveIdentity } from "../identity.ts";
 import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
-import { FAST_MODEL, FAST_PROVIDER } from "../constants.ts";
+import { ERR_ORCHESTRATOR_PANE_REJECTED, FAST_MODEL, FAST_PROVIDER } from "../constants.ts";
 import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 
 export function registerAgentsTools(pi: ExtensionAPI) {
@@ -424,6 +424,17 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			const st = await readState(p, ctx.cwd);
 			const agent = st.agents[safeId(params.agentId)];
 			if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
+			// Issue 12 C6 micro-fix: principle-based orchestrator-pane reject guard. Fires when the
+			// resolved tmux target equals the orchestrator record's tmuxTarget (typically "unknown"),
+			// so a future refactor cannot silently route raw keystrokes into the orchestrator host
+			// pane. Principle-based (target equality, not id) so ghost agents mis-stamped to "unknown"
+			// are also rejected. Read-only — no state mutation on rejection.
+			const orchestrator = st.agents["orchestrator"];
+			const orchestratorTarget = orchestrator?.tmuxTarget;
+			if (agent.tmuxTarget && orchestratorTarget && agent.tmuxTarget === orchestratorTarget) {
+				await trace(p, "agent.send_keys.rejected", { agentId: agent.id, resolvedTarget: agent.tmuxTarget, orchestratorTarget, by: currentAgentId() });
+				throw new Error(`${ERR_ORCHESTRATOR_PANE_REJECTED}: swarm_send_keys target ${agent.tmuxTarget} equals the orchestrator record's tmuxTarget; refusing to inject keystrokes into the orchestrator host pane (agentId=${agent.id}).`);
+			}
 			await sendKeys(pi, p, agent.tmuxTarget, params.keys, { literal: params.literal, enter: params.enter });
 			await trace(p, "agent.send_keys", { agentId: agent.id, target: agent.tmuxTarget, literal: Boolean(params.literal), enter: Boolean(params.enter) });
 			return textResult(`Sent keys to ${agent.id} (${agent.tmuxTarget}).`, { agent });

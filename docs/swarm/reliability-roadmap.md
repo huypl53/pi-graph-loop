@@ -442,6 +442,10 @@ This should synthesize state; it must not silently mutate state.
   authority-sensitive state.
 - Slash-command helpers that mutate stop/release surfaces must also check orchestrator identity before
   entering their mutable branch.
+- `swarm_send_keys` refuses to inject raw keystrokes into the orchestrator host pane by throwing
+  `ORCHESTRATOR_PANE_REJECTED` when the resolved tmux target equals the orchestrator record's
+  `tmuxTarget` (typically `"unknown"`); principle-based guard, fires on target equality rather than
+  on `agentId` so ghost agents mis-stamped to the orchestrator's target are also rejected.
 
 This keeps the policy simple: one live PM, one durable leader record, one rejected second leader.
 

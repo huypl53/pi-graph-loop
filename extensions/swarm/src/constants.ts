@@ -29,6 +29,13 @@ export const ERR_ORCHESTRATOR_LEADER_DENIED = "ORCHESTRATOR_LEADER_DENIED";
 // swarm_stop_agent, swarm_release_agent_task, swarm_reconcile(mark=true)). NOT a new tool.
 export const ERR_ORCHESTRATOR_AUTHORITY_REQUIRED = "ORCHESTRATOR_AUTHORITY_REQUIRED";
 
+// Stable error code for the orchestrator-pane reject guard in swarm_send_keys (issue 12 C6 micro-fix).
+// Thrown when the resolved tmux target equals the orchestrator record's tmuxTarget (typically
+// "unknown"), so a future refactor cannot silently route raw keystrokes into the orchestrator host
+// pane. Principle-based: fires on target equality, not on agentId, so ghost agents mis-stamped to
+// "unknown" are also rejected. NOT a new tool.
+export const ERR_ORCHESTRATOR_PANE_REJECTED = "ORCHESTRATOR_PANE_REJECTED";
+
 export const SEND_SETTLE_MS = 700;
 
 export const SPAWN_SETTLE_MS = 2_500;

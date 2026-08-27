@@ -145,7 +145,7 @@ state or authorization path.
 | `swarm_restart_agent` | Stops then respawns at the same stable id. | Preserves mailbox and identity history; may release active task pointers. Default kills the pane; pass `killPane=false` to keep it alive (the agent record still flips to `running`). The freshly started pi reuses the same id, mailbox, and identity. |
 | `swarm_set_role` | Changes role, role kind, and capabilities; regenerates identity. | At least one of role, role kind, or capabilities is required. |
 | `swarm_set_agent_paused` | Drains an agent from reuse without killing it. | `paused=true` prevents assignment selection; `false` resumes. |
-| `swarm_send_keys` | Sends raw tmux keys to a registered pane. | Escape hatch for interrupt/dismiss/type. Use `literal` and `enter` deliberately. |
+| `swarm_send_keys` | Sends raw tmux keys to a registered pane. | Escape hatch for interrupt/dismiss/type. Use `literal` and `enter` deliberately. The tool refuses to send keys if the resolved tmux target equals the orchestrator record's `tmuxTarget` (typically `"unknown"`), throwing `ORCHESTRATOR_PANE_REJECTED`. This is a principle-based guard: it fires on target equality, not on `agentId`, so it stays correct if any agent's record is ever mis-stamped to the orchestrator's target. |
 | `swarm_attach_agent` | Returns tmux attach/select commands for a pane. | Read-only convenience output. |
 | `swarm_release_agent_task` | Removes stale `activeTaskIds` pointers. | Only terminal/missing task pointers are released unless `force=true`; does not change task nodes. |
 | `swarm_agent_identity` | Reads or regenerates an effective agent identity card. | Optional `agentId`, `refresh`; generated card plus optional override. |
