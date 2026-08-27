@@ -40,7 +40,7 @@ Bare `tsc` TS5097 caused by existing `.ts` import specifiers is not treated as a
 | 8 | Multi-orchestrator policy | Either explicitly reject a second active orchestrator or introduce and test a durable leader lease/fencing protocol. This is not enabled partially. | Complete: `multi-orchestrator-policy` |
 | 9 | Lifecycle-notification fencing and stale-event suppression | Prevent an old `agent_settled` / open-assignment notification from remaining actionable after its assignment was released, superseded, cancelled, reassigned, or worker stopped. Fence creation and delivery using durable task/attempt/agent state; preserve audit without semantic mutation. | Complete: `lifecycle-notification-fencing` |
 | 10 | Final surface and architecture review | Re-evaluate public tool/command exposure after operational semantics settle; keep core minimal and move debug/admin exposure behind appropriate role gates or commands. | Complete: `final-surface-architecture-review` (`6cc71c2`) |
-| 11 | Orchestrator wake-up escalation | Escalating re-nudge (bounded, durable-state driven) plus optional leader-gated PM-pane wake-up via existing tmux injection when a ready node sits unassigned after the first nudge. | Queued |
+| 11 | Orchestrator wake-up escalation | Escalating re-nudge (bounded, durable-state driven) plus optional leader-gated PM-pane wake-up via existing tmux injection when a ready node sits unassigned after the first nudge. | Complete: `orchestrator-wake-up-escalation` (`4daede3`) |
 
 ## Cross-issue invariants
 
