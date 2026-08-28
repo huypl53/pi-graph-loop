@@ -7,7 +7,8 @@ import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
 import { TERMINAL_NODE_STATUSES, CANCELLATION_REASON, PREFLIGHT_ASSIGN_GRACE_MS } from "../constants.ts";
-import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
+import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
+import { resolveTaskStallLocked } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, supersedeOpenAssignments, supersedeTaskAssignmentMessages } from "../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, now, safeId, textResult } from "../utils.ts";
@@ -78,12 +79,16 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				}
 				const { ready, current } = computeReadyNodes(task);
 				task.currentNodes = current;
-				applyTaskStatus(task); // engine-enforced closure: a fresh task derives `ready`
+				let createTaskStatusChange = applyTaskStatus(task); // engine-enforced closure: a fresh task derives `ready`
 				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
 				if (autoClosed.closed.length) {
-					applyTaskStatus(task);
+					createTaskStatusChange = applyTaskStatus(task);
 					task.currentNodes = computeReadyNodes(task).current;
 				}
+				// Issue 23 — resolve any stale task-stall counter for this task if it was already in_progress
+				// (rare: legacy swarm with an in_progress task that got recreated; auto-close via terminal
+				// nodes flips it to done/failed/cancelled below).
+				if (createTaskStatusChange.terminal) resolveTaskStallLocked(p, st, taskId, "task_terminal");
 				// Actionable = newly-ready nodes PLUS already-ready unassigned nodes (e.g. a fresh task's start node,
 				// which is born status:"ready" and lands in `current`, not the raw `ready` set). Keeps the "Ready:"
 				// report consistent with swarm_next_nodes so orchestrators see what is assignable right now.
@@ -259,12 +264,12 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
 				const taskId = task.taskId;
 				const node = task.nodes[params.nodeId];
-				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId } });
+				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId }, actionableHint: "Valid node ids are listed in task.json. Run swarm_task_status or swarm_graph to inspect." });
 				if (TERMINAL_NODE_STATUSES.has(node.status)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} is terminal (${node.status}); cannot assign.`, { taskId, nodeId: params.nodeId, received: { nodeStatus: node.status } });
 				// Readiness: assignable when actionable (ready, or unassigned ready-status current) or already active (reassign).
 				const cr = computeReadyNodes(task);
 				const actionable = new Set([...cr.ready, ...cr.current.filter((id) => task.nodes[id].status === "ready" && !task.nodes[id].assignee)]);
-				if (node.status === "pending" && !actionable.has(params.nodeId)) await failTaskTool(tp, p, "NODE_NOT_READY", `Node ${params.nodeId} is not ready yet (dependencies/gates not satisfied).`, { taskId, nodeId: params.nodeId, expected: { ready: cr.ready, current: cr.current }, received: { nodeStatus: node.status }, suggestedNextCall: { tool: "swarm_next_nodes", params: { taskId } } });
+				if (node.status === "pending" && !actionable.has(params.nodeId)) await failTaskTool(tp, p, "NODE_NOT_READY", `Node ${params.nodeId} is not ready yet (dependencies/gates not satisfied).`, { taskId, nodeId: params.nodeId, expected: { ready: cr.ready, current: cr.current }, received: { nodeStatus: node.status }, suggestedNextCall: { tool: "swarm_next_nodes", params: { taskId } }, actionableHint: "The node's dependencies have not all reached a terminal state. Run swarm_task_status to inspect the blocking nodes, or wait for the orchestrator to advance the graph." });
 
 				ensureOrchestrator(st, ctx.cwd, p);
 				const expectedKind = inferRoleKind(params.nodeId, node.role);
@@ -367,59 +372,23 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					if (node.maxAttempts && node.attempts >= node.maxAttempts) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} reached maxAttempts (${node.maxAttempts}); cannot reassign.`, { taskId, nodeId: params.nodeId, received: { attempts: node.attempts, maxAttempts: node.maxAttempts } });
 					node.attempts += 1;
 				}
-				
-				// Duplicate/retry handling: re-assigning the CURRENT active assignment (node already
-				// assigned to the same agent with a live active attempt) must NOT mint or supersede an
-				// attempt — preserve the existing attempt token so duplicate assignment calls / delivery
-				// retries cannot fence the worker that already holds the active token.
-				const activeAttemptRecord = node.activeAttemptId
-					? node.attemptHistory?.find((a: any) => a.attemptId === node.activeAttemptId)
-					: undefined;
-				const sameActiveAssignment =
-					!isNewAttempt &&
-					node.assignee === assignee.id &&
-					activeAttemptRecord &&
-					activeAttemptRecord.status === "active";
-				let attemptId: string;
-				if (sameActiveAssignment) {
-					attemptId = activeAttemptRecord!.attemptId;
-					activeAttemptRecord!.lastActivityAt = now();
+
+				// Mint or reuse the attempt (Issue 24.a B5 — extracted helper). The helper inspects the
+				// prior state and returns { attemptId, created: false } when the existing active attempt
+				// can be preserved (duplicate retry), or { attemptId, created: true } on a genuine mint
+				// (which has already superseded any prior active attempt in-place).
+				const minted = mintNodeAttempt({ node, assignee: assignee.id, candidateScope, reason: "assign" });
+				const attemptId = minted.attemptId;
+				if (!minted.created) {
 					await traceTask(tp, "task.attempt.reused", { taskId, nodeId: params.nodeId, attemptId, assignee: assignee.id, reason: "duplicate_assignment_retry" });
 				} else {
-					// Create attempt record for fencing. Any genuine (re)assignment — reassign, restart after
-					// release, rework re-entry, or same-agent reassign from a non-active state — mints a fresh
-					// identity so stale tokens from the prior attempt are fenced out.
-					attemptId = safeId(`attempt-${Date.now().toString(36)}-${randomBytes(8).toString("hex")}`);
-					const ts = now();
-					// Supersede prior active attempt if exists (including same-agent reassign)
-					if (node.activeAttemptId && node.attemptHistory) {
-						const priorAttempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
-						if (priorAttempt && priorAttempt.status === "active") {
-							priorAttempt.status = "superseded";
-							priorAttempt.supersededAt = ts;
-							priorAttempt.supersededBy = attemptId;
-							// Lease release audit (issue 4): a superseded-by-reassign attempt releases its write-scope lease.
-							priorAttempt.releasedAt ||= ts;
-							priorAttempt.releaseReason = "reassign";
-							await traceTask(tp, "task.attempt.superseded", { taskId, nodeId: params.nodeId, priorAttemptId: priorAttempt.attemptId, supersededBy: attemptId, reason: "reassign" });
-						}
+					// The helper already superseded the prior attempt (if any); emit the audit trace
+					// here so the caller sees one canonical "superseded" event per supersede.
+					const priorSuperseded = (node.attemptHistory || []).find((a: any) => a.supersededBy === attemptId && a.status === "superseded");
+					if (priorSuperseded) {
+						await traceTask(tp, "task.attempt.superseded", { taskId, nodeId: params.nodeId, priorAttemptId: priorSuperseded.attemptId, supersededBy: attemptId, reason: "reassign" });
 					}
-					const newAttempt = {
-						attemptId,
-						attemptNumber: node.attempts,
-						assignmentMessageId: "", // filled after message creation
-						assignee: assignee.id,
-						assignedAt: ts,
-						status: "active" as const,
-						lastActivityAt: ts,
-						// Stamp the effective write scope at assignment time so ownership preflight + audits
-						// see what this lease actually held, even if the graph's scope config changes later.
-						// Unresolved inheritance is NOT stamped: absent scope makes later scans re-resolve live
-						// (which returns unresolved => conservatively overlapping), never a fake empty scope.
-						...("unresolved" in candidateScope ? {} : { scope: { source: candidateScope.source, sourceNodeId: candidateScope.sourceNodeId, files: candidateScope.files } }),
-					};
-					node.attemptHistory = [...(node.attemptHistory || []), newAttempt];
-					node.activeAttemptId = attemptId;
+					await traceTask(tp, "task.attempt.minted", { taskId, nodeId: params.nodeId, attemptId, assignee: assignee.id, reason: "assign" });
 				}
 				node.assignee = assignee.id;
 				node.status = "assigned";
@@ -428,6 +397,9 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				if (!assignee.activeTaskIds.includes(task.taskId)) assignee.activeTaskIds.push(task.taskId);
 				applyTaskStatus(task);
 				task.currentNodes = computeReadyNodes(task).current;
+				// Issue 23 — resolve any stalled task-stall counter for this task (an actionable node
+				// now has an assignee, so the predicate is no longer satisfied).
+				resolveTaskStallLocked(p, st, task.taskId, "assigned");
 
 				const replyTarget = params.replyTarget || me;
 				const conversationId = `task:${task.taskId}:${params.nodeId}`;
@@ -532,7 +504,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
 				const taskId = task.taskId;
 				const node = task.nodes[params.nodeId];
-				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId } });
+				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId }, actionableHint: "Valid node ids are listed in task.json. Run swarm_task_status or swarm_graph to inspect." });
 				// Cancellation fence (issue 3, fix-1): once a task is cancelled, NO caller — not even the
 				// orchestrator — can mutate task or node state via this handler. The fence is the most
 				// authoritative gate and runs BEFORE ownership/attempt checks so task cancellation
@@ -551,7 +523,94 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					);
 				}
 
-				if (!isOrch && node.assignee !== me) await failTaskTool(tp, p, "NODE_ASSIGNEE_MISMATCH", `Node ${params.nodeId} is assigned to ${node.assignee || "(unassigned)"}, but current agent is ${me}.`, { taskId, nodeId: params.nodeId, expected: { assignee: node.assignee || null, allowedAction: "update your own assigned node or send a task message" }, received: { agentId: me, requestedStatus: params.status } });
+				if (!isOrch && node.assignee !== me) {
+					// Issue 24.a — node ownership self-heal: when node.assignee is undefined AND the node
+					// is non-terminal-and-non-`in_progress`, allow the caller to CLAIM the node. The
+					// claim branch unconditionally stamps status="assigned" + assignee=me (per the B6
+					// committed strategy: no hybrid ready+assignee state). If the node is in flight
+					// without an assignee (rare reassign-drift), refuse with OWNERSHIP_REQUIRED.
+					if (node.assignee === undefined && node.status !== "in_progress" && !TERMINAL_NODE_STATUSES.has(node.status)) {
+						const priorStatus = node.status;
+						const candidateScope = resolveNodeScope(task, params.nodeId);
+						// B5 + B6 — bump node.attempts first (mirrors swarm_assign_task path) so the
+						// minted attempt carries the right attemptNumber after a rework reopen
+						// (node.attempts is preserved across rework). The helper reads node.attempts
+						// at mint time, so the bump must happen first.
+						if (["pending", "ready", "blocked"].includes(node.status)) {
+							node.attempts += 1;
+						}
+						const minted = mintNodeAttempt({ node, assignee: me, candidateScope, reason: "claim" });
+						const attemptId = minted.attemptId;
+						if (!minted.created) {
+							await traceTask(tp, "task.attempt.reused", { taskId, nodeId: params.nodeId, attemptId, assignee: me, reason: "duplicate_claim_retry" });
+						} else {
+							const priorSuperseded = (node.attemptHistory || []).find((a: any) => a.supersededBy === attemptId && a.status === "superseded");
+							if (priorSuperseded) {
+								await traceTask(tp, "task.attempt.superseded", { taskId, nodeId: params.nodeId, priorAttemptId: priorSuperseded.attemptId, supersededBy: attemptId, reason: "claim" });
+							}
+							await traceTask(tp, "task.attempt.minted", { taskId, nodeId: params.nodeId, attemptId, assignee: me, reason: "claim" });
+						}
+						node.assignee = me;
+						node.status = "assigned";
+						node.lastActivityAt = now();
+						if (node.staleAt) { const prevStaleAt = node.staleAt; delete node.staleAt; await traceTask(tp, "task.stale.cleared", { taskId, nodeId: params.nodeId, prevStaleAt, reason: "claim", by: me }); }
+						// B7 — explicit activeTaskIds update on the claimer. Mirror the
+						// swarm_assign_task path so the claimer's runtimeStatus / capacity accounting
+						// doesn't drift. ensureAgentDefaults is belt-and-braces for legacy agents
+						// that lack the array.
+						if (!st.agents[me]) {
+							// Worker claimed a node without ever being registered. Create a minimal
+							// agent record so capacity accounting + tool surfaces work; the orchestrator
+							// can re-register with full details (model/provider/role) later.
+							st.agents[me] = {
+								id: me, role: "", roleKind: "worker", capabilities: [],
+								activeTaskIds: [], maxConcurrentTasks: 1,
+								status: "running", runtimeStatus: "busy", health: "healthy",
+								tmuxSession: st.tmuxSession, tmuxWindow: "", tmuxTarget: "unknown",
+								model: "", provider: "",
+								cwd: ctx.cwd, mailbox: `.pi/swarm/mailboxes/${me}.jsonl`,
+								createdAt: now(), updatedAt: now(),
+							};
+						}
+						ensureAgentDefaults(st.agents[me]);
+						if (!st.agents[me].activeTaskIds.includes(task.taskId)) st.agents[me].activeTaskIds.push(task.taskId);
+						applyTaskStatus(task);
+						task.currentNodes = computeReadyNodes(task).current;
+						// Issue 23 — claim resolves any stalled task-stall counter.
+						resolveTaskStallLocked(p, st, task.taskId, "claim");
+						await writeTaskState(tp, task);
+						await writeState(p, st);
+						await traceTask(tp, "task.node.claimed", { taskId, nodeId: params.nodeId, claimer: me, priorAssignee: null, priorStatus, attemptId, created: minted.created });
+						// Inject the freshly minted attemptId so the attempt-fencing check below
+						// (which runs unconditionally for nodes with activeAttemptId) accepts the
+						// claimer's continuation. Without this, the caller would have to supply
+						// attemptId explicitly even though we just minted it.
+						if (!params.attemptId) params.attemptId = attemptId;
+					} else if (node.assignee === undefined && node.status === "in_progress") {
+						// Issue 24.a — in-flight unassigned node: refuse with inline-string
+						// OWNERSHIP_REQUIRED. Per B2, this is scoped to one tool + one path, not a
+						// ERR_* engine-wide constant. The hint points the caller at the orchestrator.
+						await traceTask(tp, "task.update.ownership_reject", { taskId, nodeId: params.nodeId, attemptedBy: me, priorAssignee: null, priorStatus: node.status, isOrchestrator: false, remediation: "escalate_to_orchestrator", errorCode: "OWNERSHIP_REQUIRED" });
+						await failTaskTool(tp, p, "OWNERSHIP_REQUIRED",
+							`Node ${params.nodeId} is in_progress but has no assignee; claiming an in-flight node is forbidden.`,
+							{
+								taskId, nodeId: params.nodeId,
+								expected: { assigneeRequired: true, allowedAction: "ask orchestrator to reassign via swarm_assign_task(..., force=true) or close the in-flight node" },
+								received: { agentId: me, requestedStatus: params.status, nodeStatus: node.status },
+								severity: "error",
+								suggestedNextCall: { tool: "swarm_send_message", params: { to: "orchestrator", subject: `Reassign in-flight node ${params.nodeId} of ${taskId}` } },
+							}
+						);
+					} else {
+						// Existing reject path: node.assignee is set and !== me.
+						await traceTask(tp, "task.update.ownership_reject", { taskId, nodeId: params.nodeId, attemptedBy: me, priorAssignee: node.assignee || null, priorStatus: node.status, isOrchestrator: false, remediation: "escalate_to_orchestrator", errorCode: "NODE_ASSIGNEE_MISMATCH" });
+						const hint = `Send a task message to the assignee (${node.assignee}), or ask the orchestrator to reassign (swarm_assign_task, force=true).`;
+						await failTaskTool(tp, p, "NODE_ASSIGNEE_MISMATCH",
+							`Node ${params.nodeId} is assigned to ${node.assignee || "(unassigned)"}, but current agent is ${me}.`,
+							{ taskId, nodeId: params.nodeId, expected: { assignee: node.assignee || null, allowedAction: "update your own assigned node or send a task message" }, received: { agentId: me, requestedStatus: params.status }, actionableHint: hint }
+						);
+					}
+				}
 
 				// NEW: Attempt fencing validation (same-agent reassign protection)
 				// This is the critical fix: caller must present the active attempt token to fence stale updates
@@ -559,7 +618,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					if (!isOrch) {
 						// Non-orchestrator callers must provide attempt token for nodes with active attempts
 						if (!params.attemptId) {
-							await failTaskTool(tp, p, "ATTEMPT_TOKEN_REQUIRED", `Node ${params.nodeId} has active attempt fencing. You must provide the attemptId parameter from your assignment contract.`, { taskId, nodeId: params.nodeId, expected: { attemptId: node.activeAttemptId }, received: { attemptId: params.attemptId || "(missing)" }, suggestedNextCall: { tool: "swarm_update_task", params: { ...params, attemptId: node.activeAttemptId } } });
+							await failTaskTool(tp, p, "ATTEMPT_TOKEN_REQUIRED", `Node ${params.nodeId} has active attempt fencing. You must provide the attemptId parameter from your assignment contract.`, { taskId, nodeId: params.nodeId, expected: { attemptId: node.activeAttemptId }, received: { attemptId: params.attemptId || "(missing)" }, suggestedNextCall: { tool: "swarm_update_task", params: { ...params, attemptId: node.activeAttemptId } }, actionableHint: "The attempt token is delivered with your assignment message — check your mailbox if you don't have it." });
 						}
 						// Verify the attempt token matches the active attempt (untrusted input validation)
 						if (params.attemptId !== node.activeAttemptId) {
@@ -569,7 +628,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 							const activeAttempt = node.attemptHistory?.find((a: any) => a.attemptId === node.activeAttemptId);
 							const activeNumber = activeAttempt ? activeAttempt.attemptNumber : "?";
 							
-							await failTaskTool(tp, p, "ATTEMPT_TOKEN_MISMATCH", `Your attempt token ${params.attemptId} is not the active attempt for node ${params.nodeId}. Your attempt is ${providedStatus}; the current attempt is #${activeNumber} (${node.activeAttemptId}). This update is rejected as a stale write.`, { taskId, nodeId: params.nodeId, expected: { activeAttemptId: node.activeAttemptId, activeAttemptNumber: activeNumber }, received: { attemptId: params.attemptId, attemptStatus: providedStatus }, blocked: true });
+							await failTaskTool(tp, p, "ATTEMPT_TOKEN_MISMATCH", `Your attempt token ${params.attemptId} is not the active attempt for node ${params.nodeId}. Your attempt is ${providedStatus}; the current attempt is #${activeNumber} (${node.activeAttemptId}). This update is rejected as a stale write.`, { taskId, nodeId: params.nodeId, expected: { activeAttemptId: node.activeAttemptId, activeAttemptNumber: activeNumber }, received: { attemptId: params.attemptId, attemptStatus: providedStatus }, blocked: true, actionableHint: "Your attempt has been superseded by a new assignment. Read the latest message in your mailbox (or call swarm_next_nodes to see the current assignment) before retrying." });
 						}
 						
 						// Verify the attempt record exists and is valid
@@ -599,7 +658,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 
 				const prevStatus = node.status;
 				const newStatus = (params.status as TaskNodeStatus | undefined) || prevStatus;
-				if (newStatus !== prevStatus && !isOrch && !isAllowedNodeTransition(prevStatus, newStatus)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} cannot move ${prevStatus} -> ${newStatus}.`, { taskId, nodeId: params.nodeId, expected: { lifecycle: "pending->ready->assigned->in_progress->done|failed|blocked; terminal states need orchestrator override" }, received: { from: prevStatus, to: newStatus } });
+				if (newStatus !== prevStatus && !isOrch && !isAllowedNodeTransition(prevStatus, newStatus)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} cannot move ${prevStatus} -> ${newStatus}.`, { taskId, nodeId: params.nodeId, expected: { lifecycle: "pending->ready->assigned->in_progress->done|failed|blocked; terminal states need orchestrator override" }, received: { from: prevStatus, to: newStatus }, actionableHint: "If you believe the transition should be allowed, escalate to the orchestrator (force=true)." });
 				const outEdges = task.edges.filter((e) => e.from === params.nodeId);
 				if (newStatus === "done" && outEdges.length && !params.outcome && !node.outcome) await failTaskTool(tp, p, "OUTCOME_REQUIRED", `Node ${params.nodeId} has outgoing branches but no outcome was provided.`, { taskId, nodeId: params.nodeId, expected: { validOutcomes: [...new Set(outEdges.map((e) => e.when))] }, received: { outcome: params.outcome }, suggestedNextCall: { tool: "swarm_update_task", params: { taskId, nodeId: params.nodeId, status: "done", outcome: outEdges[0].when } } });
 
@@ -714,7 +773,12 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
 				for (const nodeId of autoClosed.closed) releaseNodeAssignment(st, task, nodeId);
 				if (autoClosed.closed.length) taskStatusChange = applyTaskStatus(task);
-				if (taskStatusChange.terminal) releaseTaskFromAllAgents(st, task.taskId);
+				if (taskStatusChange.terminal) {
+					releaseTaskFromAllAgents(st, task.taskId);
+					// Issue 23 — terminal task transition: clear any stalled task-stall counter
+					// (the predicate "task in_progress" is no longer satisfied).
+					resolveTaskStallLocked(p, st, task.taskId, "task_terminal");
+				}
 				const nextReady = computeReadyNodes(task);
 				task.currentNodes = nextReady.current;
 				await writeTaskState(tp, task);

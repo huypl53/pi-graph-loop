@@ -474,6 +474,99 @@ The orchestrator's durable goal plus an anti-loop nudge that fires when the swar
 - **No new public schema**: only the two declared tools + the two slash command subcommands. No
   new event hooks, no new env knobs beyond `PI_SWARM_MAX_NUDGES`.
 
+### Pipeline-stall nudge (Issue 23)
+
+The goal-nudge (Issue 18) only fires when the orchestrator has set an explicit `swarm_goal`. If
+the operator never sets a goal, a task can stall silently: every node is `ready` (or `assigned`
+to a dead agent), every agent is `idle`, and no nudge is ever sent because the predicate
+`if (!goal) return { emitted: false, reason: "no_goal" }` short-circuits. The pipeline-stall
+nudge is the goal-independent counterpart.
+
+- **Predicate (a nudge fires when ALL hold)**:
+  1. At least one `in_progress` task exists in `tasksDir`.
+  2. At least one of its nodes has `status === "ready"` AND `assignee === undefined` (the same
+     actionable set as `reconcileGraphAdvanceLocked`).
+  3. Every non-orchestrator agent is `runtimeStatus === "idle"`.
+  4. The task has existed for at least `TASK_INITIAL_READY_GRACE_MS` (60 seconds) so a fresh
+     task's first tick is not immediately flagged.
+  5. NOT firing the existing `reconcileGraphAdvanceLocked` nudge for the same node already
+     (the shared `NOTIFY_KEY_GRAPH_ADVANCE` dedupe key) so two concurrent nudges don't compete.
+- **Back-off machinery**: mirrors the goal-nudge but is per-task. New `SwarmTaskStallState` on
+  `SwarmState` (per-taskId counter + 2-tick back-off). Cap at `MAX_TASK_STALL_NUDGES` (3,
+  overridable via `PI_SWARM_MAX_TASK_STALL_NUDGES`); back-off at `GOAL_NUDGE_BACKOFF_TICKS` (2).
+- **Resolve detection**: any reassignment of an actionable node — including a worker's claim of
+  an unassigned node via `swarm_update_task` (Issue 24.a) — resets the counter. So does the
+  task leaving `in_progress` state (e.g. all nodes reach terminal, or `cancelTask=true`).
+- **Resolve hooks** (call sites that mutate the counter):
+  - `swarm_assign_task` after stamping `node.assignee` (`tools/tasks.ts`).
+  - `swarm_update_task` claim branch after minting an attempt + stamping assignee (Issue 24.a).
+  - `applyTaskStatus` terminal-transition sites (`tools/tasks.ts`): create_task auto-close path,
+    update_task main path, and update_task second-pass after auto-close.
+- **Trace events**:
+  - `task_stall.nudge_emitted` — successful nudge emit; payload includes `taskId`,
+    `actionableCount`, `actionable` (capped at 5 nodeIds), `consecutiveCount`, `max`,
+    `idleAgents`, `key`.
+  - `task_stall.nudge.resolved` — counter reset on assign/claim/terminal transition.
+  - `task_stall.nudge.backoff` — first tick after the counter reached `MAX`; payload includes
+    `taskId`, `nudges`, `max`, `backoffTicks`.
+  - `task_stall.nudge.backoff.skip` — subsequent skipped ticks while `backoffTicksRemaining > 0`.
+  - `task_stall.nudge.backoff.exhausted` — tick when the back-off counter hits 0 (does NOT emit).
+  - `task_stall.nudge_error` — caught exception wrapper (matches the existing nudge error pattern).
+- **No new public schema**: reuses existing pump machinery; no new tools or commands.
+
+#### DISTINCTION FROM GOAL-NUDGE (do not conflate)
+
+The goal-nudge resolves on `turn_end` activity at the `hooks.ts` site (`hooks.ts:484-506`); the
+task-stall nudge resolves on graph-mutation events (assign, claim, terminal-transition). Two
+independent counters with two different reset triggers, both running under the same `withLock`.
+Operators may see both nudges in the same pump tick if both predicates fire (goal set + stalled
+task); the two messages use different dedupe keys (`goal:{goalId}:nudge:idle-streak` vs
+`task:{taskId}:nudge:graph-stall`).
+
+### Node ownership self-heal (Issue 24)
+
+The orchestration engine has two safety nets that prevent orphaned nodes from blocking work
+indefinitely.
+
+#### Claim of unassigned nodes (Issue 24.a)
+
+`swarm_update_task` no longer rejects outright when a node has `assignee=undefined`. A
+non-terminal unassigned node is claimed by the first caller: status moves to `assigned`,
+attempt-mint via the shared `mintNodeAttempt` helper (in `taskgraph.ts`), and the claimer's
+`activeTaskIds` is updated. An in-flight unassigned node (`status="in_progress"` + `assignee=undefined`)
+is still refused with the inline-string `OWNERSHIP_REQUIRED` error code; the caller is directed
+to escalate to the orchestrator (`force=true` or a fresh `swarm_assign_task`).
+
+The trace event `task.node.claimed` is emitted on every successful claim with `{ taskId,
+nodeId, claimer, priorAssignee: null, priorStatus, attemptId, created }`.
+
+#### Assignment auto-stamp (Issue 24.b)
+
+`deliverMessageLocked` auto-stamps `node.assignee = msg.to` when the message is assignment-style
+(subject starts with `"Task "` and contains `" assigned"`; conversationId matches
+`task:{taskId}:{nodeId}`). The auto-stamp runs INSIDE the swarm lock (caller's contract) and
+**MUST NOT** re-wrap in `withLock` — `withLock` is mkdir-based and non-re-entrant; nested
+acquisition hangs ~120s then throws. The only residual race is a `writeTaskState` failure,
+which the claim branch (24.a) self-heals on the recipient's first `swarm_update_task` call.
+
+#### Remediation hints (Issue 24.c)
+
+Every `failTaskTool` reject **listed in the §24.c coverage table** in `tools/tasks.ts` includes
+an `actionableHint` or `suggestedNextCall` so the LLM caller has a concrete next step. The full
+21-site audit is tracked as follow-up issue `task-graph-reject-hints-coverage-audit` (deferred).
+
+#### Ownership-reject trace (Issue 24.d)
+
+`task.update.ownership_reject` is emitted on every `NODE_ASSIGNEE_MISMATCH` (and the new
+`OWNERSHIP_REQUIRED`) so dashboards can surface ownership drift. Payload includes `{ taskId,
+nodeId, attemptedBy, priorAssignee, priorStatus, isOrchestrator, remediation, errorCode }`.
+
+#### Assignment-mismatch trace (Issue 24.e)
+
+`message.deliver.assignment_mismatch` warns when an assignment-style message is delivered to a
+recipient whose `node.assignee` already differs (reassign race or config error). Advisory only
+— the message is still delivered. The recipient may legitimately need context for a handover.
+
 ### Recovery attention and bounded worker reminder (roadmap issue 5)
 
 The orchestrator can derive a durable, decision-oriented **attention report** from persisted state

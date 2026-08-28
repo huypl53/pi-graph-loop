@@ -205,8 +205,10 @@ ok("rework clears activeAttemptId", !testAfterRework.activeAttemptId);
 ok("rework preserves attempt history", testAfterRework.attemptHistory.length === 1);
 ok("rework annotates prior attempt superseded by <rework>", testAfterRework.attemptHistory[0].supersededBy === "<rework>");
 ok("rework keeps prior attempt terminal status failed", testAfterRework.attemptHistory[0].status === "failed");
-// Reopened node is unassigned; the stale pre-rework attempt token cannot mutate it either way.
-await expectErrorCode("tester-1", "swarm_update_task", { taskId: taskId2, nodeId: "test", status: "done", outcome: "passed", attemptId: rwTest1, cwd: scratch }, "NODE_ASSIGNEE_MISMATCH");
+// Reopened node is unassigned; under Issue 24.a, a non-assignee CLAIMS the node (no longer
+// rejected with NODE_ASSIGNEE_MISMATCH). The stale pre-rework attempt token the caller passes is
+// then fenced as ATTEMPT_TOKEN_MISMATCH after the claim mints a fresh attempt.
+await expectErrorCode("tester-1", "swarm_update_task", { taskId: taskId2, nodeId: "test", status: "done", outcome: "passed", attemptId: rwTest1, cwd: scratch }, "ATTEMPT_TOKEN_MISMATCH");
 // Reassign after rework mints a fresh attempt; the OLD token must be fenced.
 await call("swarm_assign_task", { taskId: taskId2, nodeId: "test", agentId: "tester-1", cwd: scratch });
 const rwTest2 = readNode(taskId2, "test").activeAttemptId;

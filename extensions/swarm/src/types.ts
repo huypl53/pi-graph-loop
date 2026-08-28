@@ -228,6 +228,18 @@ export type OrchestratorReceiptEntry = {
 	fingerprint: string;
 };
 
+// Per-task task-graph-state idle nudge state (Issue 23). One entry per stalled task; the orchestrator
+// pump increments consecutiveNoResolveNudges on each emitted nudge and resets the counter when the
+// task graph advances (reassignment, claim, or task leaving in_progress). Anti-loop cap at
+// MAX_TASK_STALL_NUDGES; back-off at GOAL_NUDGE_BACKOFF_TICKS. Mirrors SwarmGoal's shape.
+export type SwarmTaskStallState = {
+	taskId: string;                      // safe-id (validated by formatNotifyKey)
+	consecutiveNoResolveNudges: number;  // monotonic; reset when node leaves ready+unassigned or task leaves in_progress
+	lastNudgeAt?: string;                // ISO; set on every successful nudge emission
+	lastResolvedAt?: string;             // ISO; set on every successful counter reset
+	backoffTicksRemaining?: number;      // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
+};
+
 // Durable goal the orchestrator wants the swarm to advance toward (Issue 18). Set via
 // `swarm_set_goal` / `/swarm goal set <text>`; cleared via `swarm_mark_goal_done` / `/swarm goal done`.
 // While set and ALL non-orchestrator agents are runtimeStatus="idle" with zero active task nodes,
@@ -315,6 +327,10 @@ export type SwarmState = {
 	// MUST NOT add `st.goal ||= {}` here, since that would replace undefined with an empty object
 	// and crash `goal.id` access in the pump.
 	goal?: SwarmGoal;
+	// Issue 23 — task-graph-state idle nudge. Per-(taskId) counter + back-off so a stalled
+	// task graph doesn't spam the orchestrator's mailbox. Reset on first reassignment of the
+	// actionable node OR on the task leaving `in_progress` state.
+	taskStallState?: Record<string, SwarmTaskStallState>;
 	// Issue 20: pool-scaffold write-once flag. Set by the orchestrator session_start hook AFTER the
 	// first successful `.pi/settings.json` scaffold + notify emission. Absent === never notified, which
 	// is the correct initial state. `readState` does NOT back-fill this field (mirrors `goal`): a

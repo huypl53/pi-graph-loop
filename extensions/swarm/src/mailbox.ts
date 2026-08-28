@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { MessageRecord, MessageResponseStatus, MessageStatus, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
 import type { OrphanClearReason } from "./agents.ts";
 import { SEND_SETTLE_MS, MAX_REINJECTS } from "./constants.ts";
-import { appendJsonl, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
+import { appendJsonl, mailboxPath, readState, readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "./state.ts";
 import { buildSystemDelivery } from "./delivery.ts";
 import { capturePane, isPanePiLike, sendToPane, tmux } from "./tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
@@ -267,6 +267,65 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	upsertMessageRecord(st, m, "queued", { queuedAt: createdAt });
 	await appendJsonl(mailboxPath(p, to), m);
 	await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck, requiresResponse: m.requiresResponse, idempotencyKey: m.idempotencyKey });
+
+	// === Issue 24.b — assignment-style message auto-stamp ===
+	// Detect an assignment-style message by `conversationId` matching `task:<taskId>:<nodeId>` AND
+	// subject starting with "Task " AND including " assigned". When detected AND `to` is a registered
+	// agent AND `node.assignee !== msg.to`, auto-stamp node.assignee = msg.to so the recipient's
+	// first swarm_update_task call lands in the normal flow (or, if assignee was null, the new
+	// claim branch from 24.a).
+	//
+	// === HARD RULE: DO NOT RE-WRAP IN `withLock(p)` ===
+	// This branch runs INSIDE the existing withLock(p) the caller already holds (every caller of
+	// `deliverMessageLocked` in this codebase is lock-held by construction: swarm_assign_task in
+	// tools/tasks.ts:259-476, the cancellation notice at :699-705, the notify handoff at :758, the
+	// task message at :806, and enqueueAndDeliver at :321-326 — all hold withLock(p)).
+	// `withLock` (state.ts:56-73) is implemented via mkdir(p.lock) and is NOT re-entrant.
+	// Re-acquiring from within an already-held lock hangs for ~120s (LOCK_STALE_MS * 2) and then
+	// throws `Timed out acquiring swarm lock: ${p.lock}`. A code comment in this function is the
+	// only durable guard against future maintainers re-introducing the nested-lock pattern; please
+	// preserve it.
+	//
+	// The actual residual race (narrow): if `writeTaskState` fails between the read and the write
+	// below, the recipient's pane sees the assignment message but task.json still has assignee=null.
+	// The 24.a claim branch self-heals this on the recipient's first swarm_update_task call.
+	let assignmentAutoStamped = false;
+	if (params.conversationId && params.subject && params.subject.startsWith("Task ") && params.subject.includes(" assigned")) {
+		const m = params.conversationId.match(/^task:([a-z0-9_-]+):([a-z0-9_-]+)$/);
+		if (m) {
+			const taskId = m[1];
+			const nodeId = m[2];
+			const tp = taskPaths(p, taskId);
+			if (existsSync(tp.taskJson)) {
+				try {
+					const task = await readTaskState(tp.taskJson);
+					const node = task?.nodes?.[nodeId];
+					if (task && node && node.assignee !== to) {
+						const priorAssignee = node.assignee;
+						node.assignee = to;
+						node.lastActivityAt = now();
+						await writeTaskState(tp, task);
+						assignmentAutoStamped = true;
+						await trace(p, "message.deliver.assignment_auto_stamp", { taskId, nodeId, assignee: to, priorAssignee: priorAssignee || null });
+						// === Issue 24.e — assignment-mismatch advisory trace ===
+						// If after the stamp, node.assignee was set to someone OTHER than `to` BEFORE
+						// we stamped (race: a concurrent mutation set it elsewhere), the message is
+						// being delivered to a non-assignee. This is a signal of an in-flight reassign
+						// race or a configuration error. Advisory only — the message is still delivered
+						// (the recipient may legitimately need context for a handover).
+						if (priorAssignee && priorAssignee !== to) {
+							await trace(p, "message.deliver.assignment_mismatch", {
+								taskId, nodeId, messageTo: to, nodeAssignee: to, priorAssignee,
+								severity: "warn",
+								note: "assignment-style message delivered to a recipient other than the current node.assignee; investigate for an in-flight reassign race or configuration error",
+							});
+						}
+					}
+				} catch { /* best-effort; auto-stamp is observability, never blocks delivery */ }
+			}
+		}
+	}
+
 	const delivery = await deliver(pi, p, st, m);
 	if (delivery?.delivered) {
 		if (delivery.mailboxOnly) {

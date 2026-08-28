@@ -1,7 +1,7 @@
 // === swarm/taskgraph.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
 import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
@@ -844,6 +844,88 @@ export function applyTaskStatus(task: TaskState): { changed: boolean; terminal: 
 	task.status = computeTaskStatus(task);
 	const terminal = task.status === "done" || task.status === "failed" || task.status === "cancelled";
 	return { changed: task.status !== prev, terminal };
+}
+
+// === Issue 24.a (B5) — mintNodeAttempt helper ===
+// Consolidates the ~50 lines of attempt-mint logic previously inlined in `swarm_assign_task` so the
+// new `claim` branch (and any future call site that legitimately hands a node to a worker) can mint
+// or reuse attempts with one canonical implementation. The `reason` argument drives the trace
+// observability and the duplicate-detection branch.
+//
+// Return shape:
+//   - { attemptId, created: true }  — a fresh attempt was minted; prior active attempt (if any)
+//     was superseded.
+//   - { attemptId, created: false } — the SAME active-assignment was detected (same assignee +
+//     same node + status:active attempt + non-new prevStatus). Existing attemptId is preserved so
+//     duplicate assignment calls / delivery retries cannot fence the worker that already holds
+//     the active token.
+//
+// MUST be called from inside the same `withLock(p)` the caller already holds; this helper mutates
+// `node` in-place. Callers persist via writeTaskState + writeState (or equivalent) on success.
+//
+// `isNewAttempt` callers should compute it before calling this helper (the helper inspects
+// `node` to decide, but the caller's prevStatus variable may be more up-to-date). The helper
+// uses its own prevStatus probe as a defensive fallback.
+export function mintNodeAttempt(args: {
+	node: TaskNode;
+	assignee: string;
+	candidateScope: EffectiveScope;
+	reason: "assign" | "claim";
+}): { attemptId: string; created: boolean } {
+	const { node, assignee, candidateScope } = args;
+	const prevStatus = node.status;
+	// Detect same-active-assignment duplicates: same assignee + same node + active attempt + non-new
+	// prevStatus. Mirrors the historical branch from swarm_assign_task so a duplicate retry never
+	// mints or supersedes an attempt (preserves the existing attemptId for delivery retries).
+	const activeAttemptRecord = node.activeAttemptId
+		? node.attemptHistory?.find((a: any) => a.attemptId === node.activeAttemptId)
+		: undefined;
+	const sameActiveAssignment =
+		prevStatus !== "pending" && prevStatus !== "ready" && prevStatus !== "blocked" &&
+		node.assignee === assignee &&
+		activeAttemptRecord &&
+		activeAttemptRecord.status === "active";
+	if (sameActiveAssignment) {
+		activeAttemptRecord!.lastActivityAt = now();
+		return { attemptId: activeAttemptRecord!.attemptId, created: false };
+	}
+	// Genuine (re)assignment: mint a fresh attempt identity.
+	const attemptId = safeId(`attempt-${Date.now().toString(36)}-${randomBytesLike()}`);
+	const ts = now();
+	// Supersede prior active attempt (if any) before minting the new one.
+	if (node.activeAttemptId && node.attemptHistory) {
+		const priorAttempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
+		if (priorAttempt && priorAttempt.status === "active") {
+			priorAttempt.status = "superseded";
+			priorAttempt.supersededAt = ts;
+			priorAttempt.supersededBy = attemptId;
+			priorAttempt.releasedAt ||= ts;
+			priorAttempt.releaseReason = "reassign";
+		}
+	}
+	const newAttempt = {
+		attemptId,
+		attemptNumber: node.attempts,
+		assignmentMessageId: "", // filled by caller after message delivery
+		assignee,
+		assignedAt: ts,
+		status: "active" as const,
+		lastActivityAt: ts,
+		// Stamp the effective write scope at assignment time so ownership preflight + audits see what
+		// this lease actually held. Unresolved inheritance is NOT stamped: absent scope makes later
+		// scans re-resolve live (which returns unresolved => conservatively overlapping), never a fake
+		// empty scope. Mirrors the canonical swarm_assign_task inline logic.
+		...("unresolved" in candidateScope ? {} : { scope: { source: candidateScope.source, sourceNodeId: candidateScope.sourceNodeId, files: candidateScope.files } }),
+	};
+	node.attemptHistory = [...(node.attemptHistory || []), newAttempt];
+	node.activeAttemptId = attemptId;
+	return { attemptId, created: true };
+}
+
+// Tiny helper: 8 random bytes hex, mirrors `randomBytes(8).toString("hex")` and reuses the
+// `node:crypto` import already in scope.
+function randomBytesLike(): string {
+	return randomBytes(8).toString("hex");
 }
 
 // Remove a closed task from every agent's activeTaskIds (terminal bookkeeping cleanup).

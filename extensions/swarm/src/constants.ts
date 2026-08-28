@@ -243,6 +243,21 @@ export const MAX_CONSECUTIVE_NUDGES_DEFAULT =
 // goal is still set + idle, the pump re-enters the back-off cycle.
 export const GOAL_NUDGE_BACKOFF_TICKS = 2;
 
+// === Issue 23: task-graph-state idle nudge (no-goal variant) ===
+// Max consecutive unresolved task-stall nudges before the pump enters a 2-tick back-off. Mirrors
+// the Issue 18 goal-nudge cap but is keyed on a different condition (task-graph state, not a goal).
+// Configurable via the PI_SWARM_MAX_TASK_STALL_NUDGES env var (read at module-load time, mirroring
+// the ORPHAN_SPAWN_WARNING_TIMEOUT_MS pattern). Defaults to 3, matching the goal-nudge default.
+export const MAX_TASK_STALL_NUDGES =
+	Number(process.env.PI_SWARM_MAX_TASK_STALL_NUDGES) > 0
+		? Math.floor(Number(process.env.PI_SWARM_MAX_TASK_STALL_NUDGES))
+		: 3;
+
+// Semantic dedupe key template for the task-graph-state idle nudge. Per-(taskId) key so the pump
+// never emits a duplicate nudge for the same stalled task. Validated via SAFE_ID_RE inside
+// formatNotifyKey; the `taskId` substitution must satisfy /^[a-z0-9_-]+$/.
+export const NOTIFY_KEY_TASK_GRAPH_STALL = "task:{taskId}:nudge:graph-stall";
+
 // Semantic dedupe key template for the goal idle-streak nudge. One nudge per (goal, idle-streak)
 // so the orchestrator mailbox never sees duplicate nudges for the same goal emission. Validated via
 // SAFE_ID_RE inside formatNotifyKey; the `goalId` substitution must satisfy /^[a-z0-9_-]+$/.
