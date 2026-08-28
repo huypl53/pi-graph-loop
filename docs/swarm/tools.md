@@ -145,6 +145,11 @@ needs structured parameters or machine-readable results.
   `requiresAck:false`/`requiresResponse:false` — no ack/response debt; never mutates node state.
 - `/swarm pool list` — slot health + rotation status
 - `/swarm pool show` — full config view (pool OR implicit singleton fallback); never edits `.pi/settings.json`
+- `/swarm protocol migrate [--dry-run]` — operator path for upgrading durable v1 message
+  envelopes to v2 evidence fields (Issue 25 Phase 1). Back-fills `mailboxDeliveredAt` from
+  existing `delivered[to]` entries; never invents seen/responded/processing/terminal facts.
+  Idempotent (re-run yields `migrated: 0`); emits `protocol.migration.completed` summary.
+  See `docs/swarm/operations.md` "Operator protocol-migration" for full semantics.
 - `/swarm pool validate` — structural check (empty model, duplicates, bad weight, bad rotation); read-only
 - `/swarm pool help` — canonical pool format reference
 - `/swarm pool preview-preflight [model] [provider]` — dry-run the spawn gate; reports classified errors before commit

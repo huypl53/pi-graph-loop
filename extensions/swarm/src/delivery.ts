@@ -27,6 +27,12 @@ export function isDeliveryFailureRetryable(rec: { status: string; lastAck?: unkn
 // Records are append-only JSONL; memory promotion is gated on file-backed evidence that exists + reads.
 
 export function formatSwarmMessageContent(msg: SwarmMessage) {
+	// === Issue 25 Phase 1: formatSwarmMessageContent body unchanged under gate=0 ===
+	// The proposal §K.3 binding ("gate=1 worker messages must not render [PI-SWARM ACK REQUIRED]")
+	// is DEFERRED to Phase 2. Under gate=0, today's body remains authoritative so a Phase 1 ship
+	// never alters what recipients see. When the rollout flips PI_SWARM_MINIMAL_PROTOCOL=1, this
+	// helper gains a gate-aware branch and the identity-card generator must stop instructing normal
+	// workers to call explicit ACK (proposal §E + §I.5).
 	const ackLine = msg.requiresAck
 		? `\n\n[PI-SWARM ACK REQUIRED] This message requires acknowledgement. Call \`swarm_ack_message\` with messageId="${msg.id}" and status=\`seen\`|\`processing\`|\`done\`|\`failed\` (ack \`seen\`/\`processing\` now, then \`done\`/\`failed\` when complete). Unacked delivered messages are surfaced as ack_missing.`
 		: "";

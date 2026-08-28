@@ -18,6 +18,7 @@ import { claimOrchestratorLeader, ensureOrchestrator, overridePath } from "./ide
 import { startOrchestratorPump, bumpSwapChain } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError, pickSlot, slotKey, effectiveConfig } from "./pool.ts";
+import { TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
 import type { ModelSlot } from "./types.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
@@ -1052,6 +1053,71 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						return;
 					}
 					ctx.ui.notify("Usage: /swarm goal set <text> | /swarm goal done [<goalId>]", "warning");
+					return;
+				}
+				if (cmd === "protocol") {
+					// === Issue 25 Phase 1: /swarm protocol migrate [--dry-run] ===
+					// Idempotent admin migration tool (proposal §D + §J.5). Bumps v1 envelopes to v2
+					// evidence fields WITHOUT inventing any seen/responded/processing/terminal facts.
+					// Only stamps audit fields (migrationRunId, migratedAt) and back-fills the
+					// transport-only mailboxDeliveredAt when a delivered[to] entry already provides a
+					// timestamp. Safe to re-run: a record with migrationRunId is skipped.
+					const sub = rest.shift();
+					if (sub !== "migrate") { ctx.ui.notify("Usage: /swarm protocol migrate [--dry-run]", "warning"); return; }
+					const dryRun = rest.some((t) => t === "--dry-run" || t === "-n");
+					// Filter out the recognized flag before parseFlags so it doesn't bounce as unknown-rest.
+					const flags = parseFlags(rest.filter((t) => t !== "--dry-run" && t !== "-n"));
+					if (flags.rest.length) { ctx.ui.notify("Usage: /swarm protocol migrate [--dry-run]", "warning"); return; }
+					// Authority: slash commands bypass the model authority gate by design (same as
+					// /swarm pool rotate, /swarm attention). Operators running this in any pane can
+					// execute it; the tool itself is not model-exposed.
+					const outcome = await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const ts = now();
+						const runId = `pmig-${ts.replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 6)}`;
+						let scanned = 0;
+						let migrated = 0;
+						let skipped = 0;
+						let errors = 0;
+						const plan: Array<{ messageId: string; action: string; reason: string }> = [];
+						for (const [msgId, rec] of Object.entries(st.messages || {})) {
+							scanned++;
+							let action: "skip" | "stamp" | "plan" = "skip";
+							let reason = "";
+							if (rec.migrationRunId) {
+								skipped++; action = "skip"; reason = "migrationRunId already set";
+							} else {
+								// Only back-fill mailboxDeliveredAt when we have a transport receipt to
+								// back it from. We never invent seen/responded/processing/terminal fields.
+								const deliveredArr = st.delivered?.[rec.to] || [];
+								const backfill = !rec.mailboxDeliveredAt && deliveredArr.includes(msgId)
+									? { mailboxDeliveredAt: rec.injectedAt || rec.createdAt }
+									: null;
+								if (!backfill) {
+									skipped++; action = "skip"; reason = "no transport receipt to stamp; other v2 fields derived lazily";
+								} else if (dryRun) {
+									action = "plan"; reason = "would back-fill transport-only mailboxDeliveredAt from delivered[] entry";
+								} else {
+									// Mutate via the existing key/record shape; this is the ONLY write
+									// surface the migration tool uses.
+									const updated: typeof rec = { ...rec };
+									updated.mailboxDeliveredAt = backfill.mailboxDeliveredAt;
+									updated.migrationRunId = runId;
+									updated.migratedAt = ts;
+									st.messages[msgId] = updated;
+									action = "stamp"; reason = "back-filled transport-only mailboxDeliveredAt from delivered[] entry";
+									migrated++;
+								}
+							}
+							plan.push({ messageId: msgId, action, reason });
+							await trace(p, TRACE_PROTOCOL_MIGRATION_RECORD, { runId, messageId: msgId, from: rec.from, to: rec.to, action, reason, fields: action === "skip" ? [] : ["mailboxDeliveredAt"], auditOnly: true, dryRun });
+						}
+						if (!dryRun && (migrated > 0 || scanned > 0)) await writeState(p, st);
+						await trace(p, TRACE_PROTOCOL_MIGRATION_COMPLETED, { runId, scanned, migrated, skipped, errors, dryRun, via: "command", gate: 0 });
+						return { runId, scanned, migrated, skipped, errors, dryRun, plan };
+					});
+					const head = `Migration ${outcome.dryRun ? "(dry-run) " : ""}complete. runId=${outcome.runId} scanned=${outcome.scanned} migrated=${outcome.migrated} skipped=${outcome.skipped} errors=${outcome.errors} dryRun=${outcome.dryRun}`;
+					ctx.ui.notify(head, outcome.errors > 0 ? "warning" : "info");
 					return;
 				}
 				ctx.ui.notify(`Unknown /${commandName} command: ${cmd}`, "warning");

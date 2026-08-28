@@ -10,6 +10,9 @@ import { now, safeId, textResult } from "../utils.ts";
 import { pumpOrchestratorMailbox, reconcile } from "../reconcile.ts";
 import { heartbeatOrchestratorLeader } from "../identity.ts";
 import { tmux } from "../tmux.ts";
+import { wrapSwarmToolInvocation } from "./wrapper.ts";
+import { PI_SWARM_MINIMAL_PROTOCOL, TRACE_LIFECYCLE_DERIVED_SHADOW } from "../constants.ts";
+import { deriveLifecycleFromTrigger } from "../mailbox.ts";
 
 export function registerMessagesTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
@@ -30,11 +33,13 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			idempotencyKey: Type.Optional(Type.String({ description: "Optional idempotency key to prevent duplicate messages. If a message with the same from+to+idempotencyKey exists, it is returned instead." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const { msg, delivery } = await enqueueAndDeliver(pi, ctx.cwd, p, params);
-			const injected = Boolean(delivery?.delivered) && !delivery?.mailboxOnly;
-			const mailboxOnly = Boolean(delivery?.mailboxOnly);
-			return textResult(`Sent ${msg.id} to ${msg.to}. Injected: ${injected}${mailboxOnly ? " (mailbox-only delivery; recipient has no tmux pane)" : ""}`, { message: msg, delivery });
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_send_message", async () => {
+				const p = paths(ctx.cwd);
+				const { msg, delivery } = await enqueueAndDeliver(pi, ctx.cwd, p, params);
+				const injected = Boolean(delivery?.delivered) && !delivery?.mailboxOnly;
+				const mailboxOnly = Boolean(delivery?.mailboxOnly);
+				return textResult(`Sent ${msg.id} to ${msg.to}. Injected: ${injected}${mailboxOnly ? " (mailbox-only delivery; recipient has no tmux pane)" : ""}`, { message: msg, delivery });
+			});
 		},
 	}))
 
@@ -51,8 +56,9 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			waive: Type.Optional(Type.Boolean({ description: "Orchestrator-only: accept ack of a superseded assignment as waived." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const agentId = currentAgentId();
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_ack_message", async () => {
+				const p = paths(ctx.cwd);
+				const agentId = currentAgentId();
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				const rec = st.messages[params.messageId];
@@ -106,6 +112,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				return st.messages[params.messageId];
 			});
 			return textResult(`Acked ${params.messageId} as ${params.status}`, { message: result });
+		});
 		},
 	}))
 
@@ -121,14 +128,16 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			limit: Type.Optional(Type.Number({ description: "Maximum records to return. Defaults to 50." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const st = await readState(p, ctx.cwd);
-			let records = Object.values(st.messages || {});
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_message_status", async () => {
+				const p = paths(ctx.cwd);
+				const st = await readState(p, ctx.cwd);
+				let records = Object.values(st.messages || {});
 			if (params.messageId) records = records.filter((r) => r.id === params.messageId);
 			if (params.agentId) records = records.filter((r) => r.to === safeId(params.agentId!));
 			if (params.status) records = records.filter((r) => r.status === params.status);
 			records = records.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-Math.max(1, Math.min(200, params.limit || 50)));
 			return textResult(JSON.stringify({ count: records.length, records }, null, 2), { records });
+		});
 		},
 	}))
 
@@ -144,10 +153,11 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			markDelivered: Type.Optional(Type.Boolean({ description: "Mark returned messages as delivered/read. Defaults to false." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const agentId = safeId(params.agentId || currentAgentId());
-			const limit = Math.max(1, Math.min(100, params.limit || 20));
-			const result = await withLock(p, async () => {
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_check_mailbox", async () => {
+				const p = paths(ctx.cwd);
+				const agentId = safeId(params.agentId || currentAgentId());
+				const limit = Math.max(1, Math.min(100, params.limit || 20));
+				const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				// DELIBERATELY DECOUPLED from the orchestrator auto-pump: check_mailbox keys "already read" on the
 				// shared st.delivered[agentId] ledger, NOT on the pump's per-process surfaced set
@@ -178,9 +188,39 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				}
 				messages = messages.slice(-limit);
 				await trace(p, "mailbox.poll", { agentId, count: messages.length, matchedCount, pendingOnly: Boolean(params.pendingOnly), markDelivered: Boolean(params.markDelivered) });
+				// === Issue 25 Phase 1: shadow lifecycle derivation under gate=0 ===
+				// Emits a `message.lifecycle_derived_shadow` trace for every surfaced envelope so
+				// dashboards see the upcoming inferred stage without mutating durable state. Under
+				// gate=0 the trace is the ONLY effect — no `seenAt` is written. Under gate=1 (Phase 2)
+				// the same derivation becomes authoritative and stamps the v2 field inside this same
+				// withLock(p) critical section. Never applies to messages without an existing record
+				// (legacy envelopes without st.messages[id] are silently skipped).
+				if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
+					const ts = now();
+					for (const m of messages) {
+						const rec = st.messages[m.id];
+						if (!rec) continue;
+						const d = deriveLifecycleFromTrigger(rec, { kind: "mailbox_surfaced" }, ts);
+						if (d.kind === "set") {
+							await trace(p, TRACE_LIFECYCLE_DERIVED_SHADOW, {
+								messageId: m.id,
+								from: rec.from,
+								to: rec.to,
+								field: d.field,
+								source: d.source,
+								stage: d.stage,
+								shadow: true,
+								gate: 0,
+								reason: d.reason,
+								via: "swarm_check_mailbox",
+							});
+						}
+					}
+				}
 				return { agentId, mailbox: relative(ctx.cwd, mailboxPath(p, agentId)), matchedCount, returnedCount: messages.length, messages };
 			});
 			return textResult(JSON.stringify(result, null, 2), result);
+		});
 		},
 	}))
 
@@ -195,8 +235,9 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			mark: Type.Optional(Type.Boolean({ description: "Persist the recomputed task.status when stored/derived drift is detected (repairs closure). Still never auto-fails nodes. Defaults to false." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			// mark=true persists task.status writes — an orchestrator-authoritative mutation gated
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_reconcile", async () => {
+				const p = paths(ctx.cwd);
+				// mark=true persists task.status writes — an orchestrator-authoritative mutation gated
 			// on leader heartbeat (plan §4.4.7). Advisory paths (mark=false/dryRun=true) stay ungated.
 			if (params.mark) {
 				await withLock(p, async () => {
@@ -208,6 +249,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			const result = await reconcile(pi, ctx.cwd, p, { agentId: params.agentId, dryRun: params.dryRun, mark: params.mark });
 			const summary = result.actions.map((a) => `  ${a.messageId}: ${a.action} (${a.reason})`).join("\n");
 			return textResult(`Reconciled ${result.count} item(s): ${result.messageCount} message(s), ${result.taskCount} task(s) (${result.dryRun ? "dry run" : "applied"}).\n${summary}`, result);
+		});
 		},
 	}))
 }

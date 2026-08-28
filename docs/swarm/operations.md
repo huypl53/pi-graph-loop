@@ -632,3 +632,50 @@ notification was caught before it could mislead the recipient.
   whose notify keeps being suppressed while no fresh assignment is being issued).
 
 
+## Operator protocol-migration (Issue 25 Phase 1)
+
+`/swarm protocol migrate [--dry-run]` is the operator command for upgrading durable v1 message envelopes to v2 evidence fields (proposal §A + §D, plan §2.7). It runs entirely under the existing `withLock(p)` critical section; no nesting; no state writes outside the lock.
+
+**When to run**
+
+- After every stable release once `PI_SWARM_MINIMAL_PROTOCOL=1` is enabled (Phase 2 gate-flip).
+- During the two-stable-release compatibility window before `requiresAck` is deprecated (Phase 3 governance).
+- Before an operator wants to roll forward into inferred-lifecycle tooling that consumes `seenAt` / `processingAt` / `respondedAt` / `terminalAt`.
+
+**What it does and does NOT do**
+
+- ✅ Back-fills `mailboxDeliveredAt` from existing `delivered[to]` entries (transport-only).
+- ✅ Stamps `migrationRunId` + `migratedAt` audit fields per migrated record.
+- ❌ Does NOT invent `seenAt` / `respondedAt` / `processingAt` / `terminalAt` / `lifecycleStage`.
+- ❌ Does NOT dead-letter or skip records lacking v2 fields.
+- ❌ Does NOT change completion or recovery semantics.
+
+**Dry-run**
+
+```bash
+/swarm protocol migrate --dry-run
+```
+
+Emits `protocol.migration.record` per record (action `skip` / `plan`) and one `protocol.migration.completed` summary. Does NOT write state.
+
+**Real run**
+
+```bash
+/swarm protocol migrate
+```
+
+Stamps eligible records; emits `protocol.migration.record` (action `stamp`) + `protocol.migration.completed` summary. Idempotent: a second run yields `migrated: 0`.
+
+**Rollback**
+
+A migration run is additive-only. Deleting the `migrationRunId` and `migratedAt` fields from `swarm-state.json` reverts the audit stamps without affecting durable message state. No other code path consults those fields.
+
+**Trace events**
+
+- `protocol.migration.record` — per record; payload `{ runId, messageId, from, to, action, reason, fields, auditOnly, dryRun }`.
+- `protocol.migration.completed` — one per run; payload `{ runId, scanned, migrated, skipped, errors, dryRun, via, gate }`.
+
+**Related tools / commands**
+
+- `/swarm trace` — view the migration trace.
+- `swarm_message_status` — inspect a single record's v2 fields (admin/diagnostic; not model-exposed by default).

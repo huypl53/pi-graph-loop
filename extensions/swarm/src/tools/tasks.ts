@@ -17,6 +17,7 @@ import { ensureOrchestrator, heartbeatOrchestratorLeader, isOrchestratorAuthorit
 import { findReusableAgent, spawnAgent, clearOrphanWatch, isSameOrchestratorLeader } from "../agents.ts";
 import { reconcile, runtimeTaskWarnings } from "../reconcile.ts";
 import { tmux } from "../tmux.ts";
+import { wrapSwarmToolInvocation } from "./wrapper.ts";
 
 export function registerTasksTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
@@ -48,10 +49,11 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			gates: Type.Optional(Type.Record(Type.String(), Type.Any())),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			await ensureDirs(p);
-			const me = currentAgentId();
-			requireOrchestratorAuthority(currentAgentId(), "swarm_create_task");
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_create_task", async () => {
+				const p = paths(ctx.cwd);
+				await ensureDirs(p);
+				const me = currentAgentId();
+				requireOrchestratorAuthority(currentAgentId(), "swarm_create_task");
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "create_task");
@@ -105,6 +107,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				return { taskId, task, tp, ready, actionable, autoClosed: autoClosed.closed };
 			});
 			return textResult(`Created task ${result.taskId} at ${relative(ctx.cwd, result.tp.root)}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}${result.autoClosed?.length ? `\nAuto-closed orchestrator terminal nodes: ${result.autoClosed.join(", ")}` : ""}`, { taskId: result.taskId, task: result.task, taskMd: relative(ctx.cwd, result.tp.taskMd), taskJson: relative(ctx.cwd, result.tp.taskJson), autoClosed: result.autoClosed });
+		});
 		},
 	}))
 
@@ -119,9 +122,10 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			runtime: Type.Optional(Type.Boolean({ description: "Include agent/message/liveness warnings from swarm state. Defaults to false." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId });
-			const { ready, current } = computeReadyNodes(task);
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_task_status", async () => {
+				const p = paths(ctx.cwd);
+				const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId });
+				const { ready, current } = computeReadyNodes(task);
 			const summary = graphJsonSummary(task, ready, current);
 			let artifacts: Array<{ path: string; exists: boolean }> | undefined;
 			if (params.includeArtifacts) artifacts = collectDeclaredArtifacts(task).map((path) => ({ path, exists: existsSync(join(tp.root, path)) }));
@@ -141,6 +145,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				: "";
 			const text = printGraphText(task, ready, current, artifacts) + (runtimeWarnings?.length ? `\n\nRuntime warnings:\n${runtimeWarnings.map((w) => `  ⚠ ${w}`).join("\n")}` : "") + closureBlock;
 			return textResult(text, { task: summary, taskId, artifacts, runtimeWarnings, closure });
+		});
 		},
 	}))
 
@@ -155,9 +160,10 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			runtime: Type.Optional(Type.Boolean({ description: "Include agent/message/liveness checks. Defaults to false." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId, path: params.path });
-			const { errors, warnings } = validateTaskGraph(task);
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_validate_graph", async () => {
+				const p = paths(ctx.cwd);
+				const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId, path: params.path });
+				const { errors, warnings } = validateTaskGraph(task);
 			let runtimeWarnings: string[] = [];
 			if (params.runtime) {
 				const st = await readState(p, ctx.cwd);
@@ -170,6 +176,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			for (const e of errors) lines.push(`  ✗ ${e}`);
 			for (const w of [...warnings, ...runtimeWarnings]) lines.push(`  ⚠ ${w}`);
 			return textResult(lines.join("\n"), { taskId, ok, errors, warnings, runtimeWarnings });
+		});
 		},
 	}))
 
@@ -184,14 +191,16 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			format: Type.Optional(Type.String({ description: "text, mermaid, or json. Defaults to text." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId, path: params.path });
-			const format = (params.format || "text").toLowerCase();
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_print_graph", async () => {
+				const p = paths(ctx.cwd);
+				const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId, path: params.path });
+				const format = (params.format || "text").toLowerCase();
 			const { ready, current } = computeReadyNodes(task);
 			await traceTask(tp, "task.print", { taskId, format });
 			if (format === "mermaid") return textResult(printGraphMermaid(task), { taskId, format });
 			if (format === "json") return textResult(JSON.stringify(graphJsonSummary(task, ready, current), null, 2), { taskId, format, summary: graphJsonSummary(task, ready, current) });
 			return textResult(printGraphText(task, ready, current), { taskId, format });
+		});
 		},
 	}))
 
@@ -205,11 +214,12 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			autoAssign: Type.Optional(Type.Boolean({ description: "Reserved for V1; suggestions are returned but assignment is not mutated." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId });
-			const result = await withLock(p, async () => {
-				const { ready, current } = computeReadyNodes(task);
-				task.currentNodes = current;
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_next_nodes", async () => {
+				const p = paths(ctx.cwd);
+				const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId });
+				const result = await withLock(p, async () => {
+					const { ready, current } = computeReadyNodes(task);
+					task.currentNodes = current;
 				await writeTaskState(tp, task);
 				return { ready, current };
 			});
@@ -233,6 +243,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			const lines: string[] = [`Ready: ${actionable.length ? actionable.join(", ") : "(none)"}`, `Current: ${result.current.length ? result.current.join(", ") : "(none)"}`];
 			for (const s of suggestions) lines.push(`  ${s.nodeId} (${s.role}) -> ${s.suggestedAssignee || "(no reusable agent; spawn needed)"}`);
 			return textResult(lines.join("\n"), { taskId, ready: actionable, current: result.current, suggestions, autoAssign: Boolean(params.autoAssign) });
+		});
 		},
 	}))
 
@@ -252,10 +263,11 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			note: Type.Optional(Type.String({ description: "Optional extra assignment note appended to the message body." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			await ensureDirs(p);
-			const me = currentAgentId();
-			requireOrchestratorAuthority(me, "swarm_assign_task");
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_assign_task", async () => {
+				const p = paths(ctx.cwd);
+				await ensureDirs(p);
+				const me = currentAgentId();
+				requireOrchestratorAuthority(me, "swarm_assign_task");
 			const reusePolicy = params.reusePolicy || "prefer_idle_existing";
 			let spawned = false;
 			const result = await withLock(p, async () => {
@@ -451,6 +463,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			const injected = Boolean(delivery?.delivered) && !delivery?.mailboxOnly;
 			const fencedSuffix = (result as any).fenced ? ` Message ${result.msg.id} FENCED (${(result as any).reason}) — informational trace only.` : "";
 			return textResult(`Assigned node ${params.nodeId} of ${result.task.taskId} to ${result.assigneeId}${spawned ? " (spawned)" : ""}. Message ${result.msg.id} ${delivery?.delivered ? (delivery.mailboxOnly ? "queued (mailbox-only)" : "delivered") : "queued (agent not running; reconcile will retry)"}.${fencedSuffix}`, { taskId: result.task.taskId, nodeId: params.nodeId, assignee: result.assigneeId, spawned, messageId: result.msg.id, injected, delivery, candidates: result.candidates, fenced: Boolean((result as any).fenced), reason: (result as any).reason ?? null });
+		});
 		},
 	}))
 
@@ -478,11 +491,12 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			attemptId: Type.Optional(Type.String({ description: "Opaque attempt token received in assignment. Required for non-orchestrator callers when node has an active attempt. Prevents stale updates from superseded attempts." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			await ensureDirs(p);
-			const me = currentAgentId();
-			const isOrch = isOrchestratorAuthority(me);
-			// Server-side RBAC (reliability-roadmap Phase 1, P0 #1): `force` and `cancelTask` are
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_update_task", async () => {
+				const p = paths(ctx.cwd);
+				await ensureDirs(p);
+				const me = currentAgentId();
+				const isOrch = isOrchestratorAuthority(me);
+				// Server-side RBAC (reliability-roadmap Phase 1, P0 #1): `force` and `cancelTask` are
 			// orchestrator-only escape hatches. Identity is checked against the live agent record; the
 			// caller's params cannot grant authority. Validation precedes any state mutation.
 			if (params.cancelTask === true) {
@@ -830,6 +844,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled, autoClosed: autoClosed.closed, reopened };
 			});
 			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${result.cancelled ? " Task marked cancelled; all assignments released." : ""}${result.reopened?.length ? ` Reopened rework nodes: ${result.reopened.join(", ")}.` : ""}${params.note ? ` Note: ${params.note}` : ""}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, taskStatus: result.taskStatus, cancelled: result.cancelled, by: me, autoClosed: result.autoClosed, reopened: result.reopened });
+		});
 		},
 	}))
 
@@ -850,11 +865,12 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			priority: Type.Optional(Type.String({ description: "low, normal, high. Defaults to normal." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			await ensureDirs(p);
-			const me = currentAgentId();
-			const result = await withLock(p, async () => {
-				const st = await readState(p, ctx.cwd);
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_task_message", async () => {
+				const p = paths(ctx.cwd);
+				await ensureDirs(p);
+				const me = currentAgentId();
+				const result = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
 				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
 				const taskId = task.taskId;
 				if (!task.nodes[params.fromNode]) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `fromNode ${params.fromNode} does not exist in task ${taskId}.`, { taskId, nodeId: params.fromNode, received: { fromNode: params.fromNode } });
@@ -877,6 +893,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			});
 			const delivery = result.delivery;
 			return textResult(`Sent task message ${result.msg.id} from node ${params.fromNode} to ${params.to}${params.toNode ? ` (node ${params.toNode})` : ""}. ${delivery?.delivered ? (delivery.mailboxOnly ? "Queued (mailbox-only)." : "Delivered.") : "Queued (agent not running; reconcile will retry)."}`, { taskId: result.task.taskId, messageId: result.msg.id, fromNode: params.fromNode, toNode: params.toNode, to: params.to, delivery });
+		});
 		},
 	}))
 }

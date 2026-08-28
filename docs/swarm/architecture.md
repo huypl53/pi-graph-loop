@@ -73,11 +73,15 @@ Primary code:
 Handles mailbox append, tmux injection, interception, acknowledgements, retries,
 dead letters, and idempotency. A delivery that initially failed tmux injection but is later surfaced/intercepted or ACKed `processing` remains response-tracked until the worker produces a verified result and ACKs `done` with a `resultMessageId`.
 
+**Issue 25 Phase 1: inferred lifecycle shadow telemetry.** Under `PI_SWARM_MINIMAL_PROTOCOL=0` (default), `MessageRecord` carries optional v2 evidence fields (`mailboxDeliveredAt`, `seenAt`, `processingAt`, `respondedAt`, `terminalAt`, `lifecycleStage`, `lifecycleSource`, `terminalReason`, `expectResponse`, `responseDeadlineMs`, `escalateIfSilent`, `migrationRunId`, `migratedAt`). The engine does NOT mutate these under gate=0; `swarm_check_mailbox` emits `message.lifecycle_derived_shadow` traces carrying the would-be `seenAt` derivation, and the reconcile deadline sweep emits the same trace for messages whose `responseDeadlineMs` has elapsed. `tool.invoked` telemetry is emitted once per swarm tool via `src/tools/wrapper.ts`. Migration is via `/swarm protocol migrate [--dry-run]`, idempotent and additive-only. Proposal: `docs/swarm/minimal-agent-protocol-proposal.md` §A–§K.
+
 Primary code:
-- `src/mailbox.ts`
-- `src/delivery.ts`
-- `src/reconcile.ts`
-- `src/tools/messages*.ts`
+- `src/mailbox.ts` (`deriveLifecycleFromTrigger` pure helper + `upsertMessageRecord`)
+- `src/delivery.ts` (`formatSwarmMessageContent` body UNCHANGED under gate=0)
+- `src/reconcile.ts` (deadline-sweep shadow trace hook)
+- `src/tools/messages*.ts` (shadow-trace emission from `swarm_check_mailbox`)
+- `src/tools/wrapper.ts` (`wrapSwarmToolInvocation` common wrapper)
+- `src/command.ts` (`/swarm protocol migrate` slash command)
 
 ### 3. Task graph lifecycle
 Handles durable tasks, ready/assigned/in-progress/terminal node transitions,

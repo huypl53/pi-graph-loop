@@ -475,3 +475,80 @@ export async function supersedeTaskAssignmentMessages(p: Paths, st: SwarmState, 
 	}
 	return { supersededIds, skipped };
 }
+
+// === Issue 25 Phase 1: shadow lifecycle derivation helper ===
+// Pure function: returns the would-be derivation action WITHOUT mutating state. The caller
+// (swarm_check_mailbox, swarm_send_message replyTo branch, swarm_update_task terminal branch)
+// decides whether to (a) emit a shadow trace + leave state untouched (gate=0) or (b) actually
+// stamp the v2 field (gate=1, Phase 2). This function never writes; it only inspects the
+// current record + the trigger context and returns a decision object. The proposal §A mapping
+// is followed verbatim: transport events never produce `seenAt`; only recipient-side
+// surface/read evidence can; task-tool evidence requires matching taskId/nodeId/attemptId.
+//
+// INVARIANT: no caller in Phase 1 stamps the returned field under gate=0. Even at gate=1 the
+// caller must hold the existing withLock(p) critical section. Under gate=0 the caller emits a
+// `message.lifecycle_derived_shadow` trace carrying the would-be field name + source so
+// dashboards can already see the upcoming inferred stage.
+export type LifecycleStage = "delivered" | "surfaced" | "seen" | "processing" | "responded" | "terminal";
+
+export type LifecycleDerivation =
+	| { kind: "no_change"; reason: string }
+	| { kind: "set"; field: "mailboxDeliveredAt" | "seenAt" | "processingAt" | "respondedAt" | "terminalAt"; value: string; source: string; stage: LifecycleStage; reason: string };
+
+export type LifecycleTrigger =
+	| { kind: "mailbox_appended" }
+	| { kind: "mailbox_surfaced" }
+	| { kind: "task_tool"; taskId?: string; nodeId?: string; attemptId?: string }
+	| { kind: "reply_accepted"; taskId?: string; nodeId?: string; attemptId?: string }
+	| { kind: "task_node_terminal"; taskId?: string; nodeId?: string; attemptId?: string }
+	| { kind: "supersession"; supersededBy?: string }
+	| { kind: "deadline_exceeded"; deadlineMs?: number }
+	| { kind: "ttl_expired" };
+
+export function deriveLifecycleFromTrigger(rec: MessageRecord, trigger: LifecycleTrigger, atIso?: string): LifecycleDerivation {
+	const at = atIso || new Date().toISOString();
+	switch (trigger.kind) {
+		case "mailbox_appended": {
+			// Transport-only receipt. NEVER produces seenAt — proposal §A invariant.
+			if (rec.mailboxDeliveredAt) return { kind: "no_change", reason: "mailboxDeliveredAt already set" };
+			return { kind: "set", field: "mailboxDeliveredAt", value: at, source: "mailbox.appended", stage: "delivered", reason: "durable mailbox append succeeded" };
+		}
+		case "mailbox_surfaced": {
+			// swarm_check_mailbox returned this envelope. Distinct from pane injection per proposal §A.
+			if (rec.seenAt) return { kind: "no_change", reason: "seenAt already set" };
+			return { kind: "set", field: "seenAt", value: at, source: "mailbox.surfaced", stage: "seen", reason: "swarm_check_mailbox surfaced envelope" };
+		}
+		case "task_tool": {
+			// Requires matching taskId/nodeId/attemptId. We do NOT inspect the conversationId regex — the
+			// proposal §B.2 fence says the assignment reply branch re-verifies the assignment under lock.
+			// For task_tool evidence we accept the caller's context only when it's present.
+			if (!trigger.taskId || !trigger.nodeId || !trigger.attemptId) return { kind: "no_change", reason: "task_tool missing taskId/nodeId/attemptId" };
+			if (rec.processingAt) return { kind: "no_change", reason: "processingAt already set" };
+			return { kind: "set", field: "processingAt", value: at, source: "task.tool", stage: "processing", reason: `recipient tool for task=${trigger.taskId} node=${trigger.nodeId} attempt=${trigger.attemptId}` };
+		}
+		case "reply_accepted": {
+			if (rec.respondedAt) return { kind: "no_change", reason: "respondedAt already set" };
+			const reason = trigger.taskId
+				? `verified reply accepted for task=${trigger.taskId} node=${trigger.nodeId} attempt=${trigger.attemptId}`
+				: "verified reply accepted (non-task message)";
+			return { kind: "set", field: "respondedAt", value: at, source: "reply.accepted", stage: "responded", reason };
+		}
+		case "task_node_terminal": {
+			// Phase 1 never stamps terminalAt under gate=0; the caller is responsible for gating.
+			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
+			return { kind: "set", field: "terminalAt", value: at, source: "task.node_terminal", stage: "terminal", reason: `matching fenced node reached terminal status (task=${trigger.taskId ?? "?"} node=${trigger.nodeId ?? "?"} attempt=${trigger.attemptId ?? "?"})` };
+		}
+		case "supersession": {
+			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
+			return { kind: "set", field: "terminalAt", value: at, source: "supersession", stage: "terminal", reason: `superseded by ${trigger.supersededBy || "(unknown)"}` };
+		}
+		case "deadline_exceeded": {
+			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
+			return { kind: "set", field: "terminalAt", value: at, source: "responseDeadlineMs", stage: "terminal", reason: `response deadline ${trigger.deadlineMs ?? "?"}ms exceeded without reply/terminal` };
+		}
+		case "ttl_expired": {
+			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
+			return { kind: "set", field: "terminalAt", value: at, source: "ttl_expired", stage: "terminal", reason: "TTL/attempts exhausted; message moved to dead_letter" };
+		}
+	}
+}

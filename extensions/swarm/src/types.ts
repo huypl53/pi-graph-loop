@@ -162,6 +162,30 @@ export type MessageRecord = {
 	idempotencyKey?: string;
 	// Set when a newer assignment supersedes this open assignment message (idempotency/supersede fix).
 	superseded?: { at: string; by: string; supersededBy: string };
+
+	// --- Issue 25 Phase 1: v2 lifecycle evidence schema ---
+	// Each field has a distinct meaning (see proposal §A); none of them overloads the
+	// existing delivered/ack fields. Under gate=0 these are SHADOW ONLY: the engine does
+	// not mutate state or change completion decisions. Under gate=1 (Phase 2) the same
+	// derivation paths become authoritative.
+	mailboxDeliveredAt?: string;     // durable mailbox append succeeded (transport receipt)
+	seenAt?: string;                // API-level surface/read receipt (NOT pane injection)
+	processingAt?: string;          // recipient action scoped to task/node/assignment
+	respondedAt?: string;           // accepted, non-superseded replyTo response received
+	terminalAt?: string;            // inferred terminal disposition reached
+	terminalReason?: string;        // evidence source label (e.g. "response_verified", "task_node_terminal", "supersession", "deadline_exceeded", "ttl_expired")
+	lifecycleStage?: "delivered" | "surfaced" | "seen" | "processing" | "responded" | "terminal"; // derived stage at last derivation; shadow-only under gate=0
+	lifecycleSource?: string;       // the evidence source that drove the last derivation (e.g. "mailbox.read", "task.tool", "reply.accepted")
+	// Optional forward-compat fields on the send side. NOT exposed in normal tool
+	// schemas during Phase 1; the migration tool may stamp `expectResponse` on legacy
+	// envelopes when it can derive a response expectation without inventing one.
+	expectResponse?: boolean;
+	responseDeadlineMs?: number;
+	escalateIfSilent?: boolean;
+	// Migration provenance (Issue 25 Phase 1 §D). Additive audit field; set by the migration
+	// command only. Absent on pre-migration records.
+	migrationRunId?: string;        // runId of the migration that last touched this record
+	migratedAt?: string;            // ISO timestamp of the last successful migration write
 };
 
 export type SwarmAgent = {

@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
+import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED_SHADOW } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
@@ -1147,6 +1147,28 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 			const hasTmuxPane = Boolean(agent?.tmuxTarget) && agent.tmuxTarget !== "unknown";
 			const agentRunning = agent?.status === "running" && hasTmuxPane ? await isTmuxRunning(pi, agent.tmuxTarget!) : false;
 			const mailboxOnly = Boolean(agent) && !hasTmuxPane;
+
+			// === Issue 25 Phase 1: SHADOW-ONLY deadline sweep trace (proposal §C, plan §2.6) ===
+			// Emit `message.lifecycle_derived_shadow` with source=responseDeadlineMs whenever the
+			// reconcile sweep sees a message whose optional `responseDeadlineMs` has elapsed. The
+			// field is NOT written under gate=0; this is purely a visibility trace so dashboards
+			// can already see the upcoming inferred stage. Under gate=1 the same derivation becomes
+			// authoritative (Phase 2). Never dead-letters and never increments attempts.
+			if (!options.dryRun && typeof rec.responseDeadlineMs === "number" && rec.responseDeadlineMs > 0 && ageMs > rec.responseDeadlineMs && !rec.terminalAt) {
+				await trace(p, TRACE_LIFECYCLE_DERIVED_SHADOW, {
+					messageId: msgId,
+					from: rec.from,
+					to: rec.to,
+					field: "terminalAt",
+					source: "responseDeadlineMs",
+					stage: "terminal",
+					deadlineMs: rec.responseDeadlineMs,
+					ageMs,
+					shadow: true,
+					gate: PI_SWARM_MINIMAL_PROTOCOL,
+					reason: "response deadline exceeded; reconciled in shadow-only mode under gate=0",
+				});
+			}
 
 			if (expired && actionable && !maxAttempts) {
 				if (!options.dryRun) await trace(p, "reconcile.ttl.defer_actionable", { id: msgId, to: rec.to, ageMs, ttlMs: rec.ttlMs, requiresAck: rec.requiresAck, requiresResponse: rec.requiresResponse });

@@ -422,3 +422,32 @@ The following are mandatory bindings for the eventual implementation plan:
 4. **Alias policy alignment:** `swarm_next_nodes` and `swarm_print_graph` compatibility aliases stay available for the same two-stable-release window as durable-envelope compatibility, including the second-release UAT lane.
 5. **UAT model lanes:** each of the ten §H scenarios runs once under `glm-5.1`/`zai-coding-cn` and once under `gpt-5.4-mini`/`openai`; report each result separately. A single-model UAT is insufficient.
 6. **Worker reconcile schema:** add `scope: "self" | "all"` to `swarm_reconcile`. A worker defaults to, and is forcibly constrained to, `scope:"self"`; any other requested scope fails `SCOPE_FORBIDDEN`. Orchestrator/admin may select either scope. Internally reuse the existing `agentId` reconciliation path by resolving `scope:"self"` to the calling agent id.
+
+## Phase 1 status (2026-08-28)
+
+Implemented (gate=0 behavior-preserving):
+
+- `PI_SWARM_MINIMAL_PROTOCOL` env gate (default 0) read at module load.
+- v2 lifecycle evidence schema added to `MessageRecord` (`mailboxDeliveredAt`, `seenAt`, `processingAt`, `respondedAt`, `terminalAt`, `lifecycleStage`, `lifecycleSource`, `terminalReason`, `expectResponse`, `responseDeadlineMs`, `escalateIfSilent`, `migrationRunId`, `migratedAt`).
+- `tool.invoked` telemetry emitted once per swarm-tool invocation via `extensions/swarm/src/tools/wrapper.ts`; wraps every tool in `tools/{messages,agents,tasks,gc}.ts`. Under gate=0 the wrapper is purely additive and never alters return values or swallows thrown errors.
+- `deriveLifecycleFromTrigger` pure helper in `mailbox.ts` (proposal §A mapping; emits `message.lifecycle_derived_shadow` from `swarm_check_mailbox` under gate=0).
+- Deadline-sweep hook in `reconcile.ts` emits `message.lifecycle_derived_shadow` for any message whose `responseDeadlineMs` has elapsed; never writes `terminalAt` under gate=0, never increments `attempts`, never dead-letters.
+- `/swarm protocol migrate [--dry-run]` operator command; idempotent; back-fills transport-only `mailboxDeliveredAt` from existing `delivered[to]` entries; never invents `seen`/`responded`/`processing`/`terminal` facts. Re-running yields `migrated: 0` (proposal §J.4 binding).
+- `formatSwarmMessageContent` body UNCHANGED under gate=0 (Phase 2 deferred per §K.3); one-line comment in `delivery.ts` points at the deferred Phase-2 work.
+
+Deferred to Phase 2/3 (unchanged):
+
+- Authoritative inferred lifecycle transitions under gate=1.
+- Worker 5-tool / orchestrator 12-tool profile gating (Phase 2 §E).
+- `expectResponse` / `responseDeadlineMs` exposed in normal tool schemas (Phase 2 §B / §F).
+- Removal of `[PI-SWARM ACK REQUIRED]` from `formatSwarmMessageContent` body (Phase 2 §K.3).
+- Alias policy alignment for `swarm_next_nodes` / `swarm_print_graph` (Phase 2 §K.4).
+- Fenced-response inference in `swarm_update_task` terminal branch (Phase 2 §B).
+
+Acceptance evidence:
+
+- `extensions/swarm/minimal-protocol-shadow.test.mjs` — 34 assertions on `tool.invoked` coverage, wrapper re-throw semantics, gate=0 mailbox shadow trace + no record mutation, `deriveLifecycleFromTrigger` mapping, gate constant module-load read.
+- `extensions/swarm/minimal-protocol-migration.test.mjs` — 23 assertions on dry-run plan emission, idempotent `migrated: 0` second-run, no-fabrication invariants, audit-stamp coverage, usage error paths.
+- `npx tsc --noEmit --allowImportingTsExtensions --module nodenext --moduleResolution nodenext --skipLibCheck --target es2022 --lib es2022 extensions/swarm/index.ts` — passes.
+- Full UAT §H matrix in two model lanes — see implementation-report.md.
+

@@ -13,6 +13,7 @@ import { now, safeId, textResult, truncate } from "../utils.ts";
 import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority, writeEffectiveIdentity } from "../identity.ts";
 import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
 import { ERR_ORCHESTRATOR_PANE_REJECTED, FAST_MODEL, FAST_PROVIDER } from "../constants.ts";import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
+import { wrapSwarmToolInvocation } from "./wrapper.ts";
 
 export function registerAgentsTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
@@ -24,9 +25,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			agentId: Type.Optional(Type.String({ description: "Optional agent id. If omitted, returns all agents." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const st = await readState(p, ctx.cwd);
-			const filter = params.agentId ? safeId(params.agentId) : undefined;
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_agent_status", async () => {
+				const p = paths(ctx.cwd);
+				const st = await readState(p, ctx.cwd);
+				const filter = params.agentId ? safeId(params.agentId) : undefined;
 			const agents = Object.values(st.agents).filter((a) => !filter || a.id === filter);
 			const rows = [];
 			for (const agent of agents) {
@@ -71,6 +73,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			}
 			await trace(p, "agent.status.read", { agentId: filter, count: rows.length });
 			return textResult(JSON.stringify({ count: rows.length, agents: rows }, null, 2), { agents: rows });
+		});
 		},
 	}))
 
@@ -86,9 +89,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			stoppedOlderThanMs: Type.Optional(Type.Number({ description: "Only remove stopped agent records older than this age. Defaults to 0." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			requireOrchestratorAuthority(currentAgentId(), "swarm_prune");
-			const dryRun = params.dryRun !== false;
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_prune", async () => {
+				const p = paths(ctx.cwd);
+				requireOrchestratorAuthority(currentAgentId(), "swarm_prune");
+				const dryRun = params.dryRun !== false;
 			const markDead = params.markDead !== false;
 			const removeStopped = Boolean(params.removeStopped);
 			const stoppedOlderThanMs = Math.max(0, params.stoppedOlderThanMs || 0);
@@ -125,6 +129,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			});
 			await trace(p, "swarm.prune", { dryRun, markDead, removeStopped, stoppedOlderThanMs, actions });
 			return textResult(JSON.stringify({ dryRun, count: actions.length, actions }, null, 2), { dryRun, actions });
+		});
 		},
 	}))
 
@@ -135,9 +140,11 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		promptGuidelines: ["Use `swarm_list_agents` before sending swarm messages when you are unsure which agents exist."],
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const st = await readState(p, ctx.cwd);
-			return textResult(JSON.stringify({ swarmId: st.swarmId, tmuxSession: st.tmuxSession, agents: Object.values(st.agents) }, null, 2), { state: st });
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_list_agents", async () => {
+				const p = paths(ctx.cwd);
+				const st = await readState(p, ctx.cwd);
+				return textResult(JSON.stringify({ swarmId: st.swarmId, tmuxSession: st.tmuxSession, agents: Object.values(st.agents) }, null, 2), { state: st });
+			});
 		},
 	}))
 
@@ -155,11 +162,12 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt to send into the spawned agent after pi starts." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			await ensureDirs(p);
-			const result = await withLock(p, async () => {
-				const st = await readState(p, ctx.cwd);
-				await trace(p, "agent.spawn.request", { requestedBy: currentAgentId(), ...params });
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_spawn_agent", async () => {
+				const p = paths(ctx.cwd);
+				await ensureDirs(p);
+				const result = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					await trace(p, "agent.spawn.request", { requestedBy: currentAgentId(), ...params });
 				// Explicit model / 'fast' preset pin the slot; otherwise spawnAgent consults the
 				// model pool (if configured) before falling back to the single default.
 				const model = params.model === "fast" ? FAST_MODEL : params.model || undefined;
@@ -169,6 +177,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				return { swarmId: st.swarmId, tmuxSession: st.tmuxSession, ...r };
 			});
 			return textResult(`Spawned ${result.agent.id} at ${result.agent.tmuxTarget}\nIdentity: ${relative(ctx.cwd, result.identity)}\nSnapshot: ${relative(ctx.cwd, result.snapshot)}`, result);
+		});
 		},
 	}))
 
@@ -182,9 +191,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			refresh: Type.Optional(Type.Boolean({ description: "Regenerate the identity markdown from current swarm state before reading. Defaults to false." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const agentId = safeId(params.agentId || currentAgentId());
-			const ov = overridePath(p, agentId);
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_agent_identity", async () => {
+				const p = paths(ctx.cwd);
+				const agentId = safeId(params.agentId || currentAgentId());
+				const ov = overridePath(p, agentId);
 			// Rebuild the EFFECTIVE identity (generated base + optional override + provenance) when refreshing
 			// or when no effective file exists yet. The override file is only ever READ, never generated.
 			if (params.refresh || !existsSync(identityPath(p, agentId))) {
@@ -202,6 +212,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			const agent = st.agents[agentId];
 			await trace(p, "agent.identity.read", { agentId, file: relative(ctx.cwd, file), refresh: Boolean(params.refresh), overridePresent: existsSync(ov) });
 			return textResult(markdown, { agent, identity: relative(ctx.cwd, file), override: relative(ctx.cwd, ov), identityVersion: agent?.identityVersion, identityHash: agent?.identityHash, identityLoadedAt: agent?.identityLoadedAt });
+		});
 		},
 	}))
 
@@ -215,13 +226,15 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			note: Type.Optional(Type.String({ description: "Optional reason/note appended to the injected reload instruction and traced." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const agentId = safeId(params.agentId);
-			const r = await reloadIdentity(pi, ctx.cwd, p, agentId, { note: params.note, source: "tool" });
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_reload_identity", async () => {
+				const p = paths(ctx.cwd);
+				const agentId = safeId(params.agentId);
+				const r = await reloadIdentity(pi, ctx.cwd, p, agentId, { note: params.note, source: "tool" });
 			return textResult(
 				`Reloaded identity for ${agentId}: version=${r.provenance.version}, hash=${r.provenance.shortHash}, override=${r.provenance.overridePresent}, tmuxAlive=${r.tmuxAlive}, injected=${r.injected}. Effective file: ${relative(ctx.cwd, r.file)}`,
 				{ agentId, version: r.provenance.version, hash: r.provenance.hash, shortHash: r.provenance.shortHash, loadedAt: r.provenance.loadedAt, overridePresent: r.provenance.overridePresent, tmuxAlive: r.tmuxAlive, injected: r.injected, file: relative(ctx.cwd, r.file) }
 			);
+		});
 		},
 	}))
 
@@ -232,11 +245,13 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		promptGuidelines: ["Use `swarm_trace` to debug swarm spawning, mailbox, or tmux injection behavior."],
 		parameters: Type.Object({ limit: Type.Optional(Type.Number({ description: "Number of recent trace lines. Defaults to 80." })) }),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			if (!existsSync(p.events)) return textResult("No swarm trace file yet.", { path: relative(ctx.cwd, p.events) });
-			const lines = (await readFile(p.events, "utf8")).trim().split("\n").filter(Boolean);
-			const selected = lines.slice(-Math.max(1, Math.min(500, params.limit || 80))).join("\n");
-			return textResult(truncate(selected), { path: relative(ctx.cwd, p.events), totalLines: lines.length });
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_trace", async () => {
+				const p = paths(ctx.cwd);
+				if (!existsSync(p.events)) return textResult("No swarm trace file yet.", { path: relative(ctx.cwd, p.events) });
+				const lines = (await readFile(p.events, "utf8")).trim().split("\n").filter(Boolean);
+				const selected = lines.slice(-Math.max(1, Math.min(500, params.limit || 80))).join("\n");
+				return textResult(truncate(selected), { path: relative(ctx.cwd, p.events), totalLines: lines.length });
+			});
 		},
 	}))
 
@@ -247,13 +262,15 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		promptGuidelines: ["Use `swarm_capture_agent_pane` to debug what a spawned agent is currently seeing or doing in tmux."],
 		parameters: Type.Object({ agentId: Type.String({ description: "Agent id to capture." }) }),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const st = await readState(p, ctx.cwd);
-			const agent = st.agents[safeId(params.agentId)];
-			if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
-			const file = await capturePane(pi, p, agent.id, agent.tmuxTarget, `manual-${Date.now()}`);
-			await trace(p, "tmux.capture", { agentId: agent.id, target: agent.tmuxTarget, file: relative(ctx.cwd, file) });
-			return textResult(`Captured ${agent.id} pane to ${relative(ctx.cwd, file)}`, { file, agent });
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_capture_agent_pane", async () => {
+				const p = paths(ctx.cwd);
+				const st = await readState(p, ctx.cwd);
+				const agent = st.agents[safeId(params.agentId)];
+				if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
+				const file = await capturePane(pi, p, agent.id, agent.tmuxTarget, `manual-${Date.now()}`);
+				await trace(p, "tmux.capture", { agentId: agent.id, target: agent.tmuxTarget, file: relative(ctx.cwd, file) });
+				return textResult(`Captured ${agent.id} pane to ${relative(ctx.cwd, file)}`, { file, agent });
+			});
 		},
 	}))
 
@@ -268,13 +285,15 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			limit: Type.Optional(Type.Number({ description: "Maximum records to return. Defaults to 20." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const st = await readState(p, ctx.cwd);
-			let records = Object.values(st.messages || {}).filter((r) => r.status === "dead_letter");
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_dead_letters", async () => {
+				const p = paths(ctx.cwd);
+				const st = await readState(p, ctx.cwd);
+				let records = Object.values(st.messages || {}).filter((r) => r.status === "dead_letter");
 			if (params.messageId) records = records.filter((r) => r.id === params.messageId);
 			if (params.agentId) records = records.filter((r) => r.to === safeId(params.agentId!));
 			records = records.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)).slice(-Math.max(1, Math.min(100, params.limit || 20)));
 			return textResult(JSON.stringify({ count: records.length, records }, null, 2), { records });
+		});
 		},
 	}))
 
@@ -296,11 +315,12 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			inject: Type.Optional(Type.Boolean({ description: "Inject the identity kickoff into the pane. Defaults to true; set false to register bookkeeping only." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			await ensureDirs(p);
-			const result = await withLock(p, async () => {
-				const st = await readState(p, ctx.cwd);
-				await trace(p, "agent.register.request", { requestedBy: currentAgentId(), ...params });
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_register_agent", async () => {
+				const p = paths(ctx.cwd);
+				await ensureDirs(p);
+				const result = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					await trace(p, "agent.register.request", { requestedBy: currentAgentId(), ...params });
 				const r = await registerAgent(pi, ctx.cwd, p, st, params);
 				await writeState(p, st);
 				return r;
@@ -310,6 +330,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				`Registered ${a.id} at ${a.tmuxTarget} (alive=${result.tmuxAlive} piRunning=${result.piRunning} injected=${result.injected}). Identity: ${relative(ctx.cwd, result.identity)}`,
 				{ ...result }
 			);
+		});
 		},
 	}))
 
@@ -324,16 +345,18 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			killPane: Type.Optional(Type.Boolean({ description: "Kill the tmux pane/window. Defaults to true; set false to mark stopped without touching tmux." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			requireOrchestratorAuthority(currentAgentId(), "swarm_stop_agent");
-			const result = await withLock(p, async () => {
-				const st = await readState(p, ctx.cwd);
-				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "stop_agent");
-				const r = await stopAgent(pi, p, st, safeId(params.agentId), { force: params.force, killPane: params.killPane });
-				await writeState(p, st);
-				return r;
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_stop_agent", async () => {
+				const p = paths(ctx.cwd);
+				requireOrchestratorAuthority(currentAgentId(), "swarm_stop_agent");
+				const result = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					heartbeatOrchestratorLeader(st, Date.now(), process.pid, "stop_agent");
+					const r = await stopAgent(pi, p, st, safeId(params.agentId), { force: params.force, killPane: params.killPane });
+					await writeState(p, st);
+					return r;
+				});
+				return textResult(`Stopped ${result.agent.id}: killed=${result.killed} method=${result.method}.`, result);
 			});
-			return textResult(`Stopped ${result.agent.id}: killed=${result.killed} method=${result.method}.`, result);
 		},
 	}))
 
@@ -349,15 +372,17 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt sent into the respawned pi." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			await ensureDirs(p);
-			const result = await withLock(p, async () => {
-				const st = await readState(p, ctx.cwd);
-				const r = await restartAgent(pi, ctx.cwd, p, st, safeId(params.agentId), { initialPrompt: params.initialPrompt, model: params.model, provider: params.provider });
-				await writeState(p, st);
-				return r;
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_restart_agent", async () => {
+				const p = paths(ctx.cwd);
+				await ensureDirs(p);
+				const result = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					const r = await restartAgent(pi, ctx.cwd, p, st, safeId(params.agentId), { initialPrompt: params.initialPrompt, model: params.model, provider: params.provider });
+					await writeState(p, st);
+					return r;
+				});
+				return textResult(`Restarted ${result.agent.id} at ${result.agent.tmuxTarget} (kill=${result.kill.method}). Snapshot: ${relative(ctx.cwd, result.snapshot)}`, result);
 			});
-			return textResult(`Restarted ${result.agent.id} at ${result.agent.tmuxTarget} (kill=${result.kill.method}). Snapshot: ${relative(ctx.cwd, result.snapshot)}`, result);
 		},
 	}))
 
@@ -374,15 +399,17 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			note: Type.Optional(Type.String({ description: "Optional note appended to the injected identity reload prompt." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const result = await withLock(p, async () => {
-				const st = await readState(p, ctx.cwd);
-				const r = await setAgentRole(pi, ctx.cwd, p, st, safeId(params.agentId), params);
-				await writeState(p, st);
-				return r;
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_set_role", async () => {
+				const p = paths(ctx.cwd);
+				const result = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					const r = await setAgentRole(pi, ctx.cwd, p, st, safeId(params.agentId), params);
+					await writeState(p, st);
+					return r;
+				});
+				const a = result.agent;
+				return textResult(`Set role for ${a.id}: role=${a.role} roleKind=${a.roleKind} caps=[${a.capabilities.join(",")}] (v${result.provenance.version} injected=${result.injected}).`, result);
 			});
-			const a = result.agent;
-			return textResult(`Set role for ${a.id}: role=${a.role} roleKind=${a.roleKind} caps=[${a.capabilities.join(",")}] (v${result.provenance.version} injected=${result.injected}).`, result);
 		},
 	}))
 
@@ -396,15 +423,17 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			paused: Type.Boolean({ description: "true to pause (drain from reuse), false to resume." }),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const agent = await withLock(p, async () => {
-				const st = await readState(p, ctx.cwd);
-				const a = setAgentPaused(st, safeId(params.agentId), params.paused);
-				await trace(p, "agent.set_paused", { agentId: a.id, paused: Boolean(a.paused) });
-				await writeState(p, st);
-				return a;
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_set_agent_paused", async () => {
+				const p = paths(ctx.cwd);
+				const agent = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					const a = setAgentPaused(st, safeId(params.agentId), params.paused);
+					await trace(p, "agent.set_paused", { agentId: a.id, paused: Boolean(a.paused) });
+					await writeState(p, st);
+					return a;
+				});
+				return textResult(`${agent.id} ${agent.paused ? "paused" : "resumed"}.`, { agent });
 			});
-			return textResult(`${agent.id} ${agent.paused ? "paused" : "resumed"}.`, { agent });
 		},
 	}))
 
@@ -420,11 +449,12 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			enter: Type.Optional(Type.Boolean({ description: "Append an Enter after the keys. Defaults to false." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const st = await readState(p, ctx.cwd);
-			const agent = st.agents[safeId(params.agentId)];
-			if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
-			// Issue 12 C6 micro-fix: principle-based orchestrator-pane reject guard. Fires when the
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_send_keys", async () => {
+				const p = paths(ctx.cwd);
+				const st = await readState(p, ctx.cwd);
+				const agent = st.agents[safeId(params.agentId)];
+				if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
+				// Issue 12 C6 micro-fix: principle-based orchestrator-pane reject guard. Fires when the
 			// resolved tmux target equals the orchestrator record's tmuxTarget (typically "unknown"),
 			// so a future refactor cannot silently route raw keystrokes into the orchestrator host
 			// pane. Principle-based (target equality, not id) so ghost agents mis-stamped to "unknown"
@@ -438,6 +468,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			await sendKeys(pi, p, agent.tmuxTarget, params.keys, { literal: params.literal, enter: params.enter });
 			await trace(p, "agent.send_keys", { agentId: agent.id, target: agent.tmuxTarget, literal: Boolean(params.literal), enter: Boolean(params.enter) });
 			return textResult(`Sent keys to ${agent.id} (${agent.tmuxTarget}).`, { agent });
+		});
 		},
 	}))
 
@@ -448,12 +479,14 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		promptGuidelines: ["Use `swarm_attach_agent` to get the tmux attach/select commands for an agent's pane when the user wants to observe or interact with it directly."],
 		parameters: Type.Object({ agentId: Type.String({ description: "Agent id." }) }),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			const st = await readState(p, ctx.cwd);
-			const agent = st.agents[safeId(params.agentId)];
-			if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
-			const cmds = attachTarget(agent);
-			return textResult(`${cmds.attach}\n${cmds.selectWindow}\n${cmds.selectPane}`, cmds);
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_attach_agent", async () => {
+				const p = paths(ctx.cwd);
+				const st = await readState(p, ctx.cwd);
+				const agent = st.agents[safeId(params.agentId)];
+				if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
+				const cmds = attachTarget(agent);
+				return textResult(`${cmds.attach}\n${cmds.selectWindow}\n${cmds.selectPane}`, cmds);
+			});
 		},
 	}))
 
@@ -468,9 +501,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			force: Type.Optional(Type.Boolean({ description: "Release even non-terminal tasks. Defaults to false." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			requireOrchestratorAuthority(currentAgentId(), "swarm_release_agent_task");
-			const result = await withLock(p, async () => {
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_release_agent_task", async () => {
+				const p = paths(ctx.cwd);
+				requireOrchestratorAuthority(currentAgentId(), "swarm_release_agent_task");
+				const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "release_agent_task");
 				const agent = st.agents[safeId(params.agentId)];
@@ -492,6 +526,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				return { removed, refused };
 			});
 			return textResult(JSON.stringify({ agentId: safeId(params.agentId), ...result }, null, 2), result);
+		});
 		},
 	}))
 
@@ -512,13 +547,14 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			id: Type.Optional(Type.String({ description: "Optional explicit goalId. Omit to auto-generate." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			requireOrchestratorAuthority(currentAgentId(), "swarm_set_goal");
-			const text = String(params.text || "").trim();
-			if (!text) throw new Error("swarm_set_goal: text must be non-empty");
-			const requestedId = params.id ? safeId(String(params.id)) : `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
-			const result = await withLock(p, async () => {
-				const st = await readState(p, ctx.cwd);
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_set_goal", async () => {
+				const p = paths(ctx.cwd);
+				requireOrchestratorAuthority(currentAgentId(), "swarm_set_goal");
+				const text = String(params.text || "").trim();
+				if (!text) throw new Error("swarm_set_goal: text must be non-empty");
+				const requestedId = params.id ? safeId(String(params.id)) : `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
+				const result = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
 				const previousId = st.goal?.id;
 				const ts = now();
 				st.goal = {
@@ -539,6 +575,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				return { goalId: requestedId, previousId };
 			});
 			return textResult(`Goal set: ${result.goalId}`, result);
+		});
 		},
 	}))
 
@@ -551,9 +588,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			goalId: Type.Optional(Type.String({ description: "Optional goalId to clear (safety fence; clear fails if it does not match the current goal)." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			requireOrchestratorAuthority(currentAgentId(), "swarm_mark_goal_done");
-			const result = await withLock(p, async () => {
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_mark_goal_done", async () => {
+				const p = paths(ctx.cwd);
+				requireOrchestratorAuthority(currentAgentId(), "swarm_mark_goal_done");
+				const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				if (!st.goal) return { cleared: true, noop: true };
 				if (params.goalId && safeId(params.goalId) !== st.goal.id) {
@@ -567,6 +605,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				return { cleared: true, clearedId, nudges };
 			});
 			return textResult(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, result);
+		});
 		},
 	}))
 }

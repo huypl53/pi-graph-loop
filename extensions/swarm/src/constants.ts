@@ -229,6 +229,30 @@ export const NOTIFY_KEY_SETTLE_STALE = "task:{taskId}:agent:{agentId}:nudge:sett
 // correctly. The trace shape is { ts, cid, total, counts: { reason -> n, ... } }.
 export const NOTIFY_KEY_PUMP_BATCH_SUPPRESSED = "swarm.pump.batch_suppressed";
 
+// === Issue 25 Phase 1: minimal-protocol feature gate ===
+// Read once at module load (mirrors ORPHAN_SPAWN_WARNING_TIMEOUT_MS pattern). Default 0 — the
+// existing explicit ACK/requiresAck/reconcile semantics remain authoritative and no durable
+// lifecycle mutations happen until the rollout review flips gate=1.
+export const PI_SWARM_MINIMAL_PROTOCOL =
+	(process.env.PI_SWARM_MINIMAL_PROTOCOL === "1" || process.env.PI_SWARM_MINIMAL_PROTOCOL === "true") ? 1 : 0;
+
+// === Issue 25 Phase 1: stable telemetry trace event names ===
+// Exported as constants so tests and dashboards import the same string the engine emits.
+export const TRACE_TOOL_INVOKED = "tool.invoked";
+export const TRACE_LIFECYCLE_DERIVED = "message.lifecycle_derived";
+export const TRACE_LIFECYCLE_DERIVED_SHADOW = "message.lifecycle_derived_shadow"; // gate=0 only
+export const TRACE_PROTOCOL_MIGRATION_COMPLETED = "protocol.migration.completed";
+export const TRACE_PROTOCOL_MIGRATION_RECORD = "protocol.migration.record";
+
+// === Issue 25 Phase 1: worker reconcile rate budget (proposal §E + §K.1) ===
+// Workers calling swarm_reconcile({dryRun:true}) are constrained to the `self` scope and rate-limited
+// to PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS between invocations so a stuck worker can't repeatedly
+// scan the whole swarm. Reads at module load (mirrors PI_SWARM_ORPHAN_TIMEOUT_MS).
+export const PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS =
+	Number(process.env.PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS))
+		: 60_000;
+
 // === Issue 18: Swarm goal + idle-streak nudge ===
 // Max consecutive unresolved nudges before the pump enters a 2-tick back-off. Configurable via the
 // PI_SWARM_MAX_NUDGES env var (read at module-load time, mirrors the ORPHAN_SPAWN_WARNING_TIMEOUT_MS
