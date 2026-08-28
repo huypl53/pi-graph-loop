@@ -18,7 +18,7 @@ import { claimOrchestratorLeader, ensureOrchestrator, overridePath } from "./ide
 import { startOrchestratorPump, bumpSwapChain } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError, pickSlot, slotKey, effectiveConfig } from "./pool.ts";
-import { TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
+import { MAX_CONSECUTIVE_NUDGES_DEFAULT, TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
 import type { ModelSlot } from "./types.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
@@ -44,7 +44,7 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 	return out;
 }
 
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal set <text> | goal done [<goalId>] (orchestrator-only swarm goal lifecycle) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set <text> | goal done [<goalId>] (show read-only; set/done orchestrator-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -1011,7 +1011,21 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						return;
 					}
 					const sub = rest.shift();
-					if (sub === "set") {
+					if (sub === "show" || !sub) {
+					// Read-only: any swarm member may inspect the goal (no authority gate).
+					const s = await readState(p, ctx.cwd);
+					const g = s.goal;
+					if (!g) { ctx.ui.notify("No active swarm goal.", "info"); return; }
+					const age = Math.round((Date.now() - Date.parse(g.setAt)) / 60000);
+					const backoff = g.backoffTicksRemaining ? `, backoff ${g.backoffTicksRemaining} tick(s)` : "";
+					const lastNudge = g.lastNudgeAt ? `, last nudge ${g.lastNudgeAt}` : "";
+					ctx.ui.notify(
+						`Goal ${g.id}\n  text: ${g.text}\n  set: ${g.setAt} by ${g.setBy} (${age} min ago)\n  idle-streak nudges: ${g.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}${lastNudge}${backoff}`,
+						"info",
+					);
+					return;
+				}
+				if (sub === "set") {
 						const text = rest.join(" ").trim();
 						if (!text) { ctx.ui.notify("Usage: /swarm goal set <text>", "warning"); return; }
 						const st = await withLock(p, async () => {
@@ -1052,7 +1066,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						ctx.ui.notify(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, "info");
 						return;
 					}
-					ctx.ui.notify("Usage: /swarm goal set <text> | /swarm goal done [<goalId>]", "warning");
+					ctx.ui.notify("Usage: /swarm goal show | set <text> | done [<goalId>]", "warning");
 					return;
 				}
 				if (cmd === "protocol") {
