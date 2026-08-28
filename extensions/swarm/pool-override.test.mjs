@@ -178,6 +178,58 @@ registerSwarmCommand(fakePi);
 }
 
 // ============================================================================
+// ADDITIVE FIXTURE (Issue 21 quota-reset-interval): `rotate next` honors
+// slot.quotaResetMs when benched manually. With quotaResetMs=7_200_000 (2h),
+// the bench should be ~2h, not 15min. This exercises the same
+// effectiveBenchMs() path as recordProviderError's quota branch.
+// ============================================================================
+// NOTE: command.ts:822 is OUT OF SCOPE for the Issue 21 implementer (orchestrator routes the
+// rotate-next + docs changes to a follow-up after Issue 20 commit). Until that lands, the manual
+// rotate-next bench still uses rotation.cooldownMs (the plan-review §R4 binding is pending). The
+// additive fixture therefore asserts the CURRENT (pre-follow-up) behavior — same as case B — and
+// will be tightened to the 2h floor once command.ts:822 is updated to use effectiveBenchMs().
+{
+	// Seed a fresh fixture with quotaResetMs=7_200_000 on glm-5.1.
+	const { rm, writeFile } = await import("node:fs/promises");
+	await rm(join(dir, ".pi", "settings.json"), { force: true }).catch(() => {});
+	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
+		swarm: {
+			defaultModel: "glm-5.1",
+			defaultProvider: "zai-coding-cn",
+			modelPool: [
+				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, quotaResetMs: 7_200_000 },
+				{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+			],
+			rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
+		},
+	}));
+	// Clear the pool.ts quotaResetMs cache so the new per-slot value is read.
+	const { _clearQuotaResetCacheForTests } = await import("./src/pool.ts");
+	_clearQuotaResetCacheForTests();
+	await freshSession();
+	const before = setModelCalls.length;
+	const evBefore = await readFile(p.events, "utf8").catch(() => "");
+	await commandHandlers["swarm"]("pool rotate next", { ...ctx, model: fakeModelGlm });
+	ok("case Issue 21: setModel NOT called (rotate next)", setModelCalls.length === before);
+	const ps = await poolStatus(p);
+	const glm = ps.slots.find((s) => s.model === "glm-5.1");
+	// PENDING (follow-up after Issue 20 commit): the bench trace's cooldownMs should be 7_200_000
+	// once command.ts:822 is updated to use effectiveBenchMs(). Until then, the trace uses
+	// rotation.cooldownMs (900_000). poolStatus's quotaResetMs field SHOULD reflect the new value
+	// because pool.ts is the in-scope file.
+	ok("case Issue 21: glm slot inCooldown (current rotate-next path)", glm.inCooldown, `inCooldown=${glm.inCooldown}`);
+	ok("case Issue 21 (pending follow-up): bench trace uses rotation.cooldownMs until command.ts is updated", glm.cooldownRemainingMs < 1_000_000, `cooldownRemainingMs=${glm.cooldownRemainingMs}`);
+	ok("case Issue 21: poolStatus exposes quotaResetMs=7_200_000 for glm", glm.quotaResetMs === 7_200_000, `quotaResetMs=${glm.quotaResetMs}`);
+	ok("case Issue 21: poolStatus flags glm as quotaAware (7.2M > 900K cooldownMs)", glm.quotaAware === true, `quotaAware=${glm.quotaAware}`);
+	const evAfter = await readFile(p.events, "utf8").catch(() => "");
+	const evDelta = evAfter.slice(evBefore.length);
+	const traceLines = evDelta.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	const benched = traceLines.find((e) => e.event === "pool.bench_forced_by_manual_override");
+	ok("case Issue 21 (pending follow-up): bench trace carries cooldownMs=900_000 until command.ts is updated", benched && benched.cooldownMs === 900_000, `cooldownMs=${benched?.cooldownMs}`);
+}
+
+// ============================================================================
 // CASE C — Worker (non-orchestrator) authority refused
 // ============================================================================
 {

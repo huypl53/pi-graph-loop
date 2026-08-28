@@ -27,6 +27,11 @@ export type ModelSlot = {
 	provider?: string;
 	weight?: number; // default 1; 0 = fallback-only (used only when all weighted slots are down)
 	label?: string;
+	// Issue 21 quota-reset-interval: optional per-slot floor for quota benches. When a quota error
+	// benches this slot, the effective bench = max(rotation.cooldownMs, quotaResetMs ?? env-default).
+	// The 24h exponential cap still applies — quotaResetMs is a floor only, not a ceiling. Absent or
+	// 0 falls back to rotation.cooldownMs (unchanged behavior).
+	quotaResetMs?: number;
 };
 
 export type RotationStrategy = "weighted" | "round-robin" | "sticky";
@@ -75,6 +80,20 @@ export type PoolSlotHealth = {
 	deduped?: boolean;
 	cooldownUntil?: string; // ISO; slot excluded from picking while in the future
 	benchStreak?: number; // consecutive benches without an intervening success (drives exponential backoff)
+	// Issue 21 quota-reset-interval: kind of the most recent bench event (quota/auth/etc.). Stamped
+	// on every bench so the orchestrator pump's recovery scan can filter on "quota" (no point
+	// emitting slot_recovered for an auth bench). Preserved across recordSlotSuccess (see B-3) so
+	// the recovery gate stays accurate even if a successful turn is followed by a re-bench.
+	lastBenchReason?: ProviderErrorKind;
+	// Issue 21 quota-reset-interval: original bench duration in ms (the cap-adjusted value before
+	// the 24h cap and exponential backoff were applied — actually the FINAL value written to
+	// cooldownUntil). Stamped at bench time so the recovery trace can report how long the slot
+	// was actually benched. Preserved across recordSlotSuccess for the same reason as lastBenchReason.
+	lastBenchMs?: number;
+	// Issue 21 quota-reset-interval: timestamp of the last emitted pool.slot_recovered trace for
+	// this slot. Used as the idempotent dedupe gate (same contract as goal.idle_nudge's notify key).
+	// Pre-policy slots simply lack the field, which the recovery scan treats as "never recovered".
+	lastRecoveredAt?: string;
 };
 
 export type PoolHealthState = {
@@ -292,6 +311,13 @@ export type SwarmState = {
 	// MUST NOT add `st.goal ||= {}` here, since that would replace undefined with an empty object
 	// and crash `goal.id` access in the pump.
 	goal?: SwarmGoal;
+	// Issue 20: pool-scaffold write-once flag. Set by the orchestrator session_start hook AFTER the
+	// first successful `.pi/settings.json` scaffold + notify emission. Absent === never notified, which
+	// is the correct initial state. `readState` does NOT back-fill this field (mirrors `goal`): a
+	// pre-policy swarm-state.json file parses absent keys to `undefined`, and `undefined` means
+	// "next session_start should scaffold + notify". Setting this to a non-empty string suppresses the
+	// notify on every subsequent session_start and /reload until the swarm dir is cleared (clean slate).
+	poolScaffoldNotifiedAt?: string;
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;

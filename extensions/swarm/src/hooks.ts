@@ -16,6 +16,7 @@ import { pumpOrchestratorMailbox, reconcile, runtimeTaskWarnings } from "./recon
 import { scanAgentOpenAssignments, checkStallNotificationStale } from "./taskgraph.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { tmux } from "./tmux.ts";
+import { ensurePoolScaffold } from "./pool-scaffold.ts";
 
 // Orchestrator mailbox pump state. Module-level so the PM pump can be (re)started from outside the
 // session_start hook — notably by `/swarm register here orchestrator`, which opts a running session in
@@ -519,6 +520,36 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		// command is unaffected, so a guest can still opt in via `/swarm register here <role>`. Re-applied on
 		// opt-in (command.ts) so an in-session identity change re-enables the swarm tools immediately.
 		applySwarmToolGating(pi);
+		// === Issue 20: pool-scaffold on orchestrator session_start ===
+		// Runs ONLY for the orchestrator identity (PM). The durable `poolScaffoldNotifiedAt` flag on
+		// SwarmState makes the notify write-once-per-swarm: subsequent session_starts (and /reload
+		// invocations) suppress the notify but the scaffold itself remains idempotent (writes the same
+		// payload if `modelPool` is still absent, no-ops if present). Errors are swallowed + traced so a
+		// scaffold failure never blocks session_start.
+		if (agentId === "orchestrator") {
+			try {
+				const result = await ensurePoolScaffold(ctx.cwd, {});
+				if (result.wrote) {
+					await withLock(p, async () => {
+						const locked = await readState(p, ctx.cwd);
+						if (!locked.poolScaffoldNotifiedAt) {
+							locked.poolScaffoldNotifiedAt = now();
+							await writeState(p, locked);
+						}
+					});
+					// Notify ONLY when the durable flag was absent BEFORE this call. We re-read state here
+					// (outside the lock is safe — the lock above already stamped the flag, and the user-facing
+					// notify is one-shot idempotent by construction). If `ctx.hasUI` is false (print/json
+					// sessions) the notify is skipped but the file write + flag stamp still happen, so a later
+					// TUI session_start correctly sees the flag set and stays quiet.
+					if (ctx.hasUI && result.notify) {
+						try { ctx.ui.notify(result.notify, "info"); } catch { /* notify is best-effort */ }
+					}
+				}
+			} catch (err: any) {
+				await trace(p, "pool.scaffold_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+			}
+		}
 		const ts = now();
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);

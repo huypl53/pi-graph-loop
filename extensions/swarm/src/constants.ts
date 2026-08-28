@@ -57,6 +57,24 @@ export const POOL_COOLDOWN_MS = 15 * 60 * 1000; // bench a failing slot for 15 m
 
 export const POOL_MAX_RETRIES = 2; // consecutive failures before cooldown
 
+// === Issue 20: pool-scaffold on orchestrator session_start ===
+// Placeholder written into `.pi/settings.json` when `swarm.modelPool` (or
+// `extensions.swarm.modelPool` — runtime precedence) is absent. Deliberately
+// `null` so validateSwarmSettings flags it (`slot_empty_model`) and the user
+// is steered toward replacing it with a real slot. The shape follows
+// ModelSlot (extra fields omitted) so the JSON parses cleanly; the type
+// assertion narrows `null` past ModelSlot's `model: string` invariant.
+export const POOL_SCAFFOLD_PLACEHOLDER = [{ model: null as any, provider: null as any }];
+
+// One-shot notify text surfaced to the orchestrator TUI on first scaffold.
+// Stable so tests + locale passes can match/swap it without touching hooks.ts.
+export const POOL_SCAFFOLD_NOTIFY_TEXT =
+	"Created swarm.modelPool placeholder in .pi/settings.json — fill in your model/provider. See docs/swarm/tools.md.";
+
+// Stable doc anchor the notify links to. Kept as a constant so the deep-link
+// can be updated in one place.
+export const POOL_SCAFFOLD_DOC_HINT = "docs/swarm/tools.md#configuration";
+
 // === Issue 17: engine-retry gate constants (extracted to constants.ts in Issue 19) ===
 // The pi engine retries a failed provider request up to retry.maxRetries (default 3) times with
 // exponential backoff (2s, 4s, 8s — see @earendil-works/pi-coding-agent/docs/settings.md). These

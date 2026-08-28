@@ -91,6 +91,54 @@ Un-cancelling is not supported in this release. To work on the same goal again, 
 
 ### Inspect or change agent roles
 
+### Model pool auto-scaffold on first orchestrator session (Issue 20)
+
+On the orchestrator's first `session_start` in a swarm, the extension checks
+`.pi/settings.json`. If neither `swarm.modelPool` nor `extensions.swarm.modelPool`
+(runtime precedence: extensions wins per `src/session.ts:readSwarmSettings`) is
+declared, the extension writes a placeholder slot `[{ "model": null, "provider": null }]`
+into the resolved block while preserving every other top-level key. The write is
+atomic (`state.ts:atomicWriteFile`) so a torn write is impossible.
+
+Three skip paths surface as their own return values but emit **no notify** and
+leave `.pi/settings.json` untouched:
+
+- `modelpool_present` — either block already declares `modelPool` (even `[]`).
+- `no_pi_dir` — `.pi/` directory is absent. We deliberately do NOT `mkdir -p`
+  to create a pi directory inside a non-pi project. The `.pi/swarm/...` trace
+  pipeline is also skipped (it would mkdir the chain we just refused to create).
+- `settings_unparseable` — `.pi/settings.json` exists but is not valid JSON.
+  Traced as `pool.scaffold_skipped_unparseable`; the file is left as-is for the
+  user to repair manually.
+
+The one-shot `ctx.ui.notify` fires **only** when (a) `modelpool_present` /
+`no_pi_dir` / `settings_unparseable` did NOT skip AND (b) the durable flag
+`SwarmState.poolScaffoldNotifiedAt` is absent. The flag is stamped inside the
+same `withLock` block that creates the leader-orchestrator session record, so
+subsequent `session_start` invocations (including `/reload` of the same swarm)
+are suppressed until the entire `.pi/swarm` directory is cleared (clean-slate
+re-notify is the intended escape hatch). The notify text is stable; see the
+`POOL_SCAFFOLD_NOTIFY_TEXT` constant in `extensions/swarm/src/constants.ts`.
+
+Trace events (durable in `.pi/swarm/traces/events.jsonl`):
+
+- `pool.scaffold_created` — `{ path, previousKeys, source, modelPool }`. Fires
+  on every successful write; idempotent across calls because the payload is the
+  same and the durable flag suppresses the notify.
+- `pool.scaffold_skipped_unparseable` — `{ path, error }`.
+- `pool.scaffold_error` — `{ error }`. Fires only when the scaffold threw an
+  unexpected error (e.g. an EACCES from a read-only mount). The session_start
+  handler swallows this and continues; the user can diagnose via `swarm_trace`.
+
+Placeholder `model: null` is intentionally invalid against
+`validateSwarmSettings()` (which reports `slot_empty_model`); this nudges the
+user to replace it with a real slot before running `/swarm pool validate`.
+Concurrent orchestrator session_starts (two PM panes racing) both call
+`ensurePoolScaffold`; both observe `modelPool` absent; the first
+`atomicWriteFile` wins and the second sees the post-write state on its next read
+or simply overwrites with the same idempotent payload — neither the user nor
+the swarm state machine observes a torn write.
+
 ### Model pool (multi-provider rotation)
 
 `.pi/settings.json` (under `swarm` or `extensions.swarm`) supports a weighted

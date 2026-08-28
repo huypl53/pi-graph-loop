@@ -14,6 +14,7 @@ import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
+import { readPoolHealth, writePoolHealth, withPoolLock, slotKey } from "./pool.ts";
 
 export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task: TaskState): Promise<string[]> {
 	const warnings: string[] = [];
@@ -350,6 +351,99 @@ export async function evaluateIdleGoalNudgeLocked(
 	return { emitted: true, reason: "emitted" };
 }
 
+// === Issue 21 quota-reset-interval: slot recovery scan ===
+// When a slot's bench naturally expires (cooldownUntil < nowMs) AND lastBenchReason === "quota"
+// AND at least one agent on that slot has activeTaskIds, emit `pool.slot_recovered` so the
+// orchestrator's existing dashboard/trace surface can decide whether to resume (NO auto-resume —
+// the orchestrator-driven recovery contract). Manual benches (lastBenchReason undefined) and
+// benches for non-quota reasons (auth/rate_limit/transient/unknown) NEVER emit recovery events —
+// the gate is strict on kind === "quota" so an auth-bench slot doesn't trigger a misleading
+// "recovered" trace.
+//
+// Dedupe: stamp lastRecoveredAt on the slot the first time we emit a recovery event; subsequent
+// ticks see lastRecoveredAt and skip until a fresh bench invalidates the stamp (recordProviderError
+// already deletes lastRecoveredAt on every new bench). Same idempotent contract as the goal
+// idle-streak nudge.
+//
+// Cross-reference: the agent that triggered the bench is whichever agent was on the slot at the
+// time. We do NOT persist a per-slot agentId (issue 19 plan-review's open question 1) — we resolve
+// the agent(s) from st.agents[*] at recovery-scan time, matching by model+provider. Multi-match is
+// fine: the trace payload carries an agentIds[] list (a single agent is the common case; the
+// payload shape is array-typed to avoid future drift).
+//
+// File IO: pool-state.json reads/writes use the pool's own mutex (withPoolLock). The orchestrator
+// pump already holds the SWARM lock (withLock(p)), and pool-state.json is independent — torn reads
+// are safe because cooldownUntil only ever moves forward and lastBenchReason/lastRecoveredAt are
+// write-only (never deleted except on a new bench, which we'd see). Helper is exported for direct
+// unit testing by quota-reset.test.mjs (mirrors evaluateIdleGoalNudgeLocked).
+export async function evaluateSlotRecoveryLocked(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	nowMs: number,
+): Promise<{ emitted: number; reasons: Record<string, number> }> {
+	const reasons: Record<string, number> = { expired_no_tasks: 0, expired_quota: 0, deduped: 0, no_active_agent: 0, not_quota_bench: 0 };
+	const emitted: Array<{ agentId: string; slot: string; afterMs: number; remainingTasks: number; benchMs: number }> = [];
+
+	await withPoolLock(p, async () => {
+		const h = await readPoolHealth(p);
+		let dirty = false;
+		for (const [slotKeyStr, health] of Object.entries(h.slots)) {
+			// Skip slots with no cooldown or still in cooldown.
+			if (!health?.cooldownUntil) continue;
+			const cooldownEnd = new Date(health.cooldownUntil).getTime();
+			if (cooldownEnd > nowMs) continue; // still in bench
+			// Cooldown has expired — but only "quota" benches get a recovery event.
+			if (health.lastBenchReason !== "quota") { reasons.not_quota_bench++; continue; }
+			// Idempotent: skip if we already emitted for this bench cycle.
+			if (health.lastRecoveredAt) { reasons.deduped++; continue; }
+			// Find agents on this slot. The slot key is `${provider}/${model}`; agents carry their
+			// current model+provider. We do NOT filter on tmuxTarget=="unknown" — even a dead-tmux
+			// agent is a candidate for the trace (the orchestrator may want to know regardless).
+			// Use slotKey() for consistent key derivation (handles "(default)" provider case).
+			const slotAgentKey = slotKeyStr;
+			const matchingAgents = Object.values(st.agents).filter((a) => {
+				if (a.id === "orchestrator") return false; // orchestrator pseudo-agent never has active tasks for slot work
+				return slotKey({ model: a.model, provider: a.provider }) === slotAgentKey;
+			});
+			const busyAgents = matchingAgents.filter((a) => (a.activeTaskIds?.length || 0) > 0);
+			if (!busyAgents.length) {
+				// Silent path (per plan §4 D): bench expired but no active tasks → no recovery event.
+				// Slot is healthy again for the next pickSlot; no notify needed.
+				reasons.expired_no_tasks++;
+				continue;
+			}
+			// Compute afterMs = how long the bench has been expired (nowMs - cooldownEnd). The benchMs
+			// payload comes from the slot's lastBenchMs stamped by recordProviderError at bench time.
+			const afterMs = Math.max(0, nowMs - cooldownEnd);
+			// Emit one trace per busy agent (a slot with multiple workers on it produces multiple
+			// events; the orchestrator can dedupe downstream if it cares).
+			for (const agent of busyAgents) {
+				emitted.push({ agentId: agent.id, slot: slotKeyStr, afterMs, remainingTasks: agent.activeTaskIds.length, benchMs: health.lastBenchMs ?? Math.max(0, cooldownEnd - (cooldownEnd - afterMs)) });
+				reasons.expired_quota++;
+			}
+			// Stash idempotency stamp so the next tick (and all subsequent ticks until a new bench)
+			// stay silent.
+			health.lastRecoveredAt = new Date(nowMs).toISOString();
+			dirty = true;
+		}
+		if (dirty) await writePoolHealth(p, h).catch(() => {});
+	});
+
+	for (const ev of emitted) {
+		await trace(p, "pool.slot_recovered", {
+			agentId: ev.agentId,
+			slot: ev.slot,
+			afterMs: ev.afterMs,
+			remainingTasks: ev.remainingTasks,
+			benchMs: ev.benchMs,
+		}).catch(() => {});
+	}
+
+	return { emitted: emitted.length, reasons };
+}
+
 // === Issue 11: Orchestrator wake-up escalation + durable replay fencing ===
 
 // Helper to parse taskId/nodeId from conversationId (format: "task:${taskId}:${nodeId}").
@@ -476,6 +570,11 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// back-off handled inside the function. Wrapped in try/catch (matches the existing pattern for
 		// the other two reconcile helpers) so a throw never kills the tick.
 		try { await evaluateIdleGoalNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "goal.nudge.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		// === Issue 21: slot recovery scan ===
+		// When a slot's bench naturally expires AND lastBenchReason === "quota" AND the agent on
+		// that slot still has active task assignments, emit pool.slot_recovered. NO auto-resume;
+		// the orchestrator decides. Idempotent under tick storms via lastRecoveredAt dedupe.
+		try { await evaluateSlotRecoveryLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "pool.slot_recovered.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		const sess = orchSession(st, nowMs)!;
 		const surfaced = new Set(sess.ids);
 		const triggeredAt = { ...(sess.triggeredAt ?? {}) };

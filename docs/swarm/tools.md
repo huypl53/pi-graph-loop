@@ -23,6 +23,32 @@ was a separate persistence layer and is no longer part of the core surface.
 | Retention / garbage collection | 1 | `src/tools/gc.ts` |
 | **Total** | **33** | `extensions/swarm/index.ts` |
 
+## Configuration
+
+### Model pool auto-scaffold on first orchestrator session (Issue 20)
+
+When the orchestrator (`PI_SWARM_IS_ORCHESTRATOR=1`) starts a session, the
+extension checks `.pi/settings.json`. If neither `swarm.modelPool` nor
+`extensions.swarm.modelPool` (runtime precedence: extensions wins per
+`extensions/swarm/src/session.ts:readSwarmSettings`) is declared, the
+extension writes a placeholder slot `[{ "model": null, "provider": null }]`
+into the resolved block while preserving every other top-level key. The
+placeholder is intentionally invalid against `validateSwarmSettings()` so the
+user is steered toward replacing it with a real slot.
+
+A one-shot TUI notify fires ONLY when (a) the scaffold actually wrote AND
+(b) the durable flag `SwarmState.poolScaffoldNotifiedAt` is absent. After the
+notify, the flag is stamped inside the same `withLock` block that creates
+the orchestrator session record, so subsequent session_starts (and `/reload`
+invocations) suppress the notify until the entire `.pi/swarm` directory is
+cleared (clean-slate re-notify). The notify text is:
+
+> Created swarm.modelPool placeholder in .pi/settings.json — fill in your
+> model/provider. See docs/swarm/tools.md.
+
+See [operations.md § Model pool auto-scaffold](./operations.md#model-pool-auto-scaffold-on-first-orchestrator-session-issue-20)
+for the durable-flag contract, skip paths, and trace event reference.
+
 ## Identity, visibility, and authority
 
 ### Tool visibility
