@@ -642,10 +642,14 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						const status = await poolStatus(p);
 						if (!status.slots.length) { ctx.ui.notify("No model pool configured. Add `modelPool` under `swarm` (or extensions.swarm) in .pi/settings.json.", "warning"); return; }
 						const lines = [`Model pool (${status.rotation.strategy}, cooldown ${Math.round(status.rotation.cooldownMs / 60000)}min, maxRetries ${status.rotation.maxRetries}):`];
+						// Issue 22: render a roles= column only when ANY slot has a roles allow-list set — no
+						// bare `roles=` fragment is printed for pools without roles config.
+						const anyRoles = status.slots.some((s) => Array.isArray(s.roles) && s.roles.length > 0);
 						for (const s of status.slots) {
 							const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m` : "ok";
 							const err = s.health?.lastError ? ` lastError=${s.health.lastError.slice(0, 60)}` : "";
-							lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${err}`);
+							const rolesCol = anyRoles ? ` roles=[${(s.roles || []).join(",") || "(all)"}]` : "";
+							lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${rolesCol}${err}`);
 						}
 						ctx.ui.notify(lines.join("\n"), "info");
 						return;
@@ -681,6 +685,10 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 								const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m` : (s.weight === 0 ? "ok (fallback-only)" : "ok");
 								const err = s.health?.lastError ? ` lastError=${s.health.lastError.slice(0, 60)}` : "";
 								lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${err}`);
+								// Issue 22: roles=[…] line only when the slot has a non-empty allow-list (absence = all roles).
+								if (s.roles && s.roles.length) {
+									lines.push(`    roles=[${s.roles.join(", ")}]`);
+								}
 							}
 							lines.push(`Rotation: strategy=${status.rotation.strategy}, cooldown=${Math.round(status.rotation.cooldownMs / 60000)}min, maxRetries=${status.rotation.maxRetries}`);
 						} else {
@@ -779,9 +787,9 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					}
 					const currentSlot: ModelSlot = { model: currentModelId, provider: currentProviderId };
 					if (action === "now") {
-						// `now` — force-swap the current slot. Bypasses the engine-retry gate entirely.
-						// Operator is accountable for the swap-chain cap (a swap happened).
-						const picked = await pickSlot(p, { stickyKey: agentId, avoidKey: slotKey(currentSlot) }).catch(() => undefined);
+						// `now` — force-swap the current slot. Bypasses the engine-retry gate AND any Issue 22
+						// roles filter (operator escape hatch) entirely.
+						const picked = await pickSlot(p, { stickyKey: agentId, avoidKey: slotKey(currentSlot), bypassRolesFilter: true }).catch(() => undefined);
 						if (!picked) {
 							await trace(p, "pool.manual_rotate_no_alternative", { agentId, from: slotKey(currentSlot), action: "now" }).catch(() => {});
 							ctx.ui.notify("No healthy alternative slot. All eligible slots are benched — /swarm pool list to see, or /swarm pool clear <provider/model> to unbench.", "warning");
@@ -801,7 +809,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							ctx.ui.notify(`Manual rotate failed: setModel refused for ${target.provider}/${target.id}.`, "warning");
 							return;
 						}
-						await trace(p, "pool.swap_forced_by_manual_override", { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), reason: picked.reason, target: `${target.provider}/${target.id}` }).catch(() => {});
+						await trace(p, "pool.swap_forced_by_manual_override", { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), reason: picked.reason, target: `${target.provider}/${target.id}`, rolesIgnored: true, agentRoleKind: await withLock(p, async () => { const st = await readState(p, ctx.cwd); return st.agents[agentId]?.roleKind; }).catch(() => undefined) ?? null }).catch(() => {});
 						// Issue 19 Q1: manual override is operator-accountable for the same MAX_SWAP_CHAIN=2
 						// cap as the auto-swap path. Call bumpSwapChain AFTER a successful setModel so a
 						// dead new slot cannot cascade unlimited manual rotations. Mirrors hooks.ts:405.

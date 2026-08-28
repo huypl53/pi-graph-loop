@@ -163,14 +163,33 @@ export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state:
 	let provider = input.provider;
 	let poolReason: string | undefined;
 	if (!model) {
-		const picked = await pickSlot(p, { stickyKey: id });
+		// Issue 22 roles-filter: resolve the intended roleKind with the same logic that stamps the
+		// record below (input.roleKind || inferRoleKind(id, role)) so the filter and the persisted
+		// roleKind cannot disagree.
+		const intendedRoleKind = input.roleKind || inferRoleKind(id, input.role);
+		const picked = await pickSlot(p, { stickyKey: id, roleKind: intendedRoleKind });
 		if (picked) {
 			model = picked.slot.model;
 			provider = picked.slot.provider || currentProvider(model);
 			poolReason = picked.reason;
 		} else {
-			model = currentModel();
-			provider = currentProvider(model);
+			// Issue 22 fallback: every pool slot was filtered out for this roleKind. Retry once
+			// WITHOUT the filter so the worker always starts; trace for operator visibility.
+			const fallback = await pickSlot(p, { stickyKey: id });
+			if (fallback) {
+				await trace(p, "pool.role_filter_all_filtered_fallback", {
+					agentId: id, roleKind: intendedRoleKind,
+					to: `${fallback.slot.provider || "(default)"}/${fallback.slot.model}`,
+					reason: fallback.reason,
+					note: "no slot matched role filter; spawned without filter so the worker can start",
+				}).catch(() => {});
+				model = fallback.slot.model;
+				provider = fallback.slot.provider || currentProvider(model);
+				poolReason = fallback.reason;
+			} else {
+				model = currentModel();
+				provider = currentProvider(model);
+			}
 		}
 	} else {
 		provider = provider || currentProvider(model);

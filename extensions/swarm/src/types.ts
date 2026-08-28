@@ -32,6 +32,10 @@ export type ModelSlot = {
 	// The 24h exponential cap still applies — quotaResetMs is a floor only, not a ceiling. Absent or
 	// 0 falls back to rotation.cooldownMs (unchanged behavior).
 	quotaResetMs?: number;
+	// Issue 22 roles-filter: optional allow-list of roleKind names; when set & non-empty, the slot
+	// is only eligible for pickSlot() when the agent's roleKind is in the list. Absent / empty =
+	// available for ALL roleKinds (default). Closed roleKind set: completion.ts ROLE_KINDS.
+	roles?: string[];
 };
 
 export type RotationStrategy = "weighted" | "round-robin" | "sticky";

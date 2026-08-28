@@ -270,6 +270,11 @@ export function validateSwarmSettings(cwd = process.cwd()): { ok: boolean; error
 			if (s.quotaResetMs !== undefined && (typeof s.quotaResetMs !== "number" || !Number.isFinite(s.quotaResetMs) || s.quotaResetMs < 0)) {
 				errors.push({ kind: "slot_bad_quota_reset", field: `modelPool[${idx}].quotaResetMs`, message: `Slot #${idx + 1} quotaResetMs must be a non-negative number of milliseconds (floor for quota benches; 24h cap still applies)` });
 			}
+			// Issue 22: validate the optional roles allow-list (warning-grade, informational — the
+			// malformed value is treated as "no filter" by parseModelPool, but the operator should see it).
+			if (s.roles !== undefined && (!Array.isArray(s.roles) || !s.roles.every((r: any) => typeof r === "string" && r.length > 0))) {
+				errors.push({ kind: "slot_bad_roles", field: `modelPool[${idx}].roles`, message: `Slot #${idx + 1} roles must be a string array of role-kind names (see completion.ts ROLE_KINDS for the closed set: orchestrator, planner, reviewer, tester, implementer, worker, observer)` });
+			}
 		});
 	}
 	if (rotation) {
@@ -328,18 +333,32 @@ export type PickResult = {
 // fallback-only slots (weight=0, not in cooldown) -> any slot at all (all benched: best effort).
 // `stickyKey` (agent id) pins sticky strategy; `avoidKey` (the slot that just failed) is deprioritized
 // for round-robin so a failover restart doesn't land back on the same benched slot.
-export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: string } = {}): Promise<PickResult | undefined> {
+// Issue 22 roles-filter: true when the slot is eligible for the given roleKind. Absent / empty
+// roles matches every role; roleKind === undefined (legacy callers) matches everything too.
+export function slotMatchesRole(slot: ModelSlot, roleKind: string | undefined): boolean {
+	const roles = slot.roles;
+	if (!Array.isArray(roles) || roles.length === 0) return true;
+	if (!roleKind) return true; // no role filter applied
+	return roles.includes(roleKind);
+}
+
+export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: string; roleKind?: string; bypassRolesFilter?: boolean } = {}): Promise<PickResult | undefined> {
 	const { slots, rotation } = effectiveConfig();
 	if (!slots.length) return undefined;
+	// Issue 22: filter slots through the role allow-list unless bypassed (manual operator rotate)
+	// or no roleKind was threaded (legacy callers — full backward compat).
+	const applyRoles = !opts.bypassRolesFilter && opts.roleKind !== undefined;
+	const visible = applyRoles ? slots.filter((s) => slotMatchesRole(s, opts.roleKind)) : slots;
+	if (!visible.length) return undefined;
 	// Round-robin mutates the shared cursor, so the whole pick runs under the pool lock.
 	return withPoolLock(p, async () => {
 	const h = await readPoolHealth(p);
 	const nowMs = Date.now();
 
-	const eligible = slots
+	const eligible = visible
 		.map((slot, index) => ({ slot, index }))
 		.filter(({ slot }) => (slot.weight ?? 1) > 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
-	const fallbacks = slots
+	const fallbacks = visible
 		.map((slot, index) => ({ slot, index }))
 		.filter(({ slot }) => (slot.weight ?? 1) === 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
 

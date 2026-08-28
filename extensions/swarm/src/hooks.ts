@@ -430,7 +430,17 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		engineRetryIncidents.delete(agentId);
 		await trace(p, "pool.engine_retry_exhausted", { agentId, providerKey, kind, count: incidentCount }).catch(() => {});
 		await recordProviderError(p, currentSlot, kind, errorText).catch(() => {});
-		const picked = await pickSlot(p, { stickyKey: agentId, avoidKey: slotKey(currentSlot) }).catch(() => undefined);
+		// Issue 22 roles-filter: read the agent's roleKind from state under lock so a mid-life
+		// setAgentRole change is observed on the next swap (no caching layer).
+		const roleKind = await withLock(p, async () => {
+			const st = await readState(p, ctx.cwd);
+			return st.agents[agentId]?.roleKind;
+		}).catch(() => undefined);
+		const picked = await pickSlot(p, {
+			stickyKey: agentId,
+			avoidKey: slotKey(currentSlot),
+			roleKind,
+		}).catch(() => undefined);
 		if (!picked) {
 			await trace(p, "pool.swap_no_candidate", { agentId, from: slotKey(currentSlot), kind }).catch(() => {});
 			return;
@@ -449,7 +459,10 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		}
 		const okSwap = await pi.setModel(target).catch(() => false);
 		if (okSwap) { bumpSwapChain(agentId, nowMs); }
-		await trace(p, okSwap ? "pool.swap" : "pool.swap_failed", { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), kind, reason: picked.reason, target: `${target.provider}/${target.id}` }).catch(() => {});
+		// Issue 22: record role-filter context on every auto-swap so dashboards can tell whether
+		// the swap honored the agent's roleKind constraint or fell back.
+		const swapTrace = { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), kind, reason: picked.reason, target: `${target.provider}/${target.id}`, roleKind: roleKind ?? null, rolesFilterMatched: picked.slot.roles === undefined || picked.slot.roles.length === 0 || (typeof roleKind === "string" && picked.slot.roles.includes(roleKind)) };
+		await trace(p, okSwap ? "pool.swap" : "pool.swap_failed", swapTrace).catch(() => {});
 		if (okSwap) {
 			// Tell the agent (and the transcript) what happened so it can retry the failed work
 		// knowing it now runs on a different model.

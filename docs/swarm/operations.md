@@ -164,6 +164,16 @@ Slot fields:
 - `model`: required, non-empty string
 - `provider`: optional; defaults to the provider registry
 - `weight`: non-negative number; default 1; `0` = fallback-only (used when every weighted slot is benched)
+- `roles`: optional array of role-kind names; when set & non-empty, this slot is only eligible for
+  `pickSlot()` when the spawning agent's roleKind is in the list. Absent / empty = available for
+  all roleKinds (default). The closed set of roleKinds is defined in
+  `extensions/swarm/src/completion.ts` `ROLE_KINDS` (seven entries: orchestrator, planner,
+  reviewer, tester, implementer, worker, observer). Manual `/swarm pool rotate now` ALWAYS
+  bypasses the role filter (operator override) and stamps `rolesIgnored: true` in the swap trace.
+  If every slot is filtered out for a roleKind at spawn time, a warning trace
+  (`pool.role_filter_all_filtered_fallback`) is emitted and the worker still starts on the next
+  available unfiltered slot. Malformed `roles` values are reported as `slot_bad_roles` by
+  `/swarm pool validate` (warning-grade) and treated as "no filter".
 
 Rotation fields:
 - `strategy`: `weighted` (default) | `round-robin` | `sticky` (per-agent-id deterministic)
