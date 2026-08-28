@@ -2,7 +2,7 @@
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { SwarmMessage } from "./types.ts";
-import { SYSTEM_END, SYSTEM_START } from "./constants.ts";
+import { PI_SWARM_MINIMAL_PROTOCOL, SYSTEM_END, SYSTEM_START } from "./constants.ts";
 import { currentAgentId } from "./session.ts";
 import { deliver } from "./mailbox.ts";
 import { now } from "./utils.ts";
@@ -27,13 +27,13 @@ export function isDeliveryFailureRetryable(rec: { status: string; lastAck?: unkn
 // Records are append-only JSONL; memory promotion is gated on file-backed evidence that exists + reads.
 
 export function formatSwarmMessageContent(msg: SwarmMessage) {
-	// === Issue 25 Phase 1: formatSwarmMessageContent body unchanged under gate=0 ===
-	// The proposal §K.3 binding ("gate=1 worker messages must not render [PI-SWARM ACK REQUIRED]")
-	// is DEFERRED to Phase 2. Under gate=0, today's body remains authoritative so a Phase 1 ship
-	// never alters what recipients see. When the rollout flips PI_SWARM_MINIMAL_PROTOCOL=1, this
-	// helper gains a gate-aware branch and the identity-card generator must stop instructing normal
-	// workers to call explicit ACK (proposal §E + §I.5).
-	const ackLine = msg.requiresAck
+	// === Issue 25 Phase 2: gate-aware [PI-SWARM ACK REQUIRED] rendering (proposal §K.3) ===
+	// Under PI_SWARM_MINIMAL_PROTOCOL=1 the engine derives lifecycle state from recipient actions;
+	// recipients no longer need to be told to call swarm_ack_message explicitly. Under gate=0 the
+	// hint stays so a Phase-2 ship never alters what legacy recipients see (Phase-1 contract
+	// preserved — the rendered body is byte-identical to Phase 1).
+	const showAckHint = PI_SWARM_MINIMAL_PROTOCOL === 0;
+	const ackLine = showAckHint && msg.requiresAck
 		? `\n\n[PI-SWARM ACK REQUIRED] This message requires acknowledgement. Call \`swarm_ack_message\` with messageId="${msg.id}" and status=\`seen\`|\`processing\`|\`done\`|\`failed\` (ack \`seen\`/\`processing\` now, then \`done\`/\`failed\` when complete). Unacked delivered messages are surfaced as ack_missing.`
 		: "";
 	return `Inter-agent swarm message from ${msg.from} to ${msg.to}${msg.subject ? ` (${msg.subject})` : ""}:\n\n${msg.body}${ackLine}`;

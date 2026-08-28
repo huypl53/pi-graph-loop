@@ -5,11 +5,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED_SHADOW } from "./constants.ts";
+import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
-import { deliver, deliverMessageLocked, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
+import { deliver, deliverMessageLocked, deriveLifecycleFromTrigger, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
 import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
@@ -1148,26 +1148,54 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 			const agentRunning = agent?.status === "running" && hasTmuxPane ? await isTmuxRunning(pi, agent.tmuxTarget!) : false;
 			const mailboxOnly = Boolean(agent) && !hasTmuxPane;
 
-			// === Issue 25 Phase 1: SHADOW-ONLY deadline sweep trace (proposal §C, plan §2.6) ===
-			// Emit `message.lifecycle_derived_shadow` with source=responseDeadlineMs whenever the
-			// reconcile sweep sees a message whose optional `responseDeadlineMs` has elapsed. The
-			// field is NOT written under gate=0; this is purely a visibility trace so dashboards
-			// can already see the upcoming inferred stage. Under gate=1 the same derivation becomes
-			// authoritative (Phase 2). Never dead-letters and never increments attempts.
+			// === Issue 25 Phase 2: gate-aware deadline sweep (proposal §C, plan §2.6(a)) ===
+			// Under gate=0: SHADOW-ONLY trace — never writes terminalAt (Phase 1 behavior, unchanged).
+			// Under gate=1: AUTHORITATIVE — stamps terminalAt/lifecycleStage/terminalReason via the
+			// deriveLifecycleFromTrigger pure helper, emits TRACE_LIFECYCLE_DERIVED + the
+			// consumer-facing TRACE_MESSAGE_ATTENTION_DERIVED. NEVER increments attempts;
+			// NEVER dead-letters (proposal §C binding — the deadline sweep is a scheduler, not an
+			// enforcer); NEVER overwrites a pre-existing terminalAt. Runs INSIDE the same withLock
+			// the reconcile tick already holds — no nested lock.
 			if (!options.dryRun && typeof rec.responseDeadlineMs === "number" && rec.responseDeadlineMs > 0 && ageMs > rec.responseDeadlineMs && !rec.terminalAt) {
-				await trace(p, TRACE_LIFECYCLE_DERIVED_SHADOW, {
-					messageId: msgId,
-					from: rec.from,
-					to: rec.to,
-					field: "terminalAt",
-					source: "responseDeadlineMs",
-					stage: "terminal",
-					deadlineMs: rec.responseDeadlineMs,
-					ageMs,
-					shadow: true,
-					gate: PI_SWARM_MINIMAL_PROTOCOL,
-					reason: "response deadline exceeded; reconciled in shadow-only mode under gate=0",
-				});
+				if (PI_SWARM_MINIMAL_PROTOCOL === 1) {
+					const d = deriveLifecycleFromTrigger(rec, { kind: "deadline_exceeded", deadlineMs: rec.responseDeadlineMs });
+					if (d.kind === "set") {
+						rec.terminalAt = d.value;
+						rec.terminalReason = d.reason;
+						rec.lifecycleStage = d.stage;
+						rec.lifecycleSource = d.source;
+						rec.updatedAt = now();
+						await trace(p, TRACE_LIFECYCLE_DERIVED, {
+							messageId: msgId, from: rec.from, to: rec.to,
+							field: d.field, source: d.source, stage: d.stage,
+							deadlineMs: rec.responseDeadlineMs, ageMs,
+							gate: 1, reason: d.reason,
+							via: "reconcile.deadline_sweep",
+						});
+						// Consumer-facing attention category (proposal §K.2): distinct from the
+						// per-message lifecycle trace so dashboards can subscribe to a category
+						// instead of parsing per-message traces.
+						await trace(p, TRACE_MESSAGE_ATTENTION_DERIVED, {
+							messageId: msgId, source: "responseDeadlineMs", gate: 1,
+							ts: now(), proposal: "§K.2",
+						}).catch(() => {});
+					}
+				} else {
+					// Gate=0: shadow trace only (Phase 1 behavior, unchanged).
+					await trace(p, TRACE_LIFECYCLE_DERIVED_SHADOW, {
+						messageId: msgId,
+						from: rec.from,
+						to: rec.to,
+						field: "terminalAt",
+						source: "responseDeadlineMs",
+						stage: "terminal",
+						deadlineMs: rec.responseDeadlineMs,
+						ageMs,
+						shadow: true,
+						gate: 0,
+						reason: "response deadline exceeded; reconciled in shadow-only mode under gate=0",
+					});
+				}
 			}
 
 			if (expired && actionable && !maxAttempts) {

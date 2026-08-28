@@ -247,11 +247,59 @@ export const TRACE_PROTOCOL_MIGRATION_RECORD = "protocol.migration.record";
 // === Issue 25 Phase 1: worker reconcile rate budget (proposal §E + §K.1) ===
 // Workers calling swarm_reconcile({dryRun:true}) are constrained to the `self` scope and rate-limited
 // to PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS between invocations so a stuck worker can't repeatedly
-// scan the whole swarm. Reads at module load (mirrors PI_SWARM_ORPHAN_TIMEOUT_MS).
+// scan the whole swarm. Reads at module load (mirrors PI_SWARM_ORPHAN_TIMEOUT_MS). Phase 2 CONSUMES
+// this constant at the swarm_reconcile handler boundary (it was declared in Phase 1 as a no-op).
 export const PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS =
 	Number(process.env.PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS) > 0
 		? Math.floor(Number(process.env.PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS))
 		: 60_000;
+
+// === Issue 25 Phase 2: profile gating (proposal §E + §K.3) ===
+// Allow-lists consulted by applySwarmToolGating at runtime under PI_SWARM_MINIMAL_PROTOCOL=1. Tools
+// remain registered (UX §N5) so getAllTools() / smoke test stay stable; only the active set is
+// filtered. Execution-time authority checks (requireOrchestratorAuthority) remain authoritative —
+// tier-gating is the first gate, authority is the second.
+export const WORKER_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
+	"swarm_check_mailbox",
+	"swarm_send_message",
+	"swarm_update_task",
+	"swarm_task_status",
+	"swarm_reconcile", // worker surface limits this to dryRun:true + scope:"self" at execution time
+]);
+
+export const ORCHESTRATOR_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
+	// Worker surface (inherited):
+	"swarm_check_mailbox",
+	"swarm_send_message",
+	"swarm_update_task",
+	"swarm_task_status",
+	"swarm_reconcile",
+	// Orchestration surface (5 additional):
+	"swarm_agent_status",
+	"swarm_list_agents",
+	"swarm_spawn_agent",
+	"swarm_create_task",
+	"swarm_assign_task",
+	// Goal tools (2):
+	"swarm_set_goal",
+	"swarm_mark_goal_done",
+]);
+
+// === Issue 25 Phase 2: stable error codes (NOT new tools) ===
+// Worker calling swarm_reconcile with scope other than "self" -> SCOPE_FORBIDDEN.
+// Worker calling swarm_reconcile too fast -> RECONCILE_RATE_LIMITED.
+export const ERR_SCOPE_FORBIDDEN = "SCOPE_FORBIDDEN";
+export const ERR_RECONCILE_RATE_LIMITED = "RECONCILE_RATE_LIMITED";
+
+// === Issue 25 Phase 2: stable reply-fencing trace event (proposal §B.3) ===
+// Emitted on `swarm_send_message({ replyTo })` when the original record is superseded, cancelled,
+// or otherwise not current — the original response.status is NOT flipped and debt is NOT cleared.
+export const TRACE_REPLY_REJECTED_SUPERSEDED = "message.reply_rejected_superseded";
+
+// === Issue 25 Phase 2: consumer-facing attention trace (proposal §K.2) ===
+// Emitted on the deadline sweep under gate=1 so dashboards can subscribe to a derived attention
+// category without parsing the per-message lifecycle trace.
+export const TRACE_MESSAGE_ATTENTION_DERIVED = "message.attention.derived";
 
 // === Issue 18: Swarm goal + idle-streak nudge ===
 // Max consecutive unresolved nudges before the pump enters a 2-tick back-off. Configurable via the

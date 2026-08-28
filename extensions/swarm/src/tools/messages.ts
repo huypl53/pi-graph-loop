@@ -8,10 +8,10 @@ import { enqueueAndDeliver, readMailbox, validateResultMessage } from "../mailbo
 import { mailboxPath, paths, readState, trace, withLock, writeState } from "../state.ts";
 import { now, safeId, textResult } from "../utils.ts";
 import { pumpOrchestratorMailbox, reconcile } from "../reconcile.ts";
-import { heartbeatOrchestratorLeader } from "../identity.ts";
+import { heartbeatOrchestratorLeader, requireOrchestratorAuthority } from "../identity.ts";
 import { tmux } from "../tmux.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
-import { PI_SWARM_MINIMAL_PROTOCOL, TRACE_LIFECYCLE_DERIVED_SHADOW } from "../constants.ts";
+import { ERR_RECONCILE_RATE_LIMITED, ERR_SCOPE_FORBIDDEN, PI_SWARM_MINIMAL_PROTOCOL, PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW } from "../constants.ts";
 import { deriveLifecycleFromTrigger } from "../mailbox.ts";
 
 export function registerMessagesTools(pi: ExtensionAPI) {
@@ -184,39 +184,58 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 							rec.updatedAt = ts;
 						}
 					}
-					await writeState(p, st);
 				}
 				messages = messages.slice(-limit);
 				await trace(p, "mailbox.poll", { agentId, count: messages.length, matchedCount, pendingOnly: Boolean(params.pendingOnly), markDelivered: Boolean(params.markDelivered) });
-				// === Issue 25 Phase 1: shadow lifecycle derivation under gate=0 ===
-				// Emits a `message.lifecycle_derived_shadow` trace for every surfaced envelope so
-				// dashboards see the upcoming inferred stage without mutating durable state. Under
-				// gate=0 the trace is the ONLY effect — no `seenAt` is written. Under gate=1 (Phase 2)
-				// the same derivation becomes authoritative and stamps the v2 field inside this same
-				// withLock(p) critical section. Never applies to messages without an existing record
-				// (legacy envelopes without st.messages[id] are silently skipped).
-				if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
-					const ts = now();
-					for (const m of messages) {
-						const rec = st.messages[m.id];
-						if (!rec) continue;
-						const d = deriveLifecycleFromTrigger(rec, { kind: "mailbox_surfaced" }, ts);
-						if (d.kind === "set") {
-							await trace(p, TRACE_LIFECYCLE_DERIVED_SHADOW, {
-								messageId: m.id,
-								from: rec.from,
-								to: rec.to,
-								field: d.field,
-								source: d.source,
-								stage: d.stage,
-								shadow: true,
-								gate: 0,
-								reason: d.reason,
-								via: "swarm_check_mailbox",
-							});
-						}
+				// === Issue 25 Phase 2: gate-aware mailbox_surfaced lifecycle derivation (plan §2.10) ===
+				// Under gate=0: shadow-only trace, NO durable state mutation (Phase 1 behavior preserved).
+				// Under gate=1: AUTHORITATIVE — stamp seenAt + lifecycleStage + lifecycleSource inside
+				// this same withLock(p) critical section via deriveLifecycleFromTrigger (pure helper,
+				// reuses the no-change-if-already-set semantics). Pane injection alone does NOT set
+				// seenAt — only the envelope returned from swarm_check_mailbox does (proposal §A + §B.1).
+				// Runs INSIDE the existing withLock — no nested lock. Never applies to messages without
+				// an existing record (legacy envelopes without st.messages[id] are silently skipped).
+				// Persist via writeState at the end of the critical section so the durable stamp survives
+				// a subsequent poll (no second writeState was previously committed, so the stamp was lost).
+				const ts = now();
+				let lifecycleDirty = false;
+				for (const m of messages) {
+					const rec = st.messages[m.id];
+					if (!rec) continue;
+					const d = deriveLifecycleFromTrigger(rec, { kind: "mailbox_surfaced" }, ts);
+					if (d.kind !== "set") continue;
+					if (PI_SWARM_MINIMAL_PROTOCOL === 1) {
+						(rec as any)[d.field] = d.value;
+						rec.lifecycleStage = d.stage;
+						rec.lifecycleSource = d.source;
+						await trace(p, TRACE_LIFECYCLE_DERIVED, {
+							messageId: m.id,
+							from: rec.from,
+							to: rec.to,
+							field: d.field,
+							source: d.source,
+							stage: d.stage,
+							gate: 1,
+							reason: d.reason,
+							via: "swarm_check_mailbox",
+						});
+					} else {
+						await trace(p, TRACE_LIFECYCLE_DERIVED_SHADOW, {
+							messageId: m.id,
+							from: rec.from,
+							to: rec.to,
+							field: d.field,
+							source: d.source,
+							stage: d.stage,
+							shadow: true,
+							gate: 0,
+							reason: d.reason,
+							via: "swarm_check_mailbox",
+						});
 					}
+					lifecycleDirty = true;
 				}
+				if (lifecycleDirty || params.markDelivered) await writeState(p, st);
 				return { agentId, mailbox: relative(ctx.cwd, mailboxPath(p, agentId)), matchedCount, returnedCount: messages.length, messages };
 			});
 			return textResult(JSON.stringify(result, null, 2), result);
@@ -233,23 +252,60 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			agentId: Type.Optional(Type.String({ description: "Optional agent id to reconcile only that agent's messages. Task sweep is skipped when scoped to one agent." })),
 			dryRun: Type.Optional(Type.Boolean({ description: "If true, inspect and report actions without modifying state. Defaults to false." })),
 			mark: Type.Optional(Type.Boolean({ description: "Persist the recomputed task.status when stored/derived drift is detected (repairs closure). Still never auto-fails nodes. Defaults to false." })),
+			scope: Type.Optional(Type.Union([Type.Literal("self"), Type.Literal("all")], { description: "Reconcile scope: 'self' restricts to the caller's mailbox; 'all' walks the whole swarm. Workers are forced to 'self'; orchestrator/admin may select either. Defaults to caller-tier (worker=self, orchestrator=all)." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_reconcile", async () => {
 				const p = paths(ctx.cwd);
+				// === Issue 25 Phase 2: worker rate-limit + scope gate (proposal §K.1, plan §2.6(b) + §2.10) ===
+				// Workers calling swarm_reconcile are forced to scope:"self" and rate-limited to
+				// PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS between invocations (declared Phase 1, consumed
+				// here in Phase 2). Orchestrator/admin are exempt. mark=true remains orchestrator-only
+				// (existing authority check, unchanged). The rate-limit ledger is persisted on the
+				// agent record (lastReconcileDryRunAt) under the same withLock — no nested lock.
+				const me = currentAgentId();
+				const isOrch = me === "orchestrator";
+				const isAdmin = process.env.PI_SWARM_ADMIN_MODE === "1" || me === "admin";
+				const isPrivileged = isOrch || isAdmin;
+				const requestedScope = params.scope || (isPrivileged ? "all" : "self");
+				if (!isPrivileged && requestedScope !== "self") {
+					throw new Error(`${ERR_SCOPE_FORBIDDEN}: worker ${me} requested scope="${requestedScope}" but only "self" is permitted (proposal §K.1).`);
+				}
+				// Worker dry-run rate-limit (gated on dryRun != false AND caller is a non-privileged
+				// worker). Stamps lastReconcileDryRunAt under the same withLock so the ledger is
+				// atomic with the lock check. Workers without an agent record (e.g. pre-spawn
+				// reconciliation, ad-hoc CLI use, fresh scratch dirs in tests) are exempt — the
+				// ledger is only meaningful once an agent is persisted.
+				if (!isPrivileged && params.dryRun !== false) {
+					await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const a = st.agents[me];
+						if (a) {
+							const lastAt = a.lastReconcileDryRunAt ? new Date(a.lastReconcileDryRunAt).getTime() : 0;
+							const nowMs = Date.now();
+							if (lastAt > 0 && nowMs - lastAt < PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS) {
+								const waitS = Math.ceil((PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS - (nowMs - lastAt)) / 1000);
+								throw new Error(`${ERR_RECONCILE_RATE_LIMITED}: worker ${me} dry-run reconcile throttled; retry in ${waitS}s (proposal §K.1).`);
+							}
+							a.lastReconcileDryRunAt = new Date(nowMs).toISOString();
+							a.updatedAt = a.lastReconcileDryRunAt;
+							await writeState(p, st);
+						}
+					});
+				}
 				// mark=true persists task.status writes — an orchestrator-authoritative mutation gated
-			// on leader heartbeat (plan §4.4.7). Advisory paths (mark=false/dryRun=true) stay ungated.
-			if (params.mark) {
-				await withLock(p, async () => {
-					const st = await readState(p, ctx.cwd);
-					heartbeatOrchestratorLeader(st, Date.now(), process.pid, "reconcile_mark");
-					await writeState(p, st);
-				});
-			}
-			const result = await reconcile(pi, ctx.cwd, p, { agentId: params.agentId, dryRun: params.dryRun, mark: params.mark });
-			const summary = result.actions.map((a) => `  ${a.messageId}: ${a.action} (${a.reason})`).join("\n");
-			return textResult(`Reconciled ${result.count} item(s): ${result.messageCount} message(s), ${result.taskCount} task(s) (${result.dryRun ? "dry run" : "applied"}).\n${summary}`, result);
-		});
+				// on leader heartbeat (plan §4.4.7). Advisory paths (mark=false/dryRun=true) stay ungated.
+				if (params.mark) {
+					await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						heartbeatOrchestratorLeader(st, Date.now(), process.pid, "reconcile_mark");
+						await writeState(p, st);
+					});
+				}
+				const result = await reconcile(pi, ctx.cwd, p, { agentId: params.agentId, dryRun: params.dryRun, mark: params.mark });
+				const summary = result.actions.map((a) => `  ${a.messageId}: ${a.action} (${a.reason})`).join("\n");
+				return textResult(`Reconciled ${result.count} item(s): ${result.messageCount} message(s), ${result.taskCount} task(s) (${result.dryRun ? "dry run" : "applied"}).\n${summary}`, result);
+			});
 		},
 	}))
 }

@@ -6,11 +6,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
-import { TERMINAL_NODE_STATUSES, CANCELLATION_REASON, PREFLIGHT_ASSIGN_GRACE_MS } from "../constants.ts";
+import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PREFLIGHT_ASSIGN_GRACE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED } from "../constants.ts";
 import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
 import { resolveTaskStallLocked } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";
-import { deliverMessageLocked, supersedeOpenAssignments, supersedeTaskAssignmentMessages } from "../mailbox.ts";
+import { deliverMessageLocked, deriveLifecycleFromTrigger, responseMissingRecords, supersedeOpenAssignments, supersedeTaskAssignmentMessages, validateResultMessage } from "../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, now, safeId, textResult } from "../utils.ts";
 import { ensureDirs, paths, readState, readTaskByRef, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
 import { ensureOrchestrator, heartbeatOrchestratorLeader, isOrchestratorAuthority, requireOrchestratorAuthority } from "../identity.ts";
@@ -784,6 +784,48 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					}
 				}
 				let taskStatusChange = applyTaskStatus(task);
+				// === Issue 25 Phase 2: terminal-update lock-held inference (proposal §B.1, §J.1, plan §2.11(a)) ===
+				// When node.status just transitioned to a terminal status (done/failed/skipped) under gate=1
+				// AND the node has a canonical assignment message (node.assignmentMessageId set by
+				// swarm_assign_task), run validateResultMessage semantics + response-debt release INSIDE this
+				// same withLock(p) the caller already holds. Stamps terminalAt via the same pure helper
+				// (deriveLifecycleFromTrigger) used everywhere else. No nested lock; no separate writeState
+				// needed because the parent block already writes state after the closure computation.
+				// Under gate=0 this branch is skipped (Phase-1 ack-path-only behavior preserved).
+				if (PI_SWARM_MINIMAL_PROTOCOL === 1 && (newStatus === "done" || newStatus === "failed" || newStatus === "skipped") && node.assignmentMessageId) {
+					const rec = st.messages[node.assignmentMessageId];
+					if (rec && rec.requiresResponse && rec.response?.status !== "verified" && rec.response?.status !== "waived" && !rec.superseded) {
+						// Read the most-recent resultMessageId (the worker's swarm_send_message({replyTo})).
+						const resultId = rec.response?.resultMessageId;
+						if (!resultId) {
+							throw new Error(`RESPONSE_REQUIRED: Node ${params.nodeId} of ${taskId} reached terminal status but the assignment's requiresResponse=true record has no verified reply. Send swarm_send_message(to="${rec.from}", replyTo="${rec.id}", ...) first, then call swarm_update_task again.`);
+						}
+						validateResultMessage(st, rec, resultId, me);
+						rec.response = { ...(rec.response || { status: "missing" as any }), status: "verified", resultMessageId: resultId, verifiedAt: now(), lastError: undefined };
+						rec.updatedAt = now();
+						// Release response debt: if the assignee's runtimeStatus was "response_missing" and
+						// this was their last open response, unstick it.
+						if (rec.to && st.agents[rec.to]?.runtimeStatus === "response_missing" && responseMissingRecords(st, rec.to).length === 0) {
+							st.agents[rec.to].runtimeStatus = "idle";
+							st.agents[rec.to].updatedAt = now();
+						}
+						// Stamp terminalAt via the pure helper (reused everywhere).
+						const activeAttempt = node.activeAttemptId ? node.attemptHistory?.find((a: any) => a.attemptId === node.activeAttemptId) : undefined;
+						const d = deriveLifecycleFromTrigger(rec, { kind: "task_node_terminal", taskId, nodeId: params.nodeId, attemptId: activeAttempt?.attemptId });
+						if (d.kind === "set") {
+							(rec as any)[d.field] = d.value;
+							rec.lifecycleStage = d.stage;
+							rec.lifecycleSource = d.source;
+							rec.terminalReason = d.reason;
+							await traceTask(tp, TRACE_LIFECYCLE_DERIVED, {
+								messageId: rec.id, from: rec.from, to: rec.to,
+								field: d.field, source: d.source, stage: d.stage,
+								taskId, nodeId: params.nodeId, attemptId: activeAttempt?.attemptId,
+								gate: 1, reason: d.reason, via: "swarm_update_task.terminal",
+							});
+						}
+					}
+				}
 				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
 				for (const nodeId of autoClosed.closed) releaseNodeAssignment(st, task, nodeId);
 				if (autoClosed.closed.length) taskStatusChange = applyTaskStatus(task);

@@ -204,6 +204,11 @@ export type SwarmAgent = {
 	lastAgentStartAt?: string;
 	lastAgentSettledAt?: string;
 	lastSettleNotifyAt?: string; // persisted cooldown for agent_settled->orchestrator idle/open-work notify
+	// === Issue 25 Phase 2: worker dry-run reconcile rate-limit ledger (proposal §K.1) ===
+	// Last worker dry-run reconcile timestamp. Persisted so a worker that calls swarm_reconcile
+	// more often than PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS gets RECONCILE_RATE_LIMITED without
+	// a separate ledger. Orchestrator/admin is exempt; the gate is enforced at the tool boundary.
+	lastReconcileDryRunAt?: string;
 	lastToolAt?: string;
 	lastShutdownAt?: string;
 	pid?: number;
