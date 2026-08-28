@@ -63,6 +63,14 @@ A session resolves to one of three identities:
 - **Orchestrator**: `PI_SWARM_IS_ORCHESTRATOR=1` is set, or the agent id is
   explicitly `orchestrator`. All 31 swarm tools are active.
 
+**Issue 25 Phase 2 profile gating (gate=1 only):** under
+`PI_SWARM_MINIMAL_PROTOCOL=1`, identity gating is further narrowed by role
+profile allowlists — a worker's active set is exactly 5 tools and the
+orchestrator's is 12 distinct tool names (13 capabilities). All 31 tools stay
+*registered*; only the active set is filtered, and execution-time authority
+(`ORCHESTRATOR_AUTHORITY_REQUIRED`) remains the real gate. Gate=0 (default)
+keeps the full 31-tool active set for registered agents.
+
 This is identity gating implemented with `pi.setActiveTools` in
 `extensions/swarm/src/tools/gating.ts`. The `/swarm` command remains available
 for guests so an operator can use `/swarm register here <role>` and re-enable

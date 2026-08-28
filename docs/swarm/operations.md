@@ -324,6 +324,8 @@ stale record as recoverable state, not evidence that a worker may take over.
 
 ## Orphan-spawn watchdog (Issue 14)
 
+<!-- (sections below kept in original order) -->
+
 The engine emits a structured trace event when `swarm_spawn_agent` mints a NEW agent record but no
 follow-up delivery (`swarm_send_message`, `swarm_assign_task` which sends internally, or
 `swarm_stop_agent`) occurs within `ORPHAN_SPAWN_WARNING_TIMEOUT_MS` (default **30 000 ms**). The
@@ -398,6 +400,25 @@ The orphan entry persists in `swarm-state.json` (`recentSpawns[]`), but the time
 process-local memory (a module-level `Map`). A process restart **strands** any in-flight entries
 they never fire — they remain observable in the state file for forensics but produce no new warning.
 Rearming on restart is deferred to a follow-up; see `extensions/swarm/spawn-orphan-warning.test.mjs`
+
+## Operator: Phase 2 authoritative lifecycle (Issue 25)
+
+Phase 2 ships with the gate OFF. Behavior switches only when
+`PI_SWARM_MINIMAL_PROTOCOL=1` is set at module load:
+
+- **Gate flip**: set the env var for the orchestrator (and workers) to enable
+  authoritative lifecycle derivations, reply auto-verify + fencing, ACK-banner
+  removal, and profile-gated active tool sets. Default `0` keeps Phase-1 shadow
+  behavior byte-identical.
+- **Rollback**: unset the env var and restart sessions — gate=0 is fully
+  behavior-preserving; no on-disk migration is required to roll back.
+- **Rate-limit env var**: `PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS` (default
+  60000) throttles worker-scoped dry-run reconcile; workers are also forced to
+  `scope: "self"` while orchestrator/admin may pass `scope: "all"`.
+- **New trace events** under gate=1: `message.lifecycle_derived` (per derivation
+  site), `message.response.verified`, `message.reply_rejected_superseded`.
+- Before flipping the gate in a production swarm, run the proposal §H 10×2 UAT
+  matrix (two model lanes × repeated runs).
 for the test matrix and `docs/swarm/reliability-execution-plan.md` for issue-tracking history.
 
 ## Recovery nudges (Phase 1)

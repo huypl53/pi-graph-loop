@@ -206,6 +206,20 @@ The proposal should **not** collapse these responsibilities:
 2. Remove `ack_missing` as a normal workflow failure signal; replace it with response/activity deadline findings.
 3. Retain old-message parsing until the durable-state migration window is complete.
 
+### Phase 2 status — shipped (commit 5ef238c, default gate=0)
+
+Phase 2 as implemented focuses on the authoritative lifecycle slice: gate=1
+lifecycle derivations (`seenAt`/`respondedAt`/`terminalAt`/`mailboxDeliveredAt`)
+inside the existing `withLock`; reply auto-verify with supersession fencing
+(`message.reply_rejected_superseded`); terminal-update response validation +
+debt release in the same lock; worker reconcile rate-limit + `scope: self|all`;
+role-profile allowlists filtering the active tool set (worker 5 / orchestrator 12,
+all 31 still registered); ACK banner removal from delivered bodies under gate=1.
+Validation: `minimal-protocol-authoritative.test.mjs` 36 assertions (deterministic
+under scratch-cwd isolation), shadow 34, migration 23, tsc clean. The tool-registry
+consolidations and gate-flip rollout remain future work gated on the §H 10×2 UAT
+matrix; the repo default stays `PI_SWARM_MINIMAL_PROTOCOL=0`.
+
 ## 7. Safety invariants and acceptance criteria
 
 The implementation must preserve these invariants:
