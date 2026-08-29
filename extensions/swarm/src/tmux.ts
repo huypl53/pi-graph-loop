@@ -23,9 +23,29 @@ export async function capturePane(pi: ExtensionAPI, p: Paths, agentId: string, t
 	}
 }
 
+// Debounce contract for sending text into a pi TUI pane (user-reported drop class):
+// send-keys -l types the text into the pane's input buffer, but a pi instance that is still
+// booting/rendering (spawn kickoff ~2.5s after new-window; identity reload right after a pane
+// re-attach) can miss fast successive key batches — the literal text lands but the Enter fires
+// before the TUI registered the full input, so the prompt is never actually submitted. Mitigate
+// exactly like the tmux-pane-operator skill's tmux_run_capture.sh: wait before Enter, and for
+// long payloads paste in chunks with a small gap so the TUI input can settle between writes.
+const PANE_SEND_CHUNK_CHARS = 2_000;
+const PANE_SEND_CHUNK_GAP_MS = 120;
+const PANE_SEND_ENTER_DEBOUNCE_MS = 450;
+
 export async function sendToPane(pi: ExtensionAPI, target: string, text: string) {
-	await tmux(pi, ["send-keys", "-t", target, "-l", text], 10_000);
-	await sleep(150);
+	if (text.length <= PANE_SEND_CHUNK_CHARS) {
+		await tmux(pi, ["send-keys", "-t", target, "-l", text], 10_000);
+	} else {
+		// Chunk large injections (long kickoffs with mailbox + identity prompts) with a gap between
+		// chunks; send-keys -l has practical size limits and TUIs need time to ingest each batch.
+		for (let i = 0; i < text.length; i += PANE_SEND_CHUNK_CHARS) {
+			if (i > 0) await sleep(PANE_SEND_CHUNK_GAP_MS);
+			await tmux(pi, ["send-keys", "-t", target, "-l", text.slice(i, i + PANE_SEND_CHUNK_CHARS)], 10_000);
+		}
+	}
+	await sleep(PANE_SEND_ENTER_DEBOUNCE_MS);
 	await tmux(pi, ["send-keys", "-t", target, "Enter"], 10_000);
 }
 

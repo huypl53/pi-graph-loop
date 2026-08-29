@@ -4,10 +4,22 @@ This page is for operating, debugging, and reviewing a swarm instance.
 
 ## Quick start
 
-Start pi with the packaged extension:
+Start pi with the packaged extension — bare `pi` picks up the defaults from
+`~/.pi/agent/settings.json` (defaultModel/defaultProvider) and credentials
+from `~/.pi/agent/auth.json`:
 
 ```bash
-pi --model glm-5.1 --provider zai-coding-cn -e extensions/swarm/index.ts
+pi -e extensions/swarm/index.ts
+```
+
+Only pass `--model`/`--provider` when you have verified the pair works on
+this machine (the provider must have a stored API key — check `pi auth` or
+`~/.pi/agent/auth.json`; a configured-looking combo without a key exits with
+`No API key found for <provider>` and the pane looks dead). If you do use
+explicit flags, they are the same for both roles, e.g.
+
+```bash
+pi --model glm-5.1 --provider zai-coding-cn -e extensions/swarm/index.ts   # if zai-coding-cn is authenticated
 ```
 
 Inside pi:

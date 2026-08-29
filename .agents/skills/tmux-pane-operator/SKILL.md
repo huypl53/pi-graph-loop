@@ -94,14 +94,26 @@ This writes discovery files under `./tmux-snapshots/<timestamp>/` and prints JSO
 This creates a detached tmux session, captures its initial pane state, and returns JSON containing the resolved target so later steps can send commands into the same pane.
 
 ### 3) Create or reuse a dedicated session, then start pi in it
+
+Bare `pi` uses the defaults already configured in `~/.pi/agent/settings.json`
+(defaultModel/defaultProvider) with credentials from `~/.pi/agent/auth.json` —
+prefer this whenever you do not need a specific model. Only pass
+`--model`/`--provider` flags when you have verified BOTH the model id and the
+provider's API key exist (`pi auth` or check `~/.pi/agent/auth.json`); a valid
+-looking combo without a stored key makes pi exit with `No API key found for
+<provider>` and the pane looks mysteriously dead:
+
 ```bash
 .agents/skills/tmux-pane-operator/scripts/tmux_run_capture.sh \
-  --create-session ext-validate-openai-$(date +%H%M%S) \
+  --create-session ext-validate-<name>-$(date +%H%M%S) \
   --window-name validate \
   --cwd /path/to/project \
-  -c "pi --model gpt-5.4-mini --provider openai" \
+  -c "pi" \
   --wait-for "pi|>"
 ```
+
+(If you do need a specific lane, first confirm the provider is authenticated,
+then e.g. `-c "pi --model gpt-5.4-mini --provider openai"`.)
 
 If you want to reuse a known session name:
 ```bash
@@ -140,7 +152,7 @@ Pane ids like `%123` are also supported:
 ```bash
 .agents/skills/tmux-pane-operator/scripts/tmux_run_capture.sh \
   -t mysession:0.1 \
-  -c "pi --model glm-4.5 --provider zai-coding-cn" \
+  -c "pi" \
   --wait-for "provider|model|>" \
   --wait-timeout 15
 ```
@@ -148,7 +160,8 @@ Pane ids like `%123` are also supported:
 ## Recommended extension validation flow
 When validating a pi extension, prefer this sequence:
 1. Create a dedicated tmux session for the run.
-2. Start `pi` in that session with the required model/provider.
+2. Start `pi` in that session — bare `pi` unless you have verified a specific
+   model/provider pair is authenticated (see §3).
 3. Wait for startup text or prompt with `--wait-for`.
 4. Send the smallest realistic validation action that exercises the extension.
 5. Capture the result JSON and keep the tmux target + snapshot paths for the final report.

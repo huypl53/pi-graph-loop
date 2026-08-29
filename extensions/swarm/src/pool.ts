@@ -8,6 +8,24 @@ import type { ModelSlot, Paths, PoolHealthState, PoolSlotHealth, PreflightError,
 import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
 import { currentModel, currentProvider, readSwarmSettings } from "./session.ts";
 import { atomicWriteFile, trace } from "./state.ts";
+
+// Credential probe for preflightSpawn (3b): does this provider have a usable API key?
+// Mirrors pi's own lookup order: ~/.pi/agent/auth.json entries, then the conventional
+// <PROVIDER>_API_KEY / <PROVIDER>_APIKEY env vars. Returns undefined when a key exists.
+function missingProviderCredential(provider: string): string | undefined {
+	if (!provider) return "no provider";
+	try {
+		const home = process.env.HOME || "";
+		if (home) {
+			const auth = JSON.parse(readFileSync(join(home, ".pi", "agent", "auth.json"), "utf8")) as Record<string, any>;
+			const entry = auth?.[provider];
+			if (entry && typeof entry === "object" && entry.type === "api_key" && String(entry.key || entry.apiKey || "").trim()) return undefined;
+		}
+	} catch { /* missing/unreadable auth.json falls through to env check */ }
+	const envKey = provider.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+	if (process.env[`${envKey}_API_KEY`] || process.env[`${envKey}_APIKEY`]) return undefined;
+	return `no api key for provider '${provider}'`;
+}
 import { sleep } from "./utils.ts";
 
 // === Issue 21 quota-reset-interval ===
@@ -616,6 +634,22 @@ export async function preflightSpawn(p: Paths, opts: PreflightOptions = {}): Pro
 				kind: "provider_not_found",
 				provider: provider || "",
 				suggestion: `Set swarm.defaultProvider in .pi/settings.json, or PI_SWARM_DEFAULT_PROVIDER in your shell.`,
+			},
+		};
+	}
+
+	// (3b) Credential check (user-reported spawn-dead class): the resolved provider must have a
+	// usable API key, otherwise the child `pi --provider X` exits with `No API key found for X`
+	// and the spawned pane looks inexplicably dead. Key sources mirror pi's own lookup:
+	// ~/.pi/agent/auth.json first, then the conventional env vars.
+	const credErr = missingProviderCredential(provider);
+	if (credErr) {
+		return {
+			ok: false,
+			error: {
+				kind: "provider_not_found",
+				provider,
+				suggestion: `Provider '${provider}' has no stored API key — a spawned pi would exit with 'No API key found for ${provider}'. Authenticate it (pi auth / ~/.pi/agent/auth.json), pick another slot (/swarm pool list), or set ${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY in your shell.`,
 			},
 		};
 	}
