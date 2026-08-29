@@ -106,6 +106,9 @@ export const ALLOWED_NODE_TRANSITIONS: Record<string, Set<string>> = {
 	assigned: new Set(["in_progress", "done", "failed", "blocked", "ready", "cancelled"]),
 	in_progress: new Set(["done", "failed", "blocked", "cancelled"]),
 	blocked: new Set(["assigned", "in_progress", "ready", "skipped", "cancelled"]),
+	// Issue 28: rework activation may reopen a previously-done node back to ready (orchestrator force
+	// path / rework reopen path). No other terminal regressions are enabled here.
+	done: new Set(["ready"]),
 };
 
 export const TERMINAL_NODE_STATUSES = new Set<TaskNodeStatus>(["done", "failed", "skipped", "cancelled"]);
@@ -317,6 +320,12 @@ export const TRACE_AGENT_TASK_SWEEP_STOPPED = "agent.task_sweep_stopped";
 // Summary trace emitted ONCE per close call from `taskgraph.ts:sweepTaskWorkersLocked`. Includes
 // the taskId and the count of agents stopped (so dashboards can chart sweep yield per task).
 export const TRACE_TASK_WORKERS_SWEPT = "task.workers_swept";
+
+// === Issue 28 — rework reopen trace ===
+// Emitted when activateReworkNodes reopens a previously-done/failed/skipped node because a rework
+// edge activated. Payload includes priorAttemptId so operators can correlate with the canonical
+// task.attempt.superseded emitted by the next mintNodeAttempt call.
+export const TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK = "task.attempt.reopened_by_rework";
 
 // Stable env-var opt-out: when set to "1" the task-close sweep is suppressed entirely (no traces,
 // no stops). Default ON; this is NOT gated behind PI_SWARM_MINIMAL_PROTOCOL.

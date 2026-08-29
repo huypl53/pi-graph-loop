@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
+import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
 import { paths, readTaskState, taskPaths, trace, traceTask } from "./state.ts";
@@ -476,34 +476,35 @@ function edgeMatchesActivation(task: TaskState, edge: TaskEdge) {
 export function activateReworkNodes(task: TaskState) {
 	const reopened: string[] = [];
 	for (const [nodeId, node] of Object.entries(task.nodes)) {
-		if (!(node.status === "failed" || node.status === "skipped")) continue;
+		if (!(node.status === "failed" || node.status === "skipped" || node.status === "done")) continue;
 		const incoming = task.edges.filter((edge) => edge.to === nodeId);
 		if (!incoming.some((edge) => edge.rework && edgeMatchesActivation(task, edge))) continue;
+		const priorActiveAttemptId = node.activeAttemptId;
+		const priorAttempt = priorActiveAttemptId && node.attemptHistory
+			? node.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId)
+			: undefined;
+		if (priorAttempt && priorAttempt.status === "active") {
+			priorAttempt.status = "superseded";
+			priorAttempt.outcome = undefined;
+			priorAttempt.supersededAt ||= now();
+			priorAttempt.supersededBy = "<rework>";
+			priorAttempt.releasedAt ||= now();
+			priorAttempt.releaseReason = "rework";
+		}
 		node.status = "ready";
 		node.assignee = undefined;
 		node.assignmentMessageId = undefined;
-		// NEW: Clear activeAttemptId but preserve attemptHistory for audit trail
-		if (node.activeAttemptId && node.attemptHistory) {
-			const priorAttempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
-			if (priorAttempt) {
-				if (priorAttempt.status === "active") {
-					priorAttempt.status = "superseded";
-					priorAttempt.outcome = undefined;
-				}
-			// Audit annotation: record that the rework reopen ended this attempt's lease. The terminal
-				// status (failed/skipped/completed) is preserved; supersededBy marks how the lease ended.
-				priorAttempt.supersededAt ||= now();
-				priorAttempt.supersededBy = "<rework>";
-				// Lease release audit (issue 4): a rework reopen releases the reopened node's write-scope lease.
-				priorAttempt.releasedAt ||= now();
-				priorAttempt.releaseReason = "rework";
-			}
-		}
 		delete node.activeAttemptId;
 		node.outcome = null;
 		delete node.staleAt;
 		node.lastActivityAt = now();
 		reopened.push(nodeId);
+		trace(paths(process.cwd()), TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, {
+			taskId: task.taskId,
+			nodeId,
+			priorStatus: priorAttempt ? "done" : (priorActiveAttemptId ? "unknown" : "done"),
+			priorAttemptId: priorActiveAttemptId ?? null,
+		});
 	}
 	return reopened;
 }
