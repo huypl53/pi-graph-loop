@@ -38,7 +38,16 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				const { msg, delivery } = await enqueueAndDeliver(pi, ctx.cwd, p, params);
 				const injected = Boolean(delivery?.delivered) && !delivery?.mailboxOnly;
 				const mailboxOnly = Boolean(delivery?.mailboxOnly);
-				return textResult(`Sent ${msg.id} to ${msg.to}. Injected: ${injected}${mailboxOnly ? " (mailbox-only delivery; recipient has no tmux pane)" : ""}`, { message: msg, delivery });
+				// Mailbox-only is NORMAL for the orchestrator (by design it has no swarm tmux pane; its
+				// pump surfaces mailbox messages within one 5s tick). Reporting it as a bare "no tmux
+				// pane" warning made senders misread delivery as failed. Only non-orchestrator recipients
+				// without a live pane get the genuine-warning phrasing.
+				const mailboxOnlyNote = mailboxOnly
+					? (msg.to === "orchestrator"
+						? " (mailbox-only delivery — NORMAL for the orchestrator: no tmux pane by design; its pump surfaces mailbox messages within ~5s)"
+						: " (mailbox-only delivery; recipient has no live tmux pane — will surface via reconcile/pump once it restarts)")
+					: "";
+				return textResult(`Sent ${msg.id} to ${msg.to}. Injected: ${injected}${mailboxOnlyNote}`, { message: msg, delivery });
 			});
 		},
 	}))
