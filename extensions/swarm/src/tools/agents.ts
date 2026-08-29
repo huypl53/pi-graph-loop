@@ -557,12 +557,21 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 					const st = await readState(p, ctx.cwd);
 				const previousId = st.goal?.id;
 				const ts = now();
+				// Issue 56 (live defect): re-setting a goal with the SAME goalId used to reset nudgeSeq
+				// to undefined — the next nudges would re-walk seq keys 1..N that already exist in the
+				// idempotency index (stale records from before the refresh), so every one returns
+				// duplicate_suppressed and the goal silently never re-nudges. nudgeSeq is monotonic for
+				// the lifetime of the goalId: when the id is REUSED (text refresh), inherit the prior seq;
+				// only a genuinely NEW id starts at 0. The counter/backoff fields reset either way (a
+				// refreshed goal starts a fresh nudge streak).
+				const inheritSeq = previousId === requestedId ? (st.goal?.nudgeSeq ?? 0) : 0;
 				st.goal = {
 					id: requestedId,
 					text,
 					setAt: ts,
 					setBy: currentAgentId(),
 					consecutiveNoResolveNudges: 0,
+					nudgeSeq: inheritSeq,
 				};
 				// A fresh goal never inherits the previous goal's nudge state. Bound C-1 ensures the
 				// `goal` field was `undefined` (not {}) before this assignment — a JSON-absent key
