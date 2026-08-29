@@ -13,6 +13,7 @@ import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, deriveLifecycleFromTrigger, responseMissingRecords, supersedeOpenAssignments, supersedeTaskAssignmentMessages, validateResultMessage } from "../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, now, safeId, textResult } from "../utils.ts";
 import { ensureDirs, paths, readState, readTaskByRef, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
+import { attachGitDiffStat, registerEvidenceHooks, validateAttestations, writeBaselineCommit } from "../trace.ts";
 import { ensureOrchestrator, heartbeatOrchestratorLeader, isOrchestratorAuthority, requireOrchestratorAuthority } from "../identity.ts";
 import { findReusableAgent, spawnAgent, clearOrphanWatch, isSameOrchestratorLeader } from "../agents.ts";
 import { reconcile, runtimeTaskWarnings } from "../reconcile.ts";
@@ -20,6 +21,7 @@ import { tmux } from "../tmux.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
 
 export function registerTasksTools(pi: ExtensionAPI) {
+	registerEvidenceHooks(pi);
 	pi.registerTool(defineTool({
 		name: "swarm_create_task",
 		label: "Swarm Create Task",
@@ -106,6 +108,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				]));
 				await mkdir(tp.root, { recursive: true });
 				await mkdir(tp.artifacts, { recursive: true });
+				await writeBaselineCommit(pi, tp);
 				await writeTaskState(tp, task);
 				await writeFile(tp.taskMd, buildTaskMarkdown(task), "utf8");
 				await traceTask(tp, "task.create", { taskId, title: task.title, workflow: task.workflow, owner: task.owner, start: task.start, nodeCount: Object.keys(task.nodes).length, ready, actionable, autoClosed: autoClosed.closed });
@@ -504,6 +507,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			force: Type.Optional(Type.Boolean({ description: "Orchestrator override: skip ownership + transition checks. Defaults to false." })),
 			cancelTask: Type.Optional(Type.Boolean({ description: "Orchestrator-only (requires force): mark the whole task cancelled. Sticky: a cancelled task stays cancelled and releases all assignments. Defaults to false." })),
 			attemptId: Type.Optional(Type.String({ description: "Opaque attempt token received in assignment. Required for non-orchestrator callers when node has an active attempt. Prevents stale updates from superseded attempts." })),
+			attestations: Type.Optional(Type.Array(Type.Object({ claim: Type.String(), tool: Type.String(), eventId: Type.String(), ts: Type.String() }))),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_update_task", async () => {
@@ -693,6 +697,16 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				if (newStatus !== prevStatus && !isOrch && !isAllowedNodeTransition(prevStatus, newStatus)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} cannot move ${prevStatus} -> ${newStatus}.`, { taskId, nodeId: params.nodeId, expected: { lifecycle: "pending->ready->assigned->in_progress->done|failed|blocked; terminal states need orchestrator override" }, received: { from: prevStatus, to: newStatus }, actionableHint: "If you believe the transition should be allowed, escalate to the orchestrator (force=true)." });
 				const outEdges = task.edges.filter((e) => e.from === params.nodeId);
 				if (newStatus === "done" && outEdges.length && !params.outcome && !node.outcome) await failTaskTool(tp, p, "OUTCOME_REQUIRED", `Node ${params.nodeId} has outgoing branches but no outcome was provided.`, { taskId, nodeId: params.nodeId, expected: { validOutcomes: [...new Set(outEdges.map((e) => e.when))] }, received: { outcome: params.outcome }, suggestedNextCall: { tool: "swarm_update_task", params: { taskId, nodeId: params.nodeId, status: "done", outcome: outEdges[0].when } } });
+				let attestationReport: Awaited<ReturnType<typeof validateAttestations>> | undefined;
+				if (newStatus === "done" && (params.outcome === "implemented" || params.outcome === "fixed" || node.outcome === "implemented" || node.outcome === "fixed")) {
+					const artifactText = params.artifact ? await readFile(join(tp.root, params.artifact), "utf8").catch(() => "") : "";
+					attestationReport = await validateAttestations(p, { note: params.note, artifactText, attestations: params.attestations as Array<{ claim: string; tool: string; eventId: string; ts: string }> | undefined });
+					if (!attestationReport.ok) {
+						await traceTask(tp, "task.attestation.rejected", { taskId, nodeId: params.nodeId, errors: (attestationReport as any).errors, matchedClaims: attestationReport.matchedClaims });
+						await failTaskTool(tp, p, "ATTESTATION_REJECTED", (attestationReport as any).errors.join("; "), { taskId, nodeId: params.nodeId, rejected: (attestationReport as any).errors, matchedClaims: attestationReport.matchedClaims });
+					}
+					await traceTask(tp, "task.attestation.ok", { taskId, nodeId: params.nodeId, checked: attestationReport.checked, matchedClaims: attestationReport.matchedClaims });
+				}
 
 				let forceReopen: { priorAttemptId: string | undefined } | undefined;
 				if (isOrch && params.force === true && TERMINAL_NODE_STATUSES.has(prevStatus) && !TERMINAL_NODE_STATUSES.has(newStatus)) {
@@ -873,6 +887,11 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				await writeTaskState(tp, task);
 				await writeState(p, st);
 				await traceTask(tp, "task.update", { taskId, nodeId: params.nodeId, prevStatus, status: newStatus, outcome: params.outcome, note: Boolean(params.note), artifact: params.artifact, gateUpdates: params.gateUpdates ? Object.keys(params.gateUpdates) : [], sharedContext: Boolean(params.sharedContextUpdates), by: me, autoClosed: autoClosed.closed, reopened });
+				let diffStat: { available: boolean; baseline?: string; stat?: string; note?: string } | undefined;
+				if (attestationReport) {
+					diffStat = await attachGitDiffStat(pi, ctx.cwd, tp);
+					await traceTask(tp, "task.attestation.diffstat", { taskId, nodeId: params.nodeId, baseline: diffStat.baseline || null, stat: diffStat.stat || null, note: diffStat.note || null });
+				}
 				if (autoClosed.closed.length) await traceTask(tp, "task.autoclose.orchestrator", { taskId, nodeIds: autoClosed.closed, triggerNodeId: params.nodeId, by: "engine" });
 				if (cancelled) await traceTask(tp, "task.cancel", { taskId, nodeId: params.nodeId, by: me });
 				if (taskStatusChange.terminal) await traceTask(tp, "task.close", { taskId, status: task.status, nodeId: params.nodeId, by: me });
@@ -916,9 +935,10 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						await writeState(p, st); // persist the notify message record + orchestrator pseudo-agent
 					}
 				}
-				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled, autoClosed: autoClosed.closed, reopened };
+				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled, autoClosed: autoClosed.closed, reopened, diffStat };
 			});
-			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${result.cancelled ? " Task marked cancelled; all assignments released." : ""}${result.reopened?.length ? ` Reopened rework nodes: ${result.reopened.join(", ")}.` : ""}${params.note ? ` Note: ${params.note}` : ""}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, taskStatus: result.taskStatus, cancelled: result.cancelled, by: me, autoClosed: result.autoClosed, reopened: result.reopened });
+			const diffSuffix = (result as any).diffStat ? `\n\nAttestation diffstat:\n${(result as any).diffStat.available ? (result as any).diffStat.stat : `(git diff unavailable: ${(result as any).diffStat.note || "unknown"})`}` : "";
+			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${result.cancelled ? " Task marked cancelled; all assignments released." : ""}${result.reopened?.length ? ` Reopened rework nodes: ${result.reopened.join(", ")}.` : ""}${params.note ? ` Note: ${params.note}` : ""}${diffSuffix}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, taskStatus: result.taskStatus, cancelled: result.cancelled, by: me, autoClosed: result.autoClosed, reopened: result.reopened, attestation: (result as any).diffStat || null });
 		});
 		},
 	}))
