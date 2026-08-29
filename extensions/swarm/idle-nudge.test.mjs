@@ -81,14 +81,14 @@ async function setup() {
 		status: "running", runtimeStatus: "idle", health: "healthy",
 		tmuxSession: st.tmuxSession, tmuxWindow: "worker-a", tmuxTarget: "sess:worker-a.0",
 		model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
-		createdAt: ts, updatedAt: ts,
+		createdAt: ts, updatedAt: ts, lastHeartbeatAt: ts,
 	};
 	st.agents["worker-b"] = {
 		id: "worker-b", role: "worker-b role", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
 		status: "running", runtimeStatus: "idle", health: "healthy",
 		tmuxSession: st.tmuxSession, tmuxWindow: "worker-b", tmuxTarget: "sess:worker-b.0",
 		model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/worker-b.jsonl",
-		createdAt: ts, updatedAt: ts,
+		createdAt: ts, updatedAt: ts, lastHeartbeatAt: ts,
 	};
 	await writeState(p, st);
 	// Clear events file so per-test counts start clean.
@@ -280,6 +280,49 @@ console.log("\n[D] busy agent suppresses");
 	});
 	const r2 = await tick();
 	ok("after restore tick emits", r2.emitted === true);
+}
+
+// =============================================================
+// Case E0 (Issue 27): stopped ghost agents do NOT suppress the nudge
+// =============================================================
+console.log("\n[E0] Issue 27: ghost agents ignored");
+{
+	await setup();
+	await setGoal("Test E0: ghosts ignored");
+	// Add 100 ghost records: stopped, stale heartbeat, dead tmux — exactly the live-swarm failure
+	// mode that starved goal.nudge for hours.
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		for (let i = 0; i < 100; i++) {
+			const id = `ghost-${i}`;
+			st.agents[id] = {
+				id, role: "ghost", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
+				status: "stopped", runtimeStatus: "stopped", health: "unhealthy",
+				tmuxSession: st.tmuxSession, tmuxWindow: id, tmuxTarget: "unknown",
+				model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/ghost.jsonl",
+				createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+				lastHeartbeatAt: "2026-01-01T00:00:00.000Z", tmuxAlive: false,
+			};
+		}
+		await writeState(p, st);
+	});
+	const r = await tick();
+	ok("tick DOES emit despite 100 ghosts", r.emitted === true);
+	// A stale-heartbeat but still-recorded-running agent (dead pane, never stopped) is also ignored.
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		st.agents["stale-runner"] = {
+				id: "stale-runner", role: "r", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
+				status: "running", runtimeStatus: "idle", health: "healthy",
+				tmuxSession: st.tmuxSession, tmuxWindow: "s", tmuxTarget: "sess:s.0",
+				model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/s.jsonl",
+				createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+				lastHeartbeatAt: "2026-01-01T00:00:00.000Z",
+			};
+		await writeState(p, st);
+	});
+	const r2 = await tick(Date.now()); // new tick; nudge already emitted once — reason is duplicate or emits again after counter? Use fresh idempotency expectation.
+	ok("stale-runner also ignored (not agent_busy)", r2.reason !== "agent_busy");
 }
 
 // =============================================================

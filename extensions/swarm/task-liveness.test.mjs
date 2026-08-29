@@ -81,7 +81,7 @@ async function setup({ taskId, withTask = true, ageMs = 0, allNodesDone = false 
 		status: "running", runtimeStatus: "idle", health: "healthy",
 		tmuxSession: st.tmuxSession, tmuxWindow: "worker-a", tmuxTarget: "sess:worker-a.0",
 		model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
-		createdAt: ts, updatedAt: ts,
+		createdAt: ts, updatedAt: ts, lastHeartbeatAt: ts,
 	};
 	// Reset transient state so prior tests don't leak: clear stale task-stall counters (each test
 	// sets its own) and the goal nudge (case 12 sets it; other cases don't want it).

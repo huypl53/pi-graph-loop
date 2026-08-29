@@ -223,6 +223,23 @@ async function sendInitialReadyNudgeLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	}
 }
 
+// === Issue 27: effective-liveness helper for idle predicates ===
+// An agent participates in the goal-nudge / task-stall all-idle predicate only if its record is
+// actually live: status "running", tmux not known-dead, and heartbeat within the stale window
+// (default 10 min, override PI_SWARM_AGENT_HEARTBEAT_STALE_MS). Ghost records left behind by
+// dead panes are excluded rather than counted as busy — previously 100+ stopped ghosts starved
+// both nudges forever (goal.nudge never emitted since goal set).
+const AGENT_HEARTBEAT_STALE_MS = Number(process.env.PI_SWARM_AGENT_HEARTBEAT_STALE_MS ?? 10 * 60_000);
+
+function agentIsEffectivelyAlive(a: { status?: string; runtimeStatus?: string; tmuxAlive?: boolean; lastHeartbeatAt?: string }, nowMs: number): boolean {
+	if (a.status !== "running") return false;
+	if (a.tmuxAlive === false) return false;
+	if (a.runtimeStatus === "stopped") return false;
+	const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
+	if (!Number.isFinite(hb)) return false;
+	return nowMs - hb <= AGENT_HEARTBEAT_STALE_MS;
+}
+
 // === Issue 18: Swarm goal + idle-streak nudge ===
 // When the orchestrator has set a goal AND every non-orchestrator agent is runtimeStatus="idle" AND
 // no task nodes are assigned/in_progress, this function emits an idempotent structured nudge to the
@@ -266,7 +283,15 @@ export async function evaluateIdleGoalNudgeLocked(
 	// assigned/in_progress task nodes. `readdir(p.tasksDir)` is bounded by the per-tick budget; a
 	// missing or unreadable tasksDir is treated as "no active nodes" (matches the existing graph-
 	// advance / initial-ready patterns in this file).
-	const idleAgents = Object.values(st.agents).filter((a) => a.id !== "orchestrator");
+	// Issue 27: only agents that are actually ALIVE participate in the idle predicate. Stopped
+	// agents (ghost records whose panes are gone) would otherwise block the all-idle check forever
+	// — runtimeStatus "stopped" never equals "idle", starving the nudge. Liveness signal:
+	// status === "running" (record still live) AND (tmuxAlive is not explicitly false) AND
+	// heartbeat fresh within AGENT_HEARTBEAT_STALE_MS. Stale/dead records are excluded, not counted
+	// as busy; a genuinely busy live agent still blocks the nudge as before.
+	const idleAgents = Object.values(st.agents).filter(
+		(a) => a.id !== "orchestrator" && agentIsEffectivelyAlive(a, nowMs),
+	);
 	const allIdle = idleAgents.every((a) => a.runtimeStatus === "idle");
 	if (!allIdle) return { emitted: false, reason: "agent_busy" };
 
@@ -397,7 +422,11 @@ export async function evaluateTaskGraphStallNudgeLocked(
 	if (!tasks.length) return { emitted: false, reason: "no_active_task" };
 
 	// Predicate 3: every non-orchestrator agent must be runtimeStatus === "idle".
-	const idleAgents = Object.values(st.agents).filter((a) => a.id !== "orchestrator");
+	// Issue 27: mirrors evaluateIdleGoalNudgeLocked — only effectively-alive agents participate;
+	// stopped/stale ghost records must not starve this nudge either.
+	const idleAgents = Object.values(st.agents).filter(
+		(a) => a.id !== "orchestrator" && agentIsEffectivelyAlive(a, nowMs),
+	);
 	const allIdle = idleAgents.every((a) => a.runtimeStatus === "idle");
 	if (!allIdle) return { emitted: false, reason: "agent_busy" };
 
