@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
+import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
@@ -932,10 +932,36 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// message un-marked so the next idle pump (session_start / agent_settled / 5s interval) re-reads it
 		// and delivers it WITH a real triggerTurn. It also stops queuing followUps that can themselves keep
 		// isIdle() false (a secondary cause of the orchestrator never waking).
-		if (!idleAtStart) {
+		//
+		// STUCK-BUSY ESCALATION: ctx.isIdle() can stay false indefinitely while pi has a queued
+		// continuation / auto-retry pending (e.g. provider 429 backoff, auto-compaction retry) even
+		// though the orchestrator is swarm-idle (heartbeat says idle, nothing is running). Without an
+		// escape hatch the deferral above is unbounded: messages pile up until the human intervenes
+		// (Esc/reload) — the observed "messages only arrive when I press /reload" bug. When the oldest
+		// never-displayed message has waited longer than PUMP_STUCK_DEFER_ESCALATE_MS while busy, surface
+		// it with an explicit steer: steering interrupts the queued continuation and starts a fresh turn,
+		// which is exactly the operator-mandated behavior for stale deferrals.
+		const neverDisplayedBusy = windowMsgs.filter((m) => !surfaced.has(m.id));
+		const oldestWaitMs = neverDisplayedBusy.length
+			? nowMs - new Date(neverDisplayedBusy.map((m) => st.messages[m.id]?.createdAt || m.createdAt).sort()[0] || nowMs).getTime()
+			: 0;
+		if (!idleAtStart && oldestWaitMs < PUMP_STUCK_DEFER_ESCALATE_MS) {
 			keepalive();
+			if (neverDisplayedBusy.length) {
+				await trace(p, "mailbox.orchestrator_pump_deferred", {
+					reason, queued: neverDisplayedBusy.length, oldestWaitMs: Math.round(oldestWaitMs),
+					thresholdMs: PUMP_STUCK_DEFER_ESCALATE_MS, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null,
+				});
+			}
 			await writeState(p, st);
 			return { toSurface: [] as SwarmMessage[], retriggered: 0 };
+		}
+		const escalateStuck = !idleAtStart && oldestWaitMs >= PUMP_STUCK_DEFER_ESCALATE_MS;
+		if (escalateStuck) {
+			await trace(p, "mailbox.orchestrator_pump_stuck_escalated", {
+				reason, queued: neverDisplayedBusy.length, oldestWaitMs: Math.round(oldestWaitMs),
+				thresholdMs: PUMP_STUCK_DEFER_ESCALATE_MS, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null,
+			});
 		}
 
 		// IDLE: we can fire a real turn.
@@ -976,7 +1002,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		sess.retriggerCount = capMap(retriggerCount, PUMP_SESSION_ID_CAP);
 		keepalive();
 		await writeState(p, st);
-		return { toSurface, retriggered: toSurface.filter((m) => retriggerSet.has(m.id)).length };
+		return { toSurface, retriggered: toSurface.filter((m) => retriggerSet.has(m.id)).length, escalatedStuck: escalateStuck };
 	});
 	const pending = result.toSurface;
 	if (!pending.length) {
@@ -990,12 +1016,17 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 	if (ctx.mode === "tui") {
 		for (let i = 0; i < pending.length; i++) {
 			const msg = pending[i];
+			// Stuck-busy escalation path: steer (interrupt the queued continuation and start a fresh
+			// turn) instead of triggerTurn — the engine is NOT idle, so a queued turn would never fire.
+			const opts = result.escalatedStuck
+				? { triggerTurn: true, deliverAs: "steer" as const }
+				: (i === 0 ? { triggerTurn: true } : { deliverAs: "followUp" as const });
 			pi.sendMessage({
 				customType: "swarm-message",
 				content: formatSwarmMessageContent(msg),
 				display: true,
 				details: msg,
-			}, i === 0 ? { triggerTurn: true } : { deliverAs: "followUp" });
+			}, opts);
 		}
 		// Global-consume informational PM traffic ONLY AFTER a real TUI surface succeeded. This avoids
 		// losing a message on stale-ctx/sendMessage failure while still preventing a later orchestrator

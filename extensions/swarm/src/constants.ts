@@ -167,6 +167,12 @@ export const PUMP_SESSION_TTL_MS = 60 * 60 * 1000;
 // prevent spam; the per-tick pump + agent_settled hook supply the retry cadence.
 export const PUMP_RETRIGGER_DELAY_MS = 60 * 1000;
 
+// Stuck-busy escalation threshold: when ctx.isIdle() has been false (queued continuation /
+// auto-retry pending) but the oldest never-displayed orchestrator message has waited this long,
+// the pump surfaces it with deliverAs "steer" (interrupting the stuck continuation) instead of
+// deferring forever. Override via PI_SWARM_STUCK_DEFER_ESCALATE_MS.
+export const PUMP_STUCK_DEFER_ESCALATE_MS = Number(process.env.PI_SWARM_STUCK_DEFER_ESCALATE_MS ?? 120 * 1000);
+
 export const PUMP_RETRIGGER_MAX = 3;
 
 export const MAX_STATUS_TASKS = 100;

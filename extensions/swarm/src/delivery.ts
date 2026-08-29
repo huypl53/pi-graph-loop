@@ -27,6 +27,14 @@ export function isDeliveryFailureRetryable(rec: { status: string; lastAck?: unkn
 // Records are append-only JSONL; memory promotion is gated on file-backed evidence that exists + reads.
 
 export function formatSwarmMessageContent(msg: SwarmMessage) {
+	// Timestamp prefix: the orchestrator can queue messages for a long time before the pump
+	// surfaces them (busy deferral, back-off, restarts). Without a send-time stamp the recipient
+	// cannot tell a fresh directive from one that sat in the mailbox for an hour — operators
+	// repeatedly misread stale nudges as live events. Use the durable record's createdAt (fall
+	// back to now for untracked deliveries) and a short local-time format that stays compact in
+	// the TUI.
+	const ts = new Date(msg.createdAt || Date.now());
+	const stamp = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}-${String(ts.getDate()).padStart(2, "0")} ${String(ts.getHours()).padStart(2, "0")}:${String(ts.getMinutes()).padStart(2, "0")}:${String(ts.getSeconds()).padStart(2, "0")}`;
 	// === Issue 25 Phase 2: gate-aware [PI-SWARM ACK REQUIRED] rendering (proposal §K.3) ===
 	// Under PI_SWARM_MINIMAL_PROTOCOL=1 the engine derives lifecycle state from recipient actions;
 	// recipients no longer need to be told to call swarm_ack_message explicitly. Under gate=0 the
@@ -36,7 +44,7 @@ export function formatSwarmMessageContent(msg: SwarmMessage) {
 	const ackLine = showAckHint && msg.requiresAck
 		? `\n\n[PI-SWARM ACK REQUIRED] This message requires acknowledgement. Call \`swarm_ack_message\` with messageId="${msg.id}" and status=\`seen\`|\`processing\`|\`done\`|\`failed\` (ack \`seen\`/\`processing\` now, then \`done\`/\`failed\` when complete). Unacked delivered messages are surfaced as ack_missing.`
 		: "";
-	return `Inter-agent swarm message from ${msg.from} to ${msg.to}${msg.subject ? ` (${msg.subject})` : ""}:\n\n${msg.body}${ackLine}`;
+	return `[${stamp}] Inter-agent swarm message from ${msg.from} to ${msg.to}${msg.subject ? ` (${msg.subject})` : ""}:\n\n${msg.body}${ackLine}`;
 }
 
 export function buildSystemDelivery(msg: SwarmMessage) {
