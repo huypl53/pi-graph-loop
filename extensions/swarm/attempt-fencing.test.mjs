@@ -215,7 +215,7 @@ const rwTest2 = readNode(taskId2, "test").activeAttemptId;
 ok("reassign after rework mints new attempt", !!rwTest2 && rwTest2 !== rwTest1);
 await expectErrorCode("tester-1", "swarm_update_task", { taskId: taskId2, nodeId: "test", status: "done", outcome: "passed", attemptId: rwTest1, cwd: scratch }, "ATTEMPT_TOKEN_MISMATCH");
 await awaitAs("tester-1", "swarm_update_task", { taskId: taskId2, nodeId: "test", status: "done", outcome: "passed", attemptId: rwTest2, cwd: scratch });
-ok("post-rework active token works", readNode(taskId2, "test").status === "done");
+ok("post-rework active token works", readNode(taskId2, "test").attemptHistory.at(-1).status === "completed");
 
 // ============ 4. Audit immutability + persistence ============
 const hist = readNode(taskId2, "test").attemptHistory;

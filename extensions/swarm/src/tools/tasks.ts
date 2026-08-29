@@ -6,8 +6,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
-import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PREFLIGHT_ASSIGN_GRACE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED } from "../constants.ts";
-import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
+import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PREFLIGHT_ASSIGN_GRACE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_TASK_ATTEMPT_FORCE_REOPEN } from "../constants.ts";
+import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, suppressPriorAttemptForForceReopen, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
 import { resolveTaskStallLocked } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, deriveLifecycleFromTrigger, responseMissingRecords, supersedeOpenAssignments, supersedeTaskAssignmentMessages, validateResultMessage } from "../mailbox.ts";
@@ -693,6 +693,16 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				if (newStatus !== prevStatus && !isOrch && !isAllowedNodeTransition(prevStatus, newStatus)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} cannot move ${prevStatus} -> ${newStatus}.`, { taskId, nodeId: params.nodeId, expected: { lifecycle: "pending->ready->assigned->in_progress->done|failed|blocked; terminal states need orchestrator override" }, received: { from: prevStatus, to: newStatus }, actionableHint: "If you believe the transition should be allowed, escalate to the orchestrator (force=true)." });
 				const outEdges = task.edges.filter((e) => e.from === params.nodeId);
 				if (newStatus === "done" && outEdges.length && !params.outcome && !node.outcome) await failTaskTool(tp, p, "OUTCOME_REQUIRED", `Node ${params.nodeId} has outgoing branches but no outcome was provided.`, { taskId, nodeId: params.nodeId, expected: { validOutcomes: [...new Set(outEdges.map((e) => e.when))] }, received: { outcome: params.outcome }, suggestedNextCall: { tool: "swarm_update_task", params: { taskId, nodeId: params.nodeId, status: "done", outcome: outEdges[0].when } } });
+
+				let forceReopen: { priorAttemptId: string | undefined } | undefined;
+				if (isOrch && params.force === true && TERMINAL_NODE_STATUSES.has(prevStatus) && !TERMINAL_NODE_STATUSES.has(newStatus)) {
+					forceReopen = suppressPriorAttemptForForceReopen(node);
+					node.assignee = undefined;
+					node.assignmentMessageId = undefined;
+					node.outcome = null;
+					const sup = await supersedeTaskAssignmentMessages(p, st, task, "force-reopen", me);
+					await traceTask(tp, TRACE_TASK_ATTEMPT_FORCE_REOPEN, { taskId, nodeId: params.nodeId, priorStatus: prevStatus, priorAttemptId: forceReopen.priorAttemptId ?? null, supersededMessages: sup.supersededIds.length, by: me });
+				}
 
 				// Validation complete; apply (no earlier writes occurred).
 				node.status = newStatus;

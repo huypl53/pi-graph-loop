@@ -483,13 +483,15 @@ export function activateReworkNodes(task: TaskState) {
 		const priorAttempt = priorActiveAttemptId && node.attemptHistory
 			? node.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId)
 			: undefined;
-		if (priorAttempt && priorAttempt.status === "active") {
-			priorAttempt.status = "superseded";
-			priorAttempt.outcome = undefined;
+		if (priorAttempt && (priorAttempt.status === "active" || priorAttempt.status === "completed" || priorAttempt.status === "failed" || priorAttempt.status === "skipped")) {
 			priorAttempt.supersededAt ||= now();
 			priorAttempt.supersededBy = "<rework>";
-			priorAttempt.releasedAt ||= now();
-			priorAttempt.releaseReason = "rework";
+			if (priorAttempt.status === "active") {
+				priorAttempt.status = "superseded";
+				priorAttempt.outcome = undefined;
+				priorAttempt.releasedAt ||= now();
+				priorAttempt.releaseReason = "terminal";
+			}
 		}
 		node.status = "ready";
 		node.assignee = undefined;
@@ -502,11 +504,31 @@ export function activateReworkNodes(task: TaskState) {
 		trace(paths(process.cwd()), TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, {
 			taskId: task.taskId,
 			nodeId,
-			priorStatus: priorAttempt ? "done" : (priorActiveAttemptId ? "unknown" : "done"),
+			priorStatus: priorAttempt ? priorAttempt.status : (priorActiveAttemptId ? "unknown" : "done"),
 			priorAttemptId: priorActiveAttemptId ?? null,
 		});
 	}
 	return reopened;
+}
+
+// === Issue 29 — force-reopen attempt suppression helper ===
+// On orchestrator force-reopen from a terminal state, the prior attempt must be marked superseded
+// and `node.activeAttemptId` must be cleared so the next claim/assign mints a fresh attempt.
+export function suppressPriorAttemptForForceReopen(node: TaskNode): { priorAttemptId: string | undefined } {
+	const priorActiveAttemptId = node.activeAttemptId;
+	if (priorActiveAttemptId && node.attemptHistory) {
+		const priorAttempt = node.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId);
+		if (priorAttempt && (priorAttempt.status === "active" || priorAttempt.status === "completed" || priorAttempt.status === "failed" || priorAttempt.status === "skipped")) {
+			priorAttempt.status = "superseded";
+			priorAttempt.outcome = undefined;
+			priorAttempt.supersededAt ||= now();
+			priorAttempt.supersededBy = "<force-reopen>";
+			priorAttempt.releasedAt ||= now();
+			(priorAttempt as any).releaseReason = "force-reopen";
+		}
+	}
+	delete node.activeAttemptId;
+	return { priorAttemptId: priorActiveAttemptId };
 }
 
 export function computeReadyNodes(task: TaskState) {

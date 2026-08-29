@@ -327,6 +327,12 @@ export const TRACE_TASK_WORKERS_SWEPT = "task.workers_swept";
 // task.attempt.superseded emitted by the next mintNodeAttempt call.
 export const TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK = "task.attempt.reopened_by_rework";
 
+// === Issue 29 — force reopen trace ===
+// Emitted when swarm_update_task(force=true) reopens a terminal node back to a non-terminal state.
+// Distinct from the rework reopen trace above: this path is orchestrator-explicit and does not
+// flow through activateReworkNodes.
+export const TRACE_TASK_ATTEMPT_FORCE_REOPEN = "task.attempt.force_reopen";
+
 // Stable env-var opt-out: when set to "1" the task-close sweep is suppressed entirely (no traces,
 // no stops). Default ON; this is NOT gated behind PI_SWARM_MINIMAL_PROTOCOL.
 export const PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV = "PI_SWARM_KEEP_TASK_WORKERS";
