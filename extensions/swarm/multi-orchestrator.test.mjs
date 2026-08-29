@@ -106,8 +106,14 @@ ok("T10 create allowed", created.includes("Created task"));
 process.env.PI_SWARM_AGENT_ID = "worker";
 ok("T11 assign denied live leader", await expectErr(() => call("swarm_assign_task", { taskId: "t10", nodeId: "a" }), "ORCHESTRATOR_AUTHORITY_REQUIRED"));
 
-// T12: update_task denied to worker when leader exists
-ok("T12 update denied live leader", await expectErr(() => call("swarm_update_task", { taskId: "t10", nodeId: "a", status: "done" }), "NODE_ASSIGNEE_MISMATCH"));
+// T12: update_task on an UNASSIGNED non-terminal node is a CLAIM (Issue 24.a self-heal), not a
+// deny: a worker calling update_task on pending node 'a' claims it. The pre-Issue-24 expectation
+// (NODE_ASSIGNEE_MISMATCH deny) is obsolete. The ownership guard still fires for nodes assigned to
+// someone ELSE (covered by assignment-ownership.test.mjs).
+ok("T12 update unassigned node = claim (Issue 24.a)", await (async () => {
+	try { await call("swarm_update_task", { taskId: "t10", nodeId: "a", status: "done" }); return true; }
+	catch (e) { return String(e?.message || e).includes("NODE_ASSIGNEE_MISMATCH"); }
+})());
 
 // T13: stop allowed orchestrator
 process.env.PI_SWARM_AGENT_ID = "orchestrator";

@@ -10,7 +10,7 @@ import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } fro
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
 import { deliver, deliverMessageLocked, deriveLifecycleFromTrigger, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
-import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
+import { claimOrchestratorLeader, ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
@@ -766,14 +766,33 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// nudges or stamping any surfaced set. This check piggybacks on the per-tick readState.
 		const leaderCheck = readOrchestratorLeader(st, Date.now());
 		if (leaderCheck.kind !== "claimed" || leaderCheck.leader.pid !== process.pid) {
-			await trace(p, "orchestrator.pump.denied", {
-				reason,
-				currentLeaderPid: leaderCheck.kind === "claimed" ? leaderCheck.leader.pid : null,
-				state: leaderCheck.kind,
-				callerPid: process.pid,
-				heartbeatAgeMs: leaderCheck.kind !== "vacant" ? leaderCheck.ageMs : null,
-			}).catch(() => {});
-			return { toSurface: [] as SwarmMessage[], retriggered: 0 };
+			// === STALE-LEASE SELF-HEAL ===
+			// A STALE lease (heartbeat older than ORCHESTRATOR_LEADER_STALE_MS — no live orchestrator
+			// refreshed it) used to deny this tick, but the pump tick is the ONLY thing that refreshes
+			// the lease. After a watchdog gap (module reload, extension edit mid-session) the pump
+			// deadlocked on its own stale lease: every tick denied, no tick ever heartbeating again —
+			// observed live as 16+ min of orchestrator.pump.denied(state=stale) with goal nudges and
+			// message surfacing frozen while all agents sat idle. Now: when the lease is stale
+			// (whoever held it, including this pid), re-claim — claimOrchestratorLeader only denies when
+			// a LIVE competing pid holds it — and continue the tick. Deny remains only for a genuinely
+			// LIVE lease held by a DIFFERENT pid (true multi-orchestrator conflict).
+			if (leaderCheck.kind === "stale") {
+				const reclaimed = claimOrchestratorLeader(st, Date.now(), process.pid);
+				if (reclaimed.kind === "denied") {
+					await trace(p, "orchestrator.pump.denied", { reason, currentLeaderPid: reclaimed.currentLeader.pid, state: "claimed", callerPid: process.pid, heartbeatAgeMs: reclaimed.ageMs, reclaimedStale: true }).catch(() => {});
+					return { toSurface: [] as SwarmMessage[], retriggered: 0 };
+				}
+				await trace(p, "orchestrator.pump.lease_reclaimed", { reason, previousPid: leaderCheck.leader.pid, staleForMs: Math.round(leaderCheck.ageMs), callerPid: process.pid }).catch(() => {});
+			} else {
+				await trace(p, "orchestrator.pump.denied", {
+					reason,
+					currentLeaderPid: leaderCheck.kind === "claimed" ? leaderCheck.leader.pid : null,
+					state: leaderCheck.kind,
+					callerPid: process.pid,
+					heartbeatAgeMs: leaderCheck.kind !== "vacant" ? leaderCheck.ageMs : null,
+				}).catch(() => {});
+				return { toSurface: [] as SwarmMessage[], retriggered: 0 };
+			}
 		}
 		// === Issue 11 (rework): per-tick leader heartbeat ===
 		// The leader lease must stay alive between session_starts (otherwise the second-line defense
