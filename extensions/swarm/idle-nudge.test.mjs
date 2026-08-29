@@ -129,22 +129,18 @@ console.log("\n[A] happy idle-streak: 3 nudges -> back-off -> repeat");
 	await setup();
 	await setGoal("Test A: 3 nudges then back-off");
 	const resetForNextTick = async () => {
-		// Simulate "resolve" — clears counter and backoff; for the pump to emit again under the
-		// same goalId, the previously-emitted message must no longer block the idempotency check.
-		// (In production the orchestrator turn_end resets the counter; the message record stays
-		// but the counter is 0, so the next emit re-uses the same idempotency key and findIdempotentMessage
-		// returns the existing record — `duplicate_suppressed`. So in production, a fresh emit requires
-		// either a new goal OR deleting the previous nudge message.) We delete the previous message
-		// here to test the back-off / max-nudges bookkeeping independently of idempotency.
+		// Simulate "resolve" exactly as production does: the orchestrator turn_end resets the
+		// consecutive counter and clears back-off — NOTHING deletes the emitted message record.
+		// (The pre-fix test deleted the nudge message because the static idempotency key would
+		// otherwise suppress every later emit forever — the exact production bug this suite now
+		// guards against. With the seq-suffixed key, consecutive nudges get fresh dedupe slots,
+		// so no deletion is needed or allowed here.)
 		await withLock(p, async () => {
 			const s = await readState(p, dir);
-			const keepId = s.goal?.id;
-			// Delete every message with our notify key
-			for (const [mid, m] of Object.entries(s.messages)) {
-				if (m.idempotencyKey === `goal:${keepId}:nudge:idle-streak`) delete s.messages[mid];
+			if (s.goal) {
+				s.goal.consecutiveNoResolveNudges = 0;
+				s.goal.backoffTicksRemaining = undefined;
 			}
-			s.idempotencyIndex = {};
-			s.idempotencyIndexCount = 0;
 			await writeState(p, s);
 		});
 	};
@@ -157,14 +153,14 @@ console.log("\n[A] happy idle-streak: 3 nudges -> back-off -> repeat");
 	ok("counter=1 after tick 1", st1.goal.consecutiveNoResolveNudges === 1);
 	ok("lastNudgeAt stamped", typeof st1.goal.lastNudgeAt === "string");
 	ok("backoffTicksRemaining undefined after emit", st1.goal.backoffTicksRemaining === undefined);
-	await resetForNextTick();
+
 
 	// Tick 2: second nudge (counter goes 1 -> 2)
 	r = await tick();
 	ok("tick 2 emits", r.emitted === true);
 	let st2 = await readState(p, dir);
 	ok("counter=2 after tick 2", st2.goal.consecutiveNoResolveNudges === 2);
-	await resetForNextTick();
+
 
 	// Tick 3: third nudge (counter goes 2 -> 3)
 	r = await tick();
@@ -173,7 +169,7 @@ console.log("\n[A] happy idle-streak: 3 nudges -> back-off -> repeat");
 	ok("counter=3 after tick 3", st3.goal.consecutiveNoResolveNudges === 3);
 	// The MAX-nudges branch is entered on the NEXT tick, not this one (the emit increments first).
 	ok("backoffTicksRemaining undefined after 3rd emit", st3.goal.backoffTicksRemaining === undefined);
-	await resetForNextTick();
+
 
 	// Tick 4: counter is now 3 >= MAX (3) — enters back-off branch; emits nothing.
 	const goalBeforeBackoff = await readState(p, dir);
@@ -374,19 +370,25 @@ console.log("\n[E] active task node suppresses");
 }
 
 // =============================================================
-// Case F: idempotency — two back-to-back ticks after the first emit
+// Case F: idempotency semantics under the seq-suffixed key
 // =============================================================
-console.log("\n[F] idempotency: same (goalId) key deduped across the same writeState cycle");
+console.log("\n[F] idempotency: consecutive ticks EMIT (fresh seq each emit); counter climbs to max then back-off");
 {
 	await setup();
 	await setGoal("Test F: idempotency");
 	const r1 = await tick();
 	ok("first tick emits", r1.emitted === true);
 	const r2 = await tick();
-	// After the first emit, the message exists in state.messages under the notify key. The pump's
-	// idempotency check via findIdempotentMessage hits the same key on the second tick — no new
-	// emission.
-	ok("second tick without resolve is duplicate_suppressed", r2.emitted === false && r2.reason === "duplicate_suppressed");
+	// Post-fix behavior: a silent-ignore (no resolve) keeps climbing — tick 2 emits nudge 2 of 3
+	// under a FRESH dedupe slot (goal:{goalId}:nudge:idle-streak:2). The old duplicate_suppressed
+	// behavior was the production bug: one nudge per goal, ever.
+	ok("second tick without resolve EMITS (fresh seq)", r2.emitted === true);
+	const s2 = await readState(p, dir);
+	ok("nudgeSeq=2 stamped (never resets)", s2.goal.nudgeSeq === 2);
+	ok("consecutive counter=2", s2.goal.consecutiveNoResolveNudges === 2);
+	// Two distinct message records must exist (one per seq)
+	const keys = Object.values(s2.messages).map((m) => m.idempotencyKey).filter((k) => String(k).startsWith(`goal:${s2.goal.id}:nudge:idle-streak`));
+	ok("two distinct idempotency keys persisted", new Set(keys).size === 2);
 }
 
 // =============================================================

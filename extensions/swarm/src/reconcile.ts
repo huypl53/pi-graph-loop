@@ -322,10 +322,15 @@ export async function evaluateIdleGoalNudgeLocked(
 		return { emitted: false, reason: "max_nudges" };
 	}
 
-	// Idempotency: one nudge per (goal, idle-streak) emission. The notify key uses the goalId so a
-	// fresh swarm_set_goal (which changes goal.id) gets a fresh emit slot — by design, since a new
-	// goal is a new intent. findIdempotentMessage rebuilds the O(1) index lazily.
-	const key = formatNotifyKey(NOTIFY_KEY_GOAL_IDLE_NUDGE, { goalId: goal.id });
+	// Idempotency: one nudge per (goal, nudge-sequence) emission. The notify key uses goalId plus a
+	// MONOTONIC nudgeSeq that never resets (survives resolve / counter reset). A static per-goal key
+	// would allow exactly ONE nudge per goal for its entire lifetime: after the first emit the
+	// message record lingers in state and every later tick returns duplicate_suppressed forever —
+	// the production bug where a set goal never re-nudged after its first reminder (max-3 + back-off
+	// machinery never engaged). With seq, the idempotency check still blocks double-emits within the
+	// same tick / streak (seq only advances on a successful emit), while a fresh nudge gets a fresh slot.
+	const nudgeSeq = (goal.nudgeSeq ?? 0) + 1;
+	const key = formatNotifyKey(NOTIFY_KEY_GOAL_IDLE_NUDGE, { goalId: goal.id, seq: String(nudgeSeq) });
 	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) {
 		return { emitted: false, reason: "duplicate_suppressed" };
 	}
@@ -361,6 +366,7 @@ export async function evaluateIdleGoalNudgeLocked(
 	});
 
 	goal.consecutiveNoResolveNudges += 1;
+	goal.nudgeSeq = nudgeSeq;
 	goal.lastNudgeAt = new Date(nowMs).toISOString();
 	await trace(p, "goal.idle_nudge", {
 		goalId: goal.id,
@@ -492,8 +498,11 @@ export async function evaluateTaskGraphStallNudgeLocked(
 			return { emitted: false, reason: "max_nudges", taskId };
 		}
 
-		// Idempotency: one nudge per taskId at a time.
-		const key = formatNotifyKey(NOTIFY_KEY_TASK_GRAPH_STALL, { taskId });
+		// Idempotency: one nudge per (taskId, nudge-sequence). Same fix as the goal nudge — a static
+		// per-task key allowed exactly one stall nudge per task ever; seq gives each emit a fresh slot
+		// while still blocking double-emits within a tick.
+		const nudgeSeq = (stallState.nudgeSeq ?? 0) + 1;
+		const key = formatNotifyKey(NOTIFY_KEY_TASK_GRAPH_STALL, { taskId, seq: String(nudgeSeq) });
 		if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) {
 			return { emitted: false, reason: "duplicate_suppressed", taskId };
 		}
@@ -526,6 +535,7 @@ export async function evaluateTaskGraphStallNudgeLocked(
 		});
 
 		stallState.consecutiveNoResolveNudges += 1;
+		stallState.nudgeSeq = nudgeSeq;
 		stallState.lastNudgeAt = new Date(nowMs).toISOString();
 		if (!st.taskStallState) st.taskStallState = {};
 		st.taskStallState[taskId] = stallState;

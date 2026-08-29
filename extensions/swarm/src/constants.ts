@@ -343,12 +343,12 @@ export const MAX_TASK_STALL_NUDGES =
 // Semantic dedupe key template for the task-graph-state idle nudge. Per-(taskId) key so the pump
 // never emits a duplicate nudge for the same stalled task. Validated via SAFE_ID_RE inside
 // formatNotifyKey; the `taskId` substitution must satisfy /^[a-z0-9_-]+$/.
-export const NOTIFY_KEY_TASK_GRAPH_STALL = "task:{taskId}:nudge:graph-stall";
+export const NOTIFY_KEY_TASK_GRAPH_STALL = "task:{taskId}:nudge:graph-stall:{seq}";
 
 // Semantic dedupe key template for the goal idle-streak nudge. One nudge per (goal, idle-streak)
 // so the orchestrator mailbox never sees duplicate nudges for the same goal emission. Validated via
 // SAFE_ID_RE inside formatNotifyKey; the `goalId` substitution must satisfy /^[a-z0-9_-]+$/.
-export const NOTIFY_KEY_GOAL_IDLE_NUDGE = "goal:{goalId}:nudge:idle-streak";
+export const NOTIFY_KEY_GOAL_IDLE_NUDGE = "goal:{goalId}:nudge:idle-streak:{seq}";
 
 // Format a NOTIFY_KEY_* template with validated (safe-id) substitutions.
 export function formatNotifyKey(template: string, params: Record<string, string>): string {

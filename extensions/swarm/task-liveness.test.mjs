@@ -157,18 +157,10 @@ async function getStallState(taskId) {
 }
 
 async function resetMessages() {
-	await withLock(p, async () => {
-		const s = await readState(p, dir);
-		const taskIds = Object.keys(s.taskStallState || {});
-		for (const tid of taskIds) {
-			for (const [mid, m] of Object.entries(s.messages)) {
-				if (m.idempotencyKey === `task:${tid}:nudge:graph-stall`) delete s.messages[mid];
-			}
-		}
-		s.idempotencyIndex = {};
-		s.idempotencyIndexCount = 0;
-		await writeState(p, s);
-	});
+	// Pre-fix: deleted emitted nudge messages so the static idempotency key would not suppress
+	// later emits forever (the production one-nudge-per-task bug). Post-fix (seq-suffixed keys)
+	// nothing needs cleaning between ticks: each emit gets a fresh dedupe slot and setup()
+	// reseeds scratch state per case. Kept as a no-op to avoid touching every call site.
 }
 
 // =============================================================
