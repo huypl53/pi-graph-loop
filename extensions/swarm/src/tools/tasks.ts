@@ -7,7 +7,7 @@ import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
 import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PREFLIGHT_ASSIGN_GRACE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED } from "../constants.ts";
-import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
+import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
 import { resolveTaskStallLocked } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, deriveLifecycleFromTrigger, responseMissingRecords, supersedeOpenAssignments, supersedeTaskAssignmentMessages, validateResultMessage } from "../mailbox.ts";
@@ -91,6 +91,12 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// (rare: legacy swarm with an in_progress task that got recreated; auto-close via terminal
 				// nodes flips it to done/failed/cancelled below).
 				if (createTaskStatusChange.terminal) resolveTaskStallLocked(p, st, taskId, "task_terminal");
+				// Issue 26 — task-close worker sweep (terminal transition site #1). A freshly-created task
+				// may auto-close via `autoCloseOrchestratorTerminalNodes` (e.g. a one-node graph); when
+				// that happens the auto-close path already released assignments via releaseNodeAssignment,
+				// but workers spawned-for-task with empty active-task sets still linger. The sweep runs
+				// only on terminal transitions and is a no-op when nothing is eligible.
+				if (createTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, taskId);
 				// Actionable = newly-ready nodes PLUS already-ready unassigned nodes (e.g. a fresh task's start node,
 				// which is born status:"ready" and lands in `current`, not the raw `ready` set). Keeps the "Ready:"
 				// report consistent with swarm_next_nodes so orchestrators see what is assignable right now.
@@ -299,11 +305,16 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					candidates = found.matches;
 					if (found.recommended) assigneeId = found.recommended;
 					else if (params.autoSpawn || params.spawnIsolated) { const r = await spawnAgent(pi, ctx.cwd, p, st, { id: `${expectedKind}-01`, role: node.role }); assigneeId = r.agent.id; spawned = true; }
-					else await failTaskTool(tp, p, "NO_AVAILABLE_AGENT", `No reusable ${expectedKind} agent for node ${params.nodeId}.`, { taskId, nodeId: params.nodeId, expected: { roleKind: expectedKind }, received: { reusePolicy }, suggestedNextCall: { tool: "swarm_assign_task", params: { taskId, nodeId: params.nodeId, autoSpawn: true } } });
-				}
+					else await failTaskTool(tp, p, "NO_AVAILABLE_AGENT", `No reusable ${expectedKind} agent for node ${params.nodeId}.`, { taskId, nodeId: params.nodeId, expected: { roleKind: expectedKind }, received: { reusePolicy }, suggestedNextCall: { tool: "swarm_assign_task", params: { taskId, nodeId: params.nodeId, autoSpawn: true } } });				}
 				const assignee = assigneeId ? st.agents[assigneeId] : undefined;
 				if (!assignee) await failTaskTool(tp, p, "AGENT_NOT_FOUND", `Resolved agent is missing for node ${params.nodeId}.`, { taskId, nodeId: params.nodeId, received: { agentId: assigneeId } });
 				ensureAgentDefaults(assignee);
+				// Issue 26 — spawnedForTaskId (additive durable link). Stamp when this assign path
+				// freshly spawned an agent for the task; reuse-pool agents keep their absent field
+				// (never overwritten with unrelated task ids). Read by sweepTaskWorkersLocked to
+				// decide sweep eligibility when the task closes. Idempotent: a duplicate retry that
+				// does NOT spawn does not touch the field.
+				if (spawned && !assignee.spawnedForTaskId) assignee.spawnedForTaskId = task.taskId;
 
 				// ---- Preflight auto-clear (Issue 16) ----
 				// When this assign resolves to a freshly-spawned agent AND the caller is the same
@@ -407,11 +418,15 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				node.lastActivityAt = now();
 				if (node.staleAt) { const prevStaleAt = node.staleAt; delete node.staleAt; await traceTask(tp, "task.stale.cleared", { taskId, nodeId: params.nodeId, prevStaleAt, reason: "assign", by: currentAgentId() }); }
 				if (!assignee.activeTaskIds.includes(task.taskId)) assignee.activeTaskIds.push(task.taskId);
-				applyTaskStatus(task);
+				const assignTaskStatusChange = applyTaskStatus(task);
 				task.currentNodes = computeReadyNodes(task).current;
 				// Issue 23 — resolve any stalled task-stall counter for this task (an actionable node
 				// now has an assignee, so the predicate is no longer satisfied).
 				resolveTaskStallLocked(p, st, task.taskId, "assigned");
+				// Issue 26 — task-close worker sweep (terminal transition site #2). Auto-closing an
+				// orchestrator terminal node via this assign (e.g. a one-node graph or terminal-edge
+				// node) drives the task terminal; sweep the freshly-spawned exclusive workers.
+				if (assignTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId);
 
 				const replyTarget = params.replyTarget || me;
 				const conversationId = `task:${task.taskId}:${params.nodeId}`;
@@ -588,10 +603,13 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						}
 						ensureAgentDefaults(st.agents[me]);
 						if (!st.agents[me].activeTaskIds.includes(task.taskId)) st.agents[me].activeTaskIds.push(task.taskId);
-						applyTaskStatus(task);
+						const claimTaskStatusChange = applyTaskStatus(task);
 						task.currentNodes = computeReadyNodes(task).current;
 						// Issue 23 — claim resolves any stalled task-stall counter.
 						resolveTaskStallLocked(p, st, task.taskId, "claim");
+						// Issue 26 — task-close worker sweep (terminal transition site #3). A claim
+						// that closes the task (e.g. a terminal-node claim) drives the sweep path.
+						if (claimTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId);
 						await writeTaskState(tp, task);
 						await writeState(p, st);
 						await traceTask(tp, "task.node.claimed", { taskId, nodeId: params.nodeId, claimer: me, priorAssignee: null, priorStatus, attemptId, created: minted.created });
@@ -834,6 +852,11 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					// Issue 23 — terminal task transition: clear any stalled task-stall counter
 					// (the predicate "task in_progress" is no longer satisfied).
 					resolveTaskStallLocked(p, st, task.taskId, "task_terminal");
+					// Issue 26 — task-close worker sweep (terminal transition sites #4 + #5). The
+					// sweep runs AFTER releaseTaskFromAllAgents so every closed-task pointer is
+					// gone from agents before eligibility is computed. Safe under concurrent
+					// close because we are inside the same withLock(p) the caller holds.
+					await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId);
 				}
 				const nextReady = computeReadyNodes(task);
 				task.currentNodes = nextReady.current;

@@ -401,6 +401,36 @@ process-local memory (a module-level `Map`). A process restart **strands** any i
 they never fire — they remain observable in the state file for forensics but produce no new warning.
 Rearming on restart is deferred to a follow-up; see `extensions/swarm/spawn-orphan-warning.test.mjs`
 
+## Operator: task-close worker sweep (Issue 26)
+
+When a task reaches a terminal status via `applyTaskStatus`, the swarm auto-stops every worker
+agent whose ONLY active assignment was on that task. This keeps `/swarm status` clean — closed
+tasks don't leave behind a long tail of stopped ghost workers.
+
+**Eligibility rules** (all must hold):
+
+1. The agent is NOT the orchestrator pseudo-agent.
+2. The agent is NOT paused (`agent.paused === true`).
+3. The agent was associated with the closing task AND has no remaining active tasks on other tasks.
+4. The agent is NOT protected by `PI_SWARM_KEEP_TASK_WORKERS=1`.
+
+**`spawnedForTaskId` link**: when `swarm_assign_task` spawns a fresh agent for a node (via
+`autoSpawn` / `spawnIsolated`), it stamps `agent.spawnedForTaskId = task.taskId`. Reuse-pool
+agents that were not spawned for the task are swept ONLY when their only active task was the
+closing task (the `task-graph`-derived `node.assignee` membership is the canonical signal).
+
+**Trace events** (every close):
+
+- `agent.task_sweep_stopped` — one per stopped agent (includes taskId, priorActiveTaskIds, releaseReason).
+- `task.workers_swept` — one summary per close (includes taskId, stoppedCount).
+
+**Opt-out**: set `PI_SWARM_KEEP_TASK_WORKERS=1` to disable the entire sweep (no per-agent or
+summary traces emitted). Default ON. Not gated behind `PI_SWARM_MINIMAL_PROTOCOL`.
+
+**Idempotence**: the sweep is computed from current state on every invocation, so a second call
+finds nothing to stop and emits zero traces. Already-stopped agents are skipped with reason
+`already_stopped`. Safe under the same `withLock(p)` the caller already holds — no nested locks.
+
 ## Operator: Phase 2 authoritative lifecycle (Issue 25)
 
 Phase 2 ships with the gate OFF. Behavior switches only when

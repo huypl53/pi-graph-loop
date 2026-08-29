@@ -301,6 +301,21 @@ export const TRACE_REPLY_REJECTED_SUPERSEDED = "message.reply_rejected_supersede
 // category without parsing the per-message lifecycle trace.
 export const TRACE_MESSAGE_ATTENTION_DERIVED = "message.attention.derived";
 
+// === Issue 26 — task-close worker sweep (auto-stop task-scoped workers) ===
+// Per-agent trace emitted from `taskgraph.ts:sweepTaskWorkersLocked` for every agent that the
+// sweep actually stopped. Includes the taskId and release evidence (prior activeTaskIds, the
+// path that drove the eligibility decision — spawnedForTaskId link vs. sole-active-task closure).
+// Sweep idempotence: a second invocation finds nothing to stop and emits ZERO per-agent traces.
+export const TRACE_AGENT_TASK_SWEEP_STOPPED = "agent.task_sweep_stopped";
+
+// Summary trace emitted ONCE per close call from `taskgraph.ts:sweepTaskWorkersLocked`. Includes
+// the taskId and the count of agents stopped (so dashboards can chart sweep yield per task).
+export const TRACE_TASK_WORKERS_SWEPT = "task.workers_swept";
+
+// Stable env-var opt-out: when set to "1" the task-close sweep is suppressed entirely (no traces,
+// no stops). Default ON; this is NOT gated behind PI_SWARM_MINIMAL_PROTOCOL.
+export const PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV = "PI_SWARM_KEEP_TASK_WORKERS";
+
 // === Issue 18: Swarm goal + idle-streak nudge ===
 // Max consecutive unresolved nudges before the pump enters a 2-tick back-off. Configurable via the
 // PI_SWARM_MAX_NUDGES env var (read at module-load time, mirrors the ORPHAN_SPAWN_WARNING_TIMEOUT_MS

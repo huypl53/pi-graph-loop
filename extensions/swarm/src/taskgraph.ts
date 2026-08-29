@@ -3,10 +3,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES } from "./constants.ts";
+import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
-import { readTaskState, taskPaths, trace, traceTask } from "./state.ts";
+import { paths, readTaskState, taskPaths, trace, traceTask } from "./state.ts";
+import { stopAgent } from "./agents.ts";
 
 // ---- File-scope ownership: effective scope resolution + conservative overlap predicate ----
 // (roadmap issue 4: prevent unsafe overlapping concurrent write scopes). Pure task-graph logic:
@@ -932,6 +933,133 @@ function randomBytesLike(): string {
 export function releaseTaskFromAllAgents(st: SwarmState, taskId: string) {
 	for (const a of Object.values(st.agents)) { ensureAgentDefaults(a); a.activeTaskIds = a.activeTaskIds.filter((t) => t !== taskId); }
 }
+
+// === Issue 26 — task-close worker sweep (auto-stop task-scoped workers) ===
+// Stops every worker agent whose ONLY active assignment was the closing task, leaving the
+// orchestrator, agents with other active tasks, paused agents, and `PI_SWARM_KEEP_TASK_WORKERS=1`
+// opt-out untouched. Idempotent: a second invocation under the same withLock computes eligibility
+// from current state, so a stale sweep finds nothing to do and emits ZERO per-agent traces.
+//
+// HARD RULES (enforced by the sweep, not by callers):
+//   1. MUST run inside the same `withLock(p)` the caller already holds. Never acquire the swarm
+//      lock from inside — the mkdir lock is non-reentrant and would deadlock.
+//   2. NEVER stops an agent whose `activeTaskIds` includes a task other than the closing one.
+//      Release evidence (the prior activeTaskIds) is stamped on the per-agent trace.
+//   3. NEVER stops the orchestrator pseudo-agent (id === "orchestrator").
+//   4. NEVER stops a paused agent (`agent.paused === true`).
+//   5. Honored opt-out: `PI_SWARM_KEEP_TASK_WORKERS=1` short-circuits the whole sweep (no traces).
+//   6. `spawnedForTaskId` link: if set to the closing taskId, the agent is swept even when it
+//      has zero remaining active tasks (it was FRESHLY SPAWNED for this task). Reuse-pool agents
+//      without the link are only swept when their only active task was the closing task.
+//
+// Stops via the existing `stopAgent` lock-free core (`force: true, killPane: true`). Mailbox,
+// identity, history persist via the stable agent id (existing semantics — no record removal).
+//
+// Returns the list of stopped agent ids so callers can include it in tool output; empty array
+// means "no eligible workers" (most common path: cross-task agents / paused / opt-out).
+export type SweepOutcome =
+	| "opt_out"
+	| "no_terminal"
+	| { stopped: string[]; skipped: { agentId: string; reason: string }[] };
+
+export async function sweepTaskWorkersLocked(
+	pi: import("@earendil-works/pi-coding-agent").ExtensionAPI,
+	cwd: string,
+	st: SwarmState,
+	taskId: string,
+): Promise<SweepOutcome> {
+	// Opt-out check (first — short-circuit before any state read or trace).
+	if (process.env[PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV] === "1") {
+		return "opt_out";
+	}
+	// Pre-release active-task reconstruction. `releaseTaskFromAllAgents(taskId)` runs BEFORE the
+	// sweep at every terminal transition site, so an agent whose only active task was the closing
+	// task now shows `activeTaskIds === []`. We rebuild the pre-release set per agent so the
+	// eligibility rule + per-agent trace evidence stay accurate. Reconstruction rules:
+	//   - cur includes taskId           -> pre-release = cur (release didn't touch them).
+	//   - cur empty AND link/assignment -> pre-release = [taskId] (sole-worker closure).
+	//   - cur has other tasks, no taskId -> pre-release = [taskId, ...cur] (cross-task agent).
+	//   - cur empty AND no link          -> pre-release = [] (never on this task).
+	const tp = taskPaths(paths(cwd), taskId);
+	let task: TaskState | null = null;
+	try { task = await readTaskState(tp.taskJson); } catch { /* missing/unreadable: skip graph check */ }
+	const assignedInClosingTask = new Set<string>();
+	if (task) {
+		for (const n of Object.values(task.nodes)) {
+			if (n.assignee && n.assignee !== "orchestrator" && (n.status === "assigned" || n.status === "in_progress")) {
+				assignedInClosingTask.add(n.assignee);
+			}
+		}
+	}
+	const priorActiveByAgent = new Map<string, string[]>();
+	for (const agent of Object.values(st.agents)) {
+		ensureAgentDefaults(agent);
+		const cur = agent.activeTaskIds.slice();
+		if (cur.includes(taskId)) {
+			priorActiveByAgent.set(agent.id, cur);
+		} else if (cur.length === 0) {
+			const wasInTask = agent.spawnedForTaskId === taskId || assignedInClosingTask.has(agent.id);
+			priorActiveByAgent.set(agent.id, wasInTask ? [taskId] : []);
+		} else {
+			priorActiveByAgent.set(agent.id, [taskId, ...cur]);
+		}
+	}
+	const stopped: string[] = [];
+	const skipped: { agentId: string; reason: string }[] = [];
+	for (const agent of Object.values(st.agents)) {
+		if (agent.id === "orchestrator") { skipped.push({ agentId: agent.id, reason: "orchestrator" }); continue; }
+		ensureAgentDefaults(agent);
+		if (agent.paused) { skipped.push({ agentId: agent.id, reason: "paused" }); continue; }
+		// Already stopped — skip (idempotent re-invocation).
+		if (agent.status === "stopped") { skipped.push({ agentId: agent.id, reason: "already_stopped" }); continue; }
+		const priorActive = priorActiveByAgent.get(agent.id) || [];
+		const remainingAfterClose = priorActive.filter((t) => t !== taskId);
+		const wasInClosingTask = priorActive.includes(taskId);
+		const spawnedForThis = agent.spawnedForTaskId === taskId;
+		// Eligibility:
+		//   (A) Freshly spawned for this task AND no remaining other active tasks.
+		//   (B) Sole active task was the closing task (sole-active-task closure).
+		// Cross-task agents (in closing task + remaining other active tasks) are NEVER swept.
+		// Reuse-pool workers not in the closing task are not swept either.
+		const eligible = (spawnedForThis || wasInClosingTask) && remainingAfterClose.length === 0;
+		if (!eligible) {
+			if (wasInClosingTask && remainingAfterClose.length > 0) skipped.push({ agentId: agent.id, reason: "cross_task_active" });
+			continue;
+		}
+		// Stop via the lock-free core (no nested withLock). force:true so the empty-set check stays
+		// authoritative even if activeTaskIds had a stale pointer.
+		try {
+			const res = await stopAgent(pi, paths(cwd), st, agent.id, { force: true, killPane: true });
+			stopped.push(agent.id);
+			await trace(paths(cwd), TRACE_AGENT_TASK_SWEEP_STOPPED, {
+				agentId: agent.id,
+				taskId,
+				priorActiveTaskIds: priorActive,
+				releaseReason: spawnedForThis ? "spawned_for_task" : "sole_active_task",
+				spawnedForTaskId: agent.spawnedForTaskId ?? null,
+				killed: res.killed,
+				killMethod: res.method,
+				agentStatus: agent.status,
+				by: "sweepTaskWorkersLocked",
+			});
+		} catch (err: any) {
+			skipped.push({ agentId: agent.id, reason: `stop_failed: ${String((err as Error)?.message || err).slice(0, 80)}` });
+		}
+	}
+	if (stopped.length === 0) {
+		return { stopped, skipped };
+	}
+	// One summary trace per successful close (idempotent: re-run sees stopped=[] and emits zero).
+	await trace(paths(cwd), TRACE_TASK_WORKERS_SWEPT, {
+		taskId,
+		stoppedCount: stopped.length,
+		stoppedAgentIds: stopped.slice(),
+		skippedCount: skipped.length,
+		by: "sweepTaskWorkersLocked",
+	});
+	return { stopped, skipped };
+}
+
 
 // Find non-terminal assigned/in_progress nodes still owned by an agent across its active tasks.
 // Used by session_shutdown to nudge/escalate instead of silently orphaning open assignments.

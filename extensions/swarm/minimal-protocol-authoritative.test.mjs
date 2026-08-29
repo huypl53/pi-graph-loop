@@ -342,7 +342,13 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	ok("gate=1 terminal: assignment.lifecycleStage === 'terminal'", assignRec?.lifecycleStage === "terminal");
 
 	const afterAgent = afterState?.agents?.[workerId];
-	ok("gate=1 terminal: worker runtimeStatus cleared to 'idle' (debt released)", afterAgent?.runtimeStatus === "idle");
+	// Issue 26 supersedes: when the closing task's sole worker had `activeTaskIds === [taskId]`,
+	// the task-close worker sweep auto-stops it (the debt-release branch ran first and set
+	// runtimeStatus to "idle"; the sweep then transitions the worker to "stopped"). The debt
+	// release semantics (verified response, terminalAt stamping) still run; the test above
+	// already asserts those. We just accept the post-sweep status here.
+	ok("gate=1 terminal: worker swept by task-close sweep (Issue 26 supersedes idle)", afterAgent?.status === "stopped");
+	ok("gate=1 terminal: worker runtimeStatus === 'stopped' after sweep", afterAgent?.runtimeStatus === "stopped");
 
 	const events = await readGlobalEvents();
 	const termDerived = events.filter((e) => e.event === "message.lifecycle_derived" && e.gate === 1 && e.field === "terminalAt");
