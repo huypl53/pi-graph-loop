@@ -249,7 +249,49 @@ try {
   ok("commit auto-closes once fake git reports new HEAD", closed.closed.includes("commit"));
   ok("commit evidence status verified", task3State.evidence?.commit?.status === "verified");
 
-  // 4c) The commit-guard is keyed off the orchestrator-terminal predicate, not the literal id.
+  // 4c) Mixed terminal graphs must retain commit evidence when a later non-commit terminal closes.
+  const task3Mixed = "task-row75-mixed-evidence";
+  const mixedTp = taskPaths({ tasksDir: join(scratch, ".pi/swarm/tasks"), root: scratch }, task3Mixed);
+  mkdirSync(mixedTp.root, { recursive: true });
+  mkdirSync(mixedTp.artifacts, { recursive: true });
+  writeFileSync(join(mixedTp.root, "baseline.txt"), "baseline-commit\n", "utf8");
+  const mixedTask = {
+    version: 1,
+    taskId: task3Mixed,
+    title: "mixed evidence",
+    goal: "commit evidence must survive later terminal closes",
+    status: "ready",
+    priority: "normal",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    owner: "orchestrator",
+    workflow: "feature-dev",
+    allowedFiles: [],
+    acceptanceCriteria: [],
+    validationCommands: [],
+    start: "commit",
+    currentNodes: ["commit", "finalize"],
+    sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
+    nodes: {
+      commit: { status: "pending", role: "orchestrator", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 1, terminal: true },
+      finalize: { status: "pending", role: "orchestrator", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 1, terminal: true },
+    },
+    edges: [],
+    handoffs: [],
+    gates: {},
+    editLocks: {},
+    evidence: {},
+  };
+  writeFileSync(mixedTp.taskJson, `${JSON.stringify(mixedTask, null, 2)}\n`, "utf8");
+  const mixedPi = { exec: async (cmd, args) => cmd === "git" && args?.[0] === "rev-parse" ? { code: 0, stdout: "post-create-head\n", stderr: "" } : { code: 1, stdout: "", stderr: "" } };
+  const mixedState = readTask(task3Mixed);
+  const { autoCloseOrchestratorTerminalNodes: autoCloseMixed } = await import(join(here, "src/taskgraph.ts"));
+  const mixedClosed = await autoCloseMixed(mixedPi, mixedTp, mixedState);
+  ok("mixed graph closes both terminals", mixedClosed.closed.includes("commit") && mixedClosed.closed.includes("finalize"));
+  ok("mixed graph retains commit evidence after later terminal close", mixedState.evidence?.commit?.status === "verified");
+  ok("mixed graph also stamps finalize evidence", mixedState.evidence?.finalize?.status === "verified");
+
+  // 4d) The commit-guard is keyed off the orchestrator-terminal predicate, not the literal id.
   // A custom graph whose commit-step node is named "finalize" with role "orchestrator" must also
   // require git evidence (this is the Row 75 R5/R6 bypass hole).
   process.env.PI_SWARM_AGENT_ID = "orchestrator";
@@ -282,20 +324,83 @@ try {
   const finalizeNode = readTask(task4).nodes.finalize;
   ok("finalize orchestrator terminal stays pending without git evidence", finalizeNode.status === "pending");
   ok("finalize evidence recorded under per-node key", readTask(task4).evidence?.finalize?.status === "unverified");
-  ok("finalize also surfaces in legacy .commit slot", readTask(task4).evidence?.commit?.status === "unverified");
+  ok("finalize legacy .commit alias is not dual-written", readTask(task4).evidence?.commit === undefined);
   // With a real commit landing, the finalize node auto-closes AND the per-node evidence flips.
   const fakePiFinalize = { exec: async (cmd, args) => cmd === "git" && args?.[0] === "rev-parse" ? { code: 0, stdout: "post-create-head\n", stderr: "" } : { code: 1, stdout: "", stderr: "" } };
   const task4State = readTask(task4);
-  const { autoCloseOrchestratorTerminalNodes: autoClose4 } = await import(join(here, "src/taskgraph.ts"));
+  const { autoCloseOrchestratorTerminalNodes: autoClose4, printGraphText } = await import(join(here, "src/taskgraph.ts"));
   const closed4 = await autoClose4(fakePiFinalize, taskPaths({ tasksDir: join(scratch, ".pi/swarm/tasks"), root: scratch }, task4), task4State);
   ok("finalize auto-closes once git HEAD advances", closed4.closed.includes("finalize"));
   ok("finalize per-node evidence flips to verified", task4State.evidence?.finalize?.status === "verified");
+  ok("legacy .commit alias is not dual-written", task4State.evidence?.commit === undefined);
+  ok("printGraphText still surfaces finalize evidence via read-compat alias", printGraphText(task4State, [], []).includes("Commit evidence [finalize]"));
+
+  // 4d) Create-path ordering: a terminal one-node graph only auto-closes once baseline exists.
+  const { autoCloseOrchestratorTerminalNodes: autoCloseOrder } = await import(join(here, "src/taskgraph.ts"));
+  const { writeBaselineCommit } = await import(join(here, "src/trace.ts"));
+  const seedOneNodeTask = (taskId) => {
+    const tp = taskPaths({ tasksDir: join(scratch, ".pi/swarm/tasks"), root: scratch }, taskId);
+    mkdirSync(tp.root, { recursive: true });
+    mkdirSync(tp.artifacts, { recursive: true });
+    const task = {
+      version: 1,
+      taskId,
+      title: "create ordering",
+      goal: "baseline must precede auto-close for a one-node orchestrator graph",
+      status: "ready",
+      priority: "normal",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      owner: "orchestrator",
+      workflow: "feature-dev",
+      allowedFiles: [],
+      acceptanceCriteria: [],
+      validationCommands: [],
+      start: "finalize",
+      currentNodes: ["finalize"],
+      sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
+      nodes: {
+        finalize: { status: "pending", role: "orchestrator", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 1, terminal: true },
+      },
+      edges: [],
+      handoffs: [],
+      gates: {},
+      editLocks: {},
+      evidence: {},
+    };
+    writeFileSync(tp.taskJson, JSON.stringify(task, null, 2));
+    return { tp, task };
+  };
+  // Old order: auto-close before baseline should not close the node.
+  const oldOrderTaskId = "task-row75-create-ordering-old";
+  const oldOrder = seedOneNodeTask(oldOrderTaskId);
+  const noBaselinePi = { exec: async (cmd, args) => cmd === "git" && args?.[0] === "rev-parse" ? { code: 0, stdout: "post-create-head\n", stderr: "" } : { code: 0, stdout: "", stderr: "" } };
+  const noClose = await autoCloseOrder(noBaselinePi, oldOrder.tp, oldOrder.task);
+  ok("one-node create does not auto-close before baseline exists", noClose.closed.length === 0);
+  ok("node stays pending without baseline", oldOrder.task.nodes.finalize.status === "pending");
+  // Fixed order: baseline first, then auto-close, must close and stamp evidence.
+  const newOrderTaskId = "task-row75-create-ordering-new";
+  const newOrder = seedOneNodeTask(newOrderTaskId);
+  const stagedPi = {
+    calls: 0,
+    exec: async (cmd, args) => {
+      if (cmd === "git" && args?.[0] === "rev-parse") {
+        stagedPi.calls += 1;
+        return stagedPi.calls === 1 ? { code: 0, stdout: "baseline-before-create\n", stderr: "" } : { code: 0, stdout: "post-create-head\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  await writeBaselineCommit(stagedPi, newOrder.tp);
+  const closedOrder = await autoCloseOrder(stagedPi, newOrder.tp, newOrder.task);
+  ok("one-node create auto-closes after baseline exists", closedOrder.closed.includes("finalize"));
+  ok("one-node create stamps per-node evidence", newOrder.task.evidence?.finalize?.status === "verified");
 
   // 2b) Notes with leading ./artifacts/... references rewrite to task-absolute paths.
   await ensureWorker("writer-2", "implementer");
-  const task5 = "task-row75-dot-artifact";
+  const task6 = "task-row75-dot-artifact";
   await call("swarm_create_task", {
-    taskId: task5,
+    taskId: task6,
     title: "dot artifact rewrite",
     goal: "ensure ./artifacts/x.md references in notes rewrite",
     cwd: scratch,
@@ -305,11 +410,11 @@ try {
   });
   process.env.PI_SWARM_AGENT_ID = "orchestrator";
   process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
-  await call("swarm_assign_task", { taskId: task5, nodeId: "plan", agentId: "writer-2", note: "see ./artifacts/plan.md and artifacts/other.md for context", cwd: scratch });
+  await call("swarm_assign_task", { taskId: task6, nodeId: "plan", agentId: "writer-2", note: "see ./artifacts/plan.md and artifacts/other.md for context", cwd: scratch });
   const t5Mailbox = readMailbox("writer-2");
   const t5Note = t5Mailbox[t5Mailbox.length - 1]?.body || "";
-  ok("./artifacts/ note reference rewritten to task-absolute", t5Note.includes(`.pi/swarm/tasks/${task5}/artifacts/plan.md`));
-  ok("plain artifacts/ note reference also rewritten", t5Note.includes(`.pi/swarm/tasks/${task5}/artifacts/other.md`));
+  ok("./artifacts/ note reference rewritten to task-absolute", t5Note.includes(`.pi/swarm/tasks/${task6}/artifacts/plan.md`));
+  ok("plain artifacts/ note reference also rewritten", t5Note.includes(`.pi/swarm/tasks/${task6}/artifacts/other.md`));
   ok("rewrite annotation present in assignment body", t5Note.includes("Note (rewritten to task-absolute artifact paths)"));
 
   console.log("PASS row75 guardrail test");

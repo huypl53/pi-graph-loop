@@ -329,6 +329,8 @@ export type SwarmIdleNudgeState = {
 	lastGoalNudgeAt?: string;
 	goalConsecutiveNoResolveNudges?: number;
 	goalBackoffTicksRemaining?: number;
+	lastGoalActiveTaskScanAt?: string;
+	lastGoalActiveTaskWork?: { taskId: string; nodeId: string; assignee?: string; status: "assigned" | "in_progress" } | null;
 };
 
 // In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent

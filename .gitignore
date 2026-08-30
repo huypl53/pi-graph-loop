@@ -36,6 +36,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .DS_Store
 tmux-snapshots
 .pi/swarm/
+.pi/mock-llm/
 .pi/background-tasks/
 .pi/swarm-uat/runs/
 .pi/swarm-uat/*.sh

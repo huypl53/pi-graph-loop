@@ -420,6 +420,52 @@ console.log("\n[I] fresh status=ready task with actionable plan -> graph nudge, 
 	ok("no goal nudge message emitted during this section", !Object.values((await getGoalState()).messages).some((m) => m.idempotencyKey?.includes(":nudge:idle-streak:") && new Date(m.createdAt).getTime() >= t0));
 }
 
+// =============================================================
+// J. Assigned / in_progress task work suppresses the goal fallback
+// =============================================================
+console.log("\n[J] assigned/in_progress task work suppresses goal fallback");
+{
+	await setup({ taskId: "task-active-work", ageMs: 120_000, withTask: true, taskStatus: "in_progress" });
+	const tp = taskPaths(p, "task-active-work");
+	await withLock(p, async () => {
+		const task = JSON.parse(await readFile(tp.taskJson, "utf8"));
+		task.nodes.a.status = "in_progress";
+		task.nodes.a.assignee = "worker-a";
+		await writeFile(tp.taskJson, JSON.stringify(task, null, 2), "utf8");
+		const st = await readState(p, dir);
+		st.agents["worker-a"].activeTaskIds = ["task-active-work"];
+		st.agents["worker-a"].runtimeStatus = "idle";
+		await writeState(p, st);
+	});
+	const t0 = Date.now();
+	const goalResult = await tickGoal(t0);
+	ok("goal evaluator suppresses when task node is assigned/in_progress", goalResult.emitted === false && goalResult.reason === "active_task", JSON.stringify(goalResult));
+	ok("active-work suppression trace emitted", (await countEvents("goal.nudge.suppressed_by_active_task")) >= 1);
+}
+
+// =============================================================
+// K. Missing activeTaskIds pointer still suppresses via bounded fallback scan
+// =============================================================
+console.log("\n[K] missing activeTaskIds pointer still suppresses goal fallback");
+{
+	await setup({ taskId: "task-missing-pointer", ageMs: 120_000, withTask: true, taskStatus: "in_progress" });
+	const tp = taskPaths(p, "task-missing-pointer");
+	await withLock(p, async () => {
+		const task = JSON.parse(await readFile(tp.taskJson, "utf8"));
+		task.nodes.a.status = "in_progress";
+		task.nodes.a.assignee = "worker-a";
+		await writeFile(tp.taskJson, JSON.stringify(task, null, 2), "utf8");
+		const st = await readState(p, dir);
+		st.agents["worker-a"].activeTaskIds = [];
+		st.agents["worker-a"].runtimeStatus = "idle";
+		await writeState(p, st);
+	});
+	const t0 = Date.now();
+	const goalResult = await tickGoal(t0);
+	ok("goal evaluator suppresses when pointer is missing but task.json still shows assigned/in_progress", goalResult.emitted === false && goalResult.reason === "active_task", JSON.stringify(goalResult));
+	ok("fallback scan trace emitted", (await countEvents("goal.nudge.suppressed_by_active_task")) >= 1);
+}
+
 console.log(`\n${fail === 0 ? "IDLE-NUDGE PASS" : "IDLE-NUDGE FAIL"} (${pass} passed, ${fail} failed)`);
 await rm(dir, { recursive: true, force: true });
 process.exit(fail === 0 ? 0 : 1);

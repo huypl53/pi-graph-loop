@@ -213,6 +213,7 @@ async function replayTurn(
 	context: Context,
 	options: SimpleStreamOptions | undefined,
 	model: Model<any>,
+	emitTerminal: (reason: Extract<MockLLMStopReason, "aborted" | "error">, output: AssistantMessage) => void,
 ): Promise<void> {
 	const startedAtIso = new Date().toISOString();
 	const requestId = `mockllm-${randomUUID()}`;
@@ -286,13 +287,12 @@ async function replayTurn(
 	} catch (error) {
 		output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 		output.errorMessage = error instanceof Error ? error.message : String(error);
-		stream.push({ type: "error", reason: output.stopReason as Extract<MockLLMStopReason, "aborted" | "error">, error: output });
 		transcript.events.push({ atMs: nowMs() - start, type: "error", payload: { reason: output.stopReason, errorMessage: output.errorMessage } });
 		transcript.finishedAt = new Date().toISOString();
 		transcript.durationMs = nowMs() - start;
 		transcript.final = { status: "error", stopReason: output.stopReason, errorMessage: output.errorMessage };
-		await writeTranscript(transcript);
-		stream.end(output);
+		try { await writeTranscript(transcript); } catch { /* transcript persistence is best-effort even on terminal failure */ }
+		emitTerminal(output.stopReason as Extract<MockLLMStopReason, "aborted" | "error">, output);
 	}
 }
 
@@ -302,36 +302,50 @@ export function streamMockLLM(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
+	let terminalEmitted = false;
+	const emitTerminalError = (reason: Extract<MockLLMStopReason, "aborted" | "error">, output: AssistantMessage) => {
+		if (terminalEmitted) return;
+		terminalEmitted = true;
+		try { stream.push({ type: "error", reason, error: output }); } catch { /* ignore secondary stream errors */ }
+		try { stream.end(output); } catch { /* ignore double-end / disposed stream */ }
+	};
 	void (async () => {
 		const output = createOutput(model);
-		const fixture = await loadFixtureFile(model.id);
-		const nextIndex = runtimeTurnCursor.get(model.id) ?? 0;
-		const turn = fixture.turns[nextIndex];
-		runtimeTurnCursor.set(model.id, nextIndex + 1);
-		if (!turn) {
-			stream.push({ type: "start", partial: output });
-			output.stopReason = "error";
-			output.errorMessage = `script_exhausted: model ${model.id} has no scripted turn left`;
-			stream.push({ type: "error", reason: "error", error: output });
-			const exhaustedTranscript = {
-				requestId: `mockllm-${randomUUID()}`,
-				modelId: model.id,
-				fixturePath: fixture.path,
-				startedAt: new Date().toISOString(),
-				finishedAt: new Date().toISOString(),
-				durationMs: 0,
-				request: summarizeContext(context),
-				events: [
-					{ atMs: 0, type: "start", payload: { exhausted: true, turnIndex: nextIndex } },
-					{ atMs: 0, type: "error", payload: { message: output.errorMessage } },
-				],
-				final: { status: "error", stopReason: "error", errorMessage: output.errorMessage },
-			};
-			await writeTranscript(exhaustedTranscript);
-			stream.end(output);
-			return;
+		try {
+			const fixture = await loadFixtureFile(model.id);
+			const nextIndex = runtimeTurnCursor.get(model.id) ?? 0;
+			const turn = fixture.turns[nextIndex];
+			runtimeTurnCursor.set(model.id, nextIndex + 1);
+			if (!turn) {
+				stream.push({ type: "start", partial: output });
+				output.stopReason = "error";
+				output.errorMessage = `script_exhausted: model ${model.id} has no scripted turn left`;
+				stream.push({ type: "error", reason: "error", error: output });
+				const exhaustedTranscript = {
+					requestId: `mockllm-${randomUUID()}`,
+					modelId: model.id,
+					fixturePath: fixture.path,
+					startedAt: new Date().toISOString(),
+					finishedAt: new Date().toISOString(),
+					durationMs: 0,
+					request: summarizeContext(context),
+					events: [
+						{ atMs: 0, type: "start", payload: { exhausted: true, turnIndex: nextIndex } },
+						{ atMs: 0, type: "error", payload: { message: output.errorMessage } },
+					],
+					final: { status: "error", stopReason: "error", errorMessage: output.errorMessage },
+				};
+				await writeTranscript(exhaustedTranscript);
+				terminalEmitted = true;
+				try { stream.end(output); } catch { /* ignore double-end / disposed stream */ }
+				return;
+			}
+			await replayTurn(stream, output, fixture.path, turn, context, options, model, emitTerminalError);
+		} catch (error) {
+			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+			output.errorMessage = error instanceof Error ? error.message : String(error);
+			emitTerminalError(output.stopReason as Extract<MockLLMStopReason, "aborted" | "error">, output);
 		}
-		await replayTurn(stream, output, fixture.path, turn, context, options, model);
 	})();
 	return stream;
 }

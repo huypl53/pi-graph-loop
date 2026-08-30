@@ -175,24 +175,26 @@ Replies to reminder threads don't satisfy original-assignment response debt (mai
 
 ### R8 batch closure note — 2026-08-30
 
-Rows 76 and 77 are closed above. The remaining batch work stays split:
+Rows 76 and 77 are closed above. Row 80 is now closed as well:
 
-- Confirmed live Row 80 items:
-  - mock-LLM crash path
-  - evidence persistence on all terminal close paths
-  - create-path ordering (`tasks.ts:87` before `:111`)
-  - `.pi/mock-llm/` gitignore hygiene
-  - evidence aliasing
-  - adversarial tests
+- Confirmed fixed Row 80 items:
+  - mock-LLM crash path now surfaces a stream error instead of an unhandled rejection
+  - evidence persistence now stamps per-node close evidence on terminal close paths
+  - create-path ordering now writes the baseline before any auto-close attempt
+  - `.pi/mock-llm/` is ignored
+  - evidence aliasing is now per-node only; legacy `.commit` is read-compat only
+  - adversarial tests were added for the fixed paths
 - Policy clarification, not a defect:
   - goal-nudge cadence itself is intended; only the suppression scope around assigned+active work remains a follow-up.
 - Cosmetic / low-priority:
   - pipeline-stall subject wording.
-- Stale / already-fixed by Rows 76/77: none of the true Row 80 defects were retired by those commits.
 - Next batch sequence:
-  1. Row 80 small-fix consolidation.
-  2. Row 76 follow-on implementation for liveness/progress + supersession.
-  3. Revisit Rows 73/78 only if still open after the next sweep.
+  1. Row 76 follow-on implementation for liveness/progress + supersession.
+  2. Revisit Rows 73/78 only if still open after the next sweep.
+
+Notes on evidence semantics:
+- per-node evidence is the durable source of truth for terminal close records;
+- legacy `.commit` is preserved for read-compat in status/printing only and is no longer dual-written.
 
 ### Issue 79 — mock-LLM fixture provider: deterministic swarm-behavior testbed — R6 (user-proposed)
 

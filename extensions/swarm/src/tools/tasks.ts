@@ -7,7 +7,7 @@ import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
 import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PREFLIGHT_ASSIGN_GRACE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_TASK_ATTEMPT_FORCE_REOPEN } from "../constants.ts";
-import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, suppressPriorAttemptForForceReopen, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
+import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isGraphTerminalNode, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveCommitNodeEvidence, resolveNodeScope, scopesOverlap, suppressPriorAttemptForForceReopen, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
 import { resolveTaskStallLocked } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, deriveLifecycleFromTrigger, responseMissingRecords, supersedeOpenAssignments, supersedeTaskAssignmentMessages, validateResultMessage } from "../mailbox.ts";
@@ -19,6 +19,31 @@ import { findReusableAgent, spawnAgent, clearOrphanWatch, isSameOrchestratorLead
 import { reconcile, runtimeTaskWarnings } from "../reconcile.ts";
 import { tmux } from "../tmux.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
+
+async function stampCloseEvidenceIfMissing(pi: ExtensionAPI, tp: ReturnType<typeof taskPaths>, task: TaskState, nodeId: string, attestationReport?: Awaited<ReturnType<typeof validateAttestations>>, diffStat?: Awaited<ReturnType<typeof attachGitDiffStat>>) {
+	const existing = task.evidence[nodeId];
+	if (existing && typeof existing === "object") return existing;
+	const node = task.nodes[nodeId];
+	if (!node) return undefined;
+	let record: Record<string, unknown>;
+	if (inferRoleKind(nodeId, node.role) === "orchestrator" && isGraphTerminalNode(task, nodeId)) {
+		const evidence = await resolveCommitNodeEvidence(pi, tp);
+		record = { status: evidence.verified ? "verified" : "unverified", reason: evidence.reason, baseline: evidence.baseline, head: evidence.head, at: now(), nodeId };
+	} else if (diffStat?.available || attestationReport) {
+		record = {
+			status: attestationReport && !(attestationReport as any).ok ? "unverified" : "verified",
+			reason: diffStat?.note || (attestationReport ? "attestation_diffstat" : "terminal_close"),
+			baseline: diffStat?.baseline,
+			stat: diffStat?.stat,
+			at: now(),
+			nodeId,
+		};
+	} else {
+		record = { status: "verified", reason: "terminal_close", at: now(), nodeId };
+	}
+	task.evidence[nodeId] = record;
+	return record;
+}
 
 export function registerTasksTools(pi: ExtensionAPI) {
 	registerEvidenceHooks(pi);
@@ -84,6 +109,9 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const { ready, current } = computeReadyNodes(task);
 				task.currentNodes = current;
 				let createTaskStatusChange = applyTaskStatus(task); // engine-enforced closure: a fresh task derives `ready`
+				await mkdir(tp.root, { recursive: true });
+				await mkdir(tp.artifacts, { recursive: true });
+				await writeBaselineCommit(pi, tp);
 				const autoClosed = await autoCloseOrchestratorTerminalNodes(pi, tp, task);
 				if (autoClosed.closed.length) {
 					createTaskStatusChange = applyTaskStatus(task);
@@ -106,9 +134,6 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					...ready,
 					...current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
 				]));
-				await mkdir(tp.root, { recursive: true });
-				await mkdir(tp.artifacts, { recursive: true });
-				await writeBaselineCommit(pi, tp);
 				await writeTaskState(tp, task);
 				await writeFile(tp.taskMd, buildTaskMarkdown(task), "utf8");
 				await traceTask(tp, "task.create", { taskId, title: task.title, workflow: task.workflow, owner: task.owner, start: task.start, nodeCount: Object.keys(task.nodes).length, ready, actionable, autoClosed: autoClosed.closed });
@@ -881,6 +906,10 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					// gone from agents before eligibility is computed. Safe under concurrent
 					// close because we are inside the same withLock(p) the caller holds.
 					await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId);
+				}
+				const isNodeClosing = newStatus === "done" || newStatus === "failed" || newStatus === "blocked" || newStatus === "cancelled";
+				if (isNodeClosing || taskStatusChange.terminal) {
+					await stampCloseEvidenceIfMissing(pi, tp, task, params.nodeId, attestationReport);
 				}
 				const nextReady = computeReadyNodes(task);
 				task.currentNodes = nextReady.current;

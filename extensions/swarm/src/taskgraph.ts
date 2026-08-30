@@ -851,13 +851,13 @@ export function printGraphText(task: TaskState, ready: string[], current: string
 		lines.push("Artifacts:");
 		for (const a of artifactStatus) lines.push(`  ${a.exists ? "✓" : "○"} ${a.path}`);
 	}
-	const commitEvidence = (task.evidence as any)?.commit;
+	const commitEvidence = readCommitEvidence(task);
 	if (commitEvidence) {
 		lines.push("");
 		lines.push(`Commit evidence: ${commitEvidence.status}${commitEvidence.reason ? ` (${commitEvidence.reason})` : ""}${commitEvidence.baseline ? ` baseline=${commitEvidence.baseline}` : ""}${commitEvidence.head ? ` head=${commitEvidence.head}` : ""}${commitEvidence.nodeId && commitEvidence.nodeId !== "commit" ? ` node=${commitEvidence.nodeId}` : ""}`);
 	}
 	// Row 75 (fix): surface evidence for other commit-like terminal nodes (finalize, ship, ...)
-	// alongside the legacy `.commit` slot so orchestrators don't have to query the task JSON.
+	// using the read-compat legacy `.commit` alias so orchestrators don't have to query the task JSON.
 	for (const [nodeId, ev] of Object.entries(task.evidence as Record<string, any> || {})) {
 		if (nodeId === "commit") continue;
 		if (!ev || typeof ev !== "object") continue;
@@ -1238,7 +1238,7 @@ function rewriteTaskArtifactRefs(taskId: string, text: string) {
 	return text.replace(/(^|[^A-Za-z0-9._/-])(\.\/)?(artifacts\/[A-Za-z0-9._/-]+)/g, (_m, prefix: string, dotPrefix: string, rel: string) => `${prefix}${dotPrefix || ""}${taskAbsoluteArtifactPath(taskId, rel)}`);
 }
 
-async function resolveCommitNodeEvidence(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths) {
+export async function resolveCommitNodeEvidence(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths) {
 	let baseline = "";
 	try {
 		baseline = readFileSync(join(tp.root, "baseline.txt"), "utf8").trim();
@@ -1260,6 +1260,19 @@ async function resolveCommitNodeEvidence(pi: { exec: (cmd: string, args: string[
 
 // Build the assignment message body. Carries task/node pointers, scope, artifacts, and reply target
 // so the assignee discovers the rest from durable files instead of a long orchestrator prompt.
+export function readCommitEvidence(task: TaskState) {
+	const evidence = task.evidence as Record<string, any> | undefined;
+	if (!evidence) return undefined;
+	for (const [nodeId, node] of Object.entries(task.nodes || {})) {
+		if (inferRoleKind(nodeId, node.role) === "orchestrator" && isGraphTerminalNode(task, nodeId)) {
+			const ev = evidence[nodeId];
+			if (ev && typeof ev === "object") return ev;
+		}
+	}
+	if (evidence.commit && typeof evidence.commit === "object") return evidence.commit;
+	return undefined;
+}
+
 export async function autoCloseOrchestratorTerminalNodes(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths, task: TaskState) {
 	const closed: string[] = [];
 	for (;;) {
@@ -1274,16 +1287,13 @@ export async function autoCloseOrchestratorTerminalNodes(pi: { exec: (cmd: strin
 		// OR id prefixed with commit/finalize/ship/etc.) on real git evidence, not just id === "commit".
 		// Otherwise custom graphs whose commit-step is named "finalize" / "commit-changes" / "ship"
 		// bypass the evidence check and auto-close without verification — the same defect AC4 was
-		// meant to kill, resurfacing through the naming door. Evidence is keyed both by node id
-		// (authoritative) and the legacy `.commit` slot (back-compat with surfaces/tests).
+		// meant to kill, resurfacing through the naming door. Evidence is keyed by node id only;
+		// the legacy `.commit` surface reads through the per-node key for back-compat.
 		const isCommitLike = inferRoleKind(candidate, node.role) === "orchestrator" && isGraphTerminalNode(task, candidate);
 		if (isCommitLike) {
 			const evidence = await resolveCommitNodeEvidence(pi, tp);
 			const record = { status: evidence.verified ? "verified" : "unverified", reason: evidence.reason, baseline: evidence.baseline, head: evidence.head, at: now(), nodeId: candidate };
 			task.evidence[candidate] = record;
-			// Keep the legacy `.commit` slot in sync for back-compat with existing surfaces
-			// (swarm_task_status, Row 75 printGraphText) and the r75 / rework-reopen tests.
-			if (candidate === "commit" || !task.evidence.commit) task.evidence.commit = record;
 			if (!evidence.verified) {
 				// Leave the node pending for the orchestrator to close deliberately after running git itself.
 				break;

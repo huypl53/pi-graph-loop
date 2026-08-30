@@ -256,6 +256,55 @@ function allEffectiveIdleAgents(st: SwarmState, nowMs: number) {
 	return { idleAgents, allIdle };
 }
 
+async function scanTaskDirsForActiveWork(p: Paths, taskIds?: Iterable<string>): Promise<{ taskId: string; nodeId: string; assignee?: string; status: "assigned" | "in_progress" } | null> {
+	const ids = taskIds ? Array.from(new Set(taskIds)) : null;
+	const candidateDirs = ids ?? await readdir(p.tasksDir, { withFileTypes: true }).then((entries) => entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)).catch(() => []);
+	for (const taskId of candidateDirs) {
+		const taskJson = join(p.tasksDir, taskId, "task.json");
+		let task: TaskState | null = null;
+		try {
+			task = JSON.parse(await readFile(taskJson, "utf8")) as TaskState;
+		} catch {
+			continue;
+		}
+		for (const [nodeId, node] of Object.entries(task.nodes || {})) {
+			if (node && (node.status === "assigned" || node.status === "in_progress")) {
+				return { taskId: task.taskId || taskId, nodeId, assignee: node.assignee, status: node.status as "assigned" | "in_progress" };
+			}
+		}
+	}
+	return null;
+}
+
+async function findAssignedOrInProgressTaskWork(st: SwarmState, p: Paths, idleState: SwarmIdleNudgeState, nowMs: number, scanThrottleMs: number): Promise<{ taskId: string; nodeId: string; assignee?: string; status: "assigned" | "in_progress" } | null> {
+	// Goal suppression is a prompt-time concern, so keep it cheap: inspect in-memory agent.activeTaskIds
+	// first, then fall back to a throttled task-dir scan only if the fast path finds nothing.
+	const candidateTaskIds = new Set<string>();
+	for (const agent of Object.values(st.agents)) {
+		ensureAgentDefaults(agent);
+		for (const taskId of agent.activeTaskIds || []) candidateTaskIds.add(taskId);
+	}
+	if (candidateTaskIds.size) {
+		const hit = await scanTaskDirsForActiveWork(p, candidateTaskIds);
+		if (hit) return hit;
+	}
+	const lastScanMs = idleState.lastGoalActiveTaskScanAt ? new Date(idleState.lastGoalActiveTaskScanAt).getTime() : NaN;
+	const cacheValid = Number.isFinite(lastScanMs) && nowMs - lastScanMs < scanThrottleMs;
+	if (cacheValid) {
+		const cached = idleState.lastGoalActiveTaskWork;
+		if (!cached) return null;
+		const confirmed = await scanTaskDirsForActiveWork(p, [cached.taskId]);
+		if (confirmed && confirmed.nodeId === cached.nodeId && confirmed.status === cached.status) return confirmed;
+		idleState.lastGoalActiveTaskWork = null;
+		idleState.lastGoalActiveTaskScanAt = new Date(nowMs).toISOString();
+		return await scanTaskDirsForActiveWork(p);
+	}
+	idleState.lastGoalActiveTaskScanAt = new Date(nowMs).toISOString();
+	const scanned = await scanTaskDirsForActiveWork(p);
+	idleState.lastGoalActiveTaskWork = scanned;
+	return scanned;
+}
+
 // Row 68 (AC1 fix): task statuses whose graphs can carry actionable work. A freshly created task is
 // task-status "ready" (computeTaskStatus: started ? "in_progress" : "ready"), so Path A —
 // non-terminal actionable graph + all effective agents idle — must admit BOTH, not in_progress only.
@@ -382,16 +431,22 @@ export async function evaluateIdleGoalNudgeLocked(
 		delete idleState.nextGoalNudgeAt;
 		return { emitted: false, reason: "idle_epoch_missing" };
 	}
-	// Row 68: goal fallback is DOMINATED by the graph nudge. If actionable graph work exists, the
-	// stall nudge handles this idle condition — never double-fire for the same idle state. The idle
-	// epoch is intentionally kept so that once the graph quiets, the goal fallback still honors the
-	// continuous all-idle interval measured from the busy→idle edge.
+	// Row 68: goal fallback is DOMINATED by task activity. If any task node is already assigned or
+	// in_progress, the swarm is not truly idle and the goal nudge must stay suppressed. The graph
+	// stall nudge still handles actionable unassigned work — never double-fire for the same idle
+	// state. The idle epoch is intentionally kept so that once the graph quiets, the goal fallback
+	// still honors the continuous all-idle interval measured from the busy→idle edge.
+	const intervalMs = resolveGoalNudgeIntervalMs(goal.nudgeIntervalMs);
+	const activeTaskWork = await findAssignedOrInProgressTaskWork(st, p, idleState, nowMs, intervalMs);
+	if (activeTaskWork) {
+		await trace(p, "goal.nudge.suppressed_by_active_task", { goalId: goal.id, taskId: activeTaskWork.taskId, nodeId: activeTaskWork.nodeId, assignee: activeTaskWork.assignee, status: activeTaskWork.status, scanAt: idleState.lastGoalActiveTaskScanAt ?? null }).catch(() => {});
+		return { emitted: false, reason: "active_task" };
+	}
 	const graphWork = await hasActionableGraphWork(p);
 	if (graphWork.actionable) {
 		await trace(p, "goal.nudge.suppressed_by_actionable_graph", { goalId: goal.id, taskId: graphWork.taskId, nodeId: graphWork.nodeId, role: graphWork.role }).catch(() => {});
 		return { emitted: false, reason: "actionable_graph" };
 	}
-	const intervalMs = resolveGoalNudgeIntervalMs(goal.nudgeIntervalMs);
 	// Interval gate: the goal fallback fires only after a FULL continuous all-idle interval measured
 	// from the busy→all-idle edge (or from the last goal emission). Pump ticks between boundaries
 	// are no-ops — no burst.

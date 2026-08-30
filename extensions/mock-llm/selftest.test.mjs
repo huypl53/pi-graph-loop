@@ -70,10 +70,13 @@ async function latestTranscript(modelId) {
 		}
 		return out;
 	}
-	const files = (await walk(transcriptRoot)).filter((file) => file.includes(`/${modelId}/`)).sort();
-	const latest = files.at(-1);
-	assert.ok(latest, `expected transcript file for ${modelId}`);
-	return JSON.parse(await readFile(latest, "utf8"));
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const files = (await walk(transcriptRoot)).filter((file) => file.includes(`/${modelId}/`)).sort();
+		const latest = files.at(-1);
+		if (latest) return JSON.parse(await readFile(latest, "utf8"));
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	assert.ok(false, `expected transcript file for ${modelId}`);
 }
 
 // Path traversal must be rejected for both direct lookup and path helper.
@@ -84,6 +87,41 @@ assert.throws(() => fixtureFilePath("../../escape"), /invalid model id/i);
 // Malformed JSON line should report model + line context.
 await withFixture("zz-selftest-malformed", "{not json}\n", async () => {
 	await assert.rejects(() => loadFixtureFile("zz-selftest-malformed"), /zz-selftest-malformed\.jsonl line 1/i);
+});
+
+// Stream path regression: malformed fixtures must surface a stream error event instead of
+// triggering an unhandled rejection from the fire-and-forget async IIFE.
+await withFixture("zz-selftest-stream-error", "{not json}\n", async () => {
+	resetMockLLMCursor("zz-selftest-stream-error");
+	const model = { id: "zz-selftest-stream-error", provider: "mock-llm", api: "mock-llm-stream" };
+	let unhandled = null;
+	const onUnhandled = (reason) => { unhandled = reason; };
+	process.once("unhandledRejection", onUnhandled);
+	const { events, result } = await collect(streamMockLLM(model, makeContext()));
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	process.removeListener("unhandledRejection", onUnhandled);
+	assert.equal(result.stopReason, "error");
+	assert.match(result.errorMessage, /json|line 1|malformed/i);
+	assert.equal(events.filter((event) => event.type === "error").length, 1);
+	assert.equal(unhandled, null);
+});
+
+// Terminal emission regression: if the stream end path throws while replayTurn is already
+// handling an error, the helper must keep the terminal signal single-shot.
+await withFixture("zz-selftest-double-terminal", JSON.stringify({ stopReason: "stop", events: [{ type: "error", kind: "429", status: 429 }] }) + "\n", async () => {
+	resetMockLLMCursor("zz-selftest-double-terminal");
+	const model = { id: "zz-selftest-double-terminal", provider: "mock-llm", api: "mock-llm-stream" };
+	const stream = streamMockLLM(model, makeContext());
+	stream.end = () => { throw new Error("end boom"); };
+	let unhandled = null;
+	const onUnhandled = (reason) => { unhandled = reason; };
+	process.once("unhandledRejection", onUnhandled);
+	const { events, result } = await collect(stream);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	process.removeListener("unhandledRejection", onUnhandled);
+	assert.equal(result.stopReason, "error");
+	assert.equal(events.filter((event) => event.type === "error").length, 1);
+	assert.equal(unhandled, null);
 });
 
 // Missing required field should surface a clear error.
