@@ -1,0 +1,4 @@
+# quota-exhausted-all-turns: every turn is a single 429 error event.
+{"name":"quota exhausted turn 1","stopReason":"error","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"body":{"error":{"message":"You exceeded your current quota, please check your plan and billing details","type":"insufficient_quota","code":"insufficient_quota"}}}]}
+{"name":"quota exhausted turn 2","stopReason":"error","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"body":{"error":{"message":"You exceeded your current quota, please check your plan and billing details","type":"insufficient_quota","code":"insufficient_quota"}}}]}
+{"name":"quota exhausted turn 3","stopReason":"error","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"body":{"error":{"message":"You exceeded your current quota, please check your plan and billing details","type":"insufficient_quota","code":"insufficient_quota"}}}]}
