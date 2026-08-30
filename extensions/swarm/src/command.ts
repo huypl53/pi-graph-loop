@@ -1073,7 +1073,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 								setBy: "orchestrator",
 								consecutiveNoResolveNudges: 0,
 								nudgeSeq: previousId === goalId ? (s.goal?.nudgeSeq ?? 0) : 0,
-								nudgeIntervalMs: intervalMs ?? defaultIntervalMs,
+								nudgeIntervalMs: intervalMs,
 							};
 							delete s.goal.lastNudgeAt;
 							delete s.goal.lastResolvedAt;

@@ -207,6 +207,14 @@ console.log("\n[11] /swarm goal set -i parses human time and goal show/status su
 	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
 	const notifications = [];
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
+	{
+		// a1 F1 regression: plain `goal set <text>` (no -i) must persist the resolver default (5s)
+		// and never hit an undefined fallback arm.
+		await commands.swarm("goal set plain no flag default", ctx);
+		const g = readSwarmState().goal;
+		ok("no-flag goal set persists 5000ms default", g.nudgeIntervalMs === 5_000, JSON.stringify(g));
+		await commands.swarm("goal done", ctx);
+	}
 	await commands.swarm("goal set -i 30m Show me", ctx);
 	ok("slash command persisted 30m as 1800000ms", readSwarmState().goal.nudgeIntervalMs === 1_800_000);
 	notifications.length = 0;
