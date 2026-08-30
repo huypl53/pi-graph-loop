@@ -159,53 +159,6 @@ Design (7 lines; validated = production-proven in mailbox, design = cross-checke
 
 Replies to reminder threads don't satisfy original-assignment response debt (mailbox.ts:64-71 requires replyTo===rec.id or conversationId match). This week: rgi-implementer and r5-a2 both needed manual resultMessageId coaching to clear response_missing; pump emitted repeated settled-with-missing-response noise meanwhile. Fix direction: accept conversationId-matching replies for response credit, or auto-attach pending-assignment context to reminder messages so agents reply to the correct thread.
 
-### Issue 83 — Row 76 phase 1 implementation: identity/presence split + two-tier sweep — R9 follow-on
-
-**Status:** open. **Priority:** P1. **Source:** Row 76 readiness review + investigation matrix.
-
-Phase 1 sub-tasks:
-- A. split durable identity from live presence in the agent model/state.
-- B. make `hooks.ts` write presence updates only; stop treating settle as an identity/ownership conclusion.
-- C. add a cheap tier-1 sweep (tmux/process alive check) in the existing reconcile paths.
-- D. add tier-2 probe/wake only for suspicious candidates or dispatch-time recovery.
-- E. replace `TASK_STALE_MS` as the sole stale gate; preserve `ready && !assignee` for assignment readiness, move stall/reassign decisions to presence + progress lease expiry.
-- F. update notification fencing / stale reasons to reflect presence and lease state.
-- G. refresh task-liveness / idle-nudge / lifecycle-fencing / orchestrator-wake fixtures and expectations.
-
-Metrics note:
-- track a cheap `hung-but-alive residual` proxy from existing settled-with-open-assignment / response-missing signals.
-- treat `false-reassign` as a proxy until explicit counters or labels exist.
-
-### Issue 82 — Agent retirement and dead-pane GC policy — R9 follow-on
-
-**Status:** open. **Priority:** P0. **Source:** lifecycle/resource debt review.
-
-Policy direction:
-- terminal closure should retire the worker unless an explicit reuse lease keeps it parked.
-- silent dead panes should be reclaimed by heartbeat + tmux-liveness reconciliation.
-- runtime storage should distinguish reusable park state from stale ghost records.
-- spend / usage visibility remains a follow-up once lifecycle retirement is under control.
-
-Best enforcement points:
-- `sweepTaskWorkersLocked()` on terminal task close.
-- `session_shutdown` for visible exits.
-- periodic reconcile / maintenance sweep for silent deaths and stale tmux targets.
-
-### Issue 81 — User-origin goal protection fence — R9 follow-on
-
-**Status:** open. **Priority:** Critical. **Source:** goal-clear authority incident.
-
-Policy direction:
-- add durable goal origin / author metadata (user vs orchestrator vs system), not just audit-only `setBy`.
-- make `swarm_mark_goal_done` refuse user-origin goals by default.
-- keep batch-scoped goals separate from standing user goals.
-- provide an escalation-only path for explicit user confirmation when a user-origin goal should end.
-
-Acceptance:
-- orchestrator cannot silently clear a user-origin goal.
-- batch completion no longer implies standing goal completion.
-- the close decision is auditable and policy-based, not inferred from `nudges: 0` or batch state.
-
 ### Issue 80 — R7 small-fix consolidation (mock-llm crash path, evidence persistence, goal suppression, hygiene) — R7 consolidated
 
 **Status:** open. **Priority:** P1. **Source:** R7 ritual (a1-a5 + orchestrator-verified goal-nudge investigation).
