@@ -195,6 +195,7 @@ Rows 76 and 77 are closed above. Row 80 is now closed as well:
 Notes on evidence semantics:
 - per-node evidence is the durable source of truth for terminal close records;
 - legacy `.commit` is preserved for read-compat in status/printing only and is no longer dual-written.
+- R9 post-batch synthesis is reflected in Issues 81-83: goal-clear guard, agent retirement / GC, and Row 76 phase-1 sub-tasks with proxy-first metrics.
 
 ### Issue 79 — mock-LLM fixture provider: deterministic swarm-behavior testbed — R6 (user-proposed)
 
