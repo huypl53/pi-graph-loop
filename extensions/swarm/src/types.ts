@@ -314,6 +314,7 @@ export type SwarmGoal = {
 	setBy: string;                      // agentId that set it (orchestrator in practice; recorded for audit)
 	consecutiveNoResolveNudges: number; // monotonic; reset on orchestrator turn_end {stop} resolve
 	nudgeSeq?: number;                   // monotonic emit counter (NEVER reset, survives resolve) — idempotency key component so each nudge gets a fresh dedupe slot
+	nudgeIntervalMs?: number;           // optional durable per-goal idle interval override; positive integer milliseconds only
 	lastNudgeAt?: string;               // ISO; set on every successful nudge emission
 	lastResolvedAt?: string;            // ISO; set on every successful counter reset
 	backoffTicksRemaining?: number;     // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)

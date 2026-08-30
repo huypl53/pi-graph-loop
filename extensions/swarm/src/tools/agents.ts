@@ -14,6 +14,7 @@ import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority
 import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
 import { ERR_ORCHESTRATOR_PANE_REJECTED, FAST_MODEL, FAST_PROVIDER } from "../constants.ts";import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
+import { resolveGoalNudgeIntervalMs } from "../reconcile.ts";
 
 export function registerAgentsTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
@@ -541,50 +542,62 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		name: "swarm_set_goal",
 		label: "Swarm Set Goal",
 		description: "Persist a swarm-level goal. While a goal is set and every non-orchestrator agent is idle with no active task nodes, the orchestrator pump emits an idle-streak nudge (anti-loop: max MAX_CONSECUTIVE_NUDGES_DEFAULT consecutive, then 2-tick back-off). Orchestrator-only.",
-		promptGuidelines: ["Use `swarm_set_goal` to record the swarm's current goal in durable state. Resets the consecutiveNoResolveNudges counter; clears back-off.", "Pair with `swarm_mark_goal_done` when the goal is achieved or abandoned."],
+		promptGuidelines: ["Use `swarm_set_goal` to record or update the swarm's current goal in durable state.", "Pass `intervalMs` when you want a durable per-goal idle interval override.", "Pass `update: true` to update the existing goal in place without resetting counters.", "Pair with `swarm_mark_goal_done` when the goal is achieved or abandoned."],
 		parameters: Type.Object({
-			text: Type.String({ description: "Goal text (non-empty). Replaces any current goal and resets the nudge counter." }),
+			text: Type.Optional(Type.String({ description: "Goal text. Required for create mode; optional for update mode when only interval changes." })),
 			id: Type.Optional(Type.String({ description: "Optional explicit goalId. Omit to auto-generate." })),
+			intervalMs: Type.Optional(Type.Number({ description: "Optional durable idle interval override in milliseconds; positive values only." })),
+			update: Type.Optional(Type.Boolean({ description: "When true, update the current goal in place without resetting counters or goalId." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_set_goal", async () => {
 				const p = paths(ctx.cwd);
 				requireOrchestratorAuthority(currentAgentId(), "swarm_set_goal");
+				const isUpdate = Boolean(params.update);
 				const text = String(params.text || "").trim();
-				if (!text) throw new Error("swarm_set_goal: text must be non-empty");
+				if (!isUpdate && !text) throw new Error("swarm_set_goal: text must be non-empty");
 				const requestedId = params.id ? safeId(String(params.id)) : `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
 				const result = await withLock(p, async () => {
 					const st = await readState(p, ctx.cwd);
-				const previousId = st.goal?.id;
-				const ts = now();
-				// Issue 56 (live defect): re-setting a goal with the SAME goalId used to reset nudgeSeq
-				// to undefined — the next nudges would re-walk seq keys 1..N that already exist in the
-				// idempotency index (stale records from before the refresh), so every one returns
-				// duplicate_suppressed and the goal silently never re-nudges. nudgeSeq is monotonic for
-				// the lifetime of the goalId: when the id is REUSED (text refresh), inherit the prior seq;
-				// only a genuinely NEW id starts at 0. The counter/backoff fields reset either way (a
-				// refreshed goal starts a fresh nudge streak).
-				const inheritSeq = previousId === requestedId ? (st.goal?.nudgeSeq ?? 0) : 0;
-				st.goal = {
-					id: requestedId,
-					text,
-					setAt: ts,
-					setBy: currentAgentId(),
-					consecutiveNoResolveNudges: 0,
-					nudgeSeq: inheritSeq,
-				};
-				// A fresh goal never inherits the previous goal's nudge state. Bound C-1 ensures the
-				// `goal` field was `undefined` (not {}) before this assignment — a JSON-absent key
-				// parses to undefined, which `st.goal = { ... }` cleanly replaces.
-				delete st.goal.lastNudgeAt;
-				delete st.goal.lastResolvedAt;
-				delete st.goal.backoffTicksRemaining;
-				await trace(p, "goal.set", { goalId: requestedId, previousId, setBy: currentAgentId(), length: text.length, via: "tool" });
-				await writeState(p, st);
-				return { goalId: requestedId, previousId };
+					const previousId = st.goal?.id;
+					const ts = now();
+					const hasInterval = params.intervalMs !== undefined;
+					const requestedInterval = Number(params.intervalMs);
+					if (hasInterval && (!Number.isFinite(requestedInterval) || requestedInterval <= 0 || !Number.isInteger(requestedInterval))) {
+						throw new Error(`swarm_set_goal: invalid intervalMs ${params.intervalMs}`);
+					}
+					const nudgeIntervalMs = hasInterval ? Math.floor(requestedInterval) : undefined;
+					const defaultIntervalMs = resolveGoalNudgeIntervalMs();
+					if (isUpdate) {
+						if (!st.goal) return { updated: false, noop: true };
+						if (text) st.goal.text = text;
+						if (nudgeIntervalMs !== undefined) st.goal.nudgeIntervalMs = nudgeIntervalMs;
+						await trace(p, "goal.updated", { goalId: st.goal.id, previousId, via: "tool", updatedText: Boolean(text), updatedInterval: nudgeIntervalMs !== undefined });
+						await writeState(p, st);
+						return { updated: true, goalId: st.goal.id, previousId, goal: st.goal };
+					}
+					const goalId = requestedId;
+					const inheritSeq = previousId === requestedId ? (st.goal?.nudgeSeq ?? 0) : 0;
+					st.goal = {
+						id: goalId,
+						text,
+						setAt: ts,
+						setBy: currentAgentId(),
+						consecutiveNoResolveNudges: 0,
+						nudgeSeq: inheritSeq,
+						nudgeIntervalMs: nudgeIntervalMs ?? defaultIntervalMs,
+					};
+					delete st.goal.lastNudgeAt;
+					delete st.goal.lastResolvedAt;
+					delete st.goal.backoffTicksRemaining;
+					await trace(p, "goal.set", { goalId, previousId, setBy: currentAgentId(), length: text.length, via: "tool", nudgeIntervalMs: st.goal.nudgeIntervalMs });
+					await writeState(p, st);
+					return { updated: false, goalId, previousId, goal: st.goal };
+				});
+				if (result.noop) return textResult("No active goal to update.", result);
+				if (result.updated) return textResult(`Goal updated: ${result.goalId}`, result);
+				return textResult(`Goal set: ${result.goalId}`, result);
 			});
-			return textResult(`Goal set: ${result.goalId}`, result);
-		});
 		},
 	}))
 
@@ -601,20 +614,21 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				const p = paths(ctx.cwd);
 				requireOrchestratorAuthority(currentAgentId(), "swarm_mark_goal_done");
 				const result = await withLock(p, async () => {
-				const st = await readState(p, ctx.cwd);
-				if (!st.goal) return { cleared: true, noop: true };
-				if (params.goalId && safeId(params.goalId) !== st.goal.id) {
-					throw new Error(`swarm_mark_goal_done: goalId ${params.goalId} does not match current goal ${st.goal.id}`);
-				}
-				const clearedId = st.goal.id;
-				const nudges = st.goal.consecutiveNoResolveNudges;
-				delete st.goal;
-				await trace(p, "goal.cleared", { goalId: clearedId, nudges, by: currentAgentId(), via: "tool" });
-				await writeState(p, st);
-				return { cleared: true, clearedId, nudges };
+					const st = await readState(p, ctx.cwd);
+					if (!st.goal) return { cleared: true, noop: true };
+					if (params.goalId && safeId(params.goalId) !== st.goal.id) {
+						throw new Error(`swarm_mark_goal_done: goalId ${params.goalId} does not match current goal ${st.goal.id}`);
+					}
+					const clearedId = st.goal.id;
+					const nudges = st.goal.consecutiveNoResolveNudges;
+					delete st.goal;
+					await trace(p, "goal.cleared", { goalId: clearedId, nudges, by: currentAgentId(), via: "tool" });
+					await writeState(p, st);
+					return { cleared: true, clearedId, nudges };
+				});
+				return textResult(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, result);
 			});
-			return textResult(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, result);
-		});
 		},
 	}))
+
 }

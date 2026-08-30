@@ -8,6 +8,16 @@ import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Path
 import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
+
+export function resolveGoalNudgeIntervalMs(nudgeIntervalMs?: number | null): number {
+	if (typeof nudgeIntervalMs === "number" && Number.isFinite(nudgeIntervalMs) && nudgeIntervalMs > 0) return Math.floor(nudgeIntervalMs);
+	const raw = process.env.PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS;
+	if (raw !== undefined && String(raw).trim() !== "") {
+		const env = Number(raw);
+		if (Number.isFinite(env) && env > 0) return Math.floor(env);
+	}
+	return 5_000;
+}
 import { currentAgentId } from "./session.ts";
 import { deliver, deliverMessageLocked, deriveLifecycleFromTrigger, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
 import { claimOrchestratorLeader, ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
@@ -370,10 +380,11 @@ export async function evaluateIdleGoalNudgeLocked(
 		await trace(p, "goal.nudge.suppressed_by_actionable_graph", { goalId: goal.id, taskId: graphWork.taskId, nodeId: graphWork.nodeId, role: graphWork.role }).catch(() => {});
 		return { emitted: false, reason: "actionable_graph" };
 	}
+	const intervalMs = resolveGoalNudgeIntervalMs(goal.nudgeIntervalMs);
 	// Interval gate: the goal fallback fires only after a FULL continuous all-idle interval measured
 	// from the busy→all-idle edge (or from the last goal emission). Pump ticks between boundaries
 	// are no-ops — no burst.
-	const nextEligibleMs = idleState.nextGoalNudgeAt ? new Date(idleState.nextGoalNudgeAt).getTime() : allIdleSinceMs + GOAL_NUDGE_IDLE_INTERVAL_MS;
+	const nextEligibleMs = idleState.nextGoalNudgeAt ? new Date(idleState.nextGoalNudgeAt).getTime() : allIdleSinceMs + intervalMs;
 	if (nowMs < nextEligibleMs) {
 		if (!idleState.nextGoalNudgeAt) idleState.nextGoalNudgeAt = new Date(nextEligibleMs).toISOString();
 		return { emitted: false, reason: "idle_interval_pending" };
@@ -383,7 +394,7 @@ export async function evaluateIdleGoalNudgeLocked(
 	// one back-off slot. This keeps pump tick rate from affecting the cadence.
 	if (goal.backoffTicksRemaining && goal.backoffTicksRemaining > 0) {
 		goal.backoffTicksRemaining -= 1;
-		idleState.nextGoalNudgeAt = new Date(nowMs + GOAL_NUDGE_IDLE_INTERVAL_MS).toISOString();
+		idleState.nextGoalNudgeAt = new Date(nowMs + intervalMs).toISOString();
 		if (goal.backoffTicksRemaining === 0) {
 			await trace(p, "goal.nudge.backoff.exhausted", { goalId: goal.id, by: 1 }).catch(() => {});
 			return { emitted: false, reason: "backoff_just_exhausted" };
@@ -1256,38 +1267,35 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// Coalesce repeated backlog messages by logical surface key before the final send decision so a
 		// compacted / replaced session replays at most one freshest eligible notification per logical
 		// action.
-		const coalesced = new Map<string, { msg: SwarmMessage; dropped: string[] }>();
-		const staleSuppressed: Array<{ messageId: string; reason: string | null; evidence: string[]; idempotencyKey: string }> = [];
-		for (const msg of [...surfaceCandidates].sort(compareSurfaceCandidates).reverse()) {
+		const surfacePlan = [...surfaceCandidates].sort(compareSurfaceCandidates).reverse().map((msg) => {
 			const rec = st.messages[msg.id] || msg;
-			const v = await staleSurfaceReason(p, st, msg, taskIndex, nowMs);
+			return { msg, rec, groupKey: orchestratorSurfaceGroupKey(rec) };
+		});
+		const coalesced = new Map<string, { msg: SwarmMessage; dropped: string[] }>();
+		for (const item of surfacePlan) {
+			const v = await staleSurfaceReason(p, st, item.msg, taskIndex, nowMs);
 			if (v.stale) {
-				staleSuppressed.push({ messageId: msg.id, reason: v.reason, evidence: v.evidence, idempotencyKey: String(rec.idempotencyKey || msg.idempotencyKey || "") });
+				await traceStaleSuppressedOnce(p, "orchestrator_pump.surface", {
+					messageId: item.msg.id,
+					idempotencyKey: String(item.rec.idempotencyKey || item.msg.idempotencyKey || ""),
+					reason: v.reason,
+					evidence: v.evidence,
+				});
 				continue;
 			}
-			const groupKey = orchestratorSurfaceGroupKey(rec);
-			const existing = coalesced.get(groupKey);
+			const existing = coalesced.get(item.groupKey);
 			if (!existing) {
-				coalesced.set(groupKey, { msg, dropped: [] });
+				coalesced.set(item.groupKey, { msg: item.msg, dropped: [] });
 				continue;
 			}
 			const existingTs = new Date((existing.msg as any).updatedAt || existing.msg.createdAt || 0).getTime();
-			const incomingTs = new Date((msg as any).updatedAt || msg.createdAt || 0).getTime();
+			const incomingTs = new Date((item.msg as any).updatedAt || item.msg.createdAt || 0).getTime();
 			if (incomingTs >= existingTs) {
 				existing.dropped.push(existing.msg.id);
-				existing.msg = msg;
+				existing.msg = item.msg;
 			} else {
-				existing.dropped.push(msg.id);
+				existing.dropped.push(item.msg.id);
 			}
-		}
-		for (const drop of staleSuppressed) {
-			await trace(p, "notification.stale.suppressed", {
-				site: "orchestrator_pump.surface",
-				messageId: drop.messageId,
-				idempotencyKey: drop.idempotencyKey,
-				reason: drop.reason,
-				evidence: drop.evidence,
-			}).catch(() => {});
 		}
 		for (const [groupKey, entry] of coalesced.entries()) {
 			if (!entry.dropped.length) continue;
@@ -1509,7 +1517,7 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 				const rec = st.messages[msgId];
 				if (!rec) { staleReasons.push(`references missing message ${msgId}`); continue; }
 				if (rec.status === "dead_letter") staleReasons.push(`assignment message ${msgId} dead-lettered`);
-				else if (rec.requiresAck && !rec.ackedAt) {
+				else if (rec.requiresAck && !rec.ackedAt && !st.consumerReceipts?.orchestrator?.entries?.[msgId]) {
 					const sinceMs = Math.max(rec.injectedAt ? new Date(rec.injectedAt).getTime() : 0, rec.interceptedAt ? new Date(rec.interceptedAt).getTime() : 0, rec.createdAt ? new Date(rec.createdAt).getTime() : 0);
 					if (options.nowMs - sinceMs > ACK_MISSING_MS) nudgeReasons.push(`assignment message ${msgId} ack_missing`);
 				}
@@ -1829,6 +1837,7 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 		`agents by runtime: ${Object.entries(byRuntime).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`,
 		`agents by health: ${Object.entries(byHealth).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`,
 		`tasks: ${scanned} scanned, ${Object.entries(byTaskStatus).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}; staleNodes=${staleNodes}; ackMissing=${ackMissing}`,
+		st.goal ? `goal: ${st.goal.id} interval=${resolveGoalNudgeIntervalMs(st.goal.nudgeIntervalMs)}ms nudges=${st.goal.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}` : `goal: none`,
 		closureLine,
 		...taskLines,
 	];

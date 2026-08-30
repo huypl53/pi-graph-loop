@@ -22,14 +22,17 @@ const scratch = join(tmpdir(), `swarm-goal-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
 const tools = {};
+const commands = {};
 const pi = {
 	registerTool: (def) => { tools[def.name] = def; },
-	registerCommand: () => {},
+	registerCommand: (name, def) => { commands[name] = def.handler; },
 	on: () => {},
 	sendMessage: () => {},
 	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 };
 registerAgentsTools(pi);
+const { registerSwarmCommand } = await import(join(here, "src", "command.ts"));
+registerSwarmCommand(pi);
 
 const call = async (name, params, cwd = scratch) => {
 	const t = tools[name]; if (!t) throw new Error("no tool " + name);
@@ -69,7 +72,7 @@ console.log("\n[1] swarm_set_goal stores durable goal with required shape");
 	setAgentId("orchestrator");
 	const before = readSwarmState();
 	ok("precondition: orchestrator pseudo-agent seeded", !!before.agents?.orchestrator);
-	const r = await call("swarm_set_goal", { text: "Ship Issue 18", cwd: scratch });
+	const r = await call("swarm_set_goal", { text: "Ship Issue 18", intervalMs: 15000, cwd: scratch });
 	const st = readSwarmState();
 	const goal = st.goal;
 	ok("goal persisted", !!goal);
@@ -77,12 +80,13 @@ console.log("\n[1] swarm_set_goal stores durable goal with required shape");
 	ok("goal.text stored verbatim", goal.text === "Ship Issue 18");
 	ok("goal.setAt is ISO", typeof goal.setAt === "string" && goal.setAt.includes("T") && goal.setAt.endsWith("Z"));
 	ok("goal.setBy is orchestrator", goal.setBy === "orchestrator");
+	ok("goal.nudgeIntervalMs persisted", goal.nudgeIntervalMs === 15000);
 	ok("goal.consecutiveNoResolveNudges is 0 on fresh set", goal.consecutiveNoResolveNudges === 0);
 	ok("goal.lastNudgeAt cleared on fresh set", goal.lastNudgeAt === undefined);
 	ok("goal.lastResolvedAt cleared on fresh set", goal.lastResolvedAt === undefined);
 	ok("goal.backoffTicksRemaining cleared on fresh set", goal.backoffTicksRemaining === undefined);
 	ok("tool returns { goalId, previousId }", typeof r.details?.goalId === "string" && "previousId" in r.details);
-	ok("tool text mentions Goal set", /Goal set:/.test(r?.content?.[0]?.text || ""));
+	ok("tool returns success text", /Goal set:/.test(r?.content?.[0]?.text || ""));
 }
 
 console.log("\n[2] swarm_set_goal replaces existing goal (resets counter, clears back-off state)");
@@ -91,12 +95,14 @@ console.log("\n[2] swarm_set_goal replaces existing goal (resets counter, clears
 	st.goal.consecutiveNoResolveNudges = 3;
 	st.goal.lastNudgeAt = "2026-01-01T00:00:00.000Z";
 	st.goal.backoffTicksRemaining = 2;
+	st.goal.nudgeIntervalMs = 25000;
 	writeSwarmState(st);
 	const r = await call("swarm_set_goal", { text: "Ship Issue 19", cwd: scratch });
 	const after = readSwarmState().goal;
 	ok("consecutiveNoResolveNudges reset to 0", after.consecutiveNoResolveNudges === 0);
 	ok("lastNudgeAt cleared", after.lastNudgeAt === undefined);
 	ok("backoffTicksRemaining cleared", after.backoffTicksRemaining === undefined);
+	ok("existing interval falls back to default when not provided", after.nudgeIntervalMs === 5000);
 	ok("goal.id is different from previous (replacement, not idempotency)", r.details.goalId !== st.goal.id);
 }
 
@@ -172,7 +178,7 @@ console.log("\n[9] authority gate: non-orchestrator swarm_mark_goal_done throws"
 
 console.log("\n[10] durability across re-read (binding C-1: no st.goal back-fill)");
 {
-	await call("swarm_set_goal", { text: "durability test", cwd: scratch });
+	await call("swarm_set_goal", { text: "durability test", intervalMs: 22000, cwd: scratch });
 	const before = readSwarmState();
 	const goalId = before.goal.id;
 	// Mutate unrelated field on disk to confirm goal entry round-trips cleanly.
@@ -184,6 +190,7 @@ console.log("\n[10] durability across re-read (binding C-1: no st.goal back-fill
 	ok("goal survives disk round-trip", !!reloaded.goal);
 	ok("goal.id preserved", reloaded.goal.id === goalId);
 	ok("goal.text preserved", reloaded.goal.text === "durability test");
+	ok("goal.nudgeIntervalMs preserved", reloaded.goal.nudgeIntervalMs === 22000);
 	ok("goal.consecutiveNoResolveNudges preserved", reloaded.goal.consecutiveNoResolveNudges === 7);
 	// Sanity: a hypothetical legacy state with NO `goal` key would parse to `undefined` here.
 	const rawNoGoal = { ...raw };
@@ -192,6 +199,77 @@ console.log("\n[10] durability across re-read (binding C-1: no st.goal back-fill
 	const noGoal = readSwarmState();
 	ok("legacy state (no goal key) reads as goal: undefined", noGoal.goal === undefined);
 	await call("swarm_mark_goal_done", { cwd: scratch }); // cleanup
+}
+
+console.log("\n[11] /swarm goal set -i parses human time and goal show/status surface the effective interval");
+{
+	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	const notifications = [];
+	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
+	await commands.swarm("goal set -i 30m Show me", ctx);
+	ok("slash command persisted 30m as 1800000ms", readSwarmState().goal.nudgeIntervalMs === 1_800_000);
+	notifications.length = 0;
+	await commands.swarm("goal show", ctx);
+	const goalShow = notifications.join("\n");
+	ok("goal show mentions effective interval", /nudge interval: 1800000ms/.test(goalShow), goalShow);
+	notifications.length = 0;
+	await commands.swarm("status", ctx);
+	const statusText = notifications.join("\n");
+	ok("status rollup surfaces goal interval", /goal: .*interval=1800000ms/.test(statusText), statusText);
+	await commands.swarm("goal done", ctx);
+}
+
+console.log("\n[12] /swarm goal set --interval alias and invalid values");
+{
+	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	const notifications = [];
+	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
+	await commands.swarm("goal set --interval 900000 alias test", ctx);
+	ok("long alias persists raw ms", readSwarmState().goal.nudgeIntervalMs === 900000);
+	await commands.swarm("goal done", ctx);
+	await commands.swarm("goal set -i 1h hour test", ctx);
+	ok("short alias persists 1h as ms", readSwarmState().goal.nudgeIntervalMs === 3_600_000);
+	await commands.swarm("goal done", ctx);
+	notifications.length = 0;
+	await commands.swarm("goal set -i 0 bad", ctx);
+	ok("invalid zero interval rejected", /Usage: \/swarm goal set \[-i\|--interval <time>\]/.test(notifications.join("\n")) && /invalid interval/i.test(notifications.join("\n")), notifications.join("\n"));
+	notifications.length = 0;
+	await commands.swarm("goal set -i garbage bad", ctx);
+	ok("garbage interval rejected", /invalid interval/i.test(notifications.join("\n")), notifications.join("\n"));
+}
+
+console.log("\n[13] /swarm goal update preserves goalId and counters, and swarm_set_goal update=true updates in place");
+{
+	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	const notifications = [];
+	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
+	await commands.swarm("goal set -i 45s initial update test", ctx);
+	const seeded = readSwarmState().goal;
+	seeded.consecutiveNoResolveNudges = 4;
+	seeded.nudgeSeq = 7;
+	const seededId = seeded.id;
+	writeSwarmState({ ...readSwarmState(), goal: seeded });
+	notifications.length = 0;
+	await commands.swarm("goal update refreshed text", ctx);
+	let after = readSwarmState().goal;
+	ok("command update keeps goalId", after.id === seededId);
+	ok("command update changes text", after.text === "refreshed text");
+	ok("command update preserves counter", after.consecutiveNoResolveNudges === 4);
+	ok("command update preserves interval when omitted", after.nudgeIntervalMs === 45_000);
+	await commands.swarm("goal update -i 2m", ctx);
+	after = readSwarmState().goal;
+	ok("command update with interval keeps goalId", after.id === seededId);
+	ok("command update with interval changes interval", after.nudgeIntervalMs === 120_000);
+	const toolResult = await call("swarm_set_goal", { update: true, intervalMs: 9000, cwd: scratch });
+	after = readSwarmState().goal;
+	ok("tool update=true keeps goalId", after.id === seededId);
+	ok("tool update=true updates interval in place", after.nudgeIntervalMs === 9000);
+	ok("tool update=true does not clear counters", after.consecutiveNoResolveNudges === 4);
+	ok("tool update=true reports updated", toolResult.details.updated === true);
+	await commands.swarm("goal done", ctx);
 }
 
 console.log(`\n${fail === 0 ? "SWARM-GOAL PASS" : "SWARM-GOAL FAIL"} (${pass} passed, ${fail} failed)`);

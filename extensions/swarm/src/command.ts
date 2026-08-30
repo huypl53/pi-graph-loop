@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomUUID } from "node:crypto";
-import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
+import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveGoalNudgeIntervalMs, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
 import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from "./tmux.ts";
 import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, checkStallNotificationStale, deriveNodeAttention, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
 import { buildFlowSnapshot } from "./observability.ts";
@@ -24,8 +24,8 @@ import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompl
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
 // --inject/--no-inject --kind <v> --model <v> --provider <v> --caps <v> --yes; everything else goes to `rest`.
-function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string } {
-	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string } = { rest: [], force: false, kill: true, literal: false, enter: false, yes: false };
+function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string } {
+	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string } = { rest: [], force: false, kill: true, literal: false, enter: false, yes: false };
 	for (let i = 0; i < tokens.length; i++) {
 		const t = tokens[i];
 		if (t === "--force") out.force = true;
@@ -39,12 +39,25 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 		else if (t === "--model") out.model = tokens[++i];
 		else if (t === "--provider") out.provider = tokens[++i];
 		else if (t === "--caps") out.caps = tokens[++i];
+		else if (t === "--interval" || t === "-i") out.interval = tokens[++i];
 		else out.rest.push(t);
 	}
 	return out;
 }
 
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set <text> | goal done [<goalId>] (show read-only; set/done orchestrator-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
+function parseGoalSetInterval(raw: string): { ok: true; ms: number } | { ok: false; error: string } {
+	const input = String(raw || "").trim().toLowerCase();
+	if (!input) return { ok: false, error: "missing interval" };
+	const m = input.match(/^(\d+)(ms|s|m|h)?$/);
+	if (!m) return { ok: false, error: `invalid interval "${raw}"` };
+	const value = Number(m[1]);
+	const unit = m[2] || "ms";
+	if (!Number.isFinite(value) || value <= 0) return { ok: false, error: `invalid interval "${raw}"` };
+	const ms = unit === "h" ? value * 3_600_000 : unit === "m" ? value * 60_000 : unit === "s" ? value * 1_000 : value;
+	if (!Number.isFinite(ms) || ms <= 0) return { ok: false, error: `invalid interval "${raw}"` };
+	return { ok: true, ms: Math.floor(ms) };
+}
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set [-i|--interval <time>] <text> | goal update [-i|--interval <time>] [<text>] | goal done [<goalId>] (show read-only; set/update/done orchestrator-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -1020,16 +1033,36 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const backoff = g.backoffTicksRemaining ? `, backoff ${g.backoffTicksRemaining} tick(s)` : "";
 					const lastNudge = g.lastNudgeAt ? `, last nudge ${g.lastNudgeAt}` : "";
 					ctx.ui.notify(
-						`Goal ${g.id}\n  text: ${g.text}\n  set: ${g.setAt} by ${g.setBy} (${age} min ago)\n  idle-streak nudges: ${g.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}${lastNudge}${backoff}`,
+						`Goal ${g.id}
+  text: ${g.text}
+  set: ${g.setAt} by ${g.setBy} (${age} min ago)
+  nudge interval: ${resolveGoalNudgeIntervalMs(g.nudgeIntervalMs)}ms${g.nudgeIntervalMs ? ` (durable override ${g.nudgeIntervalMs}ms)` : " (default)"}
+  idle-streak nudges: ${g.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}${lastNudge}${backoff}`,
 						"info",
 					);
 					return;
 				}
-				if (sub === "set") {
-						const text = rest.join(" ").trim();
-						if (!text) { ctx.ui.notify("Usage: /swarm goal set <text>", "warning"); return; }
+				if (sub === "set" || sub === "update") {
+						const isUpdate = sub === "update";
+						const flags = parseFlags(rest);
+						const text = flags.rest.join(" ").trim();
+						const rawInterval = flags.interval !== undefined ? String(flags.interval).trim() : "";
+						const hasInterval = rawInterval.length > 0;
+						const parsedInterval = hasInterval ? parseGoalSetInterval(rawInterval) : null;
+						if (hasInterval && !parsedInterval?.ok) { ctx.ui.notify(`Usage: /swarm goal ${isUpdate ? "update" : "set"} [-i|--interval <time>] [<text>] (${parsedInterval?.error}; time accepts raw ms, s, m, h)`, "warning"); return; }
+						if (!isUpdate && !text) { ctx.ui.notify("Usage: /swarm goal set [-i|--interval <time>] <text>", "warning"); return; }
+						if (isUpdate && !text && !hasInterval) { ctx.ui.notify("Usage: /swarm goal update [-i|--interval <time>] [<text>]", "warning"); return; }
+						const intervalMs = hasInterval ? parsedInterval!.ms : (isUpdate ? undefined : resolveGoalNudgeIntervalMs());
 						const st = await withLock(p, async () => {
 							const s = await readState(p, ctx.cwd);
+							if (isUpdate) {
+								if (!s.goal) return { noop: true, updated: false };
+								if (text) s.goal.text = text;
+								if (intervalMs !== undefined) s.goal.nudgeIntervalMs = intervalMs;
+								await trace(p, "goal.updated", { goalId: s.goal.id, via: "command", updatedText: Boolean(text), updatedInterval: intervalMs !== undefined });
+								await writeState(p, s);
+								return { updated: true, goal: s.goal };
+							}
 							const ts = now();
 							const goalId = `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
 							const previousId = s.goal?.id;
@@ -1039,18 +1072,25 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 								setAt: ts,
 								setBy: "orchestrator",
 								consecutiveNoResolveNudges: 0,
+								nudgeSeq: previousId === goalId ? (s.goal?.nudgeSeq ?? 0) : 0,
+								nudgeIntervalMs: intervalMs ?? defaultIntervalMs,
 							};
 							delete s.goal.lastNudgeAt;
 							delete s.goal.lastResolvedAt;
 							delete s.goal.backoffTicksRemaining;
-							await trace(p, "goal.set", { goalId, previousId, via: "command", length: text.length });
+							await trace(p, "goal.set", { goalId, previousId, via: "command", length: text.length, nudgeIntervalMs: s.goal.nudgeIntervalMs });
 							await writeState(p, s);
-							return s.goal;
+							return { updated: false, goal: s.goal, goalId, previousId };
 						});
-						ctx.ui.notify(`Goal set: ${st.id} — "${st.text.slice(0, 80)}${st.text.length > 80 ? "…" : ""}"`, "info");
+						if (st.noop) { ctx.ui.notify("No active swarm goal to update.", "info"); return; }
+						if (isUpdate) {
+							ctx.ui.notify(`Goal updated: ${st.goal.id} — "${st.goal.text.slice(0, 80)}${st.goal.text.length > 80 ? "…" : ""}"${st.goal.nudgeIntervalMs ? ` (nudge interval ${st.goal.nudgeIntervalMs}ms)` : ""}`, "info");
+							return;
+						}
+						ctx.ui.notify(`Goal set: ${st.goalId} — "${st.goal.text.slice(0, 80)}${st.goal.text.length > 80 ? "…" : ""}"${st.goal.nudgeIntervalMs ? ` (nudge interval ${st.goal.nudgeIntervalMs}ms)` : ""}`, "info");
 						return;
 					}
-					if (sub === "done") {
+				if (sub === "done") {
 						const goalIdArg = rest.shift();
 						const result = await withLock(p, async () => {
 							const s = await readState(p, ctx.cwd);
@@ -1066,7 +1106,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						ctx.ui.notify(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, "info");
 						return;
 					}
-					ctx.ui.notify("Usage: /swarm goal show | set <text> | done [<goalId>]", "warning");
+					ctx.ui.notify("Usage: /swarm goal show | set [-i|--interval <time>] <text> | update [-i|--interval <time>] [<text>] | done [<goalId>]", "warning");
 					return;
 				}
 				if (cmd === "protocol") {

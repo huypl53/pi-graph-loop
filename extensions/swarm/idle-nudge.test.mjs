@@ -206,9 +206,31 @@ console.log("\n[B] goal nudges are interval-spaced");
 }
 
 // =============================================================
-// C. Busy effective agents reset the idle epoch; ghosts do not
+// C. Goal-specific interval overrides env/default interval
 // =============================================================
-console.log("\n[C] busy agent resets idle epoch; ghosts ignored");
+console.log("\n[C] goal-specific interval overrides env/default interval");
+{
+	await setup();
+	const t0 = Date.now();
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		st.goal.nudgeIntervalMs = 2500;
+		await writeState(p, st);
+	});
+	let r = await tickGoal(t0);
+	ok("first tick starts idle epoch with override", r.emitted === false && r.reason === "idle_interval_pending");
+	r = await tickGoal(t0 + 2499);
+	ok("override interval still suppresses at t-1", r.emitted === false && r.reason === "idle_interval_pending");
+	r = await tickGoal(t0 + 2500);
+	ok("override interval emits at exact boundary", r.emitted === true && r.reason === "emitted");
+	const st = await getGoalState();
+	ok("durable interval remains on goal", st.goal.nudgeIntervalMs === 2500);
+}
+
+// =============================================================
+// D. Busy effective agents reset the idle epoch; ghosts do not
+// =============================================================
+console.log("\n[D] busy agent resets idle epoch; ghosts ignored");
 {
 	await setup();
 	const t0 = Date.now();
@@ -252,9 +274,9 @@ console.log("\n[C] busy agent resets idle epoch; ghosts ignored");
 }
 
 // =============================================================
-// D. Graph nudge wins over goal fallback
+// E. Graph nudge wins over goal fallback
 // =============================================================
-console.log("\n[D] graph nudge wins over goal fallback");
+console.log("\n[E] graph nudge wins over goal fallback");
 {
 	await setup({ taskId: "task-graph", ageMs: 120_000, withTask: true });
 	const t0 = Date.now();
@@ -267,9 +289,9 @@ console.log("\n[D] graph nudge wins over goal fallback");
 }
 
 // =============================================================
-// E. Deferred stale nudges are suppressed at surface time (direct predicate coverage)
+// F. Deferred stale nudges are suppressed at surface time (direct predicate coverage)
 // =============================================================
-console.log("\n[E] deferred stale nudges are suppressed at surface time");
+console.log("\n[F] deferred stale nudges are suppressed at surface time");
 {
 	await setup({ taskId: "task-surface", ageMs: 120_000, withTask: true });
 	const t0 = Date.now();

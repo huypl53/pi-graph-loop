@@ -487,11 +487,13 @@ and the same dedupe/cooldown/cap contract. Every message tells the recipient the
 
 The orchestrator's durable goal plus an anti-loop nudge that fires when the swarm has nothing to do.
 
-- **Set the goal**: `/swarm goal set <text>` or `swarm_set_goal({ text })`. The orchestrator-only
-  tool/command stores `swarm-state.json.goal = { id, text, setAt, setBy, consecutiveNoResolveNudges }`.
+- **Set the goal**: `/swarm goal set [--interval <ms>] <text>` or `swarm_set_goal({ text, intervalMs? })`. The orchestrator-only
+  tool/command stores `swarm-state.json.goal = { id, text, setAt, setBy, consecutiveNoResolveNudges, nudgeIntervalMs? }`.
   Setting a new goal replaces the old one, resets `consecutiveNoResolveNudges` to 0, and clears any
   back-off state (`backoffTicksRemaining`, `lastNudgeAt`, `lastResolvedAt`) so a new intent never
-  inherits the previous goal's counter.
+  inherits the previous goal's counter. When `nudgeIntervalMs` is absent the pump falls back to
+  `PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS` (default 60s); when present, the durable per-goal value
+  controls the goal nudge cadence and is surfaced by `/swarm goal show` and `/swarm status`.
 - **Idle predicate** (every pump tick, inside the existing `withLock` in `pumpOrchestratorMailbox`):
   every non-orchestrator agent must be `runtimeStatus: "idle"` AND zero task nodes may be in
   `assigned` or `in_progress` status across `tasks/<taskId>/task.json`. If either fails, no nudge.
