@@ -336,6 +336,9 @@ const readEvents = (p) => {
 	console.log("\n[C8] backlog coalescing — newest eligible survives, stale suppressed");
 	const p = setupScratch();
 	const nowMs = Date.now();
+	const tracesDir = join(scratch, ".pi/swarm/traces");
+	rmSync(tracesDir, { recursive: true, force: true });
+	mkdirSync(tracesDir, { recursive: true });
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
 		ensureOrchestrator(st, scratch, p);
@@ -350,20 +353,69 @@ const readEvents = (p) => {
 		st.consumerReceipts = { orchestrator: { entries: {}, revision: 1 } };
 		await writeState(p, st);
 		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
-		const lines = [
-			"msg-old",
-			"msg-fresh-1",
-			"msg-fresh-2",
-		].map((id) => JSON.stringify({ swarmId: "test", from: "orchestrator", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id, to: "orchestrator", subject: st.messages[id].subject, body: st.messages[id].body, requiresAck: false, createdAt: st.messages[id].createdAt, updatedAt: st.messages[id].updatedAt, idempotencyKey: st.messages[id].idempotencyKey }));
+		const lines = ["msg-old", "msg-fresh-1", "msg-fresh-2"].map((id) => JSON.stringify({ swarmId: "test", from: "orchestrator", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id, to: "orchestrator", subject: st.messages[id].subject, body: st.messages[id].body, requiresAck: false, createdAt: st.messages[id].createdAt, updatedAt: st.messages[id].updatedAt, idempotencyKey: st.messages[id].idempotencyKey }));
 		writeFileSync(mailboxFile, lines.join("\n") + "\n");
 	});
 	const sentMessages = [];
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
 	await pumpOrchestratorMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8");
-	const evs = readEvents(p);
-	ok("C8: stale backlog item suppressed", evs.some((e) => e.event === "notification.stale.suppressed" && e.reason === "idle_epoch_advanced"), evs.filter((e) => e.event === "notification.stale.suppressed"));
+	let evs = readEvents(p);
+	ok("C8: stale backlog item suppressed", evs.filter((e) => e.event === "notification.stale.suppressed" && e.site === "orchestrator_pump.surface" && e.messageId === "msg-old").length === 1, evs.filter((e) => e.event === "notification.stale.suppressed"));
 	ok("C8: duplicate backlog coalesced", evs.some((e) => e.event === "notification.coalesced.suppressed" && e.count === 1), evs.filter((e) => e.event === "notification.coalesced.suppressed"));
 	ok("C8: only one fresh surfaced message sent", sentMessages.length === 1, sentMessages.map((x) => x.o));
+
+	// Receipt gate regression: a durable receipt suppresses ack_missing on task sweep.
+	const { reconcileTasks } = await import(join(here, "src/reconcile.ts"));
+	const receiptTaskId = "task-receipt-gate";
+	const receiptTask = {
+		version: 1, taskId: receiptTaskId, title: "receipt gate", goal: "receipt gate", status: "in_progress", priority: "normal",
+		createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), owner: "orchestrator", workflow: "feature-dev",
+		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
+		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
+		nodes: { n1: { status: "assigned", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: ["msg-receipt"], attempts: 1, assignee: "worker-1" } },
+		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+	};
+	await withLock(p, async () => {
+		const st = await readState(p, scratch);
+		const { taskPaths, writeTaskState } = await import(join(here, "src/state.ts"));
+		const tp = taskPaths(p, receiptTaskId);
+		mkdirSync(tp.root, { recursive: true });
+		writeTaskState(tp, receiptTask);
+		st.messages["msg-receipt"] = { id: "msg-receipt", from: "worker-1", to: "orchestrator", status: "injected", requiresAck: true, conversationId: `task:${receiptTaskId}:n1`, createdAt: new Date(nowMs - 400_000).toISOString(), updatedAt: new Date(nowMs - 400_000).toISOString(), attempts: 1 };
+		st.consumerReceipts = { orchestrator: { entries: { "msg-receipt": { surfacedAt: new Date(nowMs - 300_000).toISOString(), requiresAck: true, conversationId: `task:${receiptTaskId}:n1`, fingerprint: "fp" } }, revision: 1 } };
+		await writeState(p, st);
+	});
+	const receiptActions = await reconcileTasks({ exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, p, await readState(p, scratch), { dryRun: true, nowMs });
+	ok("C8: receipted message skipped by ack_missing sweep", !receiptActions.some((a) => a.reason.includes("ack_missing") || a.action === "task_node_nudge"), receiptActions);
+
+	// Stale trace should be one-shot across repeated pump ticks for the same stale message.
+	const staleTaskId = "task-stale-trace";
+	const staleTask = {
+		version: 1, taskId: staleTaskId, title: "stale trace", goal: "stale trace", status: "done", priority: "normal",
+		createdAt: new Date(nowMs - 30_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), owner: "orchestrator", workflow: "feature-dev",
+		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
+		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
+		nodes: { n1: { status: "done", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 } },
+		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+	};
+	await withLock(p, async () => {
+		const st = await readState(p, scratch);
+		const { taskPaths, writeTaskState } = await import(join(here, "src/state.ts"));
+		const tp = taskPaths(p, staleTaskId);
+		mkdirSync(tp.root, { recursive: true });
+		writeTaskState(tp, staleTask);
+		st.messages["msg-stale"] = { id: "msg-stale", from: "worker-1", to: "orchestrator", status: "injected", requiresAck: true, conversationId: `task:${staleTaskId}:n1`, createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 20_000).toISOString(), attempts: 1 };
+		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
+		writeFileSync(mailboxFile, `${JSON.stringify({ swarmId: "test", from: "worker-1", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id: "msg-stale", to: "orchestrator", requiresAck: true, conversationId: `task:${staleTaskId}:n1`, createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 20_000).toISOString(), body: "stale", attempts: 1 })}
+`, { flag: "a" });
+		await writeState(p, st);
+	});
+	await pumpOrchestratorMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8_repeat1");
+	evs = readEvents(p);
+	await pumpOrchestratorMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8_repeat2");
+	evs = readEvents(p);
+	const staleEvents = evs.filter((e) => e.event === "notification.stale.suppressed" && e.site === "orchestrator_pump.surface" && e.messageId === "msg-stale");
+	ok("C8: stale suppression traced once across repeated pump ticks", staleEvents.length === 1, staleEvents);
 }
 
 // === C1: pi.sendMessage vs pi.sendUserMessage (real grep guard) ===

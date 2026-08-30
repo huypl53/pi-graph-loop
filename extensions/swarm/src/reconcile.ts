@@ -143,7 +143,7 @@ async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string, p: Pat
 				// to the orchestrator rather than a worker).
 				const staleCheck = checkStallNotificationStale(st, task, nodeId, node.assignee || "orchestrator", nowMs);
 				if (staleCheck.stale) {
-					await trace(p, "notification.stale.suppressed", { site: "reconcile.graph_advance_nudge", taskId, nodeId, reason: staleCheck.reason, evidence: staleCheck.evidence });
+					await traceStaleSuppressedOnce(p, "reconcile.graph_advance_nudge", { messageId: key, idempotencyKey: key, reason: staleCheck.reason, evidence: staleCheck.evidence });
 					ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node stale");
 					continue;
 				}
@@ -198,7 +198,7 @@ export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string,
 		// placeholder is "orchestrator" (the only recipient of this nudge anyway).
 		const staleCheck = checkStallNotificationStale(st, task, startId, startNode.assignee || "orchestrator", nowMs);
 		if (staleCheck.stale) {
-			await trace(p, "notification.stale.suppressed", { site: "reconcile.initial_ready_nudge", taskId, nodeId: startId, reason: staleCheck.reason, evidence: staleCheck.evidence });
+			await traceStaleSuppressedOnce(p, "reconcile.initial_ready_nudge", { messageId: key, idempotencyKey: key, reason: staleCheck.reason, evidence: staleCheck.evidence });
 			ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node stale");
 			continue;
 		}
@@ -398,7 +398,7 @@ export async function evaluateIdleGoalNudgeLocked(
 	if (goal.consecutiveNoResolveNudges >= MAX_CONSECUTIVE_NUDGES_DEFAULT) {
 		if (!goal.backoffTicksRemaining) {
 			goal.backoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
-			idleState.nextGoalNudgeAt = new Date(nowMs + GOAL_NUDGE_IDLE_INTERVAL_MS).toISOString();
+			idleState.nextGoalNudgeAt = new Date(nowMs + intervalMs).toISOString();
 			await trace(p, "goal.nudge.backoff", { goalId: goal.id, nudges: goal.consecutiveNoResolveNudges, max: MAX_CONSECUTIVE_NUDGES_DEFAULT, backoffTicks: GOAL_NUDGE_BACKOFF_TICKS }).catch(() => {});
 		}
 		return { emitted: false, reason: "max_nudges" };
@@ -447,7 +447,7 @@ export async function evaluateIdleGoalNudgeLocked(
 	goal.nudgeSeq = nudgeSeq;
 	goal.lastNudgeAt = new Date(nowMs).toISOString();
 	idleState.lastGoalNudgeAt = goal.lastNudgeAt;
-	idleState.nextGoalNudgeAt = new Date(nowMs + GOAL_NUDGE_IDLE_INTERVAL_MS).toISOString();
+	idleState.nextGoalNudgeAt = new Date(nowMs + intervalMs).toISOString();
 	idleState.goalConsecutiveNoResolveNudges = goal.consecutiveNoResolveNudges;
 	idleState.goalBackoffTicksRemaining = goal.backoffTicksRemaining;
 	await trace(p, "goal.idle_nudge", {
@@ -971,6 +971,26 @@ function compareSurfaceCandidates(a: { id: string; createdAt?: string; updatedAt
 	return a.id.localeCompare(b.id);
 }
 
+const staleSuppressionTraceSeen = new Set<string>();
+
+async function traceStaleSuppressedOnce(
+	p: Paths,
+	site: string,
+	payload: { messageId?: string; idempotencyKey?: string | null; reason: string | null; evidence: string[] },
+): Promise<boolean> {
+	const key = String(payload.messageId || payload.idempotencyKey || "");
+	if (staleSuppressionTraceSeen.has(key)) return false;
+	staleSuppressionTraceSeen.add(key);
+	await trace(p, "notification.stale.suppressed", {
+		site,
+		messageId: payload.messageId,
+		idempotencyKey: payload.idempotencyKey,
+		reason: payload.reason,
+		evidence: payload.evidence,
+	}).catch(() => {});
+	return true;
+}
+
 export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reason: string) {
 	if (currentAgentId() !== "orchestrator") return { delivered: 0, ids: [] as string[] };
 	// Read idle once, up front. Non-TUI modes have no live agent loop to trigger, so they are treated as
@@ -1158,13 +1178,12 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 				const key = v.reason === "retrigger_budget_exhausted" ? "retrigger_budget_exhausted" : v.reason;
 				suppressedCounts[key] = (suppressedCounts[key] || 0) + 1;
 				if (key === "node_reassigned" || key === "node_terminal" || key === "task_done" || key === "task_failed" || key === "task_cancelled" || key === "task_missing" || key === "node_missing") {
-					await trace(p, "notification.stale.suppressed", {
-						site: "orchestrator_pump.surface",
+					await traceStaleSuppressedOnce(p, "orchestrator_pump.surface", {
 						messageId: m.id,
 						idempotencyKey: rec.idempotencyKey || m.idempotencyKey || null,
 						reason: key,
 						evidence: [key],
-					}).catch(() => {});
+					});
 				}
 			}
 		}
