@@ -46,7 +46,10 @@ export type ProviderErrorKind = "quota" | "auth" | "rate_limit" | "transient" | 
 
 export function classifyProviderError(message: string): ProviderErrorKind {
 	const m = (message || "").toLowerCase();
-	if (/quota|insufficient|billing|balance|exceeded your current quota|prepaid/.test(m)) return "quota";
+	// Issue 70: usage_limit_reached / "usage limit has been reached" (live 429 quota bodies) must
+	// classify quota — they route into the pool's immediate-bench policy (lastBenchReason=quota).
+	// This branch runs BEFORE the 429/rate_limit branch so plain "429 rate limit" stays rate_limit.
+	if (/quota|insufficient|billing|balance|exceeded your current quota|prepaid|usage_limit|usage limit/.test(m)) return "quota";
 	if (/rate.?limit|too many requests|429|overloaded/.test(m)) return "rate_limit";
 	if (/invalid api key|unauthorized|forbidden|401|403|authentication|api key/.test(m)) return "auth";
 	if (/timeout|timed out|econnrefused|econnreset|enotfound|5\d\d|network|connection/.test(m)) return "transient";
@@ -116,11 +119,27 @@ export type PoolHealthState = {
 // In-process only — never persisted. See pool-retry.test.mjs for fixture coverage.
 export type EngineRetryIncident = {
 	providerKey: string;    // `${provider}/${model}` of the slot being retried by the engine
-	errorMessage: string;   // normalized (slice 0..200) for comparison
+	kind: ProviderErrorKind; // Issue 70: classified error kind — part of the incident identity
+	errorMessage: string;   // Issue 70: scrubErrorIdentity() output (digits erased, lowercase) for
+	                        // comparison — raw text equality broke on mutating 429 bodies
 	firstSeenAt: number;    // ms epoch — first turn_end {error} for this incident
 	lastSeenAt: number;     // ms epoch — most recent turn_end {error} for this incident
 	count: number;          // number of consecutive turn_end {error} events in this incident
 };
+
+// Issue 70: stable incident-identity string for an error message. Erases every digit run
+// (resets_in_seconds, resets_at, request ids, ports, counts) and collapses whitespace so
+// provider 429 bodies that mutate per-second normalize to ONE identity while genuinely
+// different messages stay distinct. Paired with classifyProviderError kind + providerKey this
+// forms the engine-retry incident identity (replaces raw error-text equality).
+export function scrubErrorIdentity(message: string): string {
+	return (message || "")
+		.toLowerCase()
+		.replace(/\d+/g, "n")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 200);
+}
 
 export type MessageRecord = {
 	id: string;

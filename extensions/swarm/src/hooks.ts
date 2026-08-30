@@ -5,7 +5,7 @@ import type { MessageResponseStatus, Paths } from "./types.ts";
 import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_KEY_SETTLE_STALE, ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, formatNotifyKey } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
 import type { ModelSlot } from "./types.ts";
-import { classifyProviderError } from "./types.ts";
+import { classifyProviderError, scrubErrorIdentity, type EngineRetryIncident } from "./types.ts";
 import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "./pool.ts";
 import { deliverMessageLocked, findIdempotentMessage, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
@@ -97,18 +97,12 @@ export function _resetSwapChainForTests(agentId: string) {
 // Issue 19: ENGINE_MAX_RETRIES + ENGINE_RETRY_WINDOW_MS moved to constants.ts so they share a
 // single source of truth with the rest of the gate/pool constants. The values are unchanged.
 
-// Per-agent engine-retry incident. Same shape as EngineRetryIncident in types.ts; we keep the
-// runtime value here as a plain object for fast Map.set / Map.get inside the hot path. Cleared on
-// session_start, session_shutdown, agent_settled, and any successful turn_end (the engine recovered
-// on a later retry attempt). NEVER persisted — persistence would create a stuck "exhausted" gate
-// across restarts that have lost the engine retry context.
-const engineRetryIncidents = new Map<string, {
-	providerKey: string;
-	errorMessage: string;
-	firstSeenAt: number;
-	lastSeenAt: number;
-	count: number;
-}>();
+// Per-agent engine-retry incident (Issue 70: the runtime shape IS the shared
+// EngineRetryIncident type from types.ts — identity = providerKey + kind + scrubbed message).
+// Cleared on session_start, session_shutdown, agent_settled, and any successful turn_end (the
+// engine recovered on a later retry attempt). NEVER persisted — persistence would create a stuck
+// "exhausted" gate across restarts that have lost the engine retry context.
+const engineRetryIncidents = new Map<string, EngineRetryIncident>();
 
 // Exposed for tests + the `/swarm pool rotate` manual-override path so a caller can verify the
 // engine-retry gate owns its own incident lifecycle (manual override does NOT clear it). Returns
@@ -385,16 +379,24 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		// ENGINE_RETRY_WINDOW_MS; only when the count reaches ENGINE_MAX_RETRIES do we conclude the
 		// engine has exhausted retries on this slot and allow the swap path to fire. Below the
 		// threshold, we trace the gated event and return — no swap, no bench, no streak bump.
-		// A different providerKey OR errorMessage OR a gap > ENGINE_RETRY_WINDOW_MS starts a FRESH
-		// incident (the old one aged out via the window check, not via a timer that could miss).
+		// A different providerKey OR a gap > ENGINE_RETRY_WINDOW_MS starts a FRESH incident (the old
+		// one aged out via the window check, not via a timer that could miss).
+		// Issue 70: the incident identity is the STABLE classification (providerKey + kind +
+		// digit-scrubbed message), NOT raw error-text equality. Provider 429 usage_limit_reached
+		// bodies embed a per-second-mutating resets_in_seconds; raw equality started a fresh
+		// incident at count:1 every turn so the threshold was never reached and quota-exhausted
+		// slots were never benched/rotated (live: 39x gated count:1, 0x exhausted). Scrubbed
+		// identity + kind keeps distinct transient messages distinct while collapsing mutating
+		// quota bodies into one incident.
 		const providerKey = slotKey(currentSlot);
-		const normErr = errorText.slice(0, 200);
+		const scrubErr = scrubErrorIdentity(errorText);
 		const prevIncident = engineRetryIncidents.get(agentId);
 		let engineExhausted = false;
 		let incidentCount = 1;
 		if (prevIncident
 			&& prevIncident.providerKey === providerKey
-			&& prevIncident.errorMessage === normErr
+			&& prevIncident.kind === kind
+			&& prevIncident.errorMessage === scrubErr
 			&& (nowMs - prevIncident.lastSeenAt) <= ENGINE_RETRY_WINDOW_MS) {
 			prevIncident.count++;
 			prevIncident.lastSeenAt = nowMs;
@@ -403,7 +405,8 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		} else {
 			engineRetryIncidents.set(agentId, {
 				providerKey,
-				errorMessage: normErr,
+				kind,
+				errorMessage: scrubErr,
 				firstSeenAt: nowMs,
 				lastSeenAt: nowMs,
 				count: 1,
@@ -420,7 +423,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				count: incidentCount,
 				windowMs: ENGINE_RETRY_WINDOW_MS,
 				threshold: ENGINE_MAX_RETRIES,
-				error: normErr.slice(0, 120),
+				error: errorText.slice(0, 120),
 			}).catch(() => {});
 			return;
 		}
