@@ -14,6 +14,13 @@ pi --model glm-5.1 --provider zai-coding-cn   # ONLY if zai-coding-cn has a key 
 pi --model gpt-5.4-mini --provider openai
 ```
 
+## swarm feature coding: mock-LLM fixtures are compulsory
+- every swarm feature change (new feature, fix, or behavior modification in extensions/swarm/) must ship a mock-llm fixture/scenario exercising the changed behavior end-to-end before it can be considered done
+- the fixture replays the agent-side of the interaction deterministically (extensions/mock-llm/fixtures/*.jsonl — one JSONL line per scripted turn; model id = fixture filename stem); validation lanes run `pi --provider mock-llm --model <scenario> -e ./extensions/mock-llm -e ./extensions/swarm`
+- pipeline implication: the plan node names the fixture(s) to author; the implement node authors them; the test node runs a real mock-llm lane and cites transcripts (.pi/mock-llm/transcripts/) as evidence; the review node checks the scenario actually covers the changed code path (not just the happy path)
+- if mocking streaming behavior proves impractical for a specific surface, an OpenAI-completions-compatible mock (static canned completion responses) is the fallback — state which and why in the plan artifact
+- incident-derived fixtures (429-mid-edit, edit-not-persisted, response-missing-settle, settled-with-open-assignment, drift-then-wake) are the template for scenario quality: deterministic, timing-controlled (delayMs), abortable hangs, explicit error injection, lowercase pi-builtin tool names
+
 ## extension docs map
 - canonical swarm docs live under `docs/swarm/`
 - start with `docs/swarm/index.md`, then read `docs/swarm/architecture.md` and `docs/swarm/contributor-guide.md` before changing swarm behavior
