@@ -1,0 +1,2 @@
+# settled-with-open-assignment: the assistant returns a harmless-looking response while the task remains open.
+{"name":"settled with open assignment","stopReason":"stop","events":[{"type":"toolcall","delayMs":15,"name":"Read","id":"read-1","arguments":{"path":"task.md"}},{"type":"text","delayMs":10,"text":"I’ve inspected the task and I’m waiting for the next step.","chunks":["I’ve inspected ","the task and I’m waiting for the next step."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

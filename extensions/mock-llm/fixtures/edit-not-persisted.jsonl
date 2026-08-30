@@ -1,0 +1,2 @@
+# edit-not-persisted: the model says it completed an edit, but the fixture only proves the response path.
+{"name":"edit not persisted","stopReason":"stop","events":[{"type":"toolcall","delayMs":20,"name":"Edit","id":"edit-1","arguments":{"path":"notes.txt","content":"this change is only scripted by the mock provider"}},{"type":"text","delayMs":10,"text":"Done — the edit is applied.","chunks":["Done — ","the edit is applied."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

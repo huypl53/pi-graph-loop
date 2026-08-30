@@ -1,0 +1,2 @@
+# response-missing-settle: starts responding, then hangs until aborted so the caller settles with no result.
+{"name":"response missing settle","events":[{"type":"text","delayMs":15,"text":"I’m still working on it.","chunks":["I’m still ","working on it."]},{"type":"hang","delayMs":10,"until":"abort"}]}
