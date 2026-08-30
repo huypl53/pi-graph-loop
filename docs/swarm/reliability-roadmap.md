@@ -87,7 +87,9 @@ the AC). Evidence: `extensions/swarm/pool-quota.test.mjs` (19 assertions incl. R
 isolated bare-pi UAT `r70-quota-uat3-094742` (counts 1→2→3, `pool.engine_retry_exhausted`,
 `pool.slot_failure benchReason=quota`, `pool.swap` in-process, `[PI-SWARM MODEL POOL]` note).
 
-Task: [`fix-delivery-and-rework-recovery`](../../.pi/swarm/tasks/fix-delivery-and-rework-recovery/task.md)
+### Issue 64 — declared rework edges are one-shot per causal attempt — FIXED 2026-08-30
+
+**Status:** fixed (commits `d1f1d07` + `b2bf93b`; graph-level UAT evidence in task `task-issue-64-graph-uat`: fail→fix→retest→pass→review→approve chain with exactly-2 one-shot ledger entries and no hot-reopen).
 
 ### Issue 71 — rework edge consumption stamped before reopenability is proven (one-shot edge can be burned by transient target state) — R5 finding
 
