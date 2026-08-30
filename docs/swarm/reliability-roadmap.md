@@ -134,7 +134,7 @@ Open follow-ups from review (not blocking): M1 evidence checks commit EXISTENCE 
 
 ### Issue 76 — investigate stall-predicate edge cases, then implement liveness + supersession protocol — R6 (user-mandated investigate-first)
 
-**Status:** open (testbed instrument landed: mock-llm `cd41d69`). **Priority:** P1. R7 a5: next-batch lead. **Source:** user questioning of task-graph stall detection gaps + design review by pi-talk-dev@pi-talk (mailbox author; patterns validated against `extensions/mailbox/src/db.ts`).
+**Status:** closed 2026-08-30 (`d0b18c4`; investigation/testbed complete — runtime follow-up captured in the R8 additions below). **Priority:** P1. R7 a5: next-batch lead. **Source:** user questioning of task-graph stall detection gaps + design review by pi-talk-dev@pi-talk (mailbox author; patterns validated against `extensions/mailbox/src/db.ts`).
 
 Observed stall modes NOT covered by the current predicate (`reconcile.ts` actionable = ready+unassigned+all-idle):
 1. Assigned node, assignee process died silently (no event; discovered only when a later assign fails "can't find window").
@@ -155,7 +155,7 @@ Design (7 lines; validated = production-proven in mailbox, design = cross-checke
 
 ### Issue 77 — reply-thread misrouting protocol debt — R6 converged (a2 HIGH + a5)
 
-**Status:** open. **Priority:** P2.
+**Status:** closed 2026-08-30 (`1f70418`; reminder-thread reply routing + docs). **Priority:** P2.
 
 Replies to reminder threads don't satisfy original-assignment response debt (mailbox.ts:64-71 requires replyTo===rec.id or conversationId match). This week: rgi-implementer and r5-a2 both needed manual resultMessageId coaching to clear response_missing; pump emitted repeated settled-with-missing-response noise meanwhile. Fix direction: accept conversationId-matching replies for response credit, or auto-attach pending-assignment context to reminder messages so agents reply to the correct thread.
 
@@ -172,6 +172,24 @@ Replies to reminder threads don't satisfy original-assignment response debt (mai
 - [a1/a3 cosmetic] "Pipeline stall" subject hardcoded regardless of task status; goal-channel dominated by failed-but-actionable graphs with no assignable recovery agent (mitigation: cancelTask).
 - [a5] Fold decision: Row 75 follow-ups M1 (commit attribution) + M2 (agent-mediated close gate) merged into this row's scope review at implementation time.
 - [a4] Adversarial test authoring: add negative-discrimination cases (worker-kind terminal node named "finalize" must NOT gate; isCommitLike negative tests; evidence sync path).
+
+### R8 batch closure note — 2026-08-30
+
+Rows 76 and 77 are closed above. The remaining batch work stays split:
+
+- Confirmed live Row 80 items:
+  - mock-LLM crash path
+  - evidence persistence / re-stamp on close
+  - goal suppression when orchestrator holds assigned work
+  - create-path ordering (`tasks.ts:87` before `:111`)
+  - `.pi/mock-llm/` gitignore hygiene
+  - evidence aliasing
+  - adversarial tests
+- Stale / already-fixed by Rows 76/77: none of the Row 80 bullets were retired by those commits.
+- Next batch sequence:
+  1. Row 80 small-fix consolidation.
+  2. Row 76 follow-on implementation for liveness/progress + supersession.
+  3. Revisit Rows 73/78 only if still open after the next sweep.
 
 ### Issue 79 — mock-LLM fixture provider: deterministic swarm-behavior testbed — R6 (user-proposed)
 
