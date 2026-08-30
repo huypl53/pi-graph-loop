@@ -134,7 +134,7 @@ Open follow-ups from review (not blocking): M1 evidence checks commit EXISTENCE 
 
 ### Issue 76 — investigate stall-predicate edge cases, then implement liveness + supersession protocol — R6 (user-mandated investigate-first)
 
-**Status:** open. **Priority:** P1. **Source:** user questioning of task-graph stall detection gaps + design review by pi-talk-dev@pi-talk (mailbox author; patterns validated against `extensions/mailbox/src/db.ts`).
+**Status:** open (testbed instrument landed: mock-llm `cd41d69`). **Priority:** P1. R7 a5: next-batch lead. **Source:** user questioning of task-graph stall detection gaps + design review by pi-talk-dev@pi-talk (mailbox author; patterns validated against `extensions/mailbox/src/db.ts`).
 
 Observed stall modes NOT covered by the current predicate (`reconcile.ts` actionable = ready+unassigned+all-idle):
 1. Assigned node, assignee process died silently (no event; discovered only when a later assign fails "can't find window").
@@ -159,9 +159,23 @@ Design (7 lines; validated = production-proven in mailbox, design = cross-checke
 
 Replies to reminder threads don't satisfy original-assignment response debt (mailbox.ts:64-71 requires replyTo===rec.id or conversationId match). This week: rgi-implementer and r5-a2 both needed manual resultMessageId coaching to clear response_missing; pump emitted repeated settled-with-missing-response noise meanwhile. Fix direction: accept conversationId-matching replies for response credit, or auto-attach pending-assignment context to reminder messages so agents reply to the correct thread.
 
+### Issue 80 — R7 small-fix consolidation (mock-llm crash path, evidence persistence, goal suppression, hygiene) — R7 consolidated
+
+**Status:** open. **Priority:** P1. **Source:** R7 ritual (a1-a5 + orchestrator-verified goal-nudge investigation).
+
+- [a1 M-H] `extensions/mock-llm/src/stream.ts:305-307`: void IIFE without catch — fixture-load failure (invalid/deleted fixture referenced by stale session config) → unhandled rejection → Node 15+ CRASHES the host pi process. Violates the provider's never-silent-hang contract. Fix: try/catch pushing terminal error event + stream.end().
+- [a1+a2 converge] Evidence persistence: force-reopen/manual close of commit-like nodes discards stamped evidence (both r75+r79 final snapshots `evidence: {}` because last close path was manual). Preserve evidence record or re-stamp on terminal close.
+- [orchestrator-verified] Goal-nudge suppression predicate too narrow: assigned-to-orchestrator commit node doesn't count as active work — 3 nudges fired while orchestrator was mid-commit (18:33 event trail; seq 72/73/74 correct, interval 5s by design — NOT a bug). Extend suppression to assigned+active work.
+- [a1 M] Create-path ordering: autoClose (tasks.ts:87) runs before writeBaselineCommit (:111) — Issue 26 one-node-graph auto-close example structurally dead; stale comment at tasks.ts:97-98.
+- [a1 L] `.pi/mock-llm/` missing from .gitignore.
+- [a1 L] Evidence aliasing: `.commit` and per-node key share one object reference; multi-commit-node divergence in printGraphText.
+- [a1/a3 cosmetic] "Pipeline stall" subject hardcoded regardless of task status; goal-channel dominated by failed-but-actionable graphs with no assignable recovery agent (mitigation: cancelTask).
+- [a5] Fold decision: Row 75 follow-ups M1 (commit attribution) + M2 (agent-mediated close gate) merged into this row's scope review at implementation time.
+- [a4] Adversarial test authoring: add negative-discrimination cases (worker-kind terminal node named "finalize" must NOT gate; isCommitLike negative tests; evidence sync path).
+
 ### Issue 79 — mock-LLM fixture provider: deterministic swarm-behavior testbed — R6 (user-proposed)
 
-**Status:** open. **Priority:** P1. **Source:** user — "design fixture set of LLM responses with local-first LLM messages stream to self-control concrete LLM behavior and swarm edge cases; mock like real LLM API, custom script loading our specific mock provider, nearest real-env LLM API".
+**Status:** fixed 2026-08-30 (`cd41d69`, full pipeline incl. honest REJECT→fix→reviewer-retest). **Priority:** P1. R7 residuals filed under Issue 80 (crash path, gitignore, cursor-sharing docs).
 
 Mock at the provider streaming layer (not harness stubs) so pi/swarm run their real code paths against scripted responses:
 - `extensions/mock-llm/` registers provider `mock-llm` via `pi.registerProvider` with `streamSimple` reading fixture scripts; model id = scenario name; no network, no real key (streamSimple is fully local).
