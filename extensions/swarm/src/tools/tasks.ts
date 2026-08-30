@@ -84,7 +84,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const { ready, current } = computeReadyNodes(task);
 				task.currentNodes = current;
 				let createTaskStatusChange = applyTaskStatus(task); // engine-enforced closure: a fresh task derives `ready`
-				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
+				const autoClosed = await autoCloseOrchestratorTerminalNodes(pi, tp, task);
 				if (autoClosed.closed.length) {
 					createTaskStatusChange = applyTaskStatus(task);
 					task.currentNodes = computeReadyNodes(task).current;
@@ -868,7 +868,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						}
 					}
 				}
-				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
+				const autoClosed = await autoCloseOrchestratorTerminalNodes(pi, tp, task);
 				for (const nodeId of autoClosed.closed) releaseNodeAssignment(st, task, nodeId);
 				if (autoClosed.closed.length) taskStatusChange = applyTaskStatus(task);
 				if (taskStatusChange.terminal) {

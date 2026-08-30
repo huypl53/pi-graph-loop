@@ -688,8 +688,11 @@ export function validateTaskGraph(task: TaskState): GraphValidation {
 	if (!task.nodes[task.start]) errors.push(`start node does not exist: ${task.start}`);
 	for (const id of nodeIds) if (!SAFE_ID_RE.test(id)) errors.push(`node id is not a safe id: ${id}`);
 
+	const incoming = new Map<string, number>();
+	for (const edge of task.edges) incoming.set(edge.to, (incoming.get(edge.to) || 0) + 1);
 	for (const [id, node] of Object.entries(task.nodes)) {
 		for (const dep of node.dependsOn || []) if (!nodeIds.has(dep)) errors.push(`node ${id} dependsOn missing node: ${dep}`);
+		if (id !== task.start && (incoming.get(id) || 0) > 0 && !(node.dependsOn || []).length) errors.push(`node ${id} has incoming edge(s) but no dependsOn; non-root fan-in nodes must declare dependsOn`);
 	}
 	for (const edge of task.edges) {
 		if (!nodeIds.has(edge.from)) errors.push(`edge from missing node: ${edge.from}`);
@@ -847,6 +850,19 @@ export function printGraphText(task: TaskState, ready: string[], current: string
 		lines.push("");
 		lines.push("Artifacts:");
 		for (const a of artifactStatus) lines.push(`  ${a.exists ? "✓" : "○"} ${a.path}`);
+	}
+	const commitEvidence = (task.evidence as any)?.commit;
+	if (commitEvidence) {
+		lines.push("");
+		lines.push(`Commit evidence: ${commitEvidence.status}${commitEvidence.reason ? ` (${commitEvidence.reason})` : ""}${commitEvidence.baseline ? ` baseline=${commitEvidence.baseline}` : ""}${commitEvidence.head ? ` head=${commitEvidence.head}` : ""}${commitEvidence.nodeId && commitEvidence.nodeId !== "commit" ? ` node=${commitEvidence.nodeId}` : ""}`);
+	}
+	// Row 75 (fix): surface evidence for other commit-like terminal nodes (finalize, ship, ...)
+	// alongside the legacy `.commit` slot so orchestrators don't have to query the task JSON.
+	for (const [nodeId, ev] of Object.entries(task.evidence as Record<string, any> || {})) {
+		if (nodeId === "commit") continue;
+		if (!ev || typeof ev !== "object") continue;
+		lines.push("");
+		lines.push(`Commit evidence [${nodeId}]: ${ev.status}${ev.reason ? ` (${ev.reason})` : ""}${ev.baseline ? ` baseline=${ev.baseline}` : ""}${ev.head ? ` head=${ev.head}` : ""}`);
 	}
 	lines.push("");
 	lines.push(`Ready: ${ready.length ? ready.join(", ") : "(none)"}`);
@@ -1207,9 +1223,44 @@ export function applySharedContextUpdates(task: TaskState, upd: { summary?: stri
 	for (const q of upd.openQuestions || []) ctx.openQuestions.push({ id: `question-${randomUUID().slice(0, 8)}`, by, at: ts, text: q.text });
 }
 
+function taskAbsoluteArtifactPath(taskId: string, artifact: string) {
+	if (artifact.startsWith(`.pi/swarm/tasks/${taskId}/`)) return artifact;
+	const clean = artifact.replace(/^\/+/, "").replace(/^\.\/?/, "");
+	return `.pi/swarm/tasks/${taskId}/${clean}`;
+}
+
+function rewriteTaskArtifactRefs(taskId: string, text: string) {
+	if (!text) return text;
+	// Allow optional leading ./ so references like "./artifacts/x.md" rewrite to the task-absolute
+	// path. Without the optional prefix the regex would treat the leading `.` as the boundary
+	// character, leaving `./artifacts/...` untouched and letting agents write to project-root
+	// artifacts/ by following the note literally.
+	return text.replace(/(^|[^A-Za-z0-9._/-])(\.\/)?(artifacts\/[A-Za-z0-9._/-]+)/g, (_m, prefix: string, dotPrefix: string, rel: string) => `${prefix}${dotPrefix || ""}${taskAbsoluteArtifactPath(taskId, rel)}`);
+}
+
+async function resolveCommitNodeEvidence(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths) {
+	let baseline = "";
+	try {
+		baseline = readFileSync(join(tp.root, "baseline.txt"), "utf8").trim();
+	} catch {
+		return { verified: false as const, reason: "baseline_missing" as const };
+	}
+	if (!baseline) return { verified: false as const, baseline, reason: "baseline_empty" as const };
+	try {
+		const r = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 5000 });
+		if (r.code !== 0) return { verified: false as const, baseline, reason: "git_unavailable" as const, head: (r.stdout || "").trim() || undefined };
+		const head = (r.stdout || "").trim();
+		if (!head) return { verified: false as const, baseline, reason: "head_empty" as const };
+		if (head === baseline) return { verified: false as const, baseline, head, reason: "head_matches_baseline" as const };
+		return { verified: true as const, baseline, head };
+	} catch (err: any) {
+		return { verified: false as const, baseline, reason: `git_error:${String(err?.message || err)}` as const };
+	}
+}
+
 // Build the assignment message body. Carries task/node pointers, scope, artifacts, and reply target
 // so the assignee discovers the rest from durable files instead of a long orchestrator prompt.
-export function autoCloseOrchestratorTerminalNodes(task: TaskState) {
+export async function autoCloseOrchestratorTerminalNodes(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths, task: TaskState) {
 	const closed: string[] = [];
 	for (;;) {
 		const { ready } = computeReadyNodes(task);
@@ -1219,6 +1270,25 @@ export function autoCloseOrchestratorTerminalNodes(task: TaskState) {
 		});
 		if (!candidate) break;
 		const node = task.nodes[candidate];
+		// Row 75 (fix): gate ANY terminal orchestrator-kind node (role text matching orchestrator
+		// OR id prefixed with commit/finalize/ship/etc.) on real git evidence, not just id === "commit".
+		// Otherwise custom graphs whose commit-step is named "finalize" / "commit-changes" / "ship"
+		// bypass the evidence check and auto-close without verification — the same defect AC4 was
+		// meant to kill, resurfacing through the naming door. Evidence is keyed both by node id
+		// (authoritative) and the legacy `.commit` slot (back-compat with surfaces/tests).
+		const isCommitLike = inferRoleKind(candidate, node.role) === "orchestrator" && isGraphTerminalNode(task, candidate);
+		if (isCommitLike) {
+			const evidence = await resolveCommitNodeEvidence(pi, tp);
+			const record = { status: evidence.verified ? "verified" : "unverified", reason: evidence.reason, baseline: evidence.baseline, head: evidence.head, at: now(), nodeId: candidate };
+			task.evidence[candidate] = record;
+			// Keep the legacy `.commit` slot in sync for back-compat with existing surfaces
+			// (swarm_task_status, Row 75 printGraphText) and the r75 / rework-reopen tests.
+			if (candidate === "commit" || !task.evidence.commit) task.evidence.commit = record;
+			if (!evidence.verified) {
+				// Leave the node pending for the orchestrator to close deliberately after running git itself.
+				break;
+			}
+		}
 		node.assignee ||= "orchestrator";
 		node.status = "done";
 		node.lastActivityAt = now();
@@ -1235,12 +1305,15 @@ export function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget
 	lines.push(`Reply to ${replyTarget} when done, blocked, or needing clarification.`);
 	const scope = node.allowedFiles && node.allowedFiles.length ? node.allowedFiles.join(", ") : node.allowedFilesFrom ? `(inherit scope from node ${node.allowedFilesFrom})` : "(none specified)";
 	lines.push(`Scope: ${scope}`);
-	if (node.readArtifacts && node.readArtifacts.length) lines.push(`Read artifacts: ${node.readArtifacts.join(", ")}`);
-	if (node.writeArtifacts && node.writeArtifacts.length) lines.push(`Write artifacts: ${node.writeArtifacts.join(", ")}`);
+	if (node.readArtifacts && node.readArtifacts.length) lines.push(`Read artifacts: ${node.readArtifacts.map((artifact) => taskAbsoluteArtifactPath(task.taskId, artifact)).join(", ")}`);
+	if (node.writeArtifacts && node.writeArtifacts.length) lines.push(`Write artifacts: ${node.writeArtifacts.map((artifact) => taskAbsoluteArtifactPath(task.taskId, artifact)).join(", ")}`);
 	if (task.acceptanceCriteria.length) lines.push(`Acceptance: ${task.acceptanceCriteria.join("; ")}`);
 	// NEW: Include attempt token in assignment contract for fencing
 	if (attemptId) lines.push(`Attempt token: ${attemptId}`);
-	if (note) lines.push(`Note: ${note}`);
+	if (note) {
+		const rewritten = rewriteTaskArtifactRefs(task.taskId, note);
+		lines.push(rewritten === note ? `Note: ${rewritten}` : `Note (rewritten to task-absolute artifact paths): ${rewritten}`);
+	}
 	lines.push(`When finished, call swarm_update_task with taskId=${task.taskId}, nodeId=${nodeId}, status=done (or failed/blocked) and an outcome. Ack this assignment message too.`);
 	return lines.join("\n");
 }

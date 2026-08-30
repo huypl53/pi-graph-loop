@@ -124,13 +124,13 @@ Issue 70 heading said FIXED while Status said open (fixed in this cycle). Rule: 
 
 ### Issue 75 — graph-authoring guardrails + terminal-task stall visibility — R5 cycle defects
 
-**Status:** open. **Priority:** P1 (elevated by R6 a5: hit twice more this batch — assignment-time scope narrowing workaround needed twice).
+**Status:** fixed 2026-08-30 (commit in flight — see below). **Priority:** P1.
 
-Defects observed live during the R5 ritual itself:
-- `swarm_create_task` accepted a custom graph whose fan-in node (`consolidate`) had edges in but no `dependsOn`, so `autoCloseOrchestratorTerminalNodes` closed it after the first analyst finished. Validate at creation: every non-root node must declare `dependsOn` (incoming edges alone do not imply it).
-- Assignment notes with relative artifact paths (`artifacts/analysis-aN.md`) led 3/5 analysts to write to project-root instead of the task dir — assignment bodies should always use task-absolute artifact paths.
-- Terminal-task (status=failed) graphs with a ready unassigned `fix` node produce no stall nudge (`isActionableTaskStatus` excludes failed) — Issue 64 sat unnoticed until manual inspection. Add a bounded "terminal-but-recoverable" nudge family or fold into graph-stall.
-- R6 addition: commit node auto-closes via graph transitions without verifying a real git commit exists (observed twice in this batch: Row 72 + goal-interval graphs closed commit nodes before git ran; orchestrator had to run the actual commits out-of-band).
+Landed: (a) create-time validation that every non-root node with incoming edges declares `dependsOn` (error names the node); (b) `buildAssignmentBody` rewrites read/write artifact paths and inline note refs to task-absolute paths (incl. `./`-prefixed); (c) `isStallNudgeEligibleTaskStatus` admits `failed` graphs — terminal-but-recoverable graphs now get bounded stall nudges (max 3 + backoff), nudge body states the actual task status; (d) `isCommitLike` predicate gates ANY terminal orchestrator-kind node (any id: `commit`, `finalize`, `ship`...) on baseline-vs-HEAD git evidence — unverified ⇒ node stays pending with `task.evidence[nodeId]` (legacy `.commit` slot kept in sync); per-node evidence surfaced in `printGraphText`.
+
+Verified: r75-tester honest-fail on the literal-id bypass → fix generalized the predicate → regression 4c (finalize) covers it; r75-reviewer APPROVED with own runs (20/20 + 10 suites; functional pre-existing row-73 debt excluded via clean-tree stash check).
+
+Open follow-ups from review (not blocking): M1 evidence checks commit EXISTENCE not attribution — any task's commit auto-verifies (file as its own row when scheduling); M2 agent-mediated close of commit-like nodes via assign+update path has no evidence gate; M3 docs/swarm/ guardrail documentation (folded into commit + this row update); lows recorded in artifacts/review.md.
 
 ### Issue 76 — investigate stall-predicate edge cases, then implement liveness + supersession protocol — R6 (user-mandated investigate-first)
 
@@ -158,6 +158,18 @@ Design (7 lines; validated = production-proven in mailbox, design = cross-checke
 **Status:** open. **Priority:** P2.
 
 Replies to reminder threads don't satisfy original-assignment response debt (mailbox.ts:64-71 requires replyTo===rec.id or conversationId match). This week: rgi-implementer and r5-a2 both needed manual resultMessageId coaching to clear response_missing; pump emitted repeated settled-with-missing-response noise meanwhile. Fix direction: accept conversationId-matching replies for response credit, or auto-attach pending-assignment context to reminder messages so agents reply to the correct thread.
+
+### Issue 79 — mock-LLM fixture provider: deterministic swarm-behavior testbed — R6 (user-proposed)
+
+**Status:** open. **Priority:** P1. **Source:** user — "design fixture set of LLM responses with local-first LLM messages stream to self-control concrete LLM behavior and swarm edge cases; mock like real LLM API, custom script loading our specific mock provider, nearest real-env LLM API".
+
+Mock at the provider streaming layer (not harness stubs) so pi/swarm run their real code paths against scripted responses:
+- `extensions/mock-llm/` registers provider `mock-llm` via `pi.registerProvider` with `streamSimple` reading fixture scripts; model id = scenario name; no network, no real key (streamSimple is fully local).
+- Fixture format (JSONL, one turn per request): content events (text/toolcall with arguments) + timing (`delayMs` per event, abortable `hang` for stall simulation) + error injection (429 usage_limit_reached mid-stream — reproduced from today's r75 incident; torn JSON; abort). Deterministic: same script → same behavior; `script_exhausted` terminal error instead of silence.
+- Transcripts to `.pi/mock-llm/transcripts/` for test assertions (which turns fired, with what timing).
+- Skill `.agents/skills/mock-llm-scenarios/`: fixture authoring guide + scenario recipes (429-mid-edit, edit-not-persisted, response_missing, settled-with-open-assignment, drift-then-wake).
+- Serves as the testbed for Row 76 stall-mode matrix: every stall mode (dead assignee, busy-stuck loop, settle-and-drift) becomes a deterministic fixture instead of an incident you wait for.
+- UAT lanes: spawn real pi agents with `--provider mock-llm --model <scenario> -e ./extensions/mock-llm` in tmux; validate swarm reactions (nudges, reconciliation, fencing) end-to-end without live APIs.
 
 ### Issue 78 — interval-goal follow-ups — R6 a1
 

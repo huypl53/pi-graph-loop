@@ -207,7 +207,8 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	task = await readTask(taskId);
 	ok("downstream review keeps test done", task.nodes.test.status === "done");
 	ok("downstream review keeps test passed", task.nodes.test.outcome === "passed");
-	ok("downstream review auto-closes commit", task.nodes.commit.status === "done");
+	ok("downstream review leaves commit pending until real git evidence", task.nodes.commit.status === "pending");
+	ok("commit evidence flagged unverified", task.evidence?.commit?.status === "unverified");
 	ok("downstream review does not add consumption", task.reworkConsumption.length === 1);
 
 	// Fresh qualifying source attempt should be able to trigger a new cycle with a distinct identity.

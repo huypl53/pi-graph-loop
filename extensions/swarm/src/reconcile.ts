@@ -265,6 +265,17 @@ export function isActionableTaskStatus(status: TaskState["status"]): boolean {
 	return status === "ready" || status === "in_progress";
 }
 
+// Row 75: terminal-but-recoverable graphs are failed tasks with ready/unassigned recovery nodes.
+// They should still participate in stall/goal suppression so the orchestrator gets a bounded nudge
+// instead of a silent failure.
+export function isRecoverableTaskStatus(status: TaskState["status"]): boolean {
+	return status === "failed";
+}
+
+export function isStallNudgeEligibleTaskStatus(status: TaskState["status"]): boolean {
+	return isActionableTaskStatus(status) || isRecoverableTaskStatus(status);
+}
+
 // === Row 68: swarm-level idle epoch ===
 // Maintains `st.idleNudgeState.allIdleSinceAt` — the anchor for the continuous all-idle interval
 // used by BOTH nudge families (goal fallback + graph stall spacing). Called from the pump and from
@@ -316,7 +327,7 @@ async function hasActionableGraphWork(p: Paths): Promise<{ actionable: boolean; 
 			// is assigned (computeTaskStatus: started ? in_progress : ready), so filtering on
 			// in_progress-only hid never-assigned graphs from the graph nudge AND from goal suppression.
 			// Path A is defined by NON-TERMINAL task + actionable ready/unassigned node.
-			if (!isActionableTaskStatus(task.status)) continue;
+			if (!isStallNudgeEligibleTaskStatus(task.status)) continue;
 			const cr = computeReadyNodes(task);
 			const actionable = new Set([
 				...cr.ready,
@@ -518,7 +529,7 @@ export async function evaluateTaskGraphStallNudgeLocked(
 				const t = await readTaskState(tp.taskJson);
 				// Row 68 fix (AC1): include fresh status="ready" tasks (created, never assigned) —
 				// non-terminal candidates only; the per-node actionable filter below still gates.
-				if (isActionableTaskStatus(t.status)) tasks.push({ task: t, tp });
+				if (isStallNudgeEligibleTaskStatus(t.status)) tasks.push({ task: t, tp });
 			} catch { /* skip unreadable */ }
 		}
 	} catch { /* unreadable tasksDir === no active tasks */ }
@@ -623,7 +634,7 @@ export async function evaluateTaskGraphStallNudgeLocked(
 			.concat(actionableNodes.length > 5 ? [`+${actionableNodes.length - 5} more`] : []);
 		const subject = `Pipeline stall: task ${taskId} has ${actionableNodes.length} actionable but unassigned node(s)`;
 		const body =
-			`Task ${taskId} ("${task.title || taskId}") is in_progress but has ${actionableNodes.length} actionable-but-unassigned node(s):\n` +
+			`Task ${taskId} ("${task.title || taskId}") is ${task.status || "in_progress"} but has ${actionableNodes.length} actionable-but-unassigned node(s):\n` +
 			`  - ${nodeList.join("\n  - ")}\n\n` +
 			`All ${idleAgents.length} non-orchestrator agent(s) are runtimeStatus=idle and no worker has claimed these nodes.\n\n` +
 			`This is nudge ${nudgeNumber} of ${MAX_TASK_STALL_NUDGES} before back-off.\n\n` +
@@ -887,7 +898,7 @@ export async function staleSurfaceReason(
 	// Row 68 fix (AC1): goal-nudge surface suppression must also see fresh (status="ready")
 	// actionable graphs, or a goal nudge fires instead of the graph nudge pre-first-assign.
 	const liveGraphActionable = Object.values(taskIndex).some((task) => {
-		if (!isActionableTaskStatus(task.status)) return false;
+		if (!isStallNudgeEligibleTaskStatus(task.status)) return false;
 		const cr = computeReadyNodes(task);
 		const actionable = new Set([
 			...cr.ready,
