@@ -91,7 +91,7 @@ Task: [`fix-delivery-and-rework-recovery`](../../.pi/swarm/tasks/fix-delivery-an
 
 ### Issue 71 — rework edge consumption stamped before reopenability is proven (one-shot edge can be burned by transient target state) — R5 finding
 
-**Status:** open. **Priority:** P1. Found by R5 post-batch ritual (a1+a2 independent convergence).
+**Status:** fixed (task `task-issue-71-stamp-on-success`; review APPROVED; pending commit). **Priority:** P1. Found by R5 post-batch ritual (a1+a2 independent convergence).
 
 `taskgraph.ts:520-546` calls `recordReworkConsumption(...)` before the target-status reopenability check. If the target node is transiently `assigned`/`in_progress` when a rework edge fires, the ledger entry is written and the declared rework edge is permanently suppressed — a valid rework transition is silently lost (state-loss path).
 

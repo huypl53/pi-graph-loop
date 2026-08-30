@@ -530,7 +530,6 @@ export function activateReworkNodes(task: TaskState, tp?: TaskPaths) {
 				});
 				continue;
 			}
-			recordReworkConsumption(task, activation, activation.to, source.attemptId, source.sourceStatus, source.sourceOutcome ?? null);
 			if (!(target.status === "pending" || target.status === "failed" || target.status === "skipped" || target.status === "done")) {
 				trace(paths(process.cwd()), "task.rework.suppressed", {
 					taskId: task.taskId,
@@ -545,6 +544,7 @@ export function activateReworkNodes(task: TaskState, tp?: TaskPaths) {
 				});
 				continue;
 			}
+
 			const priorActiveAttemptId = target.activeAttemptId;
 			const priorAttempt = priorActiveAttemptId && target.attemptHistory
 				? target.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId)
@@ -559,23 +559,26 @@ export function activateReworkNodes(task: TaskState, tp?: TaskPaths) {
 					priorAttempt.releaseReason = "terminal";
 				}
 			}
-		target.status = "ready";
-		target.assignee = undefined;
-		target.assignmentMessageId = undefined;
-		delete target.activeAttemptId;
-		target.outcome = null;
-		delete target.staleAt;
-		target.lastActivityAt = now();
-		reopened.push(activation.to);
-		trace(paths(process.cwd()), TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, {
-			taskId: task.taskId,
-			nodeId: activation.to,
-			priorStatus: priorAttempt ? priorAttempt.status : (priorActiveAttemptId ? "unknown" : "done"),
-			priorAttemptId: priorActiveAttemptId ?? null,
-			edgeKey: reworkEdgeKey(activation),
-			sourceNodeId: activation.from,
-			sourceAttemptId: source.attemptId,
-		});
+
+			target.status = "ready";
+			target.assignee = undefined;
+			target.assignmentMessageId = undefined;
+			delete target.activeAttemptId;
+			target.outcome = null;
+			delete target.staleAt;
+			target.lastActivityAt = now();
+
+			recordReworkConsumption(task, activation, activation.to, source.attemptId, source.sourceStatus, source.sourceOutcome ?? null);
+			reopened.push(activation.to);
+			trace(paths(process.cwd()), TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, {
+				taskId: task.taskId,
+				nodeId: activation.to,
+				priorStatus: priorAttempt ? priorAttempt.status : (priorActiveAttemptId ? "unknown" : "done"),
+				priorAttemptId: priorActiveAttemptId ?? null,
+				edgeKey: reworkEdgeKey(activation),
+				sourceNodeId: activation.from,
+				sourceAttemptId: source.attemptId,
+			});
 		}
 	}
 	return reopened;

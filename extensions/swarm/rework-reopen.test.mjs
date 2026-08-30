@@ -9,6 +9,7 @@
  *  - worker update without force still cannot reopen a done node
  *  - orchestrator force reopen from done -> ready succeeds
  *  - failed->ready path remains functional
+ *  - transiently non-reopenable rework targets do not consume the edge until reopen succeeds
  */
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -386,6 +387,56 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	ok("fix completion does not re-open fix", task.nodes.fix.status === "done");
 	const reopenAfter = (await readTaskEvents(taskId)).filter((e) => e.event === "task.attempt.reopened_by_rework" && e.nodeId === "fix").length;
 	ok("fix reopen trace remains one-shot across fix completion", reopenAfter === reopenBefore);
+}
+
+// ============================================================
+// Scenario 7: transiently non-reopenable target does not consume rework edge
+// ============================================================
+{
+	console.log("\n--- Scenario 7: transient non-reopenable target keeps rework edge unconsumed ---");
+	await rm(join(scratch, ".pi"), { recursive: true, force: true });
+	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
+	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	await registerAgent(tools, "planner-c", "planner");
+	await registerAgent(tools, "implementer-c", "implementer");
+	await registerAgent(tools, "tester-c", "tester");
+	await registerAgent(tools, "reviewer-c", "reviewer");
+	const taskId = "task-rework-reopen-s7";
+	await createDefaultTask(tools, taskId);
+
+	await assign(tools, taskId, "plan", "planner-c");
+	let task = await readTask(taskId);
+	let attempt = task.nodes.plan.activeAttemptId;
+	await updateAs(tools, "planner-c", false, { taskId, nodeId: "plan", status: "done", outcome: "planned", attemptId: attempt });
+	await assign(tools, taskId, "implement", "implementer-c");
+	task = await readTask(taskId);
+	attempt = task.nodes.implement.activeAttemptId;
+	await updateAs(tools, "implementer-c", false, { taskId, nodeId: "implement", status: "done", outcome: "implemented", attemptId: attempt });
+	await assign(tools, taskId, "test", "tester-c");
+	task = await readTask(taskId);
+	const testAttempt = task.nodes.test.activeAttemptId;
+	await updateAs(tools, "tester-c", false, { taskId, nodeId: "test", status: "done", outcome: "passed", attemptId: testAttempt });
+	await assign(tools, taskId, "review", "reviewer-c");
+	await updateAs(tools, "orchestrator", true, { taskId, nodeId: "fix", status: "assigned", force: true });
+	task = await readTask(taskId);
+	ok("fix is assigned before review rejection", task.nodes.fix.status === "assigned");
+	const consumptionBefore = task.reworkConsumption?.length || 0;
+	const reviewAttempt = task.nodes.review.activeAttemptId;
+	await updateAs(tools, "reviewer-c", false, { taskId, nodeId: "review", status: "done", outcome: "rejected", attemptId: reviewAttempt });
+	task = await readTask(taskId);
+	ok("review rejection leaves assigned fix in place", task.nodes.fix.status === "assigned");
+	ok("review rejection does not consume rework yet", (task.reworkConsumption?.length || 0) === consumptionBefore);
+
+	await updateAs(tools, "orchestrator", true, { taskId, nodeId: "fix", status: "ready", force: true });
+	await assign(tools, taskId, "fix", "implementer-c");
+	task = await readTask(taskId);
+	const fixAttempt2 = task.nodes.fix.activeAttemptId;
+	await updateAs(tools, "implementer-c", false, { taskId, nodeId: "fix", status: "done", outcome: "implemented", attemptId: fixAttempt2 });
+	task = await readTask(taskId);
+	ok("later reopenable pass reopens test", task.nodes.test.status === "ready");
+	ok("later reopenable pass stamps matching consumption", task.reworkConsumption.some((r) => r.sourceAttemptId === fixAttempt2 && r.reopenedNodeId === "test"));
+	const reopenTrace = (await readGlobalEvents()).filter((e) => e.event === "task.attempt.reopened_by_rework" && e.nodeId === "test");
+	ok("reopen trace emitted for the successful pass", reopenTrace.length >= 1);
 }
 
 const globalEvents = await readGlobalEvents();
