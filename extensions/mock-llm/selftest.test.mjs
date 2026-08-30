@@ -24,9 +24,9 @@ await mockLLM({
 
 assert.equal(registered.name, "mock-llm", "provider should register as mock-llm");
 assert.equal(registered.config.api, "mock-llm-stream");
-assert.equal(registered.config.models.length, 16, "expected sixteen scenario models");
-assert.deepEqual((await discoverModelConfigs()).map((model) => model.id).sort(), ["429-mid-edit", "ack-lifecycle-booking", "assignment-fence-stale-attempt", "delivery-repair-retry", "drift-then-wake", "edit-not-persisted", "inprogress-death", "mailbox-delivery-read", "quota-429-then-recovery", "quota-exhausted-all-turns", "response-credit-verified-result", "response-missing-settle", "response-required-death", "settled-with-open-assignment", "stale-all-agents", "torn-json-then-recovery"].sort());
-assert.equal((await listFixtureDiscovery()).length, 16);
+assert.equal(registered.config.models.length, 27, "expected twenty-seven scenario models");
+assert.deepEqual((await discoverModelConfigs()).map((model) => model.id).sort(), ["429-mid-edit", "ack-lifecycle-booking", "assignment-fence-stale-attempt", "auto-close-evidence-closure", "cancel-supersession", "commit-no-evidence", "delivery-repair-retry", "drift-then-wake", "edit-not-persisted", "handoff-chain", "initial-ready-nudge", "inprogress-death", "mailbox-delivery-read", "midturn-assign", "parallel-fail-a", "parallel-fail-b", "quota-429-then-recovery", "quota-exhausted-all-turns", "response-credit-verified-result", "response-missing-settle", "response-required-death", "settled-with-open-assignment", "shared-context-a", "shared-context-b", "stale-all-agents", "task-graph-semantics", "torn-json-then-recovery"].sort());
+assert.equal((await listFixtureDiscovery()).length, 27);
 
 function makeContext() {
 	return {
