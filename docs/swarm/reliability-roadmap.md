@@ -60,7 +60,7 @@ These values should become a consistent policy rather than independently chosen 
 
 ### Issue 70 — engine-retry gate never trips on mutable 429 bodies (model pool stuck on exhausted quota slot) — FIXED 2026-08-30
 
-**Status:** open. **Priority:** P0. **Found live 2026-08-30.**
+**Status:** fixed (commit `36643f1`; verified independently by r70-tester + r70-reviewer). **Priority:** P0. **Found live 2026-08-30.**
 
 **Symptom (live evidence):** `r69-implementer` (and other agents) hit `429 usage_limit_reached` on `ccs/gpt-5.4-mini` / `ccs/gpt-5.6-terra` until manual rescue. Traces show 39× `pool.swap_gated_by_engine_retry {count:1}`, **0×** `pool.engine_retry_exhausted`, and no swap during the outage — the pool never rotated despite quota exhaustion on every eligible slot.
 
@@ -88,6 +88,46 @@ isolated bare-pi UAT `r70-quota-uat3-094742` (counts 1→2→3, `pool.engine_ret
 `pool.slot_failure benchReason=quota`, `pool.swap` in-process, `[PI-SWARM MODEL POOL]` note).
 
 Task: [`fix-delivery-and-rework-recovery`](../../.pi/swarm/tasks/fix-delivery-and-rework-recovery/task.md)
+
+### Issue 71 — rework edge consumption stamped before reopenability is proven (one-shot edge can be burned by transient target state) — R5 finding
+
+**Status:** open. **Priority:** P1. Found by R5 post-batch ritual (a1+a2 independent convergence).
+
+`taskgraph.ts:520-546` calls `recordReworkConsumption(...)` before the target-status reopenability check. If the target node is transiently `assigned`/`in_progress` when a rework edge fires, the ledger entry is written and the declared rework edge is permanently suppressed — a valid rework transition is silently lost (state-loss path).
+
+**Fix direction:** stage the ledger write and commit it only after the reopen mutation succeeds under the same lock (stamp-on-success); if the target is not reopenable now, leave the edge unconsumed for a later pass. Regression: fire a rework edge while target is assigned; assert the edge still fires after the target returns to a reopenable state.
+
+### Issue 72 — ack_missing sweep ignores consumerReceipts + per-tick stale.suppressed trace noise (F1+F2) — R5 finding
+
+**Status:** open. **Priority:** P2.
+
+(a) `reconcile.ts:1493-1496` derives ack_missing purely from `requiresAck && !ackedAt`; durable-consumed orchestrator messages (receipt written by the Issue 69 coalescing path, `reconcile.ts:1288-1312`) are flagged missing forever — no replay risk (reinject needs a live pane) but permanent dashboard noise. Teach the sweep to consult `consumerReceipts.orchestrator.entries[msg.id]`.
+(b) stale-suppressed items re-emit `notification.stale.suppressed` every pump tick (36 events / 3 min in UAT). Add a one-shot suppression stamp or per-message trace rate-limit (keep durable record untouched).
+(c) Optimization note (from a1): coalescing work (sorting, grouping, receipt writes) runs inside the main withLock — precompute pure grouping keys outside the lock where possible.
+
+### Issue 73 — test-suite debt: two pre-existing failures + two coverage gaps — R5 finding
+
+**Status:** open. **Priority:** P2.
+
+- `functional.test.mjs` fails since `65835ca`: the same commit that added `requireOrchestratorAuthority` to `swarm_create_task` pins the test at `PI_SWARM_AGENT_ID=implementer-01`. Fix: run orchestrator-authority steps with an orchestrator-pinned subprocess or split the suite.
+- `pool-config.test.mjs` case 6 (`preflight.resolved.model` undefined) fails at clean `d3f6b01` — reproduce and fix.
+- F4 gap: busy→defer→idle leg never exercised in UAT (deferral marks nothing; cheap to add next UAT window).
+- Parked quota 1-strike option has no regression guard if later taken (document semantics first).
+
+### Issue 74 — roadmap status discipline: single authoritative status field + closure evidence — R5 finding
+
+**Status:** open. **Priority:** P3.
+
+Issue 70 heading said FIXED while Status said open (fixed in this cycle). Rule: heading carries the issue title only; `Status:` is the single authority (open/fixed with commit hash + verifier).
+
+### Issue 75 — graph-authoring guardrails + terminal-task stall visibility — R5 cycle defects
+
+**Status:** open. **Priority:** P2.
+
+Defects observed live during the R5 ritual itself:
+- `swarm_create_task` accepted a custom graph whose fan-in node (`consolidate`) had edges in but no `dependsOn`, so `autoCloseOrchestratorTerminalNodes` closed it after the first analyst finished. Validate at creation: every non-root node must declare `dependsOn` (incoming edges alone do not imply it).
+- Assignment notes with relative artifact paths (`artifacts/analysis-aN.md`) led 3/5 analysts to write to project-root instead of the task dir — assignment bodies should always use task-absolute artifact paths.
+- Terminal-task (status=failed) graphs with a ready unassigned `fix` node produce no stall nudge (`isActionableTaskStatus` excludes failed) — Issue 64 sat unnoticed until manual inspection. Add a bounded "terminal-but-recoverable" nudge family or fold into graph-stall.
 
 ### 1. Failed-first delivery later received
 
