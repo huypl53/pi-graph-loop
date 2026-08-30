@@ -269,13 +269,16 @@ export type OrchestratorReceiptEntry = {
 // pump increments consecutiveNoResolveNudges on each emitted nudge and resets the counter when the
 // task graph advances (reassignment, claim, or task leaving in_progress). Anti-loop cap at
 // MAX_TASK_STALL_NUDGES; back-off at GOAL_NUDGE_BACKOFF_TICKS. Mirrors SwarmGoal's shape.
+// Row 68: emissions and back-off decrements are interval-spaced via nextStallNudgeAt — pump tick
+// rate no longer drives the cadence (mirrors the goal nudge's nextGoalNudgeAt gate).
 export type SwarmTaskStallState = {
 	taskId: string;                      // safe-id (validated by formatNotifyKey)
 	consecutiveNoResolveNudges: number;  // monotonic; reset when node leaves ready+unassigned or task leaves in_progress
 	nudgeSeq?: number;                   // monotonic emit counter (NEVER reset) — idempotency key component so each nudge gets a fresh dedupe slot
 	lastNudgeAt?: string;                // ISO; set on every successful nudge emission
 	lastResolvedAt?: string;             // ISO; set on every successful counter reset
-	backoffTicksRemaining?: number;      // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
+	backoffTicksRemaining?: number;      // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next interval opportunit(ies)
+	nextStallNudgeAt?: string;           // ISO; earliest ts the next stall nudge/backoff decrement may fire (interval spacing)
 };
 
 // Durable goal the orchestrator wants the swarm to advance toward (Issue 18). Set via
@@ -295,6 +298,17 @@ export type SwarmGoal = {
 	lastNudgeAt?: string;               // ISO; set on every successful nudge emission
 	lastResolvedAt?: string;            // ISO; set on every successful counter reset
 	backoffTicksRemaining?: number;     // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
+};
+
+// Row 68 idle-nudge state. `allIdleSinceAt` anchors the continuous all-idle interval used by the
+// goal fallback; `lastGoalNudgeAt` and `goalConsecutiveNoResolveNudges` keep the emission/backoff
+// accounting on actual nudge emissions rather than pump ticks.
+export type SwarmIdleNudgeState = {
+	allIdleSinceAt?: string;
+	nextGoalNudgeAt?: string;
+	lastGoalNudgeAt?: string;
+	goalConsecutiveNoResolveNudges?: number;
+	goalBackoffTicksRemaining?: number;
 };
 
 // In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent
@@ -366,6 +380,10 @@ export type SwarmState = {
 	// MUST NOT add `st.goal ||= {}` here, since that would replace undefined with an empty object
 	// and crash `goal.id` access in the pump.
 	goal?: SwarmGoal;
+	// Row 68 idle-epoch bookkeeping (swarm-level, not goal-level): tracks when the effective-live
+	// non-orchestrator set last became all-idle and the interval anchor for the goal fallback
+	// backoff loop.
+	idleNudgeState?: SwarmIdleNudgeState;
 	// Issue 23 — task-graph-state idle nudge. Per-(taskId) counter + back-off so a stalled
 	// task graph doesn't spam the orchestrator's mailbox. Reset on first reassignment of the
 	// actionable node OR on the task leaving `in_progress` state.

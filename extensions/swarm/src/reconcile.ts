@@ -4,8 +4,8 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
-import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
+import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmAgent, SwarmIdleNudgeState, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
+import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
@@ -240,6 +240,88 @@ function agentIsEffectivelyAlive(a: { status?: string; runtimeStatus?: string; t
 	return nowMs - hb <= AGENT_HEARTBEAT_STALE_MS;
 }
 
+function allEffectiveIdleAgents(st: SwarmState, nowMs: number) {
+	const idleAgents = Object.values(st.agents).filter((a) => a.id !== "orchestrator" && agentIsEffectivelyAlive(a, nowMs));
+	const allIdle = idleAgents.every((a) => a.runtimeStatus === "idle");
+	return { idleAgents, allIdle };
+}
+
+// Row 68 (AC1 fix): task statuses whose graphs can carry actionable work. A freshly created task is
+// task-status "ready" (computeTaskStatus: started ? "in_progress" : "ready"), so Path A —
+// non-terminal actionable graph + all effective agents idle — must admit BOTH, not in_progress only.
+// Terminal/cancelled/blocked are excluded: blocked graphs cannot make progress (a blocked task
+// re-enters "in_progress" the moment a node unblocks, re-admitting it here).
+export function isActionableTaskStatus(status: TaskState["status"]): boolean {
+	return status === "ready" || status === "in_progress";
+}
+
+// === Row 68: swarm-level idle epoch ===
+// Maintains `st.idleNudgeState.allIdleSinceAt` — the anchor for the continuous all-idle interval
+// used by BOTH nudge families (goal fallback + graph stall spacing). Called from the pump and from
+// each nudge evaluator (idempotent: the second call in a tick is a no-op).
+//   - On the not-all-idle→all-idle edge: stamp allIdleSinceAt (the busy→idle edge, NOT a pump tick).
+//   - On any busy effective agent: clear the epoch (and per-task stall spacing, so the next
+//     all-idle edge re-arms emission immediacy) and trace once.
+// Stopped/stale ghost records never participate (agentIsEffectivelyAlive filters them), so they can
+// neither block idle detection nor reset the epoch.
+export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ allIdle: boolean; idleAgents: SwarmAgent[] }> {
+	const idleState: SwarmIdleNudgeState = st.idleNudgeState ||= {};
+	const { idleAgents, allIdle } = allEffectiveIdleAgents(st, nowMs);
+	if (!allIdle) {
+		if (idleState.allIdleSinceAt || idleState.nextGoalNudgeAt) {
+			// Busy edge: restart stall spacing so the next all-idle edge re-arms emission immediacy.
+			const stallSlotsReset: string[] = [];
+			for (const slot of Object.values(st.taskStallState || {})) {
+				if (slot?.nextStallNudgeAt) { delete slot.nextStallNudgeAt; stallSlotsReset.push(slot.taskId); }
+			}
+			await trace(p, "idle.epoch.reset", {
+				reason: "agent_busy",
+				busyAgents: idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id),
+				previousAllIdleSinceAt: idleState.allIdleSinceAt ?? null,
+				stallSlotsReset,
+			}).catch(() => {});
+		}
+		delete idleState.allIdleSinceAt;
+		delete idleState.nextGoalNudgeAt;
+		return { allIdle, idleAgents };
+	}
+	if (!idleState.allIdleSinceAt) {
+		idleState.allIdleSinceAt = new Date(nowMs).toISOString();
+		delete idleState.nextGoalNudgeAt;
+		await trace(p, "idle.epoch.started", { allIdleSinceAt: idleState.allIdleSinceAt, idleAgents: idleAgents.length }).catch(() => {});
+	}
+	return { allIdle, idleAgents };
+}
+
+async function hasActionableGraphWork(p: Paths): Promise<{ actionable: boolean; taskId?: string; nodeId?: string; role?: string }> {
+	if (!existsSync(p.tasksDir)) return { actionable: false };
+	try {
+		const entries = await readdir(p.tasksDir);
+		for (const taskId of entries) {
+			const tp = taskPaths(p, taskId);
+			if (!existsSync(tp.taskJson)) continue;
+			let task: TaskState;
+			try { task = await readTaskState(tp.taskJson); } catch { continue; }
+			// Row 68 fix (AC1): a freshly created task stays task-status "ready" until its first node
+			// is assigned (computeTaskStatus: started ? in_progress : ready), so filtering on
+			// in_progress-only hid never-assigned graphs from the graph nudge AND from goal suppression.
+			// Path A is defined by NON-TERMINAL task + actionable ready/unassigned node.
+			if (!isActionableTaskStatus(task.status)) continue;
+			const cr = computeReadyNodes(task);
+			const actionable = new Set([
+				...cr.ready,
+				...cr.current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
+			]);
+			for (const nodeId of actionable) {
+				const node = task.nodes[nodeId];
+				if (!node || node.assignee || TERMINAL_NODE_STATUSES.has(node.status)) continue;
+				return { actionable: true, taskId, nodeId, role: node.role || "worker" };
+			}
+		}
+	} catch { /* unreadable tasksDir */ }
+	return { actionable: false };
+}
+
 // === Issue 18: Swarm goal + idle-streak nudge ===
 // When the orchestrator has set a goal AND every non-orchestrator agent is runtimeStatus="idle" AND
 // no task nodes are assigned/in_progress, this function emits an idempotent structured nudge to the
@@ -266,58 +348,58 @@ export async function evaluateIdleGoalNudgeLocked(
 	// here (binding C-1) — this is the most common branch on legacy state and is intentionally cheap.
 	if (!goal) return { emitted: false, reason: "no_goal" };
 
-	// Back-off accounting: decrement first so a 1-tick-backoff goal exits back-off after exactly one
-	// tick. Clamp at 0. We do NOT emit on the tick that drains back-off to 0 — the decrement itself
-	// is the gate (avoids a one-tick over-emit after back-off expires).
+	// Row 68: the idle epoch is maintained by the SHARED helper (the pump also runs it, so this is
+	// idempotent within a tick) so the busy→all-idle edge anchors to the swarm-level state, not to
+	// goal presence. Ghosts excluded; a busy effective agent resets the epoch.
+	const idleState: SwarmIdleNudgeState = st.idleNudgeState ||= {};
+	const epoch = await updateIdleEpochLocked(p, st, nowMs);
+	const { idleAgents, allIdle } = epoch;
+	if (!allIdle) return { emitted: false, reason: "agent_busy" };
+	const allIdleSinceMs = new Date(idleState.allIdleSinceAt!).getTime();
+	if (!Number.isFinite(allIdleSinceMs)) {
+		delete idleState.allIdleSinceAt;
+		delete idleState.nextGoalNudgeAt;
+		return { emitted: false, reason: "idle_epoch_missing" };
+	}
+	// Row 68: goal fallback is DOMINATED by the graph nudge. If actionable graph work exists, the
+	// stall nudge handles this idle condition — never double-fire for the same idle state. The idle
+	// epoch is intentionally kept so that once the graph quiets, the goal fallback still honors the
+	// continuous all-idle interval measured from the busy→idle edge.
+	const graphWork = await hasActionableGraphWork(p);
+	if (graphWork.actionable) {
+		await trace(p, "goal.nudge.suppressed_by_actionable_graph", { goalId: goal.id, taskId: graphWork.taskId, nodeId: graphWork.nodeId, role: graphWork.role }).catch(() => {});
+		return { emitted: false, reason: "actionable_graph" };
+	}
+	// Interval gate: the goal fallback fires only after a FULL continuous all-idle interval measured
+	// from the busy→all-idle edge (or from the last goal emission). Pump ticks between boundaries
+	// are no-ops — no burst.
+	const nextEligibleMs = idleState.nextGoalNudgeAt ? new Date(idleState.nextGoalNudgeAt).getTime() : allIdleSinceMs + GOAL_NUDGE_IDLE_INTERVAL_MS;
+	if (nowMs < nextEligibleMs) {
+		if (!idleState.nextGoalNudgeAt) idleState.nextGoalNudgeAt = new Date(nextEligibleMs).toISOString();
+		return { emitted: false, reason: "idle_interval_pending" };
+	}
+
+	// Back-off accounting is interval-based: only when the interval boundary is reached do we consume
+	// one back-off slot. This keeps pump tick rate from affecting the cadence.
 	if (goal.backoffTicksRemaining && goal.backoffTicksRemaining > 0) {
 		goal.backoffTicksRemaining -= 1;
+		idleState.nextGoalNudgeAt = new Date(nowMs + GOAL_NUDGE_IDLE_INTERVAL_MS).toISOString();
 		if (goal.backoffTicksRemaining === 0) {
-			await trace(p, "goal.nudge.backoff.exhausted", { goalId: goal.id, by: 1 });
+			await trace(p, "goal.nudge.backoff.exhausted", { goalId: goal.id, by: 1 }).catch(() => {});
 			return { emitted: false, reason: "backoff_just_exhausted" };
 		}
-		await trace(p, "goal.nudge.backoff.skip", { goalId: goal.id, remaining: goal.backoffTicksRemaining });
+		await trace(p, "goal.nudge.backoff.skip", { goalId: goal.id, remaining: goal.backoffTicksRemaining }).catch(() => {});
 		return { emitted: false, reason: "backoff" };
 	}
 
-	// Idle predicate: every non-orchestrator agent must be runtimeStatus === "idle" AND zero
-	// assigned/in_progress task nodes. `readdir(p.tasksDir)` is bounded by the per-tick budget; a
-	// missing or unreadable tasksDir is treated as "no active nodes" (matches the existing graph-
-	// advance / initial-ready patterns in this file).
-	// Issue 27: only agents that are actually ALIVE participate in the idle predicate. Stopped
-	// agents (ghost records whose panes are gone) would otherwise block the all-idle check forever
-	// — runtimeStatus "stopped" never equals "idle", starving the nudge. Liveness signal:
-	// status === "running" (record still live) AND (tmuxAlive is not explicitly false) AND
-	// heartbeat fresh within AGENT_HEARTBEAT_STALE_MS. Stale/dead records are excluded, not counted
-	// as busy; a genuinely busy live agent still blocks the nudge as before.
-	const idleAgents = Object.values(st.agents).filter(
-		(a) => a.id !== "orchestrator" && agentIsEffectivelyAlive(a, nowMs),
-	);
-	const allIdle = idleAgents.every((a) => a.runtimeStatus === "idle");
-	if (!allIdle) return { emitted: false, reason: "agent_busy" };
-
-	let activeNodeCount = 0;
-	if (existsSync(p.tasksDir)) {
-		try {
-			const entries = await readdir(p.tasksDir);
-			for (const tid of entries) {
-				const tp = taskPaths(p, tid);
-				if (!existsSync(tp.taskJson)) continue;
-				let t: TaskState;
-				try { t = await readTaskState(tp.taskJson); } catch { continue; }
-				for (const n of Object.values(t.nodes)) {
-					if (n.status === "assigned" || n.status === "in_progress") activeNodeCount++;
-				}
-			}
-		} catch { /* unreadable tasksDir === no active nodes */ }
-	}
-	if (activeNodeCount > 0) return { emitted: false, reason: "active_nodes" };
-
-	// Already at cap? Enter / re-arm the back-off window. We do NOT emit on this tick — the counter
-	// reaching MAX is what triggers the back-off, and the back-off itself (set above) is the gate.
+	// Already at cap? Arm back-off on the first *interval opportunity* after max emissions. The next
+	// interval window is pushed forward so the pump cannot immediately re-enter the cap branch on the
+	// following 5s tick.
 	if (goal.consecutiveNoResolveNudges >= MAX_CONSECUTIVE_NUDGES_DEFAULT) {
 		if (!goal.backoffTicksRemaining) {
 			goal.backoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
-			await trace(p, "goal.nudge.backoff", { goalId: goal.id, nudges: goal.consecutiveNoResolveNudges, max: MAX_CONSECUTIVE_NUDGES_DEFAULT, backoffTicks: GOAL_NUDGE_BACKOFF_TICKS });
+			idleState.nextGoalNudgeAt = new Date(nowMs + GOAL_NUDGE_IDLE_INTERVAL_MS).toISOString();
+			await trace(p, "goal.nudge.backoff", { goalId: goal.id, nudges: goal.consecutiveNoResolveNudges, max: MAX_CONSECUTIVE_NUDGES_DEFAULT, backoffTicks: GOAL_NUDGE_BACKOFF_TICKS }).catch(() => {});
 		}
 		return { emitted: false, reason: "max_nudges" };
 	}
@@ -337,11 +419,7 @@ export async function evaluateIdleGoalNudgeLocked(
 
 	// Emit the nudge via the standard mailbox path. deliverMessageLocked mutates st (upserts the
 	// message record, appends to mailbox JSONL, returns { msg, delivery }). The orchestrator's own
-	// pump on the NEXT tick surfaces it to the TUI via the existing customType:"swarm-message" path
-	// (with details:msg carrying idempotencyKey for trace filtering). The brief asked for a custom
-	// customType:"goal.idle_nudge" for the FIRST delivery; we do that piggyback by stamping the
-	// header in the goal-nudge details so the trace event carries the customType identifier without
-	// adding a second pi.sendMessage call to the lock-held path.
+	// pump on the NEXT tick surfaces it to the TUI via the existing customType:"swarm-message" path.
 	const sinceSetMs = nowMs - new Date(goal.setAt).getTime();
 	const subjectText = goal.text.slice(0, 60);
 	const bodyText = goal.text.slice(0, 240);
@@ -368,6 +446,10 @@ export async function evaluateIdleGoalNudgeLocked(
 	goal.consecutiveNoResolveNudges += 1;
 	goal.nudgeSeq = nudgeSeq;
 	goal.lastNudgeAt = new Date(nowMs).toISOString();
+	idleState.lastGoalNudgeAt = goal.lastNudgeAt;
+	idleState.nextGoalNudgeAt = new Date(nowMs + GOAL_NUDGE_IDLE_INTERVAL_MS).toISOString();
+	idleState.goalConsecutiveNoResolveNudges = goal.consecutiveNoResolveNudges;
+	idleState.goalBackoffTicksRemaining = goal.backoffTicksRemaining;
 	await trace(p, "goal.idle_nudge", {
 		goalId: goal.id,
 		text: bodyText,
@@ -378,6 +460,8 @@ export async function evaluateIdleGoalNudgeLocked(
 		idleAgents: idleCount,
 		customType: "goal.idle_nudge",
 		key,
+		allIdleSinceAt: idleState.allIdleSinceAt,
+		nextGoalNudgeAt: idleState.nextGoalNudgeAt,
 	});
 	return { emitted: true, reason: "emitted" };
 }
@@ -421,7 +505,9 @@ export async function evaluateTaskGraphStallNudgeLocked(
 			if (!existsSync(tp.taskJson)) continue;
 			try {
 				const t = await readTaskState(tp.taskJson);
-				if (t.status === "in_progress") tasks.push({ task: t, tp });
+				// Row 68 fix (AC1): include fresh status="ready" tasks (created, never assigned) —
+				// non-terminal candidates only; the per-node actionable filter below still gates.
+				if (isActionableTaskStatus(t.status)) tasks.push({ task: t, tp });
 			} catch { /* skip unreadable */ }
 		}
 	} catch { /* unreadable tasksDir === no active tasks */ }
@@ -430,11 +516,13 @@ export async function evaluateTaskGraphStallNudgeLocked(
 	// Predicate 3: every non-orchestrator agent must be runtimeStatus === "idle".
 	// Issue 27: mirrors evaluateIdleGoalNudgeLocked — only effectively-alive agents participate;
 	// stopped/stale ghost records must not starve this nudge either.
-	const idleAgents = Object.values(st.agents).filter(
-		(a) => a.id !== "orchestrator" && agentIsEffectivelyAlive(a, nowMs),
-	);
-	const allIdle = idleAgents.every((a) => a.runtimeStatus === "idle");
+	// Row 68: the shared idle-epoch update runs here (idempotent) so the busy→all-idle edge is
+	// anchored at swarm level even with no goal set. A busy effective agent also resets per-task
+	// stall spacing (inside updateIdleEpochLocked) so the next all-idle edge re-arms immediacy.
+	const epoch = await updateIdleEpochLocked(p, st, nowMs);
+	const { idleAgents, allIdle } = epoch;
 	if (!allIdle) return { emitted: false, reason: "agent_busy" };
+	const idleAnchorMs = st.idleNudgeState?.allIdleSinceAt ? new Date(st.idleNudgeState.allIdleSinceAt).getTime() : NaN;
 
 	// Pick the first task with actionable+unassigned nodes that ALSO passes the grace period AND
 	// doesn't already have a graph-advance nudge firing for the actionable node (predicate 5).
@@ -465,32 +553,41 @@ export async function evaluateTaskGraphStallNudgeLocked(
 		}
 		if (graphAdvanceActive) continue;
 
-		// Per-task back-off + max-nudge bookkeeping (mirrors Issue 18).
+		// Per-task back-off + max-nudge bookkeeping (mirrors Issue 18). Row 68: emission cadence is
+		// interval-spaced (nextStallNudgeAt), NOT pump-tick-spaced. The first stall nudge for a fresh
+		// stall is IMMEDIATE (the graph actionable+all-idle path), then re-fires only after a full
+		// continuous all-idle interval.
 		const stallState: SwarmTaskStallState = st.taskStallState?.[taskId] || {
 			taskId,
 			consecutiveNoResolveNudges: 0,
 		};
-		// Back-off accounting: decrement first so a 1-tick-backoff task exits back-off after exactly
-		// one tick. Clamp at 0. We do NOT emit on the tick that drains back-off to 0 — the decrement
-		// itself is the gate.
+		if (!stallState.nextStallNudgeAt) {
+			// Fresh stall (or epoch was reset since the last emission): fire immediately.
+			stallState.nextStallNudgeAt = new Date(Math.min(nowMs, idleAnchorMs + TASK_STALL_NUDGE_IDLE_INTERVAL_MS)).toISOString();
+		} else if (nowMs < new Date(stallState.nextStallNudgeAt).getTime()) {
+			return { emitted: false, reason: "stall_interval_pending", taskId };
+		}
+		// Interval boundary reached: back-off consumes one slot per INTERVAL, not per tick. We do NOT
+		// emit on the interval that drains back-off to 0 — the decrement itself is the gate.
 		if (stallState.backoffTicksRemaining && stallState.backoffTicksRemaining > 0) {
 			stallState.backoffTicksRemaining -= 1;
+			stallState.nextStallNudgeAt = new Date(nowMs + TASK_STALL_NUDGE_IDLE_INTERVAL_MS).toISOString();
+			if (!st.taskStallState) st.taskStallState = {};
+			st.taskStallState[taskId] = stallState;
 			if (stallState.backoffTicksRemaining === 0) {
-				if (!st.taskStallState) st.taskStallState = {};
-				st.taskStallState[taskId] = stallState;
 				await trace(p, "task_stall.nudge.backoff.exhausted", { taskId, by: 1 }).catch(() => {});
 				return { emitted: false, reason: "backoff_just_exhausted", taskId };
 			}
-			if (!st.taskStallState) st.taskStallState = {};
-			st.taskStallState[taskId] = stallState;
 			await trace(p, "task_stall.nudge.backoff.skip", { taskId, remaining: stallState.backoffTicksRemaining }).catch(() => {});
 			return { emitted: false, reason: "backoff", taskId };
 		}
 
-		// Already at cap? Enter / re-arm the back-off window. We do NOT emit on this tick.
+		// Already at cap? Enter / re-arm the back-off window on the next interval opportunity. We do
+		// NOT emit on this interval.
 		if (stallState.consecutiveNoResolveNudges >= MAX_TASK_STALL_NUDGES) {
 			if (!stallState.backoffTicksRemaining) {
 				stallState.backoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
+				stallState.nextStallNudgeAt = new Date(nowMs + TASK_STALL_NUDGE_IDLE_INTERVAL_MS).toISOString();
 				if (!st.taskStallState) st.taskStallState = {};
 				st.taskStallState[taskId] = stallState;
 				await trace(p, "task_stall.nudge.backoff", { taskId, nudges: stallState.consecutiveNoResolveNudges, max: MAX_TASK_STALL_NUDGES, backoffTicks: GOAL_NUDGE_BACKOFF_TICKS }).catch(() => {});
@@ -529,6 +626,7 @@ export async function evaluateTaskGraphStallNudgeLocked(
 			to: "orchestrator",
 			subject,
 			body,
+			conversationId: `task:${taskId}:${actionableNodes[0]}`,
 			requiresAck: true,
 			idempotencyKey: key,
 			priority: "normal",
@@ -537,6 +635,7 @@ export async function evaluateTaskGraphStallNudgeLocked(
 		stallState.consecutiveNoResolveNudges += 1;
 		stallState.nudgeSeq = nudgeSeq;
 		stallState.lastNudgeAt = new Date(nowMs).toISOString();
+		stallState.nextStallNudgeAt = new Date(nowMs + TASK_STALL_NUDGE_IDLE_INTERVAL_MS).toISOString();
 		if (!st.taskStallState) st.taskStallState = {};
 		st.taskStallState[taskId] = stallState;
 		await trace(p, "task_stall.nudge_emitted", {
@@ -564,16 +663,19 @@ export async function evaluateTaskGraphStallNudgeLocked(
 //   - applyTaskStatus terminal-transition sites (Issue 23 B3 placement) — resolves because the
 //     task left in_progress.
 //
-// Pure state mutation: deletes backoffTicksRemaining, resets consecutiveNoResolveNudges to 0,
-// stamps lastResolvedAt, and emits `task_stall.nudge.resolved` for trace visibility. Mirrors the
-// goal-nudge reset hook (turn_end in hooks.ts:484-506) but lives next to the mutation sites
-// because the task-stall counter resolves on graph-mutation events, not on orchestrator turn-end.
+// Pure state mutation: deletes backoffTicksRemaining + nextStallNudgeAt, resets
+// consecutiveNoResolveNudges to 0, stamps lastResolvedAt, and emits `task_stall.nudge.resolved` for
+// trace visibility. Mirrors the goal-nudge reset hook (turn_end in hooks.ts:484-506) but lives next
+// to the mutation sites because the task-stall counter resolves on graph-mutation events, not on
+// orchestrator turn-end. Clearing nextStallNudgeAt means the next stall fires immediately (fresh
+// stall → immediate nudge) rather than waiting out a stale interval window.
 export function resolveTaskStallLocked(p: Paths, st: SwarmState, taskId: string, reason: string): void {
 	const slot = st.taskStallState?.[taskId];
 	if (!slot) return; // never stalled — nothing to reset
 	const wasStalled = slot.consecutiveNoResolveNudges > 0 || (slot.backoffTicksRemaining ?? 0) > 0;
 	slot.consecutiveNoResolveNudges = 0;
 	delete slot.backoffTicksRemaining;
+	delete slot.nextStallNudgeAt;
 	slot.lastResolvedAt = new Date().toISOString();
 	if (!st.taskStallState) st.taskStallState = {};
 	st.taskStallState[taskId] = slot;
@@ -752,6 +854,100 @@ function fingerprintMessage(rec: { id: string; updatedAt?: string; createdAt?: s
 	return createHash("sha256").update(`${rec.id}:${ts}`).digest("hex");
 }
 
+// === Row 68: surface-time revalidation of deferred nudges ===
+// Acceptance criterion: "Deferred stale nudge is suppressed if node was assigned or an agent became
+// busy before delivery." A nudge queued while a stall condition held may be stale by the time the
+// pump is idle and able to surface it. This predicate re-checks at surface time:
+//   - goal-idle nudges: suppressed if any effective agent became busy, actionable graph work
+//     appeared, or the idle epoch advanced past the message's creation (stale idle window);
+//   - graph-stall nudges: suppressed if agents are busy or no actionable unassigned node remains;
+//   - graph-advance / initial-ready nudges: suppressed via checkStallNotificationStale (node
+//     assigned/terminal/reassigned/task closed).
+// Pure + exported for direct unit testing by idle-nudge.test.mjs (plan §2.3 — the pump's surface
+// path is not reachable in unit tests because the leader gate denies non-leader pids).
+export async function staleSurfaceReason(
+	p: Paths,
+	st: SwarmState,
+	msg: { id: string; idempotencyKey?: string; createdAt?: string },
+	taskIndex: Record<string, TaskState>,
+	nowMs: number,
+): Promise<{ stale: boolean; reason: string | null; evidence: string[] }> {
+	const liveIdle = allEffectiveIdleAgents(st, nowMs).allIdle;
+	// Row 68 fix (AC1): goal-nudge surface suppression must also see fresh (status="ready")
+	// actionable graphs, or a goal nudge fires instead of the graph nudge pre-first-assign.
+	const liveGraphActionable = Object.values(taskIndex).some((task) => {
+		if (!isActionableTaskStatus(task.status)) return false;
+		const cr = computeReadyNodes(task);
+		const actionable = new Set([
+			...cr.ready,
+			...cr.current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
+		]);
+		for (const nodeId of actionable) {
+			const node = task.nodes[nodeId];
+			if (node && !node.assignee && !TERMINAL_NODE_STATUSES.has(node.status)) return true;
+		}
+		return false;
+	});
+	const idleAnchorMs = st.idleNudgeState?.allIdleSinceAt ? new Date(st.idleNudgeState.allIdleSinceAt).getTime() : NaN;
+	const rec = st.messages[msg.id] || msg;
+	const key = String(rec.idempotencyKey || msg.idempotencyKey || "");
+	const createdAt = new Date(rec.createdAt || msg.createdAt).getTime();
+	const taskKey = key.match(/^task:([^:]+):(?:node:([^:]+):)?nudge:/);
+	const goalKey = key.match(/^goal:([^:]+):nudge:idle-streak:(\d+)$/);
+	let staleReason: string | null = null;
+	let evidence: string[] = [];
+	if (goalKey) {
+		if (!liveIdle) {
+			staleReason = "agent_busy";
+			evidence = ["effective-agent-set-not-idle"];
+		} else if (liveGraphActionable) {
+			staleReason = "actionable_graph";
+			evidence = ["actionable-graph-work-present"];
+		} else if (Number.isFinite(idleAnchorMs) && createdAt < idleAnchorMs) {
+			staleReason = "idle_epoch_advanced";
+			evidence = [`message_created_before_idle_epoch:${new Date(createdAt).toISOString()}`, `idle_epoch:${new Date(idleAnchorMs).toISOString()}`];
+		}
+	} else if (taskKey) {
+		const task = taskKey[1] ? taskIndex[taskKey[1]] : undefined;
+		const nodeId = taskKey[2];
+		if (!liveIdle) {
+			staleReason = "agent_busy";
+			evidence = ["effective-agent-set-not-idle"];
+		} else if (!task) {
+			staleReason = "task_missing";
+			evidence = [`task_missing:${taskKey[1]}`];
+		} else if (key.includes(":nudge:graph-stall:")) {
+			const cr = computeReadyNodes(task);
+			const actionable = new Set([
+				...cr.ready,
+				...cr.current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
+			]);
+			const actionableNodes = Array.from(actionable).filter((id) => {
+				const n = task.nodes[id];
+				return n && !n.assignee && !TERMINAL_NODE_STATUSES.has(n.status);
+			});
+			if (!actionableNodes.length) {
+				staleReason = "no_active_node";
+				evidence = ["no-actionable-unassigned-node-remains"];
+			}
+		} else if (nodeId) {
+			const node = task.nodes[nodeId];
+			const check = checkStallNotificationStale(st, task, nodeId, node?.assignee || "orchestrator", nowMs);
+			if (check.stale) {
+				staleReason = check.reason || "stale";
+				evidence = check.evidence;
+			}
+		} else if (key.includes(":nudge:initial-ready")) {
+			const start = task.nodes[task.start];
+			if (!start || start.status !== "ready" || start.assignee) {
+				staleReason = "no_active_node";
+				evidence = ["initial-ready-node-no-longer-eligible"];
+			}
+		}
+	}
+	return { stale: staleReason !== null, reason: staleReason, evidence };
+}
+
 export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reason: string) {
 	if (currentAgentId() !== "orchestrator") return { delivered: 0, ids: [] as string[] };
 	// Read idle once, up front. Non-TUI modes have no live agent loop to trigger, so they are treated as
@@ -816,23 +1012,28 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// Fresh-task stall safety net: nudge the orchestrator when a start node is still ready + unassigned
 		// past the creation grace period. Also idempotent + read-only on task state.
 		try { await reconcileInitialReadyLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "task.initial_ready_reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
-		// === Issue 18: goal idle-streak nudge ===
-		// When the orchestrator has set a goal and every non-orchestrator agent is idle with no active
-		// task nodes, emit an idempotent nudge to the orchestrator's own mailbox. Anti-loop counter +
-		// back-off handled inside the function. Wrapped in try/catch (matches the existing pattern for
-		// the other two reconcile helpers) so a throw never kills the tick.
+		// === Row 68: shared idle-epoch maintenance (once per tick, before both nudge evaluators) ===
+		// Anchors the busy→all-idle edge at swarm level so BOTH nudge families measure continuous idle
+		// from the same anchor regardless of evaluator call order or goal presence.
+		try { await updateIdleEpochLocked(p, st, nowMs); } catch (err: any) { await trace(p, "idle.epoch.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		// === Issue 23: task-graph-state idle nudge (graph-first ordering) ===
+		// Evaluated BEFORE the goal fallback (row 68 plan §4): the graph nudge is the immediate priority
+		// when an unfinished graph has actionable unassigned work and all effective agents are idle; the
+		// goal nudge is a fallback only for no-actionable-graph conditions. Each evaluator internally
+		// suppresses on the other's condition, so a single cycle can never double-fire for the same
+		// idle state. Each is wrapped in try/catch (matches the existing reconcile-helper pattern) so a
+		// throw never kills the tick.
+		try { await evaluateTaskGraphStallNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "task_stall.nudge_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		// === Issue 18: goal idle-streak nudge (goal fallback, runs after the graph path) ===
+		// When the orchestrator has set a goal, there is no actionable graph work, and every effective
+		// agent has been continuously idle for the full interval, emit the goal fallback nudge. Anti-loop
+		// counter + back-off handled inside the function.
 		try { await evaluateIdleGoalNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "goal.nudge.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// === Issue 21: slot recovery scan ===
 		// When a slot's bench naturally expires AND lastBenchReason === "quota" AND the agent on
 		// that slot still has active task assignments, emit pool.slot_recovered. NO auto-resume;
 		// the orchestrator decides. Idempotent under tick storms via lastRecoveredAt dedupe.
 		try { await evaluateSlotRecoveryLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "pool.slot_recovered.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
-		// === Issue 23: task-graph-state idle nudge (no-goal variant) ===
-		// Fires when the orchestrator has no goal set but a task is in_progress with
-		// actionable+unassigned nodes AND every agent is idle. Mirrors the goal-nudge
-		// back-off machinery but keyed on task-graph state (no goal required). Both nudges can
-		// fire in the same tick (different dedupe keys) without colliding.
-		try { await evaluateTaskGraphStallNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "task_stall.nudge_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		const sess = orchSession(st, nowMs)!;
 		const surfaced = new Set(sess.ids);
 		const triggeredAt = { ...(sess.triggeredAt ?? {}) };

@@ -346,9 +346,17 @@ export const MAX_CONSECUTIVE_NUDGES_DEFAULT =
 		? Math.floor(Number(process.env.PI_SWARM_MAX_NUDGES))
 		: 3;
 
+// Goal idle interval: the fallback nudge is anchored to the BUSY→ALL-IDLE edge and only re-fires
+// after a full continuous idle interval has elapsed. The pump may run more often, but it must not
+// turn that into repeated goal nudges.
+export const GOAL_NUDGE_IDLE_INTERVAL_MS =
+	Number(process.env.PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS))
+		: 60_000;
+
 // Back-off window after MAX_CONSECUTIVE_NUDGES_DEFAULT nudges without a resolve. The pump skips the
-// next N ticks (decrementing each tick) before re-evaluating; if the counter is still at cap and the
-// goal is still set + idle, the pump re-enters the back-off cycle.
+// next N interval opportunities before re-evaluating; if the counter is still at cap and the goal is
+// still set + idle, the pump re-enters the back-off cycle.
 export const GOAL_NUDGE_BACKOFF_TICKS = 2;
 
 // === Issue 23: task-graph-state idle nudge (no-goal variant) ===
@@ -360,6 +368,14 @@ export const MAX_TASK_STALL_NUDGES =
 	Number(process.env.PI_SWARM_MAX_TASK_STALL_NUDGES) > 0
 		? Math.floor(Number(process.env.PI_SWARM_MAX_TASK_STALL_NUDGES))
 		: 3;
+
+// Graph-stall interval (row 68): the actionable-graph nudge fires immediately on the all-idle edge
+// but re-fires only after a full continuous all-idle interval — pump tick rate must not turn it
+// into a per-tick burst. Mirrors GOAL_NUDGE_IDLE_INTERVAL_MS; both share the env override pattern.
+export const TASK_STALL_NUDGE_IDLE_INTERVAL_MS =
+	Number(process.env.PI_SWARM_TASK_STALL_NUDGE_IDLE_INTERVAL_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_TASK_STALL_NUDGE_IDLE_INTERVAL_MS))
+		: 60_000;
 
 // Semantic dedupe key template for the task-graph-state idle nudge. Per-(taskId) key so the pump
 // never emits a duplicate nudge for the same stalled task. Validated via SAFE_ID_RE inside

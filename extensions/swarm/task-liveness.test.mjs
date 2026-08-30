@@ -24,6 +24,16 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Row 68: interval-spaced stall emissions. Tests drive ticks with synthetic nowMs, so a short
+// interval makes interval boundaries reachable deterministically.
+process.env.PI_SWARM_TASK_STALL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
+process.env.PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
+
+// Row 68: interval-spaced stall emissions. Tests drive ticks with synthetic nowMs, so a short
+// interval makes interval boundaries reachable deterministically.
+process.env.PI_SWARM_TASK_STALL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
+process.env.PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs, trace } = await import(join(here, "src", "state.ts"));
 const { evaluateTaskGraphStallNudgeLocked, evaluateIdleGoalNudgeLocked, resolveTaskStallLocked } = await import(join(here, "src", "reconcile.ts"));
@@ -151,6 +161,10 @@ async function tick(nowMs = Date.now()) {
 	return result;
 }
 
+// Row 68: emissions are interval-spaced, so multi-emit cases drive ticks across interval
+// boundaries (interval is 1000ms via env override) rather than hammering same-time ticks.
+const INTERVAL_MS = 1000;
+
 async function getStallState(taskId) {
 	const st = await readState(p, dir);
 	return st.taskStallState?.[taskId];
@@ -235,13 +249,18 @@ console.log("\n[6] repeat emit without resolve; counter increments");
 {
 	await setup({ taskId: "task-6", ageMs: 120_000 });
 	await resetMessages();
-	let r = await tick();
-	ok("tick 1 emits", r.emitted === true);
+	const t0 = Date.now();
+	let r = await tick(t0);
+	ok("interval 1 emits", r.emitted === true);
 	await resetMessages();
-	r = await tick();
-	ok("tick 2 emits", r.emitted === true);
+	r = await tick(t0 + INTERVAL_MS);
+	ok("interval 2 emits", r.emitted === true);
 	let slot = await getStallState("task-6");
-	ok("counter=2 after 2 ticks", slot?.consecutiveNoResolveNudges === 2);
+	ok("counter=2 after 2 interval emissions", slot?.consecutiveNoResolveNudges === 2);
+	// Sub-interval ticks must NOT emit (no pump-tick burst).
+	await resetMessages();
+	r = await tick(t0 + INTERVAL_MS + 100);
+	ok("sub-interval tick does not emit", r.emitted === false && r.reason === "stall_interval_pending");
 }
 
 // =============================================================
@@ -251,12 +270,13 @@ console.log("\n[7] past MAX; back-off armed; no emit");
 {
 	await setup({ taskId: "task-7", ageMs: 120_000 });
 	await resetMessages();
-	for (let i = 0; i < 3; i++) { await tick(); await resetMessages(); }
+	const t0 = Date.now();
+	for (let i = 0; i < 3; i++) { await tick(t0 + i * INTERVAL_MS); await resetMessages(); }
 	let slot = await getStallState("task-7");
-	ok("counter=3 after 3 emits", slot?.consecutiveNoResolveNudges === 3);
+	ok("counter=3 after 3 interval emissions", slot?.consecutiveNoResolveNudges === 3);
 	await resetMessages();
-	const r = await tick();
-	ok("tick past MAX: no emit", r.emitted === false);
+	const r = await tick(t0 + 3 * INTERVAL_MS);
+	ok("interval past MAX: no emit", r.emitted === false);
 	ok("reason=max_nudges", r.reason === "max_nudges");
 	slot = await getStallState("task-7");
 	ok("backoffTicksRemaining=2 after entry", slot?.backoffTicksRemaining === 2);
@@ -265,18 +285,25 @@ console.log("\n[7] past MAX; back-off armed; no emit");
 // =============================================================
 // Case 8: back-off drain
 // =============================================================
-console.log("\n[8] back-off drain: tick decrements without emit");
+console.log("\n[8] back-off drain: interval decrements without emit");
 {
 	await setup({ taskId: "task-8", ageMs: 120_000 });
 	await resetMessages();
-	for (let i = 0; i < 3; i++) { await tick(); await resetMessages(); }
+	const t0 = Date.now();
+	for (let i = 0; i < 3; i++) { await tick(t0 + i * INTERVAL_MS); await resetMessages(); }
 	await resetMessages();
-	await tick(); // enters back-off (max=3)
+	await tick(t0 + 3 * INTERVAL_MS); // enters back-off (max=3)
 	let slot = await getStallState("task-8");
 	ok("backoff armed", slot?.backoffTicksRemaining === 2);
+	// Sub-interval tick: no decrement (tick-rate independent).
 	await resetMessages();
-	const r1 = await tick();
-	ok("back-off tick: no emit", r1.emitted === false);
+	let r1 = await tick(t0 + 3 * INTERVAL_MS + 100);
+	ok("sub-interval backoff tick: no emit + no decrement", r1.emitted === false && r1.reason === "stall_interval_pending");
+	slot = await getStallState("task-8");
+	ok("backoff NOT decremented by sub-interval tick", slot?.backoffTicksRemaining === 2);
+	await resetMessages();
+	r1 = await tick(t0 + 4 * INTERVAL_MS);
+	ok("back-off interval: no emit", r1.emitted === false);
 	ok("reason=backoff", r1.reason === "backoff");
 	slot = await getStallState("task-8");
 	ok("backoff decremented to 1", slot?.backoffTicksRemaining === 1);
@@ -289,13 +316,14 @@ console.log("\n[9] back-off exit gate (decrement to 0; no emit)");
 {
 	await setup({ taskId: "task-9", ageMs: 120_000 });
 	await resetMessages();
-	for (let i = 0; i < 3; i++) { await tick(); await resetMessages(); }
+	const t0 = Date.now();
+	for (let i = 0; i < 3; i++) { await tick(t0 + i * INTERVAL_MS); await resetMessages(); }
 	await resetMessages();
-	await tick(); // enter back-off (2)
+	await tick(t0 + 3 * INTERVAL_MS); // enter back-off (2)
 	await resetMessages();
-	await tick(); // back-off (1)
+	await tick(t0 + 4 * INTERVAL_MS); // back-off (1)
 	await resetMessages();
-	const r = await tick(); // back-off exit (0)
+	const r = await tick(t0 + 5 * INTERVAL_MS); // back-off exit (0)
 	ok("back-off exit: no emit", r.emitted === false);
 	ok("reason=backoff_just_exhausted", r.reason === "backoff_just_exhausted");
 }
@@ -347,9 +375,9 @@ console.log("\n[11] applyTaskStatus terminal transition: counter resets");
 }
 
 // =============================================================
-// Case 12: goal set + task stalled -> both nudges fire
+// Case 12: goal set + task stalled -> goal fallback is suppressed by actionable graph work
 // =============================================================
-console.log("\n[12] goal set + task stalled -> both nudges fire independently");
+console.log("\n[12] goal set + task stalled -> goal fallback suppressed by actionable graph work");
 {
 	await setup({ taskId: "task-12", ageMs: 120_000 });
 	await withLock(p, async () => {
@@ -360,13 +388,10 @@ console.log("\n[12] goal set + task stalled -> both nudges fire independently");
 	});
 	await resetMessages();
 	const goalResult = await evaluateIdleGoalNudgeLocked(pi, dir, p, await readState(p, dir), Date.now());
-	// The task has no assigned/in_progress nodes, so the goal nudge sees activeNodes=0 and emits.
-	ok("goal nudge fires (no active nodes)", goalResult.emitted === true);
-	// Now task-stall nudge: with goal set, task-stall still emits separately
+	ok("goal nudge suppressed while actionable graph work exists", goalResult.emitted === false && goalResult.reason === "actionable_graph");
 	const r = await tick();
-	ok("task-stall nudge also fires", r.emitted === true);
-	ok("independent notify key (both nudges traced)",
-		(await countEvents("goal.idle_nudge")) >= 1 && (await countEvents("task_stall.nudge_emitted")) >= 1);
+	ok("task-stall nudge still fires", r.emitted === true);
+	ok("task-stall trace emitted", (await countEvents("task_stall.nudge_emitted")) >= 1);
 }
 
 // =============================================================

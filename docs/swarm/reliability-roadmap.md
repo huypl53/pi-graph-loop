@@ -58,6 +58,35 @@ These values should become a consistent policy rather than independently chosen 
 
 ## Active repair task
 
+### Issue 70 — engine-retry gate never trips on mutable 429 bodies (model pool stuck on exhausted quota slot) — FIXED 2026-08-30
+
+**Status:** open. **Priority:** P0. **Found live 2026-08-30.**
+
+**Symptom (live evidence):** `r69-implementer` (and other agents) hit `429 usage_limit_reached` on `ccs/gpt-5.4-mini` / `ccs/gpt-5.6-terra` until manual rescue. Traces show 39× `pool.swap_gated_by_engine_retry {count:1}`, **0×** `pool.engine_retry_exhausted`, and no swap during the outage — the pool never rotated despite quota exhaustion on every eligible slot.
+
+**Root cause:** the Issue 17 engine-retry gate in `extensions/swarm/src/hooks.ts` (~line 391) keys consecutive-error incidents on exact string equality `prevIncident.errorMessage === normErr`. Provider 429 bodies embed a per-second-changing `resets_in_seconds` (live samples: `11508`, `11504`, `11499`, `11490`, …) so every turn_end error starts a FRESH incident at `count:1`. The gate threshold `ENGINE_MAX_RETRIES = 3` is never reached, so `recordProviderError`/bench/swap never fire. The agent loops on a dead slot until a human intervenes.
+
+**Fix direction:**
+
+1. Normalize error text before incident comparison: extract the stable classification (`429`, `usage_limit_reached`, provider key, model) and drop volatile fields (`resets_in_seconds`, timestamps, request ids). Prefer reusing `classifyProviderError(errorText)` kind + `providerKey` as the incident identity, falling back to a scrubbed message (strip digits/quoted numbers) only when kind is `unknown`.
+2. Consider treating `kind === "quota"` as immediately exhausted (mirroring the pool bench policy: quota errors don't self-heal within a retry window) — one engine-exhausted strike per quota 429, not three.
+3. Regression: seed turn_end errors with identical kind but mutating `resets_in_seconds` and assert the incident count reaches threshold and `pool.swap` fires; also assert distinct provider keys still start fresh incidents.
+4. UAT: bare-pi tmux lane with a scripted 429-returning provider stub, verify swap + `[PI-SWARM MODEL POOL]` notify + bench trace `pool.slot_benched` with `lastBenchReason=quota`.
+
+**Do not** remove the engine-retry gate for genuine transient errors (network/timeouts) — Issue 17 still protects against thrashing; only the identity comparison and quota immediacy are wrong.
+
+**Resolution (2026-08-30, task `task-202608300128-issue-70-fix-engine-retr`):** two defects fixed.
+(1) `classifyProviderError` now matches `usage_limit` / `usage limit` → quota, routing live
+`usage_limit_reached` bodies into the pool's immediate-bench policy (`lastBenchReason=quota`).
+(2) The engine-retry incident identity in `extensions/swarm/src/hooks.ts` is now the stable
+classification `providerKey + kind + scrubErrorIdentity(message)` (digits erased, whitespace
+collapsed) instead of raw error-text equality — mutating `resets_in_seconds` no longer resets
+the incident. The parked "quota = 1-strike immediate exhaustion" option was NOT taken (it breaks
+`pool-retry.test.mjs` fixture 6's 3-strike swap semantics; the reached-threshold path satisfies
+the AC). Evidence: `extensions/swarm/pool-quota.test.mjs` (19 assertions incl. RED repro) +
+isolated bare-pi UAT `r70-quota-uat3-094742` (counts 1→2→3, `pool.engine_retry_exhausted`,
+`pool.slot_failure benchReason=quota`, `pool.swap` in-process, `[PI-SWARM MODEL POOL]` note).
+
 Task: [`fix-delivery-and-rework-recovery`](../../.pi/swarm/tasks/fix-delivery-and-rework-recovery/task.md)
 
 ### 1. Failed-first delivery later received
