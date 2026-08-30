@@ -101,11 +101,11 @@ isolated bare-pi UAT `r70-quota-uat3-094742` (counts 1→2→3, `pool.engine_ret
 
 ### Issue 72 — ack_missing sweep ignores consumerReceipts + per-tick stale.suppressed trace noise (F1+F2) — R5 finding
 
-**Status:** open. **Priority:** P2.
+**Status:** fixed 2026-08-30 (`36f1ba7`, verified by r72-tester + r5-a2 review). **Priority:** P2.
 
-(a) `reconcile.ts:1493-1496` derives ack_missing purely from `requiresAck && !ackedAt`; durable-consumed orchestrator messages (receipt written by the Issue 69 coalescing path, `reconcile.ts:1288-1312`) are flagged missing forever — no replay risk (reinject needs a live pane) but permanent dashboard noise. Teach the sweep to consult `consumerReceipts.orchestrator.entries[msg.id]`.
-(b) stale-suppressed items re-emit `notification.stale.suppressed` every pump tick (36 events / 3 min in UAT). Add a one-shot suppression stamp or per-message trace rate-limit (keep durable record untouched).
-(c) Optimization note (from a1): coalescing work (sorting, grouping, receipt writes) runs inside the main withLock — precompute pure grouping keys outside the lock where possible.
+Landed: (a) receipt-gated ack_missing sweep; (b) one-shot stale-suppression trace; (c) grouping keys precomputed into surfacePlan before the lock-held loop.
+
+**Residual follow-ups (R6 a1-F2/F3/F6/F8, quantified):** one-shot Set is in-memory (dies on restart, grows unbounded, dedupes across reasons — fix: cap + `${messageId}:${reason}` key); receipt gate cannot distinguish coalesce-suppression receipts from real surfacing across restart (never-acked messages permanently silent — fix: surfacedAt recency in the gate); staleSurfaceReason still O(tasks×nodes) inside withLock (hoist ready-node map, buffer traces); pre-delivery sites pass notify keys as messageId (scope Set by site).
 
 ### Issue 73 — test-suite debt: two pre-existing failures + two coverage gaps — R5 finding
 
@@ -124,12 +124,50 @@ Issue 70 heading said FIXED while Status said open (fixed in this cycle). Rule: 
 
 ### Issue 75 — graph-authoring guardrails + terminal-task stall visibility — R5 cycle defects
 
-**Status:** open. **Priority:** P2.
+**Status:** open. **Priority:** P1 (elevated by R6 a5: hit twice more this batch — assignment-time scope narrowing workaround needed twice).
 
 Defects observed live during the R5 ritual itself:
 - `swarm_create_task` accepted a custom graph whose fan-in node (`consolidate`) had edges in but no `dependsOn`, so `autoCloseOrchestratorTerminalNodes` closed it after the first analyst finished. Validate at creation: every non-root node must declare `dependsOn` (incoming edges alone do not imply it).
 - Assignment notes with relative artifact paths (`artifacts/analysis-aN.md`) led 3/5 analysts to write to project-root instead of the task dir — assignment bodies should always use task-absolute artifact paths.
 - Terminal-task (status=failed) graphs with a ready unassigned `fix` node produce no stall nudge (`isActionableTaskStatus` excludes failed) — Issue 64 sat unnoticed until manual inspection. Add a bounded "terminal-but-recoverable" nudge family or fold into graph-stall.
+- R6 addition: commit node auto-closes via graph transitions without verifying a real git commit exists (observed twice in this batch: Row 72 + goal-interval graphs closed commit nodes before git ran; orchestrator had to run the actual commits out-of-band).
+
+### Issue 76 — investigate stall-predicate edge cases, then implement liveness + supersession protocol — R6 (user-mandated investigate-first)
+
+**Status:** open. **Priority:** P1. **Source:** user questioning of task-graph stall detection gaps + design review by pi-talk-dev@pi-talk (mailbox author; patterns validated against `extensions/mailbox/src/db.ts`).
+
+Observed stall modes NOT covered by the current predicate (`reconcile.ts` actionable = ready+unassigned+all-idle):
+1. Assigned node, assignee process died silently (no event; discovered only when a later assign fails "can't find window").
+2. Assigned node, agent alive but settled/drifted (settled-notify only fires on clean settles; crash-after-settle leaves the node fenced forever).
+3. Agent busy in a loop without progress (predicate all-idle false → silence; no progress signal).
+4. Work outside task graphs (direct-message batches) — zero coverage.
+
+Design (7 lines; validated = production-proven in mailbox, design = cross-checked against our incident data):
+1. Split durable identity vs live presence; liveness = pid probe behind staleness threshold, never staleness alone [validated]
+2. Two-tier sweep: in-memory staleness every tick; expensive probe only past threshold or at dispatch [validated pattern, adapted]
+3. Progress-leases on existing attempt fence: renewal = lastToolAt advance; expiry → attempt superseded; per-class budgets from trace-derived P75, watch bimodal [design]
+4. Fused probe+release+flip+re-arm in reconcileTasks for assigned nodes only; advisory session marking elsewhere; CAS + rows-affected-gated notify [design]
+5. Lock-free append heartbeats (torn-tail-skip, date+size rotation, rename-on-boundary); global lock reserved for graph transitions; monotonic-elapsed staleness + wake-grace for laptop sleep [design; JSONL contract validated]. Replaces current RMW-under-lock heartbeat per tool call (hooks.ts:799-819) — the heaviest write in the system.
+6. Fail-closed tool-level attempt check (stamp file, mtime-invalidated, absent=reject) on edit/write/bash; loud actionable supersession error [design — verified missing: no attempt check at tool layer; all agents share one cwd]
+7. swarm_flag_supersession arbitration: freeze-new, dual-history review, resume-old with revision bump; worktree-per-assign demoted to blast-radius optimization; coordinator-wrong protocol first-class ("fencing tokens fence state writes, not the real world"; recovery from false-positive supersession must be a state decision, never a tree merge) [design]
+
+**Investigation deliverable before patching:** stall-mode × signal × false-positive-risk matrix from our own incident data (dead-assignee crash, settle-and-drift, busy-stuck loop, false-idle verdicts) + baseline metrics (hung-but-alive residual rate, false-reassign rate).
+
+### Issue 77 — reply-thread misrouting protocol debt — R6 converged (a2 HIGH + a5)
+
+**Status:** open. **Priority:** P2.
+
+Replies to reminder threads don't satisfy original-assignment response debt (mailbox.ts:64-71 requires replyTo===rec.id or conversationId match). This week: rgi-implementer and r5-a2 both needed manual resultMessageId coaching to clear response_missing; pump emitted repeated settled-with-missing-response noise meanwhile. Fix direction: accept conversationId-matching replies for response credit, or auto-attach pending-assignment context to reminder messages so agents reply to the correct thread.
+
+### Issue 78 — interval-goal follow-ups — R6 a1
+
+**Status:** open. **Priority:** P3.
+
+- F4: `GOAL_NUDGE_IDLE_INTERVAL_MS` constant dead-but-imported; resolver default (5s) diverges from its 60s — delete constant, document divergence with TASK_STALL variant.
+- F5: goal set/update never touch `idleState.nextGoalNudgeAt` — new/shrunk goal can inherit a far-future nudge slot from a deleted/long-interval goal.
+- F7: `-i 1` = 1ms → per-tick full idle/graph scan + state write; floor clamp (e.g. 1s).
+- a3: goal show lacks last-fire/next-due/why-suppressed for cadence debugging.
+- a4: coverage gaps — invalid env fallback, noop update=true corner, post-goal-done interval-clear assertion.
 
 ### 1. Failed-first delivery later received
 
