@@ -159,6 +159,53 @@ Design (7 lines; validated = production-proven in mailbox, design = cross-checke
 
 Replies to reminder threads don't satisfy original-assignment response debt (mailbox.ts:64-71 requires replyTo===rec.id or conversationId match). This week: rgi-implementer and r5-a2 both needed manual resultMessageId coaching to clear response_missing; pump emitted repeated settled-with-missing-response noise meanwhile. Fix direction: accept conversationId-matching replies for response credit, or auto-attach pending-assignment context to reminder messages so agents reply to the correct thread.
 
+### Issue 83 — Row 76 phase 1 implementation: identity/presence split + two-tier sweep — R9 follow-on
+
+**Status:** open. **Priority:** P1. **Source:** Row 76 readiness review + investigation matrix.
+
+Phase 1 sub-tasks:
+- A. split durable identity from live presence in the agent model/state.
+- B. make `hooks.ts` write presence updates only; stop treating settle as an identity/ownership conclusion.
+- C. add a cheap tier-1 sweep (tmux/process alive check) in the existing reconcile paths.
+- D. add tier-2 probe/wake only for suspicious candidates or dispatch-time recovery.
+- E. replace `TASK_STALE_MS` as the sole stale gate; preserve `ready && !assignee` for assignment readiness, move stall/reassign decisions to presence + progress lease expiry.
+- F. update notification fencing / stale reasons to reflect presence and lease state.
+- G. refresh task-liveness / idle-nudge / lifecycle-fencing / orchestrator-wake fixtures and expectations.
+
+Metrics note:
+- track a cheap `hung-but-alive residual` proxy from existing settled-with-open-assignment / response-missing signals.
+- treat `false-reassign` as a proxy until explicit counters or labels exist.
+
+### Issue 82 — Agent retirement and dead-pane GC policy — R9 follow-on
+
+**Status:** open. **Priority:** P0. **Source:** lifecycle/resource debt review.
+
+Policy direction:
+- terminal closure should retire the worker unless an explicit reuse lease keeps it parked.
+- silent dead panes should be reclaimed by heartbeat + tmux-liveness reconciliation.
+- runtime storage should distinguish reusable park state from stale ghost records.
+- spend / usage visibility remains a follow-up once lifecycle retirement is under control.
+
+Best enforcement points:
+- `sweepTaskWorkersLocked()` on terminal task close.
+- `session_shutdown` for visible exits.
+- periodic reconcile / maintenance sweep for silent deaths and stale tmux targets.
+
+### Issue 81 — User-origin goal protection fence — R9 follow-on
+
+**Status:** open. **Priority:** Critical. **Source:** goal-clear authority incident.
+
+Policy direction:
+- add durable goal origin / author metadata (user vs orchestrator vs system), not just audit-only `setBy`.
+- make `swarm_mark_goal_done` refuse user-origin goals by default.
+- keep batch-scoped goals separate from standing user goals.
+- provide an escalation-only path for explicit user confirmation when a user-origin goal should end.
+
+Acceptance:
+- orchestrator cannot silently clear a user-origin goal.
+- batch completion no longer implies standing goal completion.
+- the close decision is auditable and policy-based, not inferred from `nudges: 0` or batch state.
+
 ### Issue 80 — R7 small-fix consolidation (mock-llm crash path, evidence persistence, goal suppression, hygiene) — R7 consolidated
 
 **Status:** open. **Priority:** P1. **Source:** R7 ritual (a1-a5 + orchestrator-verified goal-nudge investigation).
@@ -733,3 +780,49 @@ Before implementing the follow-up items, confirm these policy choices:
 4. Should parallel file overlap be rejected by default, or merely warned?
 5. Which cancellation guarantee is required: best-effort stop, or lease revocation with stale-result rejection?
 6. Should recovery actions be model-callable tools, orchestrator-only tools, or slash commands only?
+
+### Issue 81 — goal-clear authority guard — P0
+
+**Status:** proposed. **Priority:** P0. **Source:** R9 a2 incident review.
+
+`swarm_mark_goal_done` currently fences only on current goal identity and orchestrator authority. That is not enough to distinguish a standing user goal from a short-lived batch goal, so a batch-close path can still retire an intent that should remain durable.
+
+**Proposal:** add durable goal origin metadata (`origin: user|orchestrator|system`, plus `authorId`/scope when useful) and refuse `swarm_mark_goal_done` for user-origin goals by default. A batch-scoped goal should be explicit and separately identified from a standing user goal.
+
+**Acceptance criteria:**
+- standing user goals cannot be silently cleared by batch completion;
+- orchestrator tools can still close explicit batch-scoped goals;
+- the clear path is auditable and semantically obvious.
+
+### Issue 82 — agent retirement and heartbeat-based pane GC — P0
+
+**Status:** proposed. **Priority:** P0. **Source:** R9 a3 resource / ops review.
+
+Terminal task closure should normally retire the worker unless an explicit reuse lease exists. The current task-close sweep is real, but it only stops a narrow class of workers; stale agents and dead panes still accumulate as long-lived resource debt.
+
+**Proposal:**
+- auto-stop or park completed-task agents on terminal close;
+- add a heartbeat + tmux-liveness GC pass that marks dead panes and stale running records for reclamation;
+- keep reuse explicit via a lease/park mechanism instead of hoping idle panes will disappear.
+
+**Acceptance criteria:**
+- completed-task agents no longer accumulate indefinitely;
+- dead tmux windows are detected and reclaimed without manual cleanup;
+- running idle-alive agents remain only when a reuse policy explicitly keeps them alive.
+
+### Issue 83 — Row 76 phase 1 sub-tasks and metric staging — P1
+
+**Status:** proposed. **Priority:** P1. **Source:** R9 a4/a5 sequencing review.
+
+Row 76 is ready to start, but the batch must stay narrow so evidence remains interpretable. The next phase should be split into explicit sub-tasks rather than bundled with broader lifecycle cleanup.
+
+**Proposal:**
+1. liveness / progress detection and stale-open assignment surfacing
+2. supersession fencing for late results and reassign churn
+3. proxy metric capture for hung-but-alive residuals, stale-open assignment counts, and supersession churn
+
+**Acceptance criteria:**
+- phase 1 runs as a cleanly scoped batch with reproducible evidence;
+- the metric story is proxy-based first, canonical later;
+- goal-clear and agent-retirement cleanup are referenced as guard rows, not silently merged into the same measurement story.
+
