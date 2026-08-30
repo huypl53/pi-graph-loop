@@ -164,8 +164,8 @@ Replies to reminder threads don't satisfy original-assignment response debt (mai
 **Status:** open. **Priority:** P1. **Source:** R7 ritual (a1-a5 + orchestrator-verified goal-nudge investigation).
 
 - [a1 M-H] `extensions/mock-llm/src/stream.ts:305-307`: void IIFE without catch — fixture-load failure (invalid/deleted fixture referenced by stale session config) → unhandled rejection → Node 15+ CRASHES the host pi process. Violates the provider's never-silent-hang contract. Fix: try/catch pushing terminal error event + stream.end().
-- [a1+a2 converge] Evidence persistence: force-reopen/manual close of commit-like nodes discards stamped evidence (both r75+r79 final snapshots `evidence: {}` because last close path was manual). Preserve evidence record or re-stamp on terminal close.
-- [orchestrator-verified] Goal-nudge suppression predicate too narrow: assigned-to-orchestrator commit node doesn't count as active work — 3 nudges fired while orchestrator was mid-commit (18:33 event trail; seq 72/73/74 correct, interval 5s by design — NOT a bug). Extend suppression to assigned+active work.
+- [a1+a2 converge] Evidence persistence: force-reopen/manual close of commit-like nodes discards stamped evidence, and Row 77 shows the natural close path can still end with `evidence: {}`. Preserve evidence record or re-stamp on **all** terminal close paths, not just manual closes.
+- [orchestrator-verified] Goal-nudge suppression predicate too narrow: assigned-to-orchestrator commit node doesn't count as active work — 3 nudges fired while orchestrator was mid-commit (18:33 event trail; seq 72/73/74 correct, interval 5s by design — cadence itself is NOT a bug). Clarify only the suppression scope.
 - [a1 M] Create-path ordering: autoClose (tasks.ts:87) runs before writeBaselineCommit (:111) — Issue 26 one-node-graph auto-close example structurally dead; stale comment at tasks.ts:97-98.
 - [a1 L] `.pi/mock-llm/` missing from .gitignore.
 - [a1 L] Evidence aliasing: `.commit` and per-node key share one object reference; multi-commit-node divergence in printGraphText.
@@ -179,13 +179,16 @@ Rows 76 and 77 are closed above. The remaining batch work stays split:
 
 - Confirmed live Row 80 items:
   - mock-LLM crash path
-  - evidence persistence / re-stamp on close
-  - goal suppression when orchestrator holds assigned work
+  - evidence persistence on all terminal close paths
   - create-path ordering (`tasks.ts:87` before `:111`)
   - `.pi/mock-llm/` gitignore hygiene
   - evidence aliasing
   - adversarial tests
-- Stale / already-fixed by Rows 76/77: none of the Row 80 bullets were retired by those commits.
+- Policy clarification, not a defect:
+  - goal-nudge cadence itself is intended; only the suppression scope around assigned+active work remains a follow-up.
+- Cosmetic / low-priority:
+  - pipeline-stall subject wording.
+- Stale / already-fixed by Rows 76/77: none of the true Row 80 defects were retired by those commits.
 - Next batch sequence:
   1. Row 80 small-fix consolidation.
   2. Row 76 follow-on implementation for liveness/progress + supersession.
