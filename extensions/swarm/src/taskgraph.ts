@@ -473,40 +473,110 @@ function edgeMatchesActivation(task: TaskState, edge: TaskEdge) {
 	return Boolean(edge.rework && (from.status === "failed" || from.status === "skipped"));
 }
 
-export function activateReworkNodes(task: TaskState) {
+function reworkEdgeKey(edge: TaskEdge) {
+	return `${edge.from}=>${edge.to}:${edge.when}:${edge.rework ? 1 : 0}`;
+}
+
+function sourceAttemptIdentity(task: TaskState, edge: TaskEdge): { attemptId: string; sourceStatus: TaskNodeStatus; sourceOutcome: string | null | undefined } | null {
+	const from = task.nodes[edge.from];
+	if (!from) return null;
+	const latestAttemptId = from.activeAttemptId || from.attemptHistory?.[from.attemptHistory.length - 1]?.attemptId;
+	if (latestAttemptId) {
+		return { attemptId: latestAttemptId, sourceStatus: from.status, sourceOutcome: from.outcome };
+	}
+	return { attemptId: `legacy:${edge.from}:${from.status}:${from.outcome ?? ""}:${from.lastActivityAt ?? ""}`, sourceStatus: from.status, sourceOutcome: from.outcome };
+}
+
+function hasConsumedRework(task: TaskState, edge: TaskEdge, sourceAttemptId: string, reopenedNodeId: string) {
+	return (task.reworkConsumption || []).some((record) => record.edgeKey === reworkEdgeKey(edge) && record.sourceNodeId === edge.from && record.sourceAttemptId === sourceAttemptId && record.reopenedNodeId === reopenedNodeId);
+}
+
+function recordReworkConsumption(task: TaskState, edge: TaskEdge, reopenedNodeId: string, sourceAttemptId: string, sourceStatus: TaskNodeStatus, sourceOutcome: string | null | undefined) {
+	task.reworkConsumption ||= [];
+	if (hasConsumedRework(task, edge, sourceAttemptId, reopenedNodeId)) return false;
+	task.reworkConsumption.push({
+		edgeKey: reworkEdgeKey(edge),
+		sourceNodeId: edge.from,
+		sourceAttemptId,
+		reopenedNodeId,
+		consumedAt: now(),
+		sourceStatus,
+		sourceOutcome,
+	});
+	return true;
+}
+
+export function activateReworkNodes(task: TaskState, tp?: TaskPaths) {
 	const reopened: string[] = [];
-	for (const [nodeId, node] of Object.entries(task.nodes)) {
-		if (!(node.status === "failed" || node.status === "skipped" || node.status === "done")) continue;
-		const incoming = task.edges.filter((edge) => edge.to === nodeId);
-		if (!incoming.some((edge) => edge.rework && edgeMatchesActivation(task, edge))) continue;
-		const priorActiveAttemptId = node.activeAttemptId;
-		const priorAttempt = priorActiveAttemptId && node.attemptHistory
-			? node.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId)
-			: undefined;
-		if (priorAttempt && (priorAttempt.status === "active" || priorAttempt.status === "completed" || priorAttempt.status === "failed" || priorAttempt.status === "skipped")) {
-			priorAttempt.supersededAt ||= now();
-			priorAttempt.supersededBy = "<rework>";
-			if (priorAttempt.status === "active") {
-				priorAttempt.status = "superseded";
-				priorAttempt.outcome = undefined;
-				priorAttempt.releasedAt ||= now();
-				priorAttempt.releaseReason = "terminal";
+	for (const [sourceNodeId, sourceNode] of Object.entries(task.nodes)) {
+		if (!(sourceNode.status === "failed" || sourceNode.status === "skipped" || sourceNode.status === "done")) continue;
+		const outgoing = task.edges.filter((edge) => edge.from === sourceNodeId && edge.rework);
+		for (const activation of outgoing) {
+			if (!edgeMatchesActivation(task, activation)) continue;
+			const source = sourceAttemptIdentity(task, activation);
+			if (!source) continue;
+			const target = task.nodes[activation.to];
+			if (!target) continue;
+			if (hasConsumedRework(task, activation, source.attemptId, activation.to)) {
+				trace(paths(process.cwd()), "task.rework.suppressed", {
+					taskId: task.taskId,
+					nodeId: activation.to,
+					edgeKey: reworkEdgeKey(activation),
+					sourceNodeId: activation.from,
+					sourceAttemptId: source.attemptId,
+					targetStatus: target.status,
+					sourceStatus: source.sourceStatus,
+					sourceOutcome: source.sourceOutcome ?? null,
+				});
+				continue;
 			}
-		}
-		node.status = "ready";
-		node.assignee = undefined;
-		node.assignmentMessageId = undefined;
-		delete node.activeAttemptId;
-		node.outcome = null;
-		delete node.staleAt;
-		node.lastActivityAt = now();
-		reopened.push(nodeId);
+			recordReworkConsumption(task, activation, activation.to, source.attemptId, source.sourceStatus, source.sourceOutcome ?? null);
+			if (!(target.status === "pending" || target.status === "failed" || target.status === "skipped" || target.status === "done")) {
+				trace(paths(process.cwd()), "task.rework.suppressed", {
+					taskId: task.taskId,
+					nodeId: activation.to,
+					edgeKey: reworkEdgeKey(activation),
+					sourceNodeId: activation.from,
+					sourceAttemptId: source.attemptId,
+					targetStatus: target.status,
+					sourceStatus: source.sourceStatus,
+					sourceOutcome: source.sourceOutcome ?? null,
+					reason: "target_not_reopenable",
+				});
+				continue;
+			}
+			const priorActiveAttemptId = target.activeAttemptId;
+			const priorAttempt = priorActiveAttemptId && target.attemptHistory
+				? target.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId)
+				: undefined;
+			if (priorAttempt && (priorAttempt.status === "active" || priorAttempt.status === "completed" || priorAttempt.status === "failed" || priorAttempt.status === "skipped")) {
+				priorAttempt.supersededAt ||= now();
+				priorAttempt.supersededBy = "<rework>";
+				if (priorAttempt.status === "active") {
+					priorAttempt.status = "superseded";
+					priorAttempt.outcome = undefined;
+					priorAttempt.releasedAt ||= now();
+					priorAttempt.releaseReason = "terminal";
+				}
+			}
+		target.status = "ready";
+		target.assignee = undefined;
+		target.assignmentMessageId = undefined;
+		delete target.activeAttemptId;
+		target.outcome = null;
+		delete target.staleAt;
+		target.lastActivityAt = now();
+		reopened.push(activation.to);
 		trace(paths(process.cwd()), TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, {
 			taskId: task.taskId,
-			nodeId,
+			nodeId: activation.to,
 			priorStatus: priorAttempt ? priorAttempt.status : (priorActiveAttemptId ? "unknown" : "done"),
 			priorAttemptId: priorActiveAttemptId ?? null,
+			edgeKey: reworkEdgeKey(activation),
+			sourceNodeId: activation.from,
+			sourceAttemptId: source.attemptId,
 		});
+		}
 	}
 	return reopened;
 }

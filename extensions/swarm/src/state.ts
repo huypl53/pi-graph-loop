@@ -222,6 +222,7 @@ export async function readTaskState(file: string): Promise<TaskState> {
 	task.gates ||= {};
 	task.editLocks ||= {};
 	task.evidence ||= {};
+	task.reworkConsumption ||= [];
 	task.sharedContext ||= { summary: "", decisions: [], openQuestions: [], risks: [] };
 	return task;
 }

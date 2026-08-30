@@ -528,6 +528,16 @@ export type TaskEdge = {
 	};
 };
 
+export type ReworkConsumptionRecord = {
+	edgeKey: string;
+	sourceNodeId: string;
+	sourceAttemptId: string;
+	reopenedNodeId: string;
+	consumedAt: string;
+	sourceStatus?: TaskNodeStatus;
+	sourceOutcome?: string | null;
+};
+
 export type TaskGate = {
 	status: TaskGateStatus;
 	by?: string | null;
@@ -626,6 +636,7 @@ export type TaskState = {
 	gates: Record<string, TaskGate>;
 	editLocks: Record<string, { nodeId: string; by: string; at: string; expiresAt?: string }>;
 	evidence: Record<string, unknown>;
+	reworkConsumption?: ReworkConsumptionRecord[];
 	// V1.5 opt-in post-iteration loop config. Absent or enabled !== true => no behavior change.
 	loop?: LoopConfig;
 };

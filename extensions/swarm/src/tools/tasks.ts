@@ -742,7 +742,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				if (params.sharedContextUpdates) applySharedContextUpdates(task, params.sharedContextUpdates as { summary?: string; decisions?: Array<{ text: string; severity?: string }>; risks?: Array<{ text: string; severity?: string }>; openQuestions?: Array<{ text: string }> }, me);
 				if (params.artifact) node.writeArtifacts = Array.from(new Set([...(node.writeArtifacts || []), params.artifact]));
 				releaseNodeAssignment(st, task, params.nodeId);
-				const reopened = activateReworkNodes(task);
+				const reopened = activateReworkNodes(task, tp);
 				const closingAssignee = node.assignee || undefined; // persisted on the node (not cleared by release)
 				// Orchestrator-explicit cancellation (issue 3): sticky terminal state. Strengthened to:
 				//   1. mark every active attempt in the task as `cancelled` (revoke the lease)
