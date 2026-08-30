@@ -948,6 +948,29 @@ export async function staleSurfaceReason(
 	return { stale: staleReason !== null, reason: staleReason, evidence };
 }
 
+function orchestratorSurfaceGroupKey(rec: { id: string; from?: string; subject?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; idempotencyKey?: string }): string {
+	const rawKey = String(rec.idempotencyKey || "");
+	if (rawKey) {
+		const normalized = rawKey
+			.replace(/^(goal:[a-z0-9_-]+:nudge:idle-streak:)\d+$/, "$1")
+			.replace(/^(task:[a-z0-9_-]+:nudge:graph-stall:)\d+$/, "$1");
+		return `idk:${normalized}`;
+	}
+	if (rec.conversationId) return `conv:${rec.conversationId}`;
+	const subject = String(rec.subject || "").trim();
+	if (subject) {
+		return `subj:${subject}|from:${String(rec.from || "")}|replyTo:${String(rec.replyTo || "")}|ack:${rec.requiresAck ? 1 : 0}|resp:${rec.requiresResponse ? 1 : 0}`;
+	}
+	return `msg:${rec.id}`;
+}
+
+function compareSurfaceCandidates(a: { id: string; createdAt?: string; updatedAt?: string }, b: { id: string; createdAt?: string; updatedAt?: string }): number {
+	const aTs = new Date(a.updatedAt || a.createdAt || 0).getTime();
+	const bTs = new Date(b.updatedAt || b.createdAt || 0).getTime();
+	if (aTs !== bTs) return aTs - bTs;
+	return a.id.localeCompare(b.id);
+}
+
 export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reason: string) {
 	if (currentAgentId() !== "orchestrator") return { delivered: 0, ids: [] as string[] };
 	// Read idle once, up front. Non-TUI modes have no live agent loop to trigger, so they are treated as
@@ -1134,6 +1157,15 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 			if (!v.ok) {
 				const key = v.reason === "retrigger_budget_exhausted" ? "retrigger_budget_exhausted" : v.reason;
 				suppressedCounts[key] = (suppressedCounts[key] || 0) + 1;
+				if (key === "node_reassigned" || key === "node_terminal" || key === "task_done" || key === "task_failed" || key === "task_cancelled" || key === "task_missing" || key === "node_missing") {
+					await trace(p, "notification.stale.suppressed", {
+						site: "orchestrator_pump.surface",
+						messageId: m.id,
+						idempotencyKey: rec.idempotencyKey || m.idempotencyKey || null,
+						reason: key,
+						evidence: [key],
+					}).catch(() => {});
+				}
 			}
 		}
 		const totalSuppressed = Object.values(suppressedCounts).reduce((a, b) => a + b, 0);
@@ -1199,7 +1231,87 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 			if (nowMs - new Date(last).getTime() < PUMP_RETRIGGER_DELAY_MS) return false;
 			return (retriggerCount[m.id] ?? 0) < PUMP_RETRIGGER_MAX;
 		});
-		const toSurface = [...neverDisplayed, ...overdueRetrigger].slice(0, 10);
+		const surfaceCandidates = [...neverDisplayed, ...overdueRetrigger].slice(0, 10);
+		// Row 68: surface-time revalidation — deferred nudges are dropped if their stall condition no
+		// longer holds (node assigned / agent busy / graph quieted / epoch advanced).
+		// Coalesce repeated backlog messages by logical surface key before the final send decision so a
+		// compacted / replaced session replays at most one freshest eligible notification per logical
+		// action.
+		const coalesced = new Map<string, { msg: SwarmMessage; dropped: string[] }>();
+		const staleSuppressed: Array<{ messageId: string; reason: string | null; evidence: string[]; idempotencyKey: string }> = [];
+		for (const msg of [...surfaceCandidates].sort(compareSurfaceCandidates).reverse()) {
+			const rec = st.messages[msg.id] || msg;
+			const v = await staleSurfaceReason(p, st, msg, taskIndex, nowMs);
+			if (v.stale) {
+				staleSuppressed.push({ messageId: msg.id, reason: v.reason, evidence: v.evidence, idempotencyKey: String(rec.idempotencyKey || msg.idempotencyKey || "") });
+				continue;
+			}
+			const groupKey = orchestratorSurfaceGroupKey(rec);
+			const existing = coalesced.get(groupKey);
+			if (!existing) {
+				coalesced.set(groupKey, { msg, dropped: [] });
+				continue;
+			}
+			const existingTs = new Date((existing.msg as any).updatedAt || existing.msg.createdAt || 0).getTime();
+			const incomingTs = new Date((msg as any).updatedAt || msg.createdAt || 0).getTime();
+			if (incomingTs >= existingTs) {
+				existing.dropped.push(existing.msg.id);
+				existing.msg = msg;
+			} else {
+				existing.dropped.push(msg.id);
+			}
+		}
+		for (const drop of staleSuppressed) {
+			await trace(p, "notification.stale.suppressed", {
+				site: "orchestrator_pump.surface",
+				messageId: drop.messageId,
+				idempotencyKey: drop.idempotencyKey,
+				reason: drop.reason,
+				evidence: drop.evidence,
+			}).catch(() => {});
+		}
+		for (const [groupKey, entry] of coalesced.entries()) {
+			if (!entry.dropped.length) continue;
+			await trace(p, "notification.coalesced.suppressed", {
+				site: "orchestrator_pump.surface",
+				groupKey,
+				keptId: entry.msg.id,
+				droppedIds: entry.dropped,
+				count: entry.dropped.length,
+			}).catch(() => {});
+		}
+		let toSurface = [...coalesced.values()].map((entry) => entry.msg).sort(compareSurfaceCandidates);
+		const consumedSuppressedIds = new Set<string>();
+		for (const entry of coalesced.values()) {
+			for (const droppedId of entry.dropped) consumedSuppressedIds.add(droppedId);
+		}
+		if (consumedSuppressedIds.size) {
+			const ts = now();
+			if (!st.consumerReceipts) st.consumerReceipts = {};
+			if (!st.consumerReceipts.orchestrator) st.consumerReceipts.orchestrator = { entries: {}, revision: 0 };
+			if (!st.consumerReceipts.orchestrator.entries) st.consumerReceipts.orchestrator.entries = {};
+			for (const id of consumedSuppressedIds) {
+				const rec = st.messages[id];
+				if (!rec || rec.to !== "orchestrator") continue;
+				if (rec.requiresAck === false) {
+					st.delivered.orchestrator = Array.from(new Set([...(st.delivered.orchestrator || []), id]));
+					if (!rec.surfacedAt) {
+						rec.surfacedAt = ts;
+						rec.updatedAt = ts;
+					}
+					continue;
+				}
+				if (!st.consumerReceipts.orchestrator.entries[id]) {
+					st.consumerReceipts.orchestrator.entries[id] = {
+						surfacedAt: ts,
+						requiresAck: true,
+						conversationId: rec.conversationId,
+						fingerprint: fingerprintMessage(rec),
+					};
+					st.consumerReceipts.orchestrator.revision = (st.consumerReceipts.orchestrator.revision || 0) + 1;
+				}
+			}
+		}
 		if (!toSurface.length) {
 			keepalive();
 			await writeState(p, st);

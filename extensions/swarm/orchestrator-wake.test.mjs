@@ -331,6 +331,41 @@ const readEvents = (p) => {
 	ok("C4: m-live has a receipt entry after successful standard surface", !!entries["m-live"], { keys: Object.keys(entries) });
 }
 
+// === C8: backlog coalescing + stale revalidation at surface time ===
+{
+	console.log("\n[C8] backlog coalescing — newest eligible survives, stale suppressed");
+	const p = setupScratch();
+	const nowMs = Date.now();
+	await withLock(p, async () => {
+		const st = await readState(p, scratch);
+		ensureOrchestrator(st, scratch, p);
+		heartbeatOrchestratorLeader(st, nowMs, process.pid, "test_seed_c8");
+		st.idleNudgeState = { allIdleSinceAt: new Date(nowMs - 60_000).toISOString() };
+		const goalId = "goal-coalesce";
+		st.goal = { id: goalId, text: "coalesce backlog", setAt: new Date(nowMs - 120_000).toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0 };
+		st.messages["msg-old"] = { id: "msg-old", from: "orchestrator", to: "orchestrator", status: "injected", createdAt: new Date(nowMs - 120_000).toISOString(), updatedAt: new Date(nowMs - 120_000).toISOString(), requiresAck: false, subject: "stale goal", body: "stale", idempotencyKey: `goal:${goalId}:nudge:idle-streak:1` };
+		st.messages["msg-fresh-1"] = { id: "msg-fresh-1", from: "orchestrator", to: "orchestrator", status: "injected", createdAt: new Date(nowMs - 5_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), requiresAck: false, subject: "fresh goal 1", body: "fresh", idempotencyKey: `goal:${goalId}:nudge:idle-streak:2` };
+		st.messages["msg-fresh-2"] = { id: "msg-fresh-2", from: "orchestrator", to: "orchestrator", status: "injected", createdAt: new Date(nowMs - 4_000).toISOString(), updatedAt: new Date(nowMs - 4_000).toISOString(), requiresAck: false, subject: "fresh goal 2", body: "fresh", idempotencyKey: `goal:${goalId}:nudge:idle-streak:3` };
+		st.delivered.orchestrator = [];
+		st.consumerReceipts = { orchestrator: { entries: {}, revision: 1 } };
+		await writeState(p, st);
+		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
+		const lines = [
+			"msg-old",
+			"msg-fresh-1",
+			"msg-fresh-2",
+		].map((id) => JSON.stringify({ swarmId: "test", from: "orchestrator", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id, to: "orchestrator", subject: st.messages[id].subject, body: st.messages[id].body, requiresAck: false, createdAt: st.messages[id].createdAt, updatedAt: st.messages[id].updatedAt, idempotencyKey: st.messages[id].idempotencyKey }));
+		writeFileSync(mailboxFile, lines.join("\n") + "\n");
+	});
+	const sentMessages = [];
+	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
+	await pumpOrchestratorMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8");
+	const evs = readEvents(p);
+	ok("C8: stale backlog item suppressed", evs.some((e) => e.event === "notification.stale.suppressed" && e.reason === "idle_epoch_advanced"), evs.filter((e) => e.event === "notification.stale.suppressed"));
+	ok("C8: duplicate backlog coalesced", evs.some((e) => e.event === "notification.coalesced.suppressed" && e.count === 1), evs.filter((e) => e.event === "notification.coalesced.suppressed"));
+	ok("C8: only one fresh surfaced message sent", sentMessages.length === 1, sentMessages.map((x) => x.o));
+}
+
 // === C1: pi.sendMessage vs pi.sendUserMessage (real grep guard) ===
 {
 	console.log("\n[C1] pi.sendMessage for PM deliveries — NO pi.sendUserMessage for swarm-message");
