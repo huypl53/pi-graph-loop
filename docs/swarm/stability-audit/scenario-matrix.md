@@ -8,6 +8,7 @@ A scenario = **fixture (agent-side script)** + **lane choreography (harness-side
 
 Rules:
 - Fixtures replay only what the LLM would emit (text/toolcall/thinking/error/hang/stop, delayMs timing, lowercase tool names).
+- **Multi-turn fixtures require explicit multi-request driving**: one `pi -p` invocation consumes exactly ONE scripted turn; a lane validating turn N>1 must drive N requests (`pi -p` then `pi --continue -p` repeatedly) and assert on the FINAL request's transcript. A single-invocation lane only proves turn 1.
 - Harness verdicts (idle/stale/reassign/supersede/dead-letter/escalation) are driven by the REAL swarm extension in the lane with real time constants — never scripted.
 - Every hang event MUST have an abort path in the choreography (timeout --signal=INT wrapper or explicit abort).
 - Honest failure > fake pass: if a scenario cannot be set up deterministically, the report says so.
