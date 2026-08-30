@@ -455,11 +455,14 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						await traceTask(tp, "notification.stale.suppressed", { site: "swarm_remind.reminder", taskId, nodeId, to: assignee, reason: remindStaleCheck.reason, evidence: remindStaleCheck.evidence });
 						return { sent: false, reason: `stale: ${remindStaleCheck.reason} (${remindStaleCheck.evidence.join("; ")})` };
 					}
-					// Send the reminder: informational only, no ack/response debt by construction.
+					// Send the reminder: informational only, no ack/response debt by construction, and thread
+					// it back to the original assignment so a reply naturally lands in the original thread.
 					const { msg: rmsg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, {
 						to: assignee,
 						subject: `Reminder: node ${nodeId} of ${taskId} awaiting progress`,
 						body: `You acknowledged the assignment for task ${taskId}, node ${nodeId} (${node.role}), but there has been no durable progress since ${new Date(anchorMs).toISOString()} (${Math.round((nowMs - anchorMs) / 60000)} minutes).\n\nRequired actions (choose one):\n1. If complete: swarm_update_task(taskId="${taskId}", nodeId="${nodeId}", status="done", outcome="<result>")\n2. If blocked: swarm_update_task(taskId="${taskId}", nodeId="${nodeId}", status="blocked", note="<reason>")\n3. If still working: continue, and update the node when finished.\n\nThis reminder is informational; it does not change your task status, assignment, or create any reply obligation. At most one reminder is sent per attempt.`,
+						replyTo: currentMsg.id,
+						conversationId: currentMsg.conversationId,
 						requiresAck: false,
 						requiresResponse: false,
 						priority: "normal",

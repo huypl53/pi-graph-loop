@@ -218,10 +218,112 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 }
 
 // ============================================================
-// Scenario 4: gate=1 reply to superseded original is fenced
+// Scenario 4: gate=1 reminder-thread reply credits the original assignment
 // ============================================================
 {
-	console.log("\n--- Scenario 4: gate=1 reply to superseded -> fenced, no mutation ---");
+	console.log("\n--- Scenario 4: gate=1 reminder-thread reply -> verified original assignment ---");
+	await rm(join(scratch, ".pi"), { recursive: true, force: true });
+	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
+
+	const { tools: tools4, handlers: handlers4 } = await loadExtension({ identity: "worker-c" });
+
+	const assignMsgId = "msg-assign-4";
+	const reminderMsgId = "msg-reminder-4";
+	const replyMsgId = "msg-result-4";
+	const workerId = "worker-c";
+	const convoId = "task:t-1:n-1";
+	const beforeTs = new Date().toISOString();
+	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify({
+		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		agents: {
+			"orchestrator": { id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
+			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "response_missing", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: beforeTs },
+		},
+		delivered: { [workerId]: [assignMsgId, reminderMsgId] },
+		messages: {
+			[assignMsgId]: { id: assignMsgId, from: "orchestrator", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: true, requiresResponse: true, conversationId: convoId, response: { status: "missing", missingAt: beforeTs } },
+			[reminderMsgId]: { id: reminderMsgId, from: "orchestrator", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: false, requiresResponse: false, conversationId: convoId, replyTo: assignMsgId, response: { status: "not_required" } },
+		},
+	}, null, 2), "utf8");
+
+	// Reply from the reminder thread, but keep the original assignment conversationId so the
+	// eventual verified result is credited to the original assignment record.
+	await tools4.swarm_send_message.execute("c4", { to: "orchestrator", body: "Result via reminder hint", replyTo: reminderMsgId, conversationId: convoId, requiresAck: false }, undefined, undefined, { cwd: scratch });
+	const afterSend = await readStateFile();
+	const reply = Object.values(afterSend?.messages || {}).find((m) => m.from === workerId && m.replyTo === reminderMsgId && m.conversationId === convoId);
+	ok("gate=1 reminder-thread reply exists on the reminder thread", Boolean(reply));
+	await tools4.swarm_ack_message.execute("c4-ack", { messageId: assignMsgId, status: "done", resultMessageId: reply?.id }, undefined, undefined, { cwd: scratch });
+
+	await handlers4["agent_settled"][0]({}, { cwd: scratch, mode: "tui", isIdle: () => true });
+	const after = await readStateFile();
+	const assign = after?.messages?.[assignMsgId];
+	const reminder = after?.messages?.[reminderMsgId];
+	const verifiedReply = after?.messages?.[reply?.id];
+	ok("gate=1 reminder-thread reply verifies the original assignment", assign?.response?.status === "verified");
+	ok("gate=1 reminder reply is actually from the reminder thread", reply?.replyTo === reminderMsgId);
+	ok("gate=1 reminder reply preserves the original assignment conversationId", reply?.conversationId === convoId);
+	ok("gate=1 reminder keeps replyTo hint on the reminder message", reminder?.replyTo === assignMsgId);
+	ok("gate=1 reminder keeps original conversationId on the reminder message", reminder?.conversationId === convoId);
+	ok("gate=1 response debt clears after the actual verification path", after?.agents?.[workerId]?.runtimeStatus === "idle");
+
+	const events = await readGlobalEvents();
+	ok("gate=1 response verification records the original assignment resultMessageId", assign?.response?.resultMessageId === verifiedReply?.id);
+	ok("gate=1 settled-with-missing-response noise stays quiet after in-thread reply", !events.some((e) => e.event === "message.response_missing.settled.notify" && e.agentId === workerId));
+}
+
+// ============================================================
+// Scenario 4b: gate=1 reminder-thread reply with mismatched conversationId is rejected on the real path
+// ============================================================
+{
+	console.log("\n--- Scenario 4b: gate=1 reminder-thread reply with mismatched conversationId -> rejected ---");
+	await rm(join(scratch, ".pi"), { recursive: true, force: true });
+	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
+
+	const { tools: tools4b } = await loadExtension({ identity: "worker-c" });
+
+	const assignMsgId = "msg-assign-4b";
+	const reminderMsgId = "msg-reminder-4b";
+	const replyMsgId = "msg-result-4b";
+	const workerId = "worker-c";
+	const convoId = "task:t-2:n-2";
+	const beforeTs = new Date().toISOString();
+	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify({
+		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		agents: {
+			"orchestrator": { id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
+			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "response_missing", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: beforeTs },
+		},
+		delivered: { [workerId]: [assignMsgId, reminderMsgId] },
+		messages: {
+			[assignMsgId]: { id: assignMsgId, from: "orchestrator", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: true, requiresResponse: true, conversationId: convoId, response: { status: "missing", missingAt: beforeTs } },
+			[reminderMsgId]: { id: reminderMsgId, from: "orchestrator", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: false, requiresResponse: false, conversationId: convoId, replyTo: assignMsgId, response: { status: "not_required" } },
+		},
+	}, null, 2), "utf8");
+
+	await tools4b.swarm_send_message.execute("c4b", { to: "orchestrator", body: "Wrong thread", replyTo: reminderMsgId, conversationId: "task:wrong:thread", requiresAck: false }, undefined, undefined, { cwd: scratch });
+	const afterSend = await readStateFile();
+	const badReply = Object.values(afterSend?.messages || {}).find((m) => m.from === workerId && m.replyTo === reminderMsgId && m.conversationId === "task:wrong:thread");
+	ok("gate=1 mismatched reminder-thread reply exists on the reminder thread", Boolean(badReply));
+	let threw = false;
+	try {
+		await tools4b.swarm_ack_message.execute("c4b-ack", { messageId: assignMsgId, status: "done", resultMessageId: badReply?.id }, undefined, undefined, { cwd: scratch });
+	} catch (err) {
+		threw = true;
+		ok("gate=1 mismatched reminder-thread reply is rejected on the real path", String(err?.message || err).includes("INVALID_RESULT_MESSAGE"));
+	}
+	ok("gate=1 mismatched reminder-thread reply did throw", threw);
+
+	const after = await readStateFile();
+	const assign = after?.messages?.[assignMsgId];
+	ok("gate=1 mismatched reminder-thread reply does not verify the original assignment", assign?.response?.status !== "verified");
+	ok("gate=1 mismatched reminder-thread reply leaves response debt in place", after?.agents?.[workerId]?.runtimeStatus === "response_missing");
+}
+
+// ============================================================
+// Scenario 5: gate=1 reply to superseded original is fenced
+// ============================================================
+{
+	console.log("\n--- Scenario 5: gate=1 reply to superseded -> fenced, no mutation ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
 

@@ -215,7 +215,10 @@ await ensureWorker("impl-a", "implementer");
 	ok("3a first reminder sends", /Reminder sent/.test(n1.text), n1?.text);
 	const node1 = readNode(taskId, "plan");
 	const rec = node1.attemptHistory.find((a) => a.attemptId === attemptId).reminder;
+	const reminderMsg = readState().messages[rec.messageId];
 	ok("3b attempt.reminder persisted", !!rec && rec.attemptId === attemptId && rec.messageId);
+	ok("3b2 reminder replyTo points at original assignment", reminderMsg.replyTo === msgId);
+	ok("3b3 reminder conversationId preserves original thread", reminderMsg.conversationId === readState().messages[msgId].conversationId);
 	// before/after state compare: only attempt.reminder added
 	const before = JSON.parse(JSON.stringify(readTask(taskId)));
 	const n2 = await runSwarm(`remind ${taskId} plan`);

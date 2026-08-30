@@ -151,6 +151,9 @@ needs structured parameters or machine-readable results.
   worker reminder. One per attempt, permanently; requires durable receipt ack (`seen`/`processing`),
   the `REMINDER_NO_PROGRESS_MS` (60 min) no-progress interval, and the current active attempt.
   `requiresAck:false`/`requiresResponse:false` — no ack/response debt; never mutates node state.
+  The reminder is threaded back to the original assignment (`replyTo=<original assignment message id>`)
+  and preserves the assignment `conversationId`, so a reply sent from the reminder thread still
+  credits the original record.
 - `/swarm pool list` — slot health + rotation status
 - `/swarm pool show` — full config view (pool OR implicit singleton fallback); never edits `.pi/settings.json`
 - `/swarm protocol migrate [--dry-run]` — operator path for upgrading durable v1 message
@@ -216,7 +219,8 @@ For an assignment or any message requiring a response:
 
 1. recipient calls `swarm_ack_message(..., status="seen"|"processing")`;
 2. recipient performs work and sends a result with `swarm_send_message` using
-   `replyTo=<original-message-id>`, or uses `swarm_task_message`;
+   `replyTo=<original-message-id>` and the original assignment `conversationId`, or uses
+   `swarm_task_message`;
 3. recipient calls `swarm_ack_message(..., status="done",
    resultMessageId=<result-message-id>)`.
 
