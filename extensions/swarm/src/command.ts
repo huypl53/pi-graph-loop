@@ -1053,7 +1053,37 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						const hasInterval = rawInterval.length > 0;
 						const parsedInterval = hasInterval ? parseGoalSetInterval(rawInterval) : null;
 						if (hasInterval && !parsedInterval?.ok) { ctx.ui.notify(`Usage: /swarm goal ${isUpdate ? "update" : "set"} [-i|--interval <time>] [<text>] (${parsedInterval?.error}; time accepts raw ms, s, m, h)`, "warning"); return; }
-						if (!isUpdate && !text) { ctx.ui.notify("Usage: /swarm goal set [-i|--interval <time>] <text>", "warning"); return; }
+						if (!isUpdate && !text) {
+						// UX (user-reported): "/swarm goal set -i 30s" with no text. When a goal already
+						// exists and an interval was given, treat it as an interval-only update instead
+						// of erroring — the user's intent (change the cadence) is unambiguous. Without
+						// an interval (bare "goal set") or with no existing goal, the usage warning stays.
+						if (hasInterval && parsedInterval?.ok) {
+							const setMs = parsedInterval.ms;
+							const stU = await withLock(p, async () => {
+								const s = await readState(p, ctx.cwd);
+								if (!s.goal) return { noop: true, updated: false };
+								if (s.goal.nudgeIntervalMs !== setMs) {
+									s.goal.nudgeIntervalMs = setMs;
+									// Re-anchor under the same min-only policy as the update path below.
+									const idle = s.idleNudgeState ||= {};
+									const anchor = idle.allIdleSinceAt ? new Date(idle.allIdleSinceAt).getTime() : Date.now();
+									idle.nextGoalNudgeAt = idle.nextGoalNudgeAt
+										? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), anchor + setMs)).toISOString()
+										: new Date(anchor + setMs).toISOString();
+								}
+								await trace(p, "goal.updated", { goalId: s.goal.id, via: "command(set-as-update)", updatedText: false, updatedInterval: true });
+								await writeState(p, s);
+								return { updated: true, goal: s.goal };
+							});
+							if (stU.updated) {
+								ctx.ui.notify(`Goal ${stU.goal!.id} interval updated to ${setMs}ms (set with no text treated as interval update).`, "info");
+								return;
+							}
+						}
+						ctx.ui.notify("Usage: /swarm goal set [-i|--interval <time>] <text> (interval-only change on an existing goal: use 'update')", "warning");
+						return;
+					}
 						if (isUpdate && !text && !hasInterval) { ctx.ui.notify("Usage: /swarm goal update [-i|--interval <time>] [<text>]", "warning"); return; }
 						const intervalMs = hasInterval ? parsedInterval!.ms : (isUpdate ? undefined : resolveGoalNudgeIntervalMs());
 						const st = await withLock(p, async () => {
@@ -1061,7 +1091,19 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							if (isUpdate) {
 								if (!s.goal) return { noop: true, updated: false };
 								if (text) s.goal.text = text;
-								if (intervalMs !== undefined) s.goal.nudgeIntervalMs = intervalMs;
+if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
+									s.goal.nudgeIntervalMs = intervalMs;
+									// Re-anchor the idle gate so the NEW interval applies immediately instead of at the
+									// next boundary of the OLD schedule (live bug: -i 30s at 02:20 left nextGoalNudgeAt
+									// pinned to 02:58 = 01:58 allIdleSince + old 1h; no nudge until then). Only pull it
+									// EARLIER (min) - a longer interval must never fire a nudge sooner than scheduled.
+									const idle = s.idleNudgeState ||= {};
+									const anchor = idle.allIdleSinceAt ? new Date(idle.allIdleSinceAt).getTime() : Date.now();
+									const fresh = anchor + intervalMs;
+									idle.nextGoalNudgeAt = idle.nextGoalNudgeAt
+										? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), fresh)).toISOString()
+										: new Date(fresh).toISOString();
+								}
 								await trace(p, "goal.updated", { goalId: s.goal.id, via: "command", updatedText: Boolean(text), updatedInterval: intervalMs !== undefined });
 								await writeState(p, s);
 								return { updated: true, goal: s.goal };

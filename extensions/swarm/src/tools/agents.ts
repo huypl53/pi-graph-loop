@@ -571,7 +571,17 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 					if (isUpdate) {
 						if (!st.goal) return { updated: false, noop: true };
 						if (text) st.goal.text = text;
-						if (nudgeIntervalMs !== undefined) st.goal.nudgeIntervalMs = nudgeIntervalMs;
+if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs) {
+									st.goal.nudgeIntervalMs = nudgeIntervalMs;
+									// Re-anchor the idle gate so the NEW interval applies immediately (command.ts parity).
+									// Only pull EARLIER (min) - a longer interval must never fire sooner than scheduled.
+									const idle = st.idleNudgeState ||= {};
+									const anchor = idle.allIdleSinceAt ? new Date(idle.allIdleSinceAt).getTime() : Date.now();
+									const fresh = anchor + nudgeIntervalMs;
+									idle.nextGoalNudgeAt = idle.nextGoalNudgeAt
+										? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), fresh)).toISOString()
+										: new Date(fresh).toISOString();
+								}
 						await trace(p, "goal.updated", { goalId: st.goal.id, previousId, via: "tool", updatedText: Boolean(text), updatedInterval: nudgeIntervalMs !== undefined });
 						await writeState(p, st);
 						return { updated: true, goalId: st.goal.id, previousId, goal: st.goal };
