@@ -182,6 +182,11 @@ Slot fields:
   `extensions/swarm/src/completion.ts` `ROLE_KINDS` (seven entries: orchestrator, planner,
   reviewer, tester, implementer, worker, observer). Manual `/swarm pool rotate now` ALWAYS
   bypasses the role filter (operator override) and stamps `rolesIgnored: true` in the swap trace.
+  **Strict roles (2026-08-31)**: when at least one slot is tagged for a roleKind, that roleKind is
+  served by ONLY its tagged slots — untagged slots are no longer a fallback for it. Untagged
+  slots serve only roleKinds that have no tags anywhere in the pool. A roleKind whose tagged
+  slots are all benched has no candidate (the agent keeps its current model; spawn falls back
+  via the traced `pool.role_filter_all_filtered_fallback` path).
   If every slot is filtered out for a roleKind at spawn time, a warning trace
   (`pool.role_filter_all_filtered_fallback`) is emitted and the worker still starts on the next
   available unfiltered slot. Malformed `roles` values are reported as `slot_bad_roles` by

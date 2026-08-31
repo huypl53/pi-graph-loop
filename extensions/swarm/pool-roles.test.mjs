@@ -76,6 +76,17 @@ async function resetHealth() {
 	// C: roles:[] matches ANY roleKind (empty = all).
 	// (covered via B above — gpt slot has roles:[] and served reviewer)
 
+	// STRICT (2026-08-31): a roleKind that has ANY tagged slot is served ONLY by its tagged slots.
+	// implementer is tagged on glm -> must NEVER pick the untagged gpt slot now.
+	await resetHealth();
+	for (let i = 0; i < 5; i++) {
+		const s = await pickSlot(p, { roleKind: "implementer" });
+		ok(`strict ${i}: implementer picks only its tagged glm slot`, s && s.slot.model === "glm-5.1", JSON.stringify(s?.slot));
+	}
+	// Untagged roleKinds (reviewer/orchestrator) are unaffected — served by untagged slots.
+	const so = await pickSlot(p, { roleKind: "orchestrator" });
+	ok("strict: untagged roleKind served by untagged slot", so && so.slot.model === "gpt-5.4-mini", JSON.stringify(so?.slot));
+
 	// D + J: absent roles field / legacy undefined roleKind -> no filter.
 	const d = await pickSlot(p, { roleKind: "orchestrator" });
 	ok("case D: absent-roles slot eligible for any role", Boolean(d)); // may pick glm or gpt; just no-undefined
