@@ -13,6 +13,7 @@ import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { enqueueAndDeliver, deliverMessageLocked, findIdempotentMessage } from "./mailbox.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
+import { classifyGoalClearAuthority, GOAL_ORIGIN_ORCHESTRATOR, GOAL_ORIGIN_VALUES } from "./goals.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
 import { claimOrchestratorLeader, ensureOrchestrator, overridePath } from "./identity.ts";
 import { startOrchestratorPump, bumpSwapChain } from "./hooks.ts";
@@ -24,8 +25,8 @@ import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompl
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
 // --inject/--no-inject --kind <v> --model <v> --provider <v> --caps <v> --yes; everything else goes to `rest`.
-function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string } {
-	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string } = { rest: [], force: false, kill: true, literal: false, enter: false, yes: false };
+function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string; origin?: string; "set-by-scope"?: string } {
+	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string; origin?: string; "set-by-scope"?: string } = { rest: [], force: false, kill: true, literal: false, enter: false, yes: false };
 	for (let i = 0; i < tokens.length; i++) {
 		const t = tokens[i];
 		if (t === "--force") out.force = true;
@@ -40,6 +41,8 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 		else if (t === "--provider") out.provider = tokens[++i];
 		else if (t === "--caps") out.caps = tokens[++i];
 		else if (t === "--interval" || t === "-i") out.interval = tokens[++i];
+		else if (t === "--origin") out.origin = tokens[++i];
+		else if (t === "--set-by-scope") out["set-by-scope"] = tokens[++i];
 		else out.rest.push(t);
 	}
 	return out;
@@ -1052,6 +1055,14 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						const rawInterval = flags.interval !== undefined ? String(flags.interval).trim() : "";
 						const hasInterval = rawInterval.length > 0;
 						const parsedInterval = hasInterval ? parseGoalSetInterval(rawInterval) : null;
+						// Issue 81: --origin flag validates against the allowed origin set.
+						const requestedOrigin = flags.origin ? String(flags.origin).trim() : undefined;
+						if (requestedOrigin !== undefined && !GOAL_ORIGIN_VALUES.has(requestedOrigin as any)) {
+							ctx.ui.notify(`/swarm goal set --origin must be one of: ${[...GOAL_ORIGIN_VALUES].join(", ")}`, "warning");
+							return;
+						}
+						const newOrigin = (requestedOrigin ?? GOAL_ORIGIN_ORCHESTRATOR) as import("./goals.ts").GoalOrigin;
+						const requestedSetByScope = flags["set-by-scope"] ? String(flags["set-by-scope"]).trim() : undefined;
 						if (hasInterval && !parsedInterval?.ok) { ctx.ui.notify(`Usage: /swarm goal ${isUpdate ? "update" : "set"} [-i|--interval <time>] [<text>] (${parsedInterval?.error}; time accepts raw ms, s, m, h)`, "warning"); return; }
 						if (!isUpdate && !text) {
 						// UX (user-reported): "/swarm goal set -i 30s" with no text. When a goal already
@@ -1111,9 +1122,38 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 										? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), fresh)).toISOString()
 										: new Date(fresh).toISOString();
 								}
-								await trace(p, "goal.updated", { goalId: s.goal.id, via: "command", updatedText: Boolean(text), updatedInterval: intervalMs !== undefined });
+								// Issue 81: allow origin/setByScope update on the update path.
+								if (requestedOrigin !== undefined) s.goal.origin = newOrigin;
+								if (requestedSetByScope !== undefined) s.goal.setByScope = requestedSetByScope;
+								await trace(p, "goal.updated", { goalId: s.goal.id, via: "command", updatedText: Boolean(text), updatedInterval: intervalMs !== undefined, origin: s.goal.origin, setByScope: s.goal.setByScope });
 								await writeState(p, s);
 								return { updated: true, goal: s.goal };
+							}
+							// Issue 81: refuse to REPLACE a user-origin active goal via /swarm goal set <text>.
+							// Mirror of the tool path (tools/agents.ts swarm_set_goal replace branch).
+							if (s.goal) {
+								const guard = classifyGoalClearAuthority({
+									currentGoal: s.goal,
+									action: "replace",
+									actor: "orchestrator",
+									params: { origin: newOrigin },
+								});
+								if (!guard.allowed) {
+									await trace(p, "goal.clear_refused", {
+										goalId: s.goal.id,
+										origin: guard.origin,
+										reason: guard.reason,
+										actor: "orchestrator",
+										action: "replace",
+										via: "command",
+									});
+									return {
+										refused: true,
+										reason: guard.reason,
+										origin: guard.origin,
+										goalId: s.goal.id,
+									};
+								}
 							}
 							const ts = now();
 							const goalId = `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
@@ -1133,6 +1173,8 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 								text,
 								setAt: ts,
 								setBy: "orchestrator",
+								origin: newOrigin,
+								setByScope: requestedSetByScope,
 								consecutiveNoResolveNudges: 0,
 								nudgeSeq: previousId === goalId ? (s.goal?.nudgeSeq ?? 0) : 0,
 								nudgeIntervalMs: resolvedIntervalMs,
@@ -1140,10 +1182,11 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 							delete s.goal.lastNudgeAt;
 							delete s.goal.lastResolvedAt;
 							delete s.goal.backoffTicksRemaining;
-							await trace(p, "goal.set", { goalId, previousId, via: "command", length: text.length, nudgeIntervalMs: s.goal.nudgeIntervalMs, inheritedIntervalMs: inheritedIntervalMs ?? null });
+							await trace(p, "goal.set", { goalId, previousId, via: "command", length: text.length, nudgeIntervalMs: s.goal.nudgeIntervalMs, inheritedIntervalMs: inheritedIntervalMs ?? null, origin: newOrigin, setByScope: requestedSetByScope });
 							await writeState(p, s);
 							return { updated: false, goal: s.goal, goalId, previousId };
 						});
+						if (st.refused) { ctx.ui.notify(`Goal clear refused: ${st.reason} (origin=${st.origin}, goalId=${st.goalId}). Clear first with /swarm goal done --force-user-clear, then set the new goal.`, "warning"); return; }
 						if (st.noop) { ctx.ui.notify("No active swarm goal to update.", "info"); return; }
 						if (isUpdate) {
 							ctx.ui.notify(`Goal updated: ${st.goal.id} — "${st.goal.text.slice(0, 80)}${st.goal.text.length > 80 ? "…" : ""}"${st.goal.nudgeIntervalMs ? ` (nudge interval ${st.goal.nudgeIntervalMs}ms)` : ""}`, "info");
@@ -1153,18 +1196,47 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 						return;
 					}
 				if (sub === "done") {
-						const goalIdArg = rest.shift();
+						const forceUserClear = rest.includes("--force-user-clear");
+						const goalIdArg = rest.find((t) => t !== "--force-user-clear");
 						const result = await withLock(p, async () => {
 							const s = await readState(p, ctx.cwd);
 							if (!s.goal) return { cleared: true, noop: true };
 							if (goalIdArg && safeId(goalIdArg) !== s.goal.id) throw new Error(`goalId ${goalIdArg} does not match current goal ${s.goal.id}`);
+							// Issue 81: classify clear authority against the current goal's origin. --force-user-clear
+							// is the command-surface analog of approvedByUser: true on swarm_mark_goal_done.
+							const guard = classifyGoalClearAuthority({
+								currentGoal: s.goal,
+								action: "clear",
+								actor: "orchestrator",
+								params: { approvedByUser: forceUserClear },
+							});
+							if (!guard.allowed) {
+								await trace(p, "goal.clear_refused", {
+									goalId: s.goal.id,
+									origin: guard.origin,
+									reason: guard.reason,
+									actor: "orchestrator",
+									action: "clear",
+									via: "command",
+									approvedByUser: forceUserClear,
+								});
+								return {
+									cleared: false,
+									refused: true,
+									reason: guard.reason,
+									origin: guard.origin,
+									goalId: s.goal.id,
+								};
+							}
 							const clearedId = s.goal.id;
 							const nudges = s.goal.consecutiveNoResolveNudges;
+							const clearedOrigin = guard.origin;
 							delete s.goal;
-							await trace(p, "goal.cleared", { goalId: clearedId, nudges, via: "command" });
+							await trace(p, "goal.cleared", { goalId: clearedId, nudges, via: "command", origin: clearedOrigin });
 							await writeState(p, s);
 							return { cleared: true, clearedId, nudges };
 						});
+						if (result.refused) { ctx.ui.notify(`Goal clear refused: ${result.reason} (origin=${result.origin}). Use --force-user-clear to clear a user-origin goal.`, "warning"); return; }
 						ctx.ui.notify(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, "info");
 						return;
 					}

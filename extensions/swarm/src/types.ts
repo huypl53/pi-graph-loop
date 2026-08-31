@@ -330,6 +330,15 @@ export type SwarmGoal = {
 	text: string;                       // the goal text the orchestrator set
 	setAt: string;                      // ISO; durable on set
 	setBy: string;                      // agentId that set it (orchestrator in practice; recorded for audit)
+	// Issue 81: durable origin metadata so a standing user goal cannot be silently cleared by
+	// batch workflow. Absent on pre-policy goals (== historical default; legacy goals treat as
+	// origin="orchestrator" for the guard, which is the LENIENT pre-policy path). New goals stamp
+	// origin explicitly via swarm_set_goal({ origin }) or default to "orchestrator" for backwards-
+	// compatible tool behavior. See classifyGoalClearAuthority in goals.ts.
+	origin?: "user" | "orchestrator" | "system" | "batch";
+	// Human-readable provenance hint ("pm-cli", "batch-worker-r80", etc.) — not enforced by the
+	// guard but useful for audit traces. Optional; absent on pre-policy goals.
+	setByScope?: string;
 	consecutiveNoResolveNudges: number; // monotonic; reset on orchestrator turn_end {stop} resolve
 	nudgeSeq?: number;                   // monotonic emit counter (NEVER reset, survives resolve) — idempotency key component so each nudge gets a fresh dedupe slot
 	nudgeIntervalMs?: number;           // optional durable per-goal idle interval override; positive integer milliseconds only

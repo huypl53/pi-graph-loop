@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { capturePane, isTmuxRunning, tmux } from "../tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "../session.ts";
 import { ensureDirs, identityPath, paths, readState, taskPaths, readTaskState, trace, withLock, writeState } from "../state.ts";
+import { classifyGoalClearAuthority, GOAL_ORIGIN_ORCHESTRATOR, GOAL_ORIGIN_VALUES } from "../goals.ts";
 import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
 import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority, writeEffectiveIdentity } from "../identity.ts";
@@ -547,6 +548,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			id: Type.Optional(Type.String({ description: "Optional explicit goalId. Omit to auto-generate." })),
 			intervalMs: Type.Optional(Type.Number({ description: "Optional durable idle interval override in milliseconds; positive values only." })),
 			update: Type.Optional(Type.Boolean({ description: "When true, update the current goal in place without resetting counters or goalId." })),
+			// Issue 81: durable origin metadata. Default "orchestrator" (backwards-compatible).
+			// "user" marks the goal as user-intent (refuses clear/replace without approval).
+			origin: Type.Optional(Type.String({ description: "Goal origin provenance: 'user' | 'orchestrator' | 'system' | 'batch'. Default 'orchestrator'. User-origin goals refuse clear/replace without explicit approval." })),
+			setByScope: Type.Optional(Type.String({ description: "Human-readable provenance hint (e.g. 'pm-cli', 'batch-worker-r80'). Optional, audit only." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_set_goal", async () => {
@@ -567,8 +572,17 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 					}
 					const nudgeIntervalMs = hasInterval ? Math.floor(requestedInterval) : undefined;
 					const defaultIntervalMs = resolveGoalNudgeIntervalMs();
+					// Issue 81: validate origin parameter against the allowed set; default "orchestrator".
+					const requestedOrigin = params.origin;
+					if (requestedOrigin !== undefined && !GOAL_ORIGIN_VALUES.has(requestedOrigin as any)) {
+						throw new Error(`swarm_set_goal: invalid origin ${params.origin} (must be one of: ${[...GOAL_ORIGIN_VALUES].join(", ")})`);
+					}
+					const newOrigin = (requestedOrigin ?? GOAL_ORIGIN_ORCHESTRATOR) as import("../goals.ts").GoalOrigin;
+					const requestedSetByScope = params.setByScope ? String(params.setByScope) : undefined;
 					if (isUpdate) {
 						if (!st.goal) return { updated: false, noop: true };
+						// Issue 81: allow origin update on the update path (explicit provenance correction);
+						// do NOT trigger the replace guard for an in-place update (same id, no text replace).
 						if (text) st.goal.text = text;
 if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs) {
 									st.goal.nudgeIntervalMs = nudgeIntervalMs;
@@ -581,9 +595,38 @@ if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs
 										? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), fresh)).toISOString()
 										: new Date(fresh).toISOString();
 								}
-						await trace(p, "goal.updated", { goalId: st.goal.id, previousId, via: "tool", updatedText: Boolean(text), updatedInterval: nudgeIntervalMs !== undefined });
+						if (requestedOrigin !== undefined) st.goal.origin = newOrigin;
+						if (requestedSetByScope !== undefined) st.goal.setByScope = requestedSetByScope;
+						await trace(p, "goal.updated", { goalId: st.goal.id, previousId, via: "tool", updatedText: Boolean(text), updatedInterval: nudgeIntervalMs !== undefined, origin: st.goal.origin, setByScope: st.goal.setByScope });
 						await writeState(p, st);
 						return { updated: true, goalId: st.goal.id, previousId, goal: st.goal };
+					}
+					// Issue 81: REPLACE path on an existing user-origin goal must REFUSE unless the caller
+					// has explicit approval (the new origin is irrelevant — the replace is what fires the
+					// guard, because the user-origin goal is being implicitly retired).
+					if (previousId) {
+						const guard = classifyGoalClearAuthority({
+							currentGoal: st.goal,
+							action: "replace",
+							actor: currentAgentId(),
+							params: { origin: newOrigin },
+						});
+						if (!guard.allowed) {
+							await trace(p, "goal.clear_refused", {
+								goalId: previousId,
+								origin: guard.origin,
+								reason: guard.reason,
+								actor: currentAgentId(),
+								action: "replace",
+								via: "tool",
+							});
+							return {
+								refused: true,
+								reason: guard.reason,
+								origin: guard.origin,
+								goalId: previousId,
+							};
+						}
 					}
 					const goalId = requestedId;
 					const inheritSeq = previousId === requestedId ? (st.goal?.nudgeSeq ?? 0) : 0;
@@ -601,6 +644,8 @@ if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs
 						text,
 						setAt: ts,
 						setBy: currentAgentId(),
+						origin: newOrigin,
+						setByScope: requestedSetByScope,
 						consecutiveNoResolveNudges: 0,
 						nudgeSeq: inheritSeq,
 						nudgeIntervalMs: resolvedIntervalMs,
@@ -608,10 +653,11 @@ if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs
 					delete st.goal.lastNudgeAt;
 					delete st.goal.lastResolvedAt;
 					delete st.goal.backoffTicksRemaining;
-					await trace(p, "goal.set", { goalId, previousId, setBy: currentAgentId(), length: text.length, via: "tool", nudgeIntervalMs: st.goal.nudgeIntervalMs, inheritedIntervalMs: inheritedIntervalMs ?? null });
+					await trace(p, "goal.set", { goalId, previousId, setBy: currentAgentId(), length: text.length, via: "tool", nudgeIntervalMs: st.goal.nudgeIntervalMs, inheritedIntervalMs: inheritedIntervalMs ?? null, origin: newOrigin, setByScope: requestedSetByScope });
 					await writeState(p, st);
 					return { updated: false, goalId, previousId, goal: st.goal };
 				});
+				if (result.refused) return textResult(`Goal clear refused: ${result.reason} (origin=${result.origin}, goalId=${result.goalId}). Use swarm_mark_goal_done({ approvedByUser: true }) to clear an explicit user-origin goal first.`, result);
 				if (result.noop) return textResult("No active goal to update.", result);
 				if (result.updated) return textResult(`Goal updated: ${result.goalId}`, result);
 				return textResult(`Goal set: ${result.goalId}`, result);
@@ -626,6 +672,11 @@ if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs
 		promptGuidelines: ["Use `swarm_mark_goal_done` once the goal is achieved or abandoned — it stops the orchestrator pump's idle nudge entirely."],
 		parameters: Type.Object({
 			goalId: Type.Optional(Type.String({ description: "Optional goalId to clear (safety fence; clear fails if it does not match the current goal)." })),
+			// Issue 81: explicit user-approval signal. Without this, swarm_mark_goal_done refuses on
+			// a user-origin goal (the R9 a2 incident shape — a standing user goal silently cleared by
+			// batch workflow). Pass `approvedByUser: true` only when the user has explicitly
+			// authorized the clear.
+			approvedByUser: Type.Optional(Type.Boolean({ description: "Explicit user-approval signal. Required to clear a user-origin goal. Defaults to false (refuses on user-origin)." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_mark_goal_done", async () => {
@@ -637,13 +688,40 @@ if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs
 					if (params.goalId && safeId(params.goalId) !== st.goal.id) {
 						throw new Error(`swarm_mark_goal_done: goalId ${params.goalId} does not match current goal ${st.goal.id}`);
 					}
+					// Issue 81: classify clear authority against the current goal's origin.
+					const guard = classifyGoalClearAuthority({
+						currentGoal: st.goal,
+						action: "clear",
+						actor: currentAgentId(),
+						params: { approvedByUser: Boolean(params.approvedByUser) },
+					});
+					if (!guard.allowed) {
+						await trace(p, "goal.clear_refused", {
+							goalId: st.goal.id,
+							origin: guard.origin,
+							reason: guard.reason,
+							actor: currentAgentId(),
+							action: "clear",
+							via: "tool",
+							approvedByUser: Boolean(params.approvedByUser),
+						});
+						return {
+							cleared: false,
+							refused: true,
+							reason: guard.reason,
+							origin: guard.origin,
+							goalId: st.goal.id,
+						};
+					}
 					const clearedId = st.goal.id;
 					const nudges = st.goal.consecutiveNoResolveNudges;
+					const clearedOrigin = guard.origin;
 					delete st.goal;
-					await trace(p, "goal.cleared", { goalId: clearedId, nudges, by: currentAgentId(), via: "tool" });
+					await trace(p, "goal.cleared", { goalId: clearedId, nudges, by: currentAgentId(), via: "tool", origin: clearedOrigin });
 					await writeState(p, st);
 					return { cleared: true, clearedId, nudges };
 				});
+				if (result.refused) return textResult(`Goal clear refused: ${result.reason} (origin=${result.origin}, goalId=${result.goalId}). Pass approvedByUser: true to clear a user-origin goal.`, result);
 				return textResult(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, result);
 			});
 		},

@@ -1,0 +1,14 @@
+# goal-clear-refusal: a standing user-origin goal must refuse swarm_mark_goal_done by default.
+# Lane seeding helper pre-stamps st.goal.origin = "user", st.goal.text = "chỉ dùng khi user yêu cầu".
+# Turn 1: orchestrator (mistakenly) calls swarm_mark_goal_done with no approval -> refuses.
+# Turn 2: orchestrator retries with approvedByUser=true -> clears (legitimate path).
+# Turn 3: orchestrator sets a NEW user-origin goal (replacement intent; the new goal is also
+#         user-origin, mirroring the legitimate "user replaces their own standing goal" path).
+# Turn 4: orchestrator (mistakenly) calls swarm_set_goal with a replace text on top of the
+#         user-origin goal -> refuses (replace blocked on user-origin).
+# Turn 5: settle (interval-only update on the still-active user-origin goal).
+{"name":"clear refuse","events":[{"type":"text","delayMs":15,"text":"Attempting to clear the user-origin goal without approval must refuse.","chunks":["Attempting to clear ","the user-origin goal ","without approval must refuse."]},{"type":"toolcall","delayMs":15,"name":"swarm_mark_goal_done","id":"clear-refuse-1","arguments":{}}]}
+{"name":"clear with approval","events":[{"type":"text","delayMs":15,"text":"Retrying with approvedByUser=true clears the user-origin goal (legitimate path).","chunks":["Retrying with approvedByUser=true ","clears the user-origin goal ","(legitimate path)."]},{"type":"toolcall","delayMs":15,"name":"swarm_mark_goal_done","id":"clear-approve-2","arguments":{"approvedByUser":true}}]}
+{"name":"set new user-origin goal","events":[{"type":"text","delayMs":15,"text":"Setting a fresh user-origin goal after the clear (legitimate user intent path).","chunks":["Setting a fresh user-origin goal ","after the clear ","(legitimate user intent path)."]},{"type":"toolcall","delayMs":15,"name":"swarm_set_goal","id":"set-3","arguments":{"text":"User replacement goal","origin":"user"}}]}
+{"name":"replace blocked","events":[{"type":"text","delayMs":15,"text":"Replacing the new user-origin goal must refuse (replace blocked on user-origin).","chunks":["Replacing the new user-origin goal ","must refuse ","(replace blocked on user-origin)."]},{"type":"toolcall","delayMs":15,"name":"swarm_set_goal","id":"replace-block-4","arguments":{"text":"Replace attempt"}}]}
+{"name":"refusal settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Goal refused, replace refused, user-origin goal preserved.","chunks":["Goal refused, ","replace refused, ","user-origin goal preserved."]},{"type":"toolcall","delayMs":10,"name":"swarm_set_goal","id":"settle-5","arguments":{"update":true,"intervalMs":60000}},{"type":"stop","delayMs":5,"reason":"stop"}]}
