@@ -477,6 +477,34 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		}
 	});
 
+	// === Orchestrator-busy resets the shared idle epoch (Row 68 semantics fix, 2026-08-31) ===
+	// The idle-streak nudge measures "all agents + ORCHESTRATOR idle for a full interval". Workers
+	// are covered by updateIdleEpochLocked (runtimeStatus busy/idle edges), but the ORCHESTRATOR's
+	// own activity was invisible to it: while the PM was busy answering the human (turns running),
+	// the epoch stayed anchored at the old all-idle edge, so a 30s interval elapsed "during" the
+	// PM's work and the nudge fired ~30s after every turn end (live: nudge 1/3 following each reply
+	// even though the PM had been busy the whole time). turn_start = busy edge for the orchestrator:
+	// drop the epoch (and pending boundary); turn_end (below) re-arms it via the next pump tick's
+	// fresh allIdleSinceAt, so the interval is measured from the END of the orchestrator's work.
+	pi.on("turn_start", async (_event, ctx) => {
+		if (currentAgentId() !== "orchestrator") return;
+		const p = paths(ctx.cwd);
+		try {
+			await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const idleState = st.idleNudgeState;
+				if (!idleState?.allIdleSinceAt && !idleState?.nextGoalNudgeAt && !idleState?.lastGoalNudgeAt) return;
+				const prev = idleState.allIdleSinceAt ?? null;
+				delete idleState.allIdleSinceAt;
+				delete idleState.nextGoalNudgeAt;
+				await trace(p, "idle.epoch.reset", { reason: "orchestrator_busy", previousAllIdleSinceAt: prev }).catch(() => {});
+				await writeState(p, st);
+			});
+		} catch (err: any) {
+			await trace(p, "idle.epoch.reset_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
+	});
+
 	// === Issue 18: Goal idle-streak resolve detection ===
 	// Registered AFTER the model-pool swap branch above so pi's per-event handler loop runs the
 	// resolve AFTER any in-process swap (binding C-2 of the plan review). Both handlers acquire the
