@@ -780,3 +780,32 @@ Row 76 is ready to start, but the batch must stay narrow so evidence remains int
 - the metric story is proxy-based first, canonical later;
 - goal-clear and agent-retirement cleanup are referenced as guard rows, not silently merged into the same measurement story.
 
+
+### Issue 84 — swarm audit tooling + trace retention — P1
+
+**Status:** proposed. **Priority:** P1. **Source:** user request 2026-08-31 + orchestrator trace-debt review (1.16M events / 256MB in one session; analysis is ad-hoc grep today).
+
+The append-only `events.jsonl` audit trail is complete but unprocessed: no reader tooling, no retention, no invariant checks. Ritual agents and humans grep 256MB by hand.
+
+**Proposal (3 independently landable parts):**
+
+1. **`swarm audit` command/tool** (P1, self-contained)
+   - filters: `--event`, `--since`, `--until`, `--agent`, `--task`, `--cid`
+   - rollups: per-event-type counts per time window; message timeline reconstruction (enqueue → deliver → inject → ack → response) for a message id
+   - anomaly probes: enqueues without terminal state past TTL, pump_stuck epochs, dead_letter listing, nudge-burst detection
+   - text + JSON output so ritual/review agents consume it instead of raw grep
+
+2. **Trace retention / rotation** (P1, cheap)
+   - rotate `events.jsonl` at a size cap (e.g. 50MB), keep N gzip'd generations + a small rollup index
+   - **age-based pruning: events older than a configurable retention window (default a few days) are dropped at rotate time — stale multi-day events are audit noise, not signal** (user directive 2026-08-31)
+   - tmux pane captures follow the same retention window
+
+3. **Invariant checker** (P2, depends on 1)
+   - end-of-lane / CI assertion: every message terminal or dead-lettered; every waived fence has a waive record; every done task has verified commit evidence
+   - consumes the `swarm audit` rollup surface
+
+**Acceptance criteria:**
+- `swarm audit --event graph.advance_nudge_emitted --task <id>` returns a usable timeline in milliseconds, offline;
+- events.jsonl stays bounded (cap + age window both enforced; multi-day-old lines provably gone after a rotate);
+- the invariant checker catches a seeded violation in a mock-llm lane (fixture per AGENTS.md rule);
+- ritual analysis artifacts cite audit tool output rather than raw grep commands.
