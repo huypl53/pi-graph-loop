@@ -899,3 +899,14 @@ Three stacked bugs, all in the goal-nudge family:
 **Source:** R10 synthesis. Graph-advance nudges cannot distinguish "unassigned because forgotten" from "unassigned because orchestrated sequencing" (fired 4× on Issue 81/86 holds today). Add node deferReason or orchestrator-declared queue-intent so the checker skips deliberately held nodes.
 
 **R10 sequencing decision:** Issue 83 (Row 76 phase-1) next, then 84. R10-1 rule applies to 83c metric capture; R10-3 applies to 83a new pump phases — land both rows' guidance before R11 batch starts.
+
+### Row R10-a4 — Heartbeat-GC composition findings (fresh-eye audit H1-H4) — P1
+
+**Source:** R10 a4 (r10-analyst, fresh-perspective agent). Core GC×goal-nudge composition verified SOUND (same-tick ordering correct, no double-stop, vacuous hold works). Four real findings:
+
+- **H1** (P2, mechanical): `held_no_live_workers` + `assignment_in_flight` traces fire EVERY tick (~720/hr noise) — comment claims once-per-transition; comment/code mismatch.
+- **H2** (P2, mechanical): `idle.epoch.reset` mislabels `agent_busy` with empty busyAgents on GC-stop-driven vacuous.
+- **H3** (P1, red-first required): single failed tmux probe flips a stale-idle-but-alive worker to stopped — idle workers never refresh heartbeat, so one transient probe failure kills a healthy idle agent. Needs 2-strike confirmation or heartbeat-refresh-on-idle. Reproduce-first mandate applies.
+- **H4** (P1): GC stop of an agent holding an open assignment is silent (no activeTaskIds in payload, no orchestrator nudge) — goal nudge stays suppressed by the orphaned node → potential idle-lock with buried diagnostics.
+
+Test gap: no test drives GC→epoch→goal-evaluator on one st in a single tick (the exact composition surface).
