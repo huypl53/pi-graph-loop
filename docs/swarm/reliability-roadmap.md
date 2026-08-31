@@ -809,3 +809,19 @@ The append-only `events.jsonl` audit trail is complete but unprocessed: no reade
 - events.jsonl stays bounded (cap + age window both enforced; multi-day-old lines provably gone after a rotate);
 - the invariant checker catches a seeded violation in a mock-llm lane (fixture per AGENTS.md rule);
 - ritual analysis artifacts cite audit tool output rather than raw grep commands.
+
+### Issue 85 — goal-nudge noise: interval reset on replace, assigned-not-started suppression, vacuous idle — P0
+
+**Status:** proposed. **Priority:** P0. **Source:** live incident 2026-08-31 09:00 (user-observed: orchestrator actively working yet nudged 3× in 15s right after goal replace).
+
+Three stacked bugs, all in the goal-nudge family:
+
+1. **Goal replacement resets intervalMs to default (5s).** `swarm_set_goal` with new text drops the operator-tuned interval (was 600000). Fix: replacement inherits the previous goal's intervalMs unless an explicit `intervalMs` is passed (mirror the set-as-update UX fix from 02e89d6).
+2. **Assigned-but-not-started nodes don't suppress the nudge.** Suppression predicate counts only nodes `in_progress`; the assignment→agent-pickup window (seconds to minutes) still emits "no active work" nudges. Fix: `assigned` counts as active work (or grace window after assignment).
+3. **Vacuous idle predicate.** "All 0 non-orchestrator agents idle" is trivially true after a prune/stop with no live workers — nudges fire forever with nobody to nudge about. Fix: when effective non-orchestrator agent count is 0, the goal nudge should hold (nothing can advance; surfacing as spawn-suggestion instead, if at all).
+
+**Acceptance criteria:**
+- goal replace keeps prior intervalMs (fixture: replace without interval → next boundary uses old interval);
+- assignment alone suppresses the idle nudge until pickup or a grace timeout (fixture: assign node → no nudge in window);
+- zero live workers → goal nudge holds (unit test with empty effective agent set);
+- existing goal suites (swarm-goal, idle-nudge) stay green; clamp v3/v4 + busy-epoch semantics untouched.
