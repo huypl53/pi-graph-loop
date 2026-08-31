@@ -24,9 +24,9 @@ await mockLLM({
 
 assert.equal(registered.name, "mock-llm", "provider should register as mock-llm");
 assert.equal(registered.config.api, "mock-llm-stream");
-assert.equal(registered.config.models.length, 35, "expected thirty-five scenario models");
-assert.deepEqual((await discoverModelConfigs()).map((model) => model.id).sort(), ["429-mid-edit", "ack-lifecycle-booking", "assignment-fence-stale-attempt", "auto-close-evidence-closure", "cancel-supersession", "commit-no-evidence", "dead-letter-final", "delivery-repair-retry", "drift-then-wake", "edit-not-persisted", "gc-retention-dryrun", "handoff-chain", "idle-nudge-recovery", "initial-ready-nudge", "inprogress-death", "mailbox-delivery-read", "midturn-assign", "parallel-fail-a", "parallel-fail-b", "prune-retention-apply", "quota-429-then-recovery", "quota-exhausted-all-turns", "reconcile-repair-retry", "response-credit-verified-result", "response-missing-settle", "response-required-death", "settled-with-open-assignment", "shared-context-a", "shared-context-b", "stale-all-agents", "supersession-race-new", "supersession-race-old", "task-graph-semantics", "torn-json-then-recovery", "wake-up-escalation-reminder"].sort());
-assert.equal((await listFixtureDiscovery()).length, 35);
+assert.equal(registered.config.models.length, 39, "expected thirty-nine scenario models");
+assert.deepEqual((await discoverModelConfigs()).map((model) => model.id).sort(), ["429-mid-edit", "ack-lifecycle-booking", "assignment-fence-stale-attempt", "auto-close-evidence-closure", "cancel-supersession", "commit-no-evidence", "dead-letter-final", "delivery-repair-retry", "drift-then-wake", "edit-not-persisted", "gc-retention-dryrun", "handoff-chain", "idle-nudge-recovery", "initial-ready-nudge", "inprogress-death", "mailbox-delivery-read", "midturn-assign", "parallel-fail-a", "parallel-fail-b", "pool-engine-retry-gated-swap-exhausted", "pool-quota-bench-cooldown-recovery", "pool-spawn-fallback-all-tagged-benched", "pool-strict-roles-tagged-only", "prune-retention-apply", "quota-429-then-recovery", "quota-exhausted-all-turns", "reconcile-repair-retry", "response-credit-verified-result", "response-missing-settle", "response-required-death", "settled-with-open-assignment", "shared-context-a", "shared-context-b", "stale-all-agents", "supersession-race-new", "supersession-race-old", "task-graph-semantics", "torn-json-then-recovery", "wake-up-escalation-reminder"].sort());
+assert.equal((await listFixtureDiscovery()).length, 39);
 
 function makeContext() {
 	return {
