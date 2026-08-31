@@ -12,7 +12,7 @@ import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
 import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority, writeEffectiveIdentity } from "../identity.ts";
 import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
-import { ERR_ORCHESTRATOR_PANE_REJECTED, FAST_MODEL, FAST_PROVIDER } from "../constants.ts";import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
+import { ERR_ORCHESTRATOR_PANE_REJECTED } from "../constants.ts";import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
 import { resolveGoalNudgeIntervalMs } from "../reconcile.ts";
 
@@ -158,7 +158,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			id: Type.Optional(Type.String({ description: "Stable agent id, e.g. planner or reviewer. Lowercase letters, digits, dash and underscore are safest." })),
 			role: Type.String({ description: "Role/instructions for the agent." }),
 			roleKind: Type.Optional(Type.String({ description: "Explicit role kind override (orchestrator/planner/reviewer/tester/observer/implementer/worker). Pinned so it is not re-derived from id/role. Defaults to inference (id-first, then role text)." })),
-			model: Type.Optional(Type.String({ description: "pi model id, or the preset alias 'fast' (expands to gpt-5.4-mini/openai). Defaults to PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1." })),
+			model: Type.Optional(Type.String({ description: "pi model id. Defaults to the model pool (if configured), else PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1." })),
 			provider: Type.Optional(Type.String({ description: "pi provider id. Defaults to PI_SWARM_DEFAULT_PROVIDER or model preset provider (zai-coding-cn for glm-5.1, openai for gpt-5.4-mini)." })),
 			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt to send into the spawned agent after pi starts." })),
 		}),
@@ -169,10 +169,9 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				const result = await withLock(p, async () => {
 					const st = await readState(p, ctx.cwd);
 					await trace(p, "agent.spawn.request", { requestedBy: currentAgentId(), ...params });
-				// Explicit model / 'fast' preset pin the slot; otherwise spawnAgent consults the
-				// model pool (if configured) before falling back to the single default.
-				const model = params.model === "fast" ? FAST_MODEL : params.model || undefined;
-				const provider = params.provider || (params.model === "fast" ? FAST_PROVIDER : undefined);
+				// Otherwise spawnAgent consults the model pool (if configured) before falling back to the single default.
+				const model = params.model || undefined;
+				const provider = params.provider || undefined;
 				const r = await spawnAgent(pi, ctx.cwd, p, st, { ...params, model, provider });
 				await writeState(p, st);
 				return { swarmId: st.swarmId, tmuxSession: st.tmuxSession, ...r };
