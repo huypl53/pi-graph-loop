@@ -448,6 +448,93 @@ summary traces emitted). Default ON. Not gated behind `PI_SWARM_MINIMAL_PROTOCOL
 finds nothing to stop and emits zero traces. Already-stopped agents are skipped with reason
 `already_stopped`. Safe under the same `withLock(p)` the caller already holds — no nested locks.
 
+## Operator: heartbeat-driven agent GC (Issue 82, P0)
+
+The heartbeat GC is a periodic pump-tick phase in `pumpOrchestratorMailbox` that reclaims
+dead-pane agents and downgrades stale-heartbeat agents. Wired inside the existing
+`withLock(p)` so no nested lock acquisition is possible.
+
+**Default stale window**: `DEFAULT_AGENT_HEARTBEAT_STALE_MS = 600_000` (10 min). Override with
+`PI_SWARM_AGENT_HEARTBEAT_STALE_MS` env var. tmux probes fire after **2× the stale window**
+(`probeAfterMs`) by design — probes are expensive and rate-limited by a per-agent ledger.
+
+**Three cheap gates** (run sequentially per agent after exemption checks):
+
+1. **Gate 1 — known-dead pane**: `tmuxAlive === false && status === "running"` → flip to
+   `stopped` + emit `agent.heartbeat_gc.stopped {reason:"tmux_dead"}`.
+2. **Gate 2 — heartbeat too old + probe ledger permits**: only fires when
+   `hbAge > probeAfterMs && status === "running" && tmuxAlive !== false &&
+   (nowMs - lastProbeAtMs) > probeAfterMs`. The `lastProbeAt` ledger field on `SwarmAgent`
+   is the **cost-bound** that prevents the per-tick livelock the original implementation was
+   vulnerable to: without it, every agent with a stale heartbeat + tmuxTarget would be probed
+   on every pump tick forever, holding the swarm lock for seconds. With the ledger, each
+   agent is probed at most once per `probeAfterMs` window (~20 min default). When gate 2
+   conditions are met but the ledger blocks the probe, the trace `agent.heartbeat_gc.probe_throttled`
+   is emitted (with `lastProbeAtMs` + `probeAfterMs`) so dashboards can chart probe-skip rate.
+   When the probe fires and returns `false`, emit `agent.heartbeat_gc.stopped {reason:"tmux_dead_after_probe"}`.
+   When the probe disagrees with the cached `tmuxAlive` field, emit
+   `agent.tmux_liveness_correction` and update the cached field.
+3. **Gate 3 — heartbeat too old + idle**: downgrade `health` from `"healthy"` to `"stale"`
+   (does NOT touch `status`; a busy agent with a stale heartbeat may be in a long tool call).
+   Emit `agent.heartbeat_gc.stale`.
+
+**Exemptions** (skipped entirely before gates):
+
+- Orchestrator pseudo-agent.
+- Lease-valid agents (`leaseKind === "reuse" || leaseKind === "park"` AND `leaseUntil > now`).
+- Paused agents without a lease, OR paused agents with a VALID lease.
+
+**Expired-lease paused-agent exception** (Review item 3 fix): an agent with
+`paused === true && leaseKind in {"reuse","park"} && leaseUntil <= now` is NOT exempted.
+Gate 1 still runs, so an expired-park agent whose pane actually died gets flipped to
+`stopped` instead of staying a zombie forever. The trace
+`agent.heartbeat_gc.expired_park_flipped {reason:"tmux_dead_after_lease_expiry"}` distinguishes
+this case from the normal gate-1 dead-pane flip.
+
+**`swarm_prune` remains the orchestrator escape hatch** for already-stopped records that
+the heartbeat GC does not touch. The GC is bounded by `probesFired + direct flips`; the
+size of the `state.agents` stopped set only grows until prune runs. The R9 a3 graveyard
+(177 stopped agents) becomes bounded: the GC flips dead-pane running records automatically,
+and prune removes the resulting stopped records on operator demand.
+
+## Operator: explicit reuse lease + park mechanism (Issue 82)
+
+By default the task-close sweep stops task-scoped workers (Issue 26) and the heartbeat GC
+flips dead panes. For workers the orchestrator wants to outlive their task scope, the
+explicit reuse lease + park mechanism overrides these defaults.
+
+**Lease fields on `SwarmAgent`** (additive; absent == default behavior):
+
+- `leaseKind: "reuse"` — the worker should survive the closing task and be reused for a
+  future task. Sweep skips; heartbeat GC exempt.
+- `leaseKind: "park"` — the worker should be parked (paused, pane preserved) at task
+  close instead of stopped. Sweep pauses (sets `paused: true`, preserves `status: running`);
+  heartbeat GC exempt while the lease is valid.
+- `leaseUntil: string` — ISO timestamp; lease auto-expires past this. Expired leases fall
+  through to default behavior on the next sweep tick.
+- `leaseReason: string` — free-text audit annotation.
+
+**Three stamp surfaces**:
+
+1. `/swarm agent lease <id> [--reuse|--park] [--until <iso>] [--reason <text...>] [--clear]`
+   (orchestrator-only; `--reason` consumes all remaining tokens). Traces
+   `agent.lease_set` / `agent.lease_cleared`. Default flags: `--reuse`,
+   `--until now+1h`, `--reason "operator lease"`.
+2. `swarm_assign_task({ lease: { kind: "reuse"|"park", until?, reason? } })` — stamps
+   the assignee's record at assignment time. Traces `task.lease_stamped`.
+3. Direct field mutation (not recommended; use the surfaces above).
+
+**Clear**: pass `--clear` or run `delete agent.leaseKind/leaseUntil/leaseReason`.
+
+**Observability note** (review-item-4 / audit-trace debt): the plan originally called for
+a `agent.task_sweep_skipped {reason: "cross_task_default_kept"}` audit trace on every
+non-event task close. The implementer did NOT add this trace because the kept path is
+the pre-existing Issue-26 default behavior (`wasInClosingTask=false` → early continue);
+emitting a trace per kept agent on every close would add noise without changing behavior.
+The behavioral correctness is independently verified by the round-2 cross-task lane
+(`/tmp/82-lane-m/lane-cross-task.mjs`); a follow-up can add the trace if dashboards need
+a per-sweep audit count.
+
 ## Operator: Phase 2 authoritative lifecycle (Issue 25)
 
 Phase 2 ships with the gate OFF. Behavior switches only when

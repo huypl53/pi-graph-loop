@@ -337,6 +337,61 @@ export const TRACE_AGENT_TASK_SWEEP_STOPPED = "agent.task_sweep_stopped";
 // the taskId and the count of agents stopped (so dashboards can chart sweep yield per task).
 export const TRACE_TASK_WORKERS_SWEPT = "task.workers_swept";
 
+// === Issue 82: heartbeat-driven agent GC + lease-aware park-or-stop ===
+// Emitted from reconcile.ts:agentHeartbeatGCLocked when the cheap-gate sweep marks a running
+// agent whose tmux pane is dead (carried over from a previous probe) as stopped. Includes the
+// reason so dashboards can distinguish "known-dead cached" from "freshly probed dead".
+export const TRACE_AGENT_HEARTBEAT_GC_STOPPED = "agent.heartbeat_gc.stopped";
+
+// Emitted from reconcile.ts:agentHeartbeatGCLocked when an idle agent's heartbeat is older than
+// PI_SWARM_AGENT_HEARTBEAT_STALE_MS and the gate downgrades health to "stale" WITHOUT flipping
+// status (a busy agent without fresh heartbeat is not necessarily dead). The gate also drops a
+// flag so the goal-nudge `agent_busy` predicate (Issue 85) does NOT see this as a busy signal.
+export const TRACE_AGENT_HEARTBEAT_GC_STALE = "agent.heartbeat_gc.stale";
+
+// Emitted from reconcile.ts:agentHeartbeatGCLocked when a tmux probe disagrees with the cached
+// `tmuxAlive` field on the agent record. The cached field is otherwise stale-by-design (refreshed
+// on tool calls / hook events); this trace + field update is the GC's reconciliation step.
+export const TRACE_AGENT_TMUX_LIVENESS_CORRECTION = "agent.tmux_liveness_correction";
+
+// Emitted from taskgraph.ts:sweepTaskWorkersLocked when an eligible worker was paused (instead
+// of stopped) because of a valid `leaseKind: "park"` lease. Companion to TRACE_AGENT_TASK_SWEEP_STOPPED.
+export const TRACE_AGENT_TASK_SWEEP_PARKED = "agent.task_sweep_parked";
+
+// === Issue 82: lease stamping trace (tools/tasks.ts:swarm_assign_task) ===
+// Emitted when the orchestrator passes a `lease` parameter to swarm_assign_task and the assignee's
+// record is stamped with the lease fields. Carries the lease kind, until timestamp, and reason
+// so dashboards can chart which assignments carry an explicit reuse/park lease.
+export const TRACE_TASK_LEASE_STAMPED = "task.lease_stamped";
+
+// === Issue 82: lease set/clear via /swarm agent lease (command.ts) ===
+// Emitted when the orchestrator runs `/swarm agent lease <id> [--reuse|--park] ...`. Carries the
+// kind/until/reason so the lease ledger is auditable end-to-end (assignment-tool stamps and
+// command-tool stamps are unified by both writing the same `agent.leaseKind/leaseUntil/leaseReason`
+// fields, but the trace event source differs).
+export const TRACE_AGENT_LEASE_SET = "agent.lease_set";
+export const TRACE_AGENT_LEASE_CLEARED = "agent.lease_cleared";
+
+// Default stale-heartbeat window for agentHeartbeatGCLocked: an agent whose lastHeartbeatAt is
+// older than this AND is idle gets health downgraded to "stale" (not stopped). tmux probes fire
+// after 2× this window. Mirrors the existing reconcile.ts default of 600_000; env override
+// PI_SWARM_AGENT_HEARTBEAT_STALE_MS lets operators tighten / loosen the window.
+export const DEFAULT_AGENT_HEARTBEAT_STALE_MS = 600_000; // 10 minutes
+
+// === Issue 82 (review item 1): tmux-probe throttle ledger trace ===
+// Emitted by `agentHeartbeatGCLocked` gate 2 whenever a tmux probe is skipped because the agent's
+// `lastProbeAt` is younger than `probeAfterMs` (the throttle ledger). Carries the throttle fields
+// so dashboards can chart the probe-skip rate without re-reading the state file. Counts toward
+// the cheap-gate 1/2/3 totals emitted alongside the gate-2 skip.
+export const TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED = "agent.heartbeat_gc.probe_throttled";
+
+// === Issue 82 (review item 3): expired-lease dead-pane flip trace ===
+// Emitted by `agentHeartbeatGCLocked` when a paused-with-expired-lease agent's pane is detected
+// dead (gate 1 path) and is therefore eligible for the zombie-reclamation flip. Companion to
+// TRACE_AGENT_HEARTBEAT_GC_STOPPED — distinguishes "the normal dead-pane flip" from
+// "the previously-orphaned expired-park zombie we just reclaimed".
+export const TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED = "agent.heartbeat_gc.expired_park_flipped";
+
 // === Issue 28 — rework reopen trace ===
 // Emitted when activateReworkNodes reopens a previously-done/failed/skipped node because a rework
 // edge activated. Payload includes priorAttemptId so operators can correlate with the canonical

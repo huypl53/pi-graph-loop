@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
-import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PREFLIGHT_ASSIGN_GRACE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_TASK_ATTEMPT_FORCE_REOPEN } from "../constants.ts";
+import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PREFLIGHT_ASSIGN_GRACE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_TASK_ATTEMPT_FORCE_REOPEN, TRACE_TASK_LEASE_STAMPED } from "../constants.ts";
 import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isGraphTerminalNode, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveCommitNodeEvidence, resolveNodeScope, scopesOverlap, suppressPriorAttemptForForceReopen, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
 import { resolveTaskStallLocked } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";
@@ -295,6 +295,15 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			spawnIsolated: Type.Optional(Type.Boolean({ description: "Force a fresh agent for this node instead of reusing. Defaults to false." })),
 			replyTarget: Type.Optional(Type.String({ description: "Agent id the assignee should reply to. Defaults to the assigning agent (sender)." })),
 			note: Type.Optional(Type.String({ description: "Optional extra assignment note appended to the message body." })),
+			// === Issue 82: explicit reuse lease + park mechanism (stamp at assignment time) ===
+			// When passed, the assignee's record is stamped with the lease; the task-close sweep
+			// will honor it (reuse = skip, park = pause). Default: lease is absent and the
+			// worker is auto-stopped on task close unless a later /swarm agent lease call sets one.
+			lease: Type.Optional(Type.Object({
+				kind: Type.Union([Type.Literal("reuse"), Type.Literal("park")], { description: "Lease kind: 'reuse' = skip task-close sweep; 'park' = pause (preserve pane) on sweep." }),
+				until: Type.Optional(Type.String({ description: "ISO timestamp; lease auto-expires past this. Default: now+1h." })),
+				reason: Type.Optional(Type.String({ description: "Free-text reason recorded on the lease + trace." })),
+			}, { description: "Optional lease stamp at assignment time (Issue 82). When set, the task-close sweep honors the lease instead of stopping the worker." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_assign_task", async () => {
@@ -446,6 +455,21 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				node.lastActivityAt = now();
 				if (node.staleAt) { const prevStaleAt = node.staleAt; delete node.staleAt; await traceTask(tp, "task.stale.cleared", { taskId, nodeId: params.nodeId, prevStaleAt, reason: "assign", by: currentAgentId() }); }
 				if (!assignee.activeTaskIds.includes(task.taskId)) assignee.activeTaskIds.push(task.taskId);
+				// === Issue 82: stamp lease on the assignee at assignment time (optional) ===
+				// When the caller passes a `lease` parameter, stamp the assignee's record with the
+				// lease fields so the task-close sweep honors it (reuse = skip, park = pause).
+				// Default behavior unchanged when lease is absent.
+				if (params.lease) {
+					const leaseUntil = params.lease.until && !Number.isNaN(new Date(params.lease.until).getTime())
+						? new Date(params.lease.until).toISOString()
+						: new Date(Date.now() + 3_600_000).toISOString();
+					const leaseReason = params.lease.reason || `assigned with ${params.lease.kind} lease`;
+					assignee.leaseKind = params.lease.kind;
+					assignee.leaseUntil = leaseUntil;
+					assignee.leaseReason = leaseReason;
+					assignee.updatedAt = now();
+					await traceTask(tp, TRACE_TASK_LEASE_STAMPED, { taskId, nodeId: params.nodeId, assignee: assignee.id, leaseKind: params.lease.kind, leaseUntil, leaseReason });
+				}
 				const assignTaskStatusChange = applyTaskStatus(task);
 				task.currentNodes = computeReadyNodes(task).current;
 				// Issue 23 — resolve any stalled task-stall counter for this task (an actionable node

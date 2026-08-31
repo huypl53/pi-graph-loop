@@ -3,10 +3,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
+import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
-import { paths, readTaskState, taskPaths, trace, traceTask } from "./state.ts";
+import { paths, readTaskState, taskPaths, trace, traceTask, writeState } from "./state.ts";
 import { stopAgent } from "./agents.ts";
 
 // ---- File-scope ownership: effective scope resolution + conservative overlap predicate ----
@@ -1138,6 +1138,34 @@ export async function sweepTaskWorkersLocked(
 			if (wasInClosingTask && remainingAfterClose.length > 0) skipped.push({ agentId: agent.id, reason: "cross_task_active" });
 			continue;
 		}
+		// === Issue 82: lease-aware park-or-stop (precedes stop) ===
+		// When the orchestrator stamped an explicit lease on the agent, honor it BEFORE stopping.
+		//   - reuse: skip the sweep entirely (worker stays alive for cross-task reuse).
+		//   - park:  pause instead of stop (pane preserved for inspection / revival).
+		// Both leases auto-expire at `leaseUntil`; an expired lease falls through to default.
+		const leaseKind = agent.leaseKind;
+		const leaseUntilMs = agent.leaseUntil ? new Date(agent.leaseUntil).getTime() : 0;
+		const leaseValid = leaseKind && leaseUntilMs > Date.now();
+		if (leaseValid && leaseKind === "reuse") {
+			skipped.push({ agentId: agent.id, reason: "lease_reuse" });
+			continue;
+		}
+		if (leaseValid && leaseKind === "park") {
+			agent.paused = true;
+			agent.leaseReason = agent.leaseReason ?? "sweep honored park lease";
+			agent.updatedAt = new Date().toISOString();
+			stopped.push(agent.id); // counted as swept (paused) so the summary trace fires
+			skipped.push({ agentId: agent.id, reason: "lease_park" });
+			await trace(paths(cwd), TRACE_AGENT_TASK_SWEEP_PARKED, {
+				agentId: agent.id,
+				taskId,
+				leaseKind: "park",
+				leaseUntil: agent.leaseUntil,
+				leaseReason: agent.leaseReason ?? null,
+				by: "sweepTaskWorkersLocked",
+			});
+			continue;
+		}
 		// Stop via the lock-free core (no nested withLock). force:true so the empty-set check stays
 		// authoritative even if activeTaskIds had a stale pointer.
 		try {
@@ -1149,6 +1177,8 @@ export async function sweepTaskWorkersLocked(
 				priorActiveTaskIds: priorActive,
 				releaseReason: spawnedForThis ? "spawned_for_task" : "sole_active_task",
 				spawnedForTaskId: agent.spawnedForTaskId ?? null,
+				leaseKind: leaseKind ?? null,
+				leaseValidAtSweep: Boolean(leaseValid),
 				killed: res.killed,
 				killMethod: res.method,
 				agentStatus: agent.status,

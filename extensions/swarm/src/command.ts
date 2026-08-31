@@ -19,7 +19,7 @@ import { claimOrchestratorLeader, ensureOrchestrator, overridePath } from "./ide
 import { startOrchestratorPump, bumpSwapChain } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError, pickSlot, slotKey, effectiveConfig } from "./pool.ts";
-import { MAX_CONSECUTIVE_NUDGES_DEFAULT, TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
+import { MAX_CONSECUTIVE_NUDGES_DEFAULT, TRACE_AGENT_LEASE_CLEARED, TRACE_AGENT_LEASE_SET, TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
 import type { ModelSlot } from "./types.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
@@ -60,7 +60,7 @@ function parseGoalSetInterval(raw: string): { ok: true; ms: number } | { ok: fal
 	if (!Number.isFinite(ms) || ms <= 0) return { ok: false, error: `invalid interval "${raw}"` };
 	return { ok: true, ms: Math.floor(ms) };
 }
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set [-i|--interval <time>] <text> | goal update [-i|--interval <time>] [<text>] | goal done [<goalId>] (show read-only; set/update/done orchestrator-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | lease <id> [--reuse|--park] [--until <iso>] [--reason <text>] [--clear] (orchestrator-only) | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set [-i|--interval <time>] <text> | goal update [-i|--interval <time>] [<text>] | goal done [<goalId>] (show read-only; set/update/done orchestrator-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -872,6 +872,59 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const paused = cmd === "pause";
 					const agent = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const a = setAgentPaused(st, safeId(id), paused); await writeState(p, st); return a; });
 					ctx.ui.notify(`${agent.id} ${paused ? "paused" : "resumed"}`, "info");
+					return;
+				}
+				// === Issue 82: explicit reuse lease + park mechanism (orchestrator-only) ===
+				// Usage: /swarm agent lease <id> [--reuse | --park] [--until <iso>] [--reason <text>] [--clear]
+				// Default flags: --reuse, --until now+1h, --reason "operator lease". Cleared with --clear.
+				if (cmd === "lease") {
+					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("lease is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
+					const id = rest.shift();
+					if (!id) { ctx.ui.notify("Usage: /swarm lease <id> [--reuse|--park] [--until <iso>] [--reason <text...>] [--clear]", "warning"); return; }
+					const clear = rest.includes("--clear");
+					const out = await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const agent = st.agents[safeId(id)];
+						if (!agent) throw new Error(`Unknown agent ${id}`);
+						if (clear) {
+							delete agent.leaseKind;
+							delete agent.leaseUntil;
+							delete agent.leaseReason;
+							agent.updatedAt = now();
+							await writeState(p, st);
+							await trace(p, TRACE_AGENT_LEASE_CLEARED, { agentId: agent.id, by: "command" }).catch(() => {});
+							return { cleared: true, agentId: agent.id };
+						}
+						const leaseKind: "reuse" | "park" = rest.includes("--park") ? "park" : "reuse";
+						const untilFlagIdx = rest.indexOf("--until");
+						const reasonFlagIdx = rest.indexOf("--reason");
+						let leaseUntil = new Date(Date.now() + 3600_000).toISOString();
+						if (untilFlagIdx >= 0 && rest[untilFlagIdx + 1]) {
+							const parsed = new Date(rest[untilFlagIdx + 1]);
+							if (isNaN(parsed.getTime())) throw new Error(`Invalid --until timestamp: ${rest[untilFlagIdx + 1]}`);
+							leaseUntil = parsed.toISOString();
+						}
+						let leaseReason = "operator lease";
+						if (reasonFlagIdx >= 0) {
+							// --reason takes the rest of the args as the reason text (single-token bug
+							// was the reviewer-flagged hygiene #5c issue). Slice after --reason and
+							// join with spaces. Stops at the next recognized flag if present.
+							const afterReason = rest.slice(reasonFlagIdx + 1);
+							const reasonEnd = afterReason.findIndex((a) => a.startsWith("--"));
+							const tokens = reasonEnd >= 0 ? afterReason.slice(0, reasonEnd) : afterReason;
+							if (tokens.length > 0) leaseReason = tokens.join(" ");
+						}
+						agent.leaseKind = leaseKind;
+						agent.leaseUntil = leaseUntil;
+						agent.leaseReason = leaseReason;
+						agent.updatedAt = now();
+						await writeState(p, st);
+						await trace(p, TRACE_AGENT_LEASE_SET, { agentId: agent.id, leaseKind, leaseUntil, leaseReason, by: "command" }).catch(() => {});
+						return { cleared: false, agentId: agent.id, leaseKind, leaseUntil, leaseReason };
+					}).catch((err: any) => { return { failed: String((err as Error)?.message || err) }; });
+					if ("failed" in out) ctx.ui.notify(`Lease failed: ${out.failed}`, "warning");
+					else if (out.cleared) ctx.ui.notify(`Cleared lease on ${out.agentId}`, "info");
+					else ctx.ui.notify(`Set ${out.leaseKind} lease on ${out.agentId} until ${out.leaseUntil} (reason: ${out.leaseReason})`, "info");
 					return;
 				}
 				if (cmd === "sendkey") {

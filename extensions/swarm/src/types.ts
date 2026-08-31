@@ -241,6 +241,25 @@ export type SwarmAgent = {
 	// Park/drain flag: a paused agent is skipped by the reuse pool (findReusableAgent) but is NOT killed
 	// and still appears in status/list. Cleared by resume (delete) so absent == not paused.
 	paused?: boolean;
+	// === Issue 82: explicit reuse lease + park mechanism (P0, R9 a3 graveyard) ===
+	// When the orchestrator wants a worker to outlive its task scope, it stamps a lease on the
+	// agent record. The task-close sweep honors the lease: `reuse` skips the sweep entirely
+	// (worker is kept alive for cross-task reuse); `park` pauses (`paused=true`) instead of
+	// stopping (worker pane is preserved for inspection / revival). Both leases auto-expire at
+	// `leaseUntil`; the default behavior (retire on task close) applies once expired. Additive;
+	// absent fields == default behavior. Cleared by `/swarm agent lease <id> --clear` or by
+	// any explicit lease-removal call (e.g. assignment-tool resets).
+	leaseKind?: "reuse" | "park";
+	leaseUntil?: string;
+	leaseReason?: string;
+	// === Issue 82 (review item 1): heartbeat-GC probe-throttle ledger ===
+	// ISO timestamp of the most recent tmux probe fired by `agentHeartbeatGCLocked` gate 2.
+	// Pre-policy agents simply lack the field (== never probed). The GC skips a gate-2 probe
+	// unless `lastProbeAt` is older than `probeAfterMs` (2× PI_SWARM_AGENT_HEARTBEAT_STALE_MS),
+	// so the per-tick probe rate is bounded at roughly one probe per agent per 20 minutes by
+	// default — even for a graveyard-shape swarm where lastHeartbeatAt is stale forever.
+	// Absent on legacy agents; treated as "never probed" by the gate.
+	lastProbeAt?: string;
 	tmuxSession: string;
 	tmuxWindow: string;
 	tmuxTarget: string;

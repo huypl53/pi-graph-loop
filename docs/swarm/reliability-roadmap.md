@@ -750,7 +750,7 @@ Before implementing the follow-up items, confirm these policy choices:
 
 ### Issue 82 — agent retirement and heartbeat-based pane GC — P0
 
-**Status:** proposed. **Priority:** P0. **Source:** R9 a3 resource / ops review.
+**Status:** **shipped** (commit pending orchestrator commit after review passes; landed in working tree at HEAD `90d16b1` + uncommitted). **Priority:** P0. **Source:** R9 a3 resource / ops review.
 
 Terminal task closure should normally retire the worker unless an explicit reuse lease exists. The current task-close sweep is real, but it only stops a narrow class of workers; stale agents and dead panes still accumulate as long-lived resource debt.
 
@@ -763,6 +763,36 @@ Terminal task closure should normally retire the worker unless an explicit reuse
 - completed-task agents no longer accumulate indefinitely;
 - dead tmux windows are detected and reclaimed without manual cleanup;
 - running idle-alive agents remain only when a reuse policy explicitly keeps them alive.
+
+**Implementation landing zone:**
+- `extensions/swarm/src/reconcile.ts:agentHeartbeatGCLocked` — 3 cheap gates + `lastProbeAt` ledger
+  (cost-bound: at most 1 probe per agent per `probeAfterMs` window). Wired into
+  `pumpOrchestratorMailbox`'s existing `withLock` (no nested locks).
+- `extensions/swarm/src/taskgraph.ts:sweepTaskWorkersLocked` — lease-aware park-or-stop arm
+  (reuse-skip, park-pause, expired-lease-fallthrough).
+- `extensions/swarm/src/types.ts` — additive `leaseKind?: "reuse" \| "park"`, `leaseUntil?: string`,
+  `leaseReason?: string`, `lastProbeAt?: string` fields on `SwarmAgent`.
+- `extensions/swarm/src/tools/tasks.ts:swarm_assign_task` — new `lease` parameter stamps the
+  assignee at assignment time.
+- `extensions/swarm/src/command.ts` — `/swarm agent lease <id> [--reuse\|--park] [--until <iso>] [--reason <text...>] [--clear]`.
+- Tests: `heartbeat-gc.test.mjs` (67/0), `agent-retirement-sweep.test.mjs` (29/0), `graveyard-repro.test.mjs` (10/0).
+- Fixtures: `agent-retirement-sweep.jsonl`, `agent-retirement-lease.jsonl`, `heartbeat-gc-dead-pane.jsonl`.
+- Trace events: `agent.heartbeat_gc.stopped`, `agent.heartbeat_gc.stale`,
+  `agent.heartbeat_gc.probe_throttled`, `agent.heartbeat_gc.expired_park_flipped`,
+  `agent.tmux_liveness_correction`, `agent.task_sweep_parked`, `task.lease_stamped`,
+  `agent.lease_set`, `agent.lease_cleared`.
+- Docs: `docs/swarm/operations.md` §"heartbeat-driven agent GC (Issue 82, P0)" and
+  §"explicit reuse lease + park mechanism (Issue 82)"; `docs/swarm/tools.md` row updates for
+  `swarm_assign_task` (lease param) and `swarm_prune` (now an escape hatch alongside auto-GC).
+
+**Observability debt** (review item 4): the plan originally called for an
+`agent.task_sweep_skipped {reason: "cross_task_default_kept"}` audit trace on every
+non-event task close. The implementation does NOT emit this trace because the kept
+path is the pre-existing Issue-26 default behavior (`wasInClosingTask=false` → early
+continue); emitting a trace per kept agent on every close would add noise without
+changing behavior. The behavioral correctness is independently verified by the
+round-2 cross-task lane. The R9 a3 cross-task agents that still hold an
+`assigned`/`in_progress` node at close (the cancelTask path) ARE swept, correctly.
 
 ### Issue 83 — Row 76 phase 1 sub-tasks and metric staging — P1
 

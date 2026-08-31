@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmAgent, SwarmIdleNudgeState, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
+import { ACK_MISSING_MS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 
@@ -877,6 +877,129 @@ export async function evaluateTaskGraphStallNudgeLocked(
 //   - swarm_update_task claim branch (Issue 24.a) — same; a worker claimed an unassigned node.
 //   - applyTaskStatus terminal-transition sites (Issue 23 B3 placement) — resolves because the
 //     task left in_progress.
+// === Issue 82: heartbeat-driven agent GC pass (P0, R9 a3 graveyard) ===
+// Runs once per pump tick under the existing withLock. Bounded cost:
+//   - O(N) over agents for the cheap heartbeat gate (no I/O).
+//   - tmux probes ONLY for agents whose lastHeartbeatAt is older than 2× the stale window
+//     (we can't tell from lastHeartbeatAt alone whether the pane is gone — we sample tmux).
+// Hard rules:
+//   - Orchestrator pseudo-agent is exempt (its heartbeat is owned by the leader lease).
+//   - Paused agents: status/health untouched (they're dormant by design; the lease honors park).
+//   - Lease-valid agents (reuse): status/health untouched (orchestrator wants them around).
+//   - When the tmux probe disagrees with the in-memory `tmuxAlive` field, we update the field
+//     and emit `agent.tmux_liveness_correction`. The field is otherwise stale-by-design (refreshed
+//     on tool calls / hook events; this GC pass picks up the stragglers).
+//   - Mark-stopped is non-destructive: stopAgent is NOT called here (we leave that to the next
+//     sweepTaskWorkersLocked or explicit /swarm stop). The GC just flips the status flag so
+//     downstream sweeps / prunes can pick it up.
+export async function agentHeartbeatGCLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<{ stopped: number; stale: number; corrected: number; probesFired: number; probesThrottled: number; expiredParkFlipped: number }> {
+	// Source the threshold from constants (single source of truth; env override is operator-only).
+	const staleWindow = Number(process.env.PI_SWARM_AGENT_HEARTBEAT_STALE_MS ?? DEFAULT_AGENT_HEARTBEAT_STALE_MS);
+	const probeAfterMs = staleWindow * 2;
+	let stopped = 0, stale = 0, corrected = 0, probesFired = 0, probesThrottled = 0, expiredParkFlipped = 0;
+	for (const agent of Object.values(st.agents)) {
+		if (agent.id === "orchestrator") continue;
+		const leaseKind = agent.leaseKind;
+		const leaseUntilMs = agent.leaseUntil ? new Date(agent.leaseUntil).getTime() : 0;
+		// Both `reuse` and `park` leases exempt the agent from the heartbeat GC: `reuse` because
+		// the orchestrator wants the worker kept alive for cross-task reuse; `park` because parking
+		// is the sweep's job (the GC must not flip a parked agent to stopped — the parked pane is
+		// intentionally dormant and may be revived by the operator). Lease validity requires both
+		// `leaseKind` set AND `leaseUntil > now`.
+		const leaseValid = (leaseKind === "reuse" || leaseKind === "park") && leaseUntilMs > nowMs;
+		if (leaseValid) continue;
+		// Review item 3 fix: a paused agent is normally exempt (skip). BUT if the agent has an
+		// EXPIRED lease (lease fields set + leaseUntil <= now), the pause no longer represents
+		// an intentional operator hold — it's a stranded zombie. Fall through to the gates so
+		// gate 1 can still flip a dead-pane expired-park agent to stopped. Without this fix, an
+		// expired-park agent whose pane died post-expiry stays status:running forever, immune to
+		// both heartbeat GC and the task-close sweep (which also exempts paused).
+		const paused = agent.paused === true;
+		const expiredLease = !leaseValid && (leaseKind === "reuse" || leaseKind === "park");
+		if (paused && !expiredLease) continue;
+		const hb = agent.lastHeartbeatAt ? new Date(agent.lastHeartbeatAt).getTime() : 0;
+		const hbAge = hb ? nowMs - hb : Number.POSITIVE_INFINITY;
+		const lastProbeAtMs = agent.lastProbeAt ? new Date(agent.lastProbeAt).getTime() : 0;
+		// Cheap gate 1: pane known-dead (carried over from a previous probe) + running -> mark stopped.
+		// (A stopped agent that stays `tmuxAlive:false` is left alone — it was already counted.)
+		if (agent.tmuxAlive === false && agent.status === "running") {
+			agent.status = "stopped";
+			agent.runtimeStatus = "stopped";
+			agent.health = "unhealthy";
+			agent.lastShutdownAt ||= new Date(nowMs).toISOString();
+			agent.updatedAt = new Date(nowMs).toISOString();
+			stopped++;
+			if (paused && expiredLease) {
+				expiredParkFlipped++;
+				await trace(p, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, { agentId: agent.id, reason: "tmux_dead_after_lease_expiry", hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge }).catch(() => {});
+			} else {
+				await trace(p, TRACE_AGENT_HEARTBEAT_GC_STOPPED, { agentId: agent.id, reason: "tmux_dead", hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge }).catch(() => {});
+			}
+			continue;
+		}
+		// Cheap gate 2: heartbeat too old AND tmuxTarget set AND plausibly alive (status:running +
+		// tmuxAlive !== false) AND probe ledger permits (lastProbeAt older than probeAfterMs).
+		// The plausibly-alive guard is the review item 1 fix: a stopped agent with a stale
+		// heartbeat must NOT be probed every tick (the original bug — would re-probe the entire
+		// graveyard forever, holding the swarm lock for seconds per tick).
+		// The probe ledger is the cost-bound the plan/implementation-report claimed: each agent
+		// is probed at most once per `probeAfterMs` window (~20 min default), regardless of how
+		// stale its heartbeat is.
+		if (
+			hbAge > probeAfterMs &&
+			agent.tmuxTarget &&
+			agent.tmuxTarget !== "unknown" &&
+			agent.status === "running" &&
+			agent.tmuxAlive !== false &&
+			(nowMs - lastProbeAtMs > probeAfterMs)
+		) {
+			agent.lastProbeAt = new Date(nowMs).toISOString();
+			probesFired++;
+			const alive = await isTmuxRunning(pi, agent.tmuxTarget);
+			if (alive !== agent.tmuxAlive) {
+				const previous = agent.tmuxAlive ?? null;
+				agent.tmuxAlive = alive;
+				corrected++;
+				await trace(p, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, { agentId: agent.id, alive, previous, hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge }).catch(() => {});
+			}
+			if (!alive && agent.status === "running") {
+				agent.status = "stopped";
+				agent.runtimeStatus = "stopped";
+				agent.health = "unhealthy";
+				agent.lastShutdownAt ||= new Date(nowMs).toISOString();
+				agent.updatedAt = new Date(nowMs).toISOString();
+				stopped++;
+				await trace(p, TRACE_AGENT_HEARTBEAT_GC_STOPPED, { agentId: agent.id, reason: "tmux_dead_after_probe", hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge }).catch(() => {});
+				continue;
+			}
+		} else if (
+			hbAge > probeAfterMs &&
+			agent.tmuxTarget &&
+			agent.tmuxTarget !== "unknown" &&
+			(nowMs - lastProbeAtMs <= probeAfterMs)
+		) {
+			// Review item 1 evidence trace: emit a throttle-skip counter when gate 2 conditions
+			// are met but the probe ledger blocks the probe. Cheap (one trace per skipped agent
+			// per tick); dashboards can chart probe-skip rates without re-reading state.
+			probesThrottled++;
+			await trace(p, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, { agentId: agent.id, hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge, lastProbeAtMs: lastProbeAtMs || null, probeAfterMs }).catch(() => {});
+		}
+		// Cheap gate 3: heartbeat too old AND idle -> mark stale (downgrade; don't stop).
+		if (hbAge > staleWindow && agent.runtimeStatus === "idle") {
+			if (agent.health !== "stale") {
+				agent.health = "stale";
+				agent.updatedAt = new Date(nowMs).toISOString();
+				stale++;
+				await trace(p, TRACE_AGENT_HEARTBEAT_GC_STALE, { agentId: agent.id, hbAgeMs: hbAge }).catch(() => {});
+			}
+		}
+	}
+	if (stopped || stale || corrected) {
+		await writeState(p, st);
+	}
+	return { stopped, stale, corrected, probesFired, probesThrottled, expiredParkFlipped };
+}
+
 //
 // Pure state mutation: deletes backoffTicksRemaining + nextStallNudgeAt, resets
 // consecutiveNoResolveNudges to 0, stamps lastResolvedAt, and emits `task_stall.nudge.resolved` for
@@ -1264,6 +1387,15 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		for (const [k, v] of Object.entries(st.orchestratorPumpSessions!)) {
 			if (k !== String(process.pid) && nowMs - new Date(v.lastAt).getTime() > PUMP_SESSION_TTL_MS) delete st.orchestratorPumpSessions![k];
 		}
+		// === Issue 82: heartbeat-driven agent GC pass (P0, R9 a3 graveyard) ===
+		// Runs inside the existing pump withLock (no nested lock acquisition). Bounded cost:
+		// O(N) over agents for the cheap heartbeat gate; tmux probe fires only when an agent's
+		// heartbeat is older than 2× the stale window. Auto-flips `status` from "running" to
+		// "stopped" for agents whose tmux pane is known-dead or freshly probed dead, so the next
+		// sweepTaskWorkersLocked / swarm_prune picks them up. Lease-valid (reuse) and paused
+		// agents are exempt. Idempotent across ticks.
+		try { await agentHeartbeatGCLocked(pi, ctx.cwd, p, st, nowMs); }
+		catch (err: any) { await trace(p, "agent.heartbeat_gc.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// Mid-graph stall safety net: nudge the orchestrator to assign any ready-but-unassigned node in an
 		// in_progress task. The nudge is idempotent, so it is safe to run on every pump tick.
 		try { await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
