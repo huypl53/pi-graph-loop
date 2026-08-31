@@ -227,7 +227,14 @@ export const NOTIFY_DEFAULT_MAX_NUDGES = 3; // per task+template cap before we s
 // Semantic dedupe key templates. Templates are formatted by formatNotifyKey (never interpolated at
 // runtime) so every code path shares one identifier space and cannot accidentally collide or drift.
 export const NOTIFY_KEY_INITIAL_READY = "task:{taskId}:nudge:initial-ready";
-export const NOTIFY_KEY_GRAPH_ADVANCE = "task:{taskId}:node:{nodeId}:nudge:assign";
+// Issue F2 (task-202608310422): include a `{seq}` slot so each successful emit gets a fresh dedupe
+// slot. Pre-fix the key was static per (taskId, nodeId), so mailbox.ts:237-245 dedupe
+// (`findIdempotentMessage` over `from + to + idempotencyKey`) returned the original message on every
+// later tick regardless of ackedAt — cap/cooldown gates were reachable but no second mailbox nudge
+// was ever delivered. The seq-suffix mirrors NOTIFY_KEY_GOAL_IDLE_NUDGE and NOTIFY_KEY_TASK_GRAPH_STALL
+// (same `{seq}` shape). `seq` is monotonic per (taskId, nodeId), stored in
+// SwarmGraphAdvanceNudgeState — see reconcile.ts:sendGraphAdvanceNudgeLocked.
+export const NOTIFY_KEY_GRAPH_ADVANCE = "task:{taskId}:node:{nodeId}:nudge:assign:seq:{seq}";
 // Lifecycle-fencing (issue 9): per-(task,agent) dedupe for the agent_settled -> orchestrator
 // "settled with open assignment(s)" notify so repeated settles in a window don't storm. Reused by
 // the session_shutdown site too via the same predicate gating.
@@ -244,6 +251,11 @@ export const NOTIFY_KEY_PUMP_BATCH_SUPPRESSED = "swarm.pump.batch_suppressed";
 // lifecycle mutations happen until the rollout review flips gate=1.
 export const PI_SWARM_MINIMAL_PROTOCOL =
 	(process.env.PI_SWARM_MINIMAL_PROTOCOL === "1" || process.env.PI_SWARM_MINIMAL_PROTOCOL === "true") ? 1 : 0;
+
+// === Issue F2 (task-202608310422): stable telemetry trace event name for graph-advance emits ===
+// Exported so tests + dashboards import the same string the engine emits. Payload:
+// { taskId, nodeId, seq, key, cap, cooldownMs }.
+export const TRACE_GRAPH_ADVANCE_NUDGE_EMITTED = "graph.advance_nudge_emitted";
 
 // === Issue 25 Phase 1: stable telemetry trace event names ===
 // Exported as constants so tests and dashboards import the same string the engine emits.

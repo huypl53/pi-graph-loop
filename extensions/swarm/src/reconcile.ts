@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmAgent, SwarmIdleNudgeState, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
+import { ACK_MISSING_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
 
@@ -97,15 +97,34 @@ export function orchSession(st: SwarmState, nowMs: number): { ids: string[]; tri
 // prompting the orchestrator to move. This watcher is a safety net: after ~LOOP_RECONCILE_INTERVAL_MS of a
 // node being ready-but-unassigned, it nudges the orchestrator with the exact assign call. Idempotent per
 // (task,node); auto-acked once the node is assigned/terminal. The harness never assigns (the orchestrator
-// is the actor) — it only surfaces the stall and the fix. Assumes the caller holds the state lock.
-async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, nodeId: string, role: string, key: string): Promise<void> {
-	// Issue: graph-advance nudge was one-shot per node — an ack with a deferral note (e.g. "scope
-	// conflict, will assign when the lease closes") consumed the ONLY nudge, and when the node later
-	// became ready-but-unassigned again the watcher stayed silent forever (live: 71-min stall on
-	// task-202608310022 review node). Re-arm policy mirrors reconcileInitialReadyLocked: per-key cap of
-	// NOTIFY_DEFAULT_MAX_NUDGES sends + NOTIFY_DEFAULT_COOLDOWN_MS between sends. Auto-acks for
-	// left-ready nodes do NOT count toward the cap (only real sends do).
-	const prior = Object.values(st.messages || {}).filter((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+// Issue F2 (task-202608310422): graph-advance nudge key now carries a per-(taskId, nodeId) monotonic
+// seq suffix. The pre-fix static key allowed exactly one mailbox nudge per (taskId, nodeId) for the
+// node's lifetime (mailbox.ts:237-245 dedupes on from+to+idempotencyKey regardless of ackedAt), so
+// the re-arm policy (cap + cooldown + acked-not-in-flight gate chain, added in 7994451) was reachable
+// but never produced a NEW message — only `message.idempotent_reuse` traces. The seq-suffix mirrors
+// the goal-nudge `nudgeSeq` (reconcile.ts:528) and task-stall `nudgeSeq` (reconcile.ts:715) patterns:
+// `seq` advances only on a successful emit, so same-tick double-emits still dedupe via
+// `findIdempotentMessage`, while a fresh tick after ack + cooldown gets a fresh slot.
+//
+// Cap + cooldown semantics unchanged — only the per-emit key uniqueness changed. Cap is still
+// NOTIFY_DEFAULT_MAX_NUDGES sends per (taskId, nodeId) across the node's lifetime (the prior-scan now
+// matches the seq-prefix set instead of a single static key, so all 3 sends count). Cooldown is still
+// NOTIFY_DEFAULT_COOLDOWN_MS between sends. Auto-acks for left-ready nodes do NOT count toward the
+// cap (only real sends do), same as before.
+//
+// Assumes the caller holds the state lock.
+async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, nodeId: string, role: string): Promise<void> {
+	// Per-(taskId, nodeId) monotonic seq store. Lazily initialized so pre-policy swarms boot cleanly.
+	const graphAdvanceState = (st.graphAdvanceNudgeState ||= {});
+	const perTask = (graphAdvanceState[taskId] ||= {});
+	const perNode = (perTask[nodeId] ||= {});
+	const priorSeq = perNode.nudgeSeq ?? 0;
+	const nextSeq = priorSeq + 1;
+	const key = formatNotifyKey(NOTIFY_KEY_GRAPH_ADVANCE, { taskId, nodeId, seq: String(nextSeq) });
+
+	// Cap: count ALL prior sends for this (taskId, nodeId) across all seqs — the seq-prefix set.
+	const keyPrefix = `task:${taskId}:node:${nodeId}:nudge:assign:seq:`;
+	const prior = Object.values(st.messages || {}).filter((r) => r.to === "orchestrator" && (r.idempotencyKey?.startsWith(keyPrefix) ?? false));
 	if (prior.length >= NOTIFY_DEFAULT_MAX_NUDGES) return; // cap: orchestrator has ignored the stall
 	const lastSent = prior.map((r) => r.createdAt || "").sort().pop() || "";
 	if (lastSent && Date.now() - new Date(lastSent).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) return; // cooldown
@@ -118,8 +137,14 @@ async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Pat
 			requiresAck: true,
 			idempotencyKey: key,
 		});
+		// Persist the seq ONLY after a successful emit (mirrors goal-nudge reconcile.ts:560 + task-stall
+		// reconcile.ts:749). If deliverMessageLocked throws we want the next attempt to retry the same
+		// seq, not skip ahead.
+		perNode.nudgeSeq = nextSeq;
+		perNode.lastNudgeAt = new Date().toISOString();
+		await trace(p, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, { taskId, nodeId, seq: nextSeq, key, cap: NOTIFY_DEFAULT_MAX_NUDGES, cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS }).catch(() => {});
 	} catch (err: any) {
-		await trace(p, "graph.advance_nudge_failed", { taskId, nodeId, error: String((err as Error)?.message || err) }).catch(() => {});
+		await trace(p, "graph.advance_nudge_failed", { taskId, nodeId, seq: nextSeq, error: String((err as Error)?.message || err) }).catch(() => {});
 	}
 }
 
@@ -129,6 +154,27 @@ function ackOrchestratorNudgeLocked(st: SwarmState, key: string, nowMs: number, 
 		const at = new Date(nowMs).toISOString();
 		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "orchestrator", status: "done", note, at } };
 		st.delivered["orchestrator"] = Array.from(new Set([...(st.delivered["orchestrator"] || []), rec.id]));
+	}
+}
+
+// Issue F2 (task-202608310422): with the seq-suffixed graph-advance key, there is no single static key
+// to clear when a node leaves ready+unassigned — there can be up to NOTIFY_DEFAULT_MAX_NUDGES open
+// records (each at a different seq) for the same (taskId, nodeId). This helper auto-acks every open
+// seq-suffixed record for the pair. Idempotent w.r.t. already-acked records (the inner guard skips
+// records with `ackedAt`). Mirror of ackOrchestratorNudgeLocked but matching the seq-prefix set.
+function ackOrchestratorGraphAdvanceNudgesLocked(st: SwarmState, taskId: string, nodeId: string, nowMs: number, note: string): void {
+	const keyPrefix = `task:${taskId}:node:${nodeId}:nudge:assign:seq:`;
+	const at = new Date(nowMs).toISOString();
+	const ids: string[] = [];
+	for (const rec of Object.values(st.messages || {})) {
+		if (rec.to !== "orchestrator") continue;
+		if (!(rec.idempotencyKey?.startsWith(keyPrefix) ?? false)) continue;
+		if (!rec.requiresAck || rec.ackedAt) continue;
+		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "orchestrator", status: "done", note, at } };
+		ids.push(rec.id);
+	}
+	if (ids.length) {
+		st.delivered["orchestrator"] = Array.from(new Set([...(st.delivered["orchestrator"] || []), ...ids]));
 	}
 }
 
@@ -152,7 +198,6 @@ async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string, p: Pat
 			...cr.current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
 		]);
 		for (const nodeId of Object.keys(task.nodes)) {
-			const key = formatNotifyKey(NOTIFY_KEY_GRAPH_ADVANCE, { taskId, nodeId });
 			const node = task.nodes[nodeId];
 			if (actionable.has(nodeId) && !node.assignee && !TERMINAL_NODE_STATUSES.has(node.status)) {
 				// Lifecycle-fencing (issue 9, site 4): per-node staleness check before emitting a graph-advance
@@ -163,14 +208,23 @@ async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string, p: Pat
 				// to the orchestrator rather than a worker).
 				const staleCheck = checkStallNotificationStale(st, task, nodeId, node.assignee || "orchestrator", nowMs);
 				if (staleCheck.stale) {
-					await traceStaleSuppressedOnce(p, "reconcile.graph_advance_nudge", { messageId: key, idempotencyKey: key, reason: staleCheck.reason, evidence: staleCheck.evidence });
-					ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node stale");
+					const keyForTrace = formatNotifyKey(NOTIFY_KEY_GRAPH_ADVANCE, { taskId, nodeId, seq: "1" });
+					await traceStaleSuppressedOnce(p, "reconcile.graph_advance_nudge", { messageId: keyForTrace, idempotencyKey: keyForTrace, reason: staleCheck.reason, evidence: staleCheck.evidence });
+					ackOrchestratorGraphAdvanceNudgesLocked(st, taskId, nodeId, nowMs, "auto-acked: node stale");
 					continue;
 				}
-				await sendGraphAdvanceNudgeLocked(pi, cwd, p, st, taskId, nodeId, node.role || "worker", key);
+				await sendGraphAdvanceNudgeLocked(pi, cwd, p, st, taskId, nodeId, node.role || "worker");
 			} else {
-				// Node assigned / terminal / not yet ready -> clear any outstanding assign nudge for it.
-				ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node assigned/left ready");
+				// Node assigned / terminal / not yet ready -> clear any outstanding assign nudges for it.
+				// Issue F2 (task-202608310422): clear ALL seq-suffixed records for this (taskId, nodeId),
+				// not just the static key — with the new key shape there is no single static key to clear.
+				ackOrchestratorGraphAdvanceNudgesLocked(st, taskId, nodeId, nowMs, "auto-acked: node assigned/left ready");
+				// Stamp lastResolvedAt on the durable per-(task,node) seq store (seq survives; only the
+				// resolved marker is set). Keeps the store consistent with the auto-ack.
+				const graphAdvanceState = (st.graphAdvanceNudgeState ||= {});
+				const perTask = (graphAdvanceState[taskId] ||= {});
+				const perNode = (perTask[nodeId] ||= {});
+				if (perNode.nudgeSeq !== undefined) perNode.lastResolvedAt = new Date(nowMs).toISOString();
 			}
 		}
 	}
@@ -587,8 +641,9 @@ export async function evaluateIdleGoalNudgeLocked(
 //       actionable set as `reconcileGraphAdvanceLocked`).
 //   (3) Every non-orchestrator agent is `runtimeStatus === "idle"`.
 //   (4) The task has existed for at least TASK_INITIAL_READY_GRACE_MS (60s).
-//   (5) NOT firing the existing `reconcileGraphAdvanceLocked` nudge for the same node already (the
-//       shared NOTIFY_KEY_GRAPH_ADVANCE dedupe key) so two concurrent nudges don't compete.
+//   (5) NOT firing the existing `reconcileGraphAdvanceLocked` nudge for the same node already (any
+//       unacked record in the seq-suffixed NOTIFY_KEY_GRAPH_ADVANCE set for that (taskId, nodeId))
+//       so two concurrent nudges don't compete.
 //
 // Back-off + max-nudge cap mirror the goal-nudge machinery but are per-task (not global). Both
 // nudges coexist; a goal set + a stalled task emits BOTH (different dedupe keys). Independent
@@ -659,10 +714,13 @@ export async function evaluateTaskGraphStallNudgeLocked(
 		if (!actionableNodes.length) continue;
 
 		// Predicate 5: skip if a graph-advance nudge is already firing for any actionable node.
+		// Issue F2 (task-202608310422): with the seq-suffixed key, "already firing" means ANY seq
+		// record for that (taskId, nodeId) is unacked — match the seq-prefix set, not a static key.
 		let graphAdvanceActive = false;
 		for (const nodeId of actionableNodes) {
-			const advanceKey = formatNotifyKey(NOTIFY_KEY_GRAPH_ADVANCE, { taskId, nodeId });
-			if (findIdempotentMessage(st, "orchestrator", "orchestrator", advanceKey)) { graphAdvanceActive = true; break; }
+			const advanceKeyPrefix = `task:${taskId}:node:${nodeId}:nudge:assign:seq:`;
+			const hasActive = Object.values(st.messages || {}).some((r) => r.to === "orchestrator" && !r.ackedAt && (r.idempotencyKey?.startsWith(advanceKeyPrefix) ?? false));
+			if (hasActive) { graphAdvanceActive = true; break; }
 		}
 		if (graphAdvanceActive) continue;
 

@@ -300,6 +300,24 @@ export type SwarmTaskStallState = {
 	nextStallNudgeAt?: string;           // ISO; earliest ts the next stall nudge/backoff decrement may fire (interval spacing)
 };
 
+// Per-(taskId, nodeId) monotonic seq store for the graph-advance safety net (Issue F2,
+// task-202608310422). Mirrors the per-task shape of SwarmTaskStallState but at node granularity so a
+// single task with multiple ready-but-unassigned nodes keeps independent counters. The seq is the
+// `{seq}` slot in NOTIFY_KEY_GRAPH_ADVANCE — it is NEVER reset (survives acks + node-leaves/re-enters
+// ready) so a future re-stall still climbs past the cap rather than starting over. lastResolvedAt is
+// stamped (without resetting nudgeSeq) when the node leaves ready+unassigned — see
+// reconcileGraphAdvanceLocked:170-180. Bounded by active task surface; pruned alongside the message
+// ledger by swarm_gc.
+export type SwarmGraphAdvanceNudgeState = {
+	[taskId: string]: {
+		[nodeId: string]: {
+			nudgeSeq?: number;        // monotonic emit counter (NEVER reset)
+			lastNudgeAt?: string;     // ISO; set on every successful emit
+			lastResolvedAt?: string;  // ISO; set when node leaves ready+unassigned (seq survives)
+		};
+	};
+};
+
 // Durable goal the orchestrator wants the swarm to advance toward (Issue 18). Set via
 // `swarm_set_goal` / `/swarm goal set <text>`; cleared via `swarm_mark_goal_done` / `/swarm goal done`.
 // While set and ALL non-orchestrator agents are runtimeStatus="idle" with zero active task nodes,
@@ -410,6 +428,12 @@ export type SwarmState = {
 	// task graph doesn't spam the orchestrator's mailbox. Reset on first reassignment of the
 	// actionable node OR on the task leaving `in_progress` state.
 	taskStallState?: Record<string, SwarmTaskStallState>;
+	// Issue F2 (task-202608310422): per-(taskId, nodeId) monotonic nudgeSeq store for the graph-advance
+	// safety net. The seq is the `{seq}` slot in NOTIFY_KEY_GRAPH_ADVANCE so each successful emit gets a
+	// fresh dedupe slot. NEVER reset (survives acks + node-leaves/re-enters ready); the durable map is
+	// bounded by the active task surface and pruned alongside the message ledger by swarm_gc. Absent on
+	// pre-policy swarms — lazily initialized inside reconcileGraphAdvanceLocked's lock.
+	graphAdvanceNudgeState?: SwarmGraphAdvanceNudgeState;
 	// Issue 20: pool-scaffold write-once flag. Set by the orchestrator session_start hook AFTER the
 	// first successful `.pi/settings.json` scaffold + notify emission. Absent === never notified, which
 	// is the correct initial state. `readState` does NOT back-fill this field (mirrors `goal`): a
