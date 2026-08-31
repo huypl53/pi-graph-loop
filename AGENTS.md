@@ -28,6 +28,7 @@ pi --model gpt-5.4-mini --provider openai
 - update focused docs in `docs/swarm/` when adding or changing swarm features; do not treat `docs/swarm.md` as the only source of truth
 
 ## extension development flow
+- Deterministic & Offline-First: Tests must execute in milliseconds without making real network requests or requiring paid API tokens.
 - when developing or changing a pi extension, do not stop at code changes; always include a validation/test step in tmux so the extension is exercised in a fresh interactive pi environment
 - prefer an isolated tmux target dedicated to the validation run so the user can later inspect or attach to it for review
 - after starting the validation pi session, run the smallest realistic workflow that proves the extension behavior, such as loading the extension, invoking the tool/command/hook, and checking the resulting output
