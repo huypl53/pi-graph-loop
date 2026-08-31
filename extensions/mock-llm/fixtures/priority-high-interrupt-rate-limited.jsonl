@@ -1,0 +1,7 @@
+# priority-high-interrupt-rate-limited: Issue 86 — two `priority:"high"` injects within the 30s
+# window. The first inject interrupts the hung turn; the second inject is rate-limited (no
+# abort) and lands as a normal followUp. Lane harness asserts: 1× interrupt_requested/effective
+# pair + 1× interrupt_suppressed trace; both messages still queued and consumed at the next
+# turn boundary.
+{"name":"hung turn phase","events":[{"type":"text","delayMs":15,"text":"Long hung turn; first high-priority inject will abort, second will be suppressed.","chunks":["Long hung turn; ","first high-priority inject will abort, ","second will be suppressed."]},{"type":"hang","delayMs":15,"until":"abort"}]}
+{"name":"resumed turn after first abort","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"First interrupt fired; consuming the queued messages.","chunks":["First interrupt fired; ","consuming the queued messages."]},{"type":"toolcall","delayMs":15,"name":"swarm_ack_message","id":"ack-1","arguments":{"messageId":"PHI-RATE-1","status":"done"}},{"type":"toolcall","delayMs":15,"name":"swarm_ack_message","id":"ack-2","arguments":{"messageId":"PHI-RATE-2","status":"done"}},{"type":"stop","delayMs":5,"reason":"stop"}]}

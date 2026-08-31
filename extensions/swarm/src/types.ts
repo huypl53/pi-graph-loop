@@ -223,6 +223,13 @@ export type SwarmAgent = {
 	lastAgentStartAt?: string;
 	lastAgentSettledAt?: string;
 	lastSettleNotifyAt?: string; // persisted cooldown for agent_settled->orchestrator idle/open-work notify
+	// === Issue 86: priority-high interrupt-on-delivery (recipient-side rate-limit ledger) ===
+	// Last timestamp a `ctx.abort()` was invoked by the recipient's input hook in response to a
+	// priority:"high" swarm message. Persisted on the recipient agent record; orchestrator pseudo-
+	// agent is exempt. A second high-priority inject within PI_SWARM_HIGH_INTERRUPT_WINDOW_MS
+	// (default 30000) does NOT re-abort (suppressed via `message.interrupt_suppressed` trace).
+	// Cleared on respawn via ensureAgentDefaults (existing pattern); no extra logic needed.
+	lastHighInterruptAt?: string;
 	// === Issue 25 Phase 2: worker dry-run reconcile rate-limit ledger (proposal §K.1) ===
 	// Last worker dry-run reconcile timestamp. Persisted so a worker that calls swarm_reconcile
 	// more often than PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS gets RECONCILE_RATE_LIMITED without

@@ -944,6 +944,76 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			await writeState(p, st);
 		});
 		await trace(p, "message.input_intercept", { id: msg.id, from: msg.from, to: msg.to, agentId: currentAgentId(), status: "intercepted" });
+
+		const isHigh = msg.priority === "high";
+		const midTurn = !ctx.isIdle();
+
+		// === Issue 86: priority-high interrupt-on-delivery ===
+		// When a high-priority swarm message is intercepted mid-turn, call ctx.abort() (TUI-level
+		// interrupt, same channel as manual Escape) so urgent directives are consumed at the next-turn
+		// boundary instead of sitting intercepted for 20+ minutes (live incident 2026-08-31: STOP sat
+		// 23 min). Rate-limited per agent (~1/30s default) so a chatty orchestrator cannot livelock
+		// a worker. Graceful degrade on ctx.abort() failure: still queue the message as followUp so it
+		// lands at the next-turn boundary regardless.
+		if (isHigh && midTurn) {
+			const WINDOW_MS = Number(process.env.PI_SWARM_HIGH_INTERRUPT_WINDOW_MS ?? 30_000);
+			const me = currentAgentId();
+			let allowed = true;
+			let lastInterruptAt: string | undefined;
+			await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				// Orchestrator pseudo-agent is exempt from the ledger; the orchestrator has no in-flight
+				// turn in the TUI sense, and rate-limiting would block legitimate nudges.
+				const self = me === "orchestrator" ? undefined : st.agents[me];
+				lastInterruptAt = self?.lastHighInterruptAt;
+				if (lastInterruptAt && (Date.now() - new Date(lastInterruptAt).getTime()) < WINDOW_MS) {
+					allowed = false;
+				} else if (self) {
+					self.lastHighInterruptAt = new Date().toISOString();
+					self.updatedAt = new Date().toISOString();
+					await writeState(p, st);
+				}
+			});
+
+			if (!allowed) {
+				await trace(p, "message.interrupt_suppressed", {
+					id: msg.id, from: msg.from, to: msg.to, agentId: me,
+					reason: "rate_limited", windowMs: WINDOW_MS, lastInterruptAt,
+				}).catch(() => {});
+				// Still queue as followUp so the message is consumed at the next-turn boundary — just
+				// don't burn an extra interrupt budget on the second directive.
+				pi.sendMessage({
+					customType: "swarm-message",
+					content: formatSwarmMessageContent(msg),
+					display: true,
+					details: msg,
+				}, { triggerTurn: true, deliverAs: "followUp" });
+				return { action: "handled" };
+			}
+
+			await trace(p, "message.interrupt_requested", { id: msg.id, from: msg.from, to: msg.to, agentId: me }).catch(() => {});
+			let interruptEffective = false;
+			try {
+				await ctx.abort();
+				interruptEffective = true;
+			} catch (err) {
+				await trace(p, "message.interrupt_failed", { id: msg.id, from: msg.from, to: msg.to, agentId: me, error: String((err as Error)?.message || err) }).catch(() => {});
+				// Graceful degrade: still queue the message as followUp so it lands at the next-turn
+				// boundary even if the abort itself failed (matches the manual-Escape fallback pattern).
+			}
+			if (interruptEffective) {
+				await trace(p, "message.interrupt_effective", { id: msg.id, from: msg.from, to: msg.to, agentId: me }).catch(() => {});
+			}
+			pi.sendMessage({
+				customType: "swarm-message",
+				content: formatSwarmMessageContent(msg),
+				display: true,
+				details: msg,
+			}, { triggerTurn: true, deliverAs: "followUp" });
+			return { action: "handled" };
+		}
+
+		// === Existing behavior (preserved verbatim) ===
 		pi.sendMessage({
 			customType: "swarm-message",
 			content: formatSwarmMessageContent(msg),
