@@ -89,6 +89,34 @@ All events support `delayMs`.
 - `settled-with-open-assignment` — returns a polite stop while the task graph still has open work.
 - `drift-then-wake` — first request hangs, second request wakes and finishes normally.
 
+## Multi-agent replay patterns
+
+Swarm agents never talk to each other directly — all communication flows through mailbox JSONL + graph state on disk, and every agent is a separate pi process with its own `PI_SWARM_AGENT_ID`. The mock provider's turn cursor is **in-process** (`runtimeTurnCursor` in `src/stream.ts`): each process advances its own fixture independently. You therefore cannot script "A sends, B receives" inside one fixture. Use one of these three patterns instead:
+
+### Pattern 1 — handoff-chain (one process plays multiple roles)
+
+One scripted session acts as role A then role B against the real shared state (`fixtures/handoff-chain.jsonl` is the reference): turn 1 (A) closes its node + sends `swarm_task_message`; turn 2 (B) checks mailbox + acks; turn 3 (B) advances its own node. This genuinely exercises ownership fencing, ack lifecycle, and handoff credit because the engine only checks agent ids and assignment records — it does not care which process invoked the tool. Use this when the *coordination semantics* are under test.
+
+### Pattern 2 — seeded world + single-actor script (the workhorse)
+
+Instead of running the second agent, seed on-disk state *as if* it had acted, then let the engine react:
+
+- seed `messages[msg-1]` with `status=acked`, a deferral note, and `createdAt` older than the cooldown (see `graph-advance-nudge-rearm` + its lane seeding helper) to test re-arm re-send;
+- seed a stale `allIdleSinceAt` to test the busy-epoch reset (`goal-busy-epoch-reset`);
+- leave a node ready-but-unassigned to trigger graph-advance / initial-ready nudges.
+
+The scripted turns only need to respond to engine output (ack a nudge, verify the mailbox) — the pump/reconcile machinery runs for real on its normal tick. This is deterministic (no cross-process timing) and covers almost every engine-side behavior.
+
+### Pattern 3 — parallel real lanes (for delivery machinery itself)
+
+When the *transport* is under test — tmux injection, reconcile retry, dead-lettering — run two real pi processes with different fixtures/scripts (see the issue-11 UAT: an orchestrator lane with `PI_SWARM_IS_ORCHESTRATOR=1` and a worker lane with a scripted `swarm_send_message`). Coordinate with explicit sleeps and by mutating the mailbox file between turns from outside the processes. Accept the timing races — that is the point: the engine must be robust to them. Reserve this pattern for delivery/injection paths that patterns 1-2 cannot reach.
+
+### Choosing a pattern
+
+- Testing what agents *say to each other* (handoffs, acks, fences) → pattern 1.
+- Testing what the *engine does* around agents (nudges, cooldowns, caps, epochs, dedupe) → pattern 2.
+- Testing how messages *physically move* (tmux injection, retries, TTL, dead-letter) → pattern 3.
+
 ## Validation checklist
 
 1. Update or add the fixture JSONL file.

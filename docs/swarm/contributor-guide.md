@@ -132,8 +132,20 @@ Preferred validation layers:
 - typecheck of `extensions/swarm/index.ts`
 - scenario scripts such as `scripts/swarm_task_uat.sh`
 - fresh interactive tmux/pi validation for extension behavior changes
+- mock-LLM fixture replay lanes for any agent-facing behavior (see "Testing philosophy: real engine, scripted LLM" below)
 
 For docs-only changes, it is acceptable to skip interactive validation, but say so explicitly in the final report.
+
+## Testing philosophy: real engine, scripted LLM
+
+Every swarm behavior change ships a mock-LLM fixture (AGENTS.md makes this compulsory). The philosophy behind it:
+
+- **The engine is never mocked.** A fixture lane runs a real `pi` process with the real swarm extension: hooks fire, the orchestrator pump ticks, reconcile walks task.json, mailbox delivery + tmux injection + idempotency dedupe are all production code paths. Only the model is replaced by a scripted stream (`extensions/mock-llm/`, one JSONL turn per request; when the script runs out the provider returns `script_exhausted` rather than hanging).
+- **Engine-side behavior is driven by seeding, not scripting.** Pumps, nudges, cooldowns, caps, and fences react to *state on disk*. To test them you seed the precondition (a stale `allIdleSinceAt`, an acked deferral message older than the cooldown, a ready-but-unassigned node) and then assert the engine's side effects: trace events in `events.jsonl`, new mailbox records with distinct ids, task.json node transitions.
+- **Assertions read disk, not console.** Evidence is what the engine wrote: `.pi/mock-llm/transcripts/<fixture>/` (ordered tool calls + stopReasons), `swarm-state.json` ledgers (delivered/acked/idempotency keys/seq counters), `events.jsonl` traces, mailbox JSONL. A deterministic fixture replayed twice must produce semantically identical output (same final statuses, same ordered tool-call sequence, same boundary values).
+- **Deterministic and offline.** Milliseconds, no network, no provider keys. `delayMs` values are part of the contract; no hidden randomness or environment-sensitive branching. This is what makes a fixture a regression test rather than a demo.
+
+For multi-agent interaction patterns (handoff chains, seeded worlds, parallel lanes) see the `mock-llm-scenarios` skill — the authoring reference for fixtures.
 
 ## Suggested workflow for a non-trivial feature
 
