@@ -115,6 +115,13 @@ Required examples in this issue family:
 | agent lifecycle and tmux integration | `src/agents.ts`, `src/tmux.ts` |
 | tmux behavior | `src/tmux.ts` |
 
+## Review and evidence rules (R10 keepers)
+
+- **Cost-bound claims require counting assertions.** Any plan/comment/report claiming a bound (probe rate, lock-hold, message rate; trigger words: only/at most/bounded/throttled/rate-limited/once-per) must carry a counting test at the real I/O boundary that fails when violated. State assertions see "what happened once", never "how often". Template: heartbeat-gc C10-C13 (seed rejected population, counting mock at boundary, N≥2 passes, assert ≤bound, surgical-RED by reverting only the bound). Full checklist: docs/swarm/r10-postbatch-synthesis/consolidated-findings.md.
+- **No reject smell.** A clean batch with zero reviewer rejections is a review-depth smell, not a success metric. Reviewer rejections must cite: specific code location + concern + consequence + fix proposal.
+- **Name the red assertion.** Plans name the exact assertion that must go red; RED reports reference named assertions, not "tests fail". TypeError-class REDs prove newness, not discrimination.
+- **Every shipped fixture is exercised by an independent tester in a fresh tmux lane** (durable-state + trace census asserted), not just unit-test PASS counts.
+
 ## Documentation update checklist
 
 When you change behavior, update docs in this order:
