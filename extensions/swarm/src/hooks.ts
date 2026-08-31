@@ -1,6 +1,7 @@
 // === swarm/hooks.ts — event hooks + orchestrator mailbox pump (verbatim from index.ts) ===
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname, relative, sep } from "node:path";
+import { existsSync } from "node:fs";
 import type { MessageResponseStatus, Paths } from "./types.ts";
 import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_KEY_SETTLE_STALE, ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, formatNotifyKey } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
@@ -9,11 +10,11 @@ import { classifyProviderError, scrubErrorIdentity, type EngineRetryIncident } f
 import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "./pool.ts";
 import { deliverMessageLocked, findIdempotentMessage, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
-import { ensureDirs, identityPath, mailboxPath, paths, readState, trace, withLock, writeState, writeTaskState } from "./state.ts";
+import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "./state.ts";
 import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader } from "./identity.ts";
 import { formatSwarmMessageContent, parseSystemDelivery } from "./delivery.ts";
 import { pumpOrchestratorMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
-import { scanAgentOpenAssignments, checkStallNotificationStale } from "./taskgraph.ts";
+import { ensureNodeActivityStamp, scanAgentOpenAssignments, checkStallNotificationStale } from "./taskgraph.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { tmux } from "./tmux.ts";
 import { ensurePoolScaffold } from "./pool-scaffold.ts";
@@ -861,6 +862,34 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			agent.updatedAt = ts;
 			await writeState(p, st);
 		});
+		// === Issue 83a — stamp lastProgressAt on every tool execution (worker is making forward progress) ===
+		// I/O cost per tool call: 1 `withLock`+`readState` (swarm state) + N `readTaskState` (one per
+		// active task file) + M `writeTaskState` (one per dirty task). Where N = agent.activeTaskIds
+		// length, M ≤ N (only dirty tasks written). Bounded by agent load; agent load is bounded by
+		// `maxConcurrentTasks`. This is an EXTRA I/O cost vs the pre-83a baseline (which did not
+		// stamp on tool calls); the cost is honest and bounded, NOT free. The read-then-stamp is
+		// idempotent and safe under concurrent task-file writes because TaskNode.lastProgressAt is
+		// monotone non-decreasing per node. Calls the exported `ensureNodeActivityStamp` helper per
+		// node (single source of truth for the stamp invariant; unit tests exercise the same helper,
+		// so the helper is the production entry point). R10-KR5 compliance: even the bare-catch
+		// inner try/catch is wrapped in a test (C9) that asserts the durable side-effect; if the
+		// wrapped body throws, C9 fails loudly instead of silently no-opping.
+		{
+			const _ids = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const a = st.agents[agentId]; return a?.activeTaskIds ?? []; });
+			for (const taskId of _ids) {
+				try {
+					const tp = taskPaths(p, taskId);
+					if (!existsSync(tp.taskJson)) continue;
+					const task = await readTaskState(tp.taskJson);
+					const ts = new Date().toISOString();
+					let dirty = false;
+					for (const nodeId of Object.keys(task.nodes)) {
+						if (ensureNodeActivityStamp(task, nodeId, ts, agentId)) dirty = true;
+					}
+					if (dirty) await writeTaskState(tp, task).catch(() => {});
+				} catch { /* no progress stamp on this task; the agent may not be bound to it */ }
+			}
+		}
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {

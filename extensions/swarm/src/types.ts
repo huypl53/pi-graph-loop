@@ -594,6 +594,21 @@ export type TaskNode = {
 	activeAttemptId?: string;
 	// NEW: Audit history of all attempts (never cleared, append-only)
 	attemptHistory?: TaskNodeAttempt[];
+	// === Issue 83a — liveness/progress detection + stale-open surfacing ===
+	// ISO timestamp of the most recent forward-progress signal on this node. Stamped by
+	// `ensureNodeActivityStamp` from the `tool_execution_end` hook (the worker is making tool
+	// calls) and from `tools/tasks.ts:swarm_update_task` (forward state transitions). NOT
+	// stamped on `agent_settled` / pure-idle events (those are NOT progress). Consumed by
+	// the `staleOpenAssignmentScanLocked` pump-tick phase: a node in `assigned`/`in_progress`
+	// past `PI_SWARM_STALE_OPEN_THRESHOLD_MS` (default 5 min) without a `lastProgressAt` is
+	// surfaced once per window to the orchestrator mailbox. Absent on pre-policy nodes
+	// (== never seen progress; the scan treats absent as the oldest possible timestamp).
+	lastProgressAt?: string;
+	// Last time the orchestrator was nudged about this node's stale-open state. Idempotent
+	// gate for the pump-tick scan: absent or older than the threshold => surface; otherwise
+	// skip (already surfaced within the window). Cleared on `swarm_update_task` forward
+	// transitions so progress resets the surface cycle.
+	staleOpenSurfacedAt?: string;
 };
 
 export type TaskEdge = {

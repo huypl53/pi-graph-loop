@@ -5,9 +5,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmAgent, SwarmIdleNudgeState, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED } from "./constants.ts";
+import { ACK_MISSING_MS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED, TRACE_STALE_OPEN_SURFACED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
-import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention } from "./taskgraph.ts";
+import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention, staleOpenAssignmentScanLocked } from "./taskgraph.ts";
 
 export function resolveGoalNudgeIntervalMs(nudgeIntervalMs?: number | null): number {
 	if (typeof nudgeIntervalMs === "number" && Number.isFinite(nudgeIntervalMs) && nudgeIntervalMs > 0) return Math.floor(nudgeIntervalMs);
@@ -1396,6 +1396,18 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// agents are exempt. Idempotent across ticks.
 		try { await agentHeartbeatGCLocked(pi, ctx.cwd, p, st, nowMs); }
 		catch (err: any) { await trace(p, "agent.heartbeat_gc.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}); }
+		// === Issue 83a — stale-open assignment scan [R10-3 restart-required pump phase] ===
+		// Pump phase: `staleOpenAssignmentScanLocked` (called from `pumpOrchestratorMailbox`).
+		// Runs after heartbeat GC (so freshly-stopped agents are excluded by status) and before the
+		// graph-stall safety net (so a freshly-stale-open node does not double-fire the graph-advance
+		// nudge). R10-1 cost-bound: per-tick readdir of tasks dir + readTaskState per task under
+		// pump lock; no subprocess/tmux. The bound is N+1 file reads per tick where N = count of
+		// `task-*` subdirs; ZERO tmux subprocess calls. Surfacing is TRACE-ONLY: no orchestrator
+		// mailbox nudge is sent (the plan's nudge was consciously dropped; pre-existing stall
+		// nudge machinery still nudges on stalled nodes). Throws are wrapped in try/catch so a
+		// scan failure never kills the tick.
+		try { await staleOpenAssignmentScanLocked(p, st, nowMs); }
+		catch (err: any) { await trace(p, "stale_open.scan.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// Mid-graph stall safety net: nudge the orchestrator to assign any ready-but-unassigned node in an
 		// in_progress task. The nudge is idempotent, so it is safe to run on every pump tick.
 		try { await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }

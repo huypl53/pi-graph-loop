@@ -121,6 +121,8 @@ Required examples in this issue family:
 - **No reject smell.** A clean batch with zero reviewer rejections is a review-depth smell, not a success metric. Reviewer rejections must cite: specific code location + concern + consequence + fix proposal.
 - **Name the red assertion.** Plans name the exact assertion that must go red; RED reports reference named assertions, not "tests fail". TypeError-class REDs prove newness, not discrimination.
 - **Every shipped fixture is exercised by an independent tester in a fresh tmux lane** (durable-state + trace census asserted), not just unit-test PASS counts.
+- **KR5 (silent-swallow anti-pattern).** A `try { ... } catch { /* swallow */ }` or `.catch(() => {})` wrapping an engine-wiring path (hook body, pump-tick phase, message-delivery callback) MUST have at least one integration test exercising the production factory/registration path that would FAIL if the wrapped body throws. Helper-only unit tests that bypass the wrapping layer cannot catch silent failures inside the swallowed region. Corollary: when the production entry point is a hook (`pi.on("tool_execution_end", ...)`), at least one assertion must go through the hook, not the helper.
+- **KR6 (seed diversity for threshold gates).** Tests that verify threshold/staleness/boundary logic MUST seed BOTH sides of the boundary: stale-above (gate SHOULD fire) + fresh-below (gate SHOULD NOT fire). One-sided suites cannot detect gate-polarity bugs (an implementer flipping the gate direction passes the one-sided suite). Apply at plan-writing time too: plans should specify the negative case explicitly.
 
 ## Documentation update checklist
 

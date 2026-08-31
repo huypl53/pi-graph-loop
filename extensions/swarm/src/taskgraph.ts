@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
+import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, DEFAULT_STALE_OPEN_THRESHOLD_MS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_STALE_OPEN_SURFACED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
 import { paths, readTaskState, taskPaths, trace, traceTask, writeState } from "./state.ts";
@@ -1231,6 +1231,89 @@ export async function scanAgentOpenAssignments(p: Paths, st: SwarmState, agentId
 		}
 	}
 	return out;
+}
+// === Issue 83a — progress stamp helper (production entry point, called from hooks.ts:tool_execution_end) ===
+// Stamps `node.lastProgressAt` when a worker (the assignee) emits a forward-progress signal:
+//   - tool_execution_end (the worker is making tool calls)
+//   - swarm_update_task forward transitions (in tools/tasks.ts) — not yet wired; see plan-deviations §
+// Only stamps when `assignee === workerAgentId` AND status is `assigned` or `in_progress`. Returns
+// true when the stamp landed (callers use this for instrumentation: 1 stamp per dirty task).
+export function ensureNodeActivityStamp(task: TaskState, nodeId: string, tsIso: string, workerAgentId?: string): boolean {
+	const node = task.nodes[nodeId];
+	if (!node) return false;
+	if (node.status !== "assigned" && node.status !== "in_progress") return false;
+	if (workerAgentId && node.assignee !== workerAgentId) return false;
+	node.lastProgressAt = tsIso;
+	// Reset the stale-open surface cycle: progress cancels any prior surface so the next stale
+	// period starts fresh.
+	delete node.staleOpenSurfacedAt;
+	return true;
+}
+
+// === Issue 83a — stale-open assignment scan (pump-tick phase) ===
+// Cost bound (R10-1): each scan tick does 1 `readdirSync(p.tasksDir)` + 1 `readTaskState` per
+// `task-*` subdirectory under the existing pump `withLock`. ZERO tmux probes, ZERO subprocess
+// calls. The bound is the count of task files on disk; for a 100-task graveyard shape that is
+// ~100 file reads per ~5 s tick (no interval gate yet; future PI_SWARM_STALE_OPEN_SCAN_INTERVAL_MS
+// is a follow-up). The scan is wrapped in `try { ... } catch { ... }` so a single tick failure
+// does not crash the pump; errors surface via the standard `trace()` events.
+export async function staleOpenAssignmentScanLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ surfaced: number; inspected: number; alreadySurfaced: number }> {
+	const thresholdMs = Number(process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ?? DEFAULT_STALE_OPEN_THRESHOLD_MS);
+	let surfaced = 0, inspected = 0, alreadySurfaced = 0;
+	// Discover tasks via the swarm's tasks dir.
+	let taskDirs: string[] = [];
+	try {
+		const { readdirSync } = await import("node:fs");
+		taskDirs = readdirSync(p.tasksDir).filter((d) => d.startsWith("task-"));
+	} catch { return { surfaced, inspected, alreadySurfaced }; }
+	for (const taskDir of taskDirs) {
+		const tp = taskPaths(p, taskDir);
+		let task: TaskState;
+		try {
+			task = await readTaskState(tp.taskJson);
+		} catch { continue; }
+		let dirty = false;
+		for (const [nodeId, node] of Object.entries(task.nodes)) {
+			if (node.status !== "assigned" && node.status !== "in_progress") continue;
+			inspected++;
+			const ts = nowMs;
+			// `lastProgressAt` absent or older than threshold → candidate.
+			// `staleOpenSurfacedAt` present within threshold → already surfaced this window → skip.
+			// Plan §(a): stale check is `nowMs - max(lastProgressAt, lastActivityAt) > thresholdMs`.
+			// A node with no `lastProgressAt` but recently assigned is NOT stale (the worker just
+			// picked it up). The implementer's first pass used `lastProgressAt absent → Infinity`
+			// which surfaced every un-progressed node immediately on assignment — defeated the
+			// feature. Use max() to anchor on the most-recent activity timestamp.
+			const lastProgressMs = node.lastProgressAt ? new Date(node.lastProgressAt).getTime() : 0;
+			const lastActivityMs = node.lastActivityAt ? new Date(node.lastActivityAt).getTime() : 0;
+			const anchorMs = Math.max(lastProgressMs, lastActivityMs);
+			const staleAtMs = anchorMs ? ts - anchorMs : Number.POSITIVE_INFINITY;
+			const surfacedMs = node.staleOpenSurfacedAt ? new Date(node.staleOpenSurfacedAt).getTime() : 0;
+			if (staleAtMs <= thresholdMs) continue;
+			if (surfacedMs && ts - surfacedMs <= thresholdMs) {
+				alreadySurfaced++;
+				continue;
+			}
+			const now = new Date(ts).toISOString();
+			node.staleOpenSurfacedAt = now;
+			dirty = true;
+			surfaced++;
+			await traceTask(tp, TRACE_STALE_OPEN_SURFACED, {
+				taskId: task.taskId,
+				nodeId,
+				assignee: node.assignee,
+				assignedAt: node.lastActivityAt,
+				lastProgressAt: node.lastProgressAt ?? null,
+				thresholdMs,
+				staleMs: staleAtMs === Number.POSITIVE_INFINITY ? null : Math.round(staleAtMs),
+			}).catch(() => {});
+		}
+		if (dirty) {
+			const { writeTaskState } = await import("./state.ts");
+			await writeTaskState(tp, task).catch(() => {});
+		}
+	}
+	return { surfaced, inspected, alreadySurfaced };
 }
 
 // Apply gate updates { gateName: { status, by?, artifact? } }. `by` defaults to the acting agent.

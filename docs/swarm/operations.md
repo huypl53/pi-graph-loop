@@ -497,6 +497,86 @@ size of the `state.agents` stopped set only grows until prune runs. The R9 a3 gr
 (177 stopped agents) becomes bounded: the GC flips dead-pane running records automatically,
 and prune removes the resulting stopped records on operator demand.
 
+## Operator: Stale-open surfacing (Issue 83 sub-task a, P1)
+
+The liveness/progress subsystem surfaces worker nodes that have been assigned or in-progress
+for longer than a threshold without any forward-progress signal. Surfacing is **trace-only**
+(no orchestrator mailbox nudge is sent — the plan's nudge was consciously dropped; the
+pre-existing task-stall machinery still nudges on stalled nodes per "Pipeline-stall nudge"
+below).
+
+**The gate** (in `staleOpenAssignmentScanLocked`, called from `pumpOrchestratorMailbox` after
+`agentHeartbeatGCLocked` and before `reconcileGraphAdvanceLocked`):
+
+```
+lastProgressAt = node.lastProgressAt ? new Date(node.lastProgressAt).getTime() : 0
+lastActivityAt = node.lastActivityAt  ? new Date(node.lastActivityAt).getTime()  : 0
+anchorMs       = max(lastProgressAt, lastActivityAt)          # plan §(a) max-anchor
+staleAtMs      = anchorMs ? nowMs - anchorMs : +Infinity      # no timestamps → always stale
+# gate fires when staleAtMs > thresholdMs AND no surface stamp in this window
+```
+
+A freshly-assigned node (recent `lastActivityAt`, no `lastProgressAt` yet) is anchored on
+`lastActivityAt` and is NOT stale. Forward progress (any tool call) is captured by
+`hooks.ts:tool_execution_end` via `ensureNodeActivityStamp`, which sets `lastProgressAt`
+and clears any prior `staleOpenSurfacedAt`. The gate's anchor on the most-recent activity
+timestamp means a node is stale only when BOTH signals are older than the threshold.
+
+**Environment override**
+
+`PI_SWARM_STALE_OPEN_THRESHOLD_MS` (default 300_000 = 5 min). Tighten for short-cycle work,
+loosen for long-running nodes. The scan is idempotent within the window: re-running before
+threshold expiry produces 0 additional surfaces per node.
+
+**Trace event**: `stale_open_surfaced` payload `{ taskId, nodeId, assignee, assignedAt,
+lastProgressAt, thresholdMs, staleMs }`. `staleMs` is the rounded stale-age in ms; `null`
+when the node has no timestamps at all.
+
+**Pump-phase cost bound** (R10-1, honest, not in-memory):
+
+| per pump tick | op | cost |
+| --- | --- | --- |
+| 1 | `readdirSync(p.tasksDir)` | O(N) syscalls where N = count of `task-*` subdirs |
+| N | `readTaskState(tp.taskJson)` | N file reads (one per task) |
+| 0–N | `writeTaskState(tp, task)` | one write per dirty task (rare: only newly-surfaced nodes) |
+| 0 | tmux subprocess calls | ZERO — scan is purely in-process |
+
+The scan runs inside the existing pump `withLock` (no nested lock). For a 100-task swarm
+this is ~100 file reads per pump tick (~5 s cadence); no interval gate yet
+(`PI_SWARM_STALE_OPEN_SCAN_INTERVAL_MS` is a follow-up). Wrapped in `try/catch` so a scan
+failure never crashes the tick.
+
+**Hook-side I/O cost per tool call** (also honest, NOT zero):
+
+| per `tool_execution_end` | op | cost |
+| --- | --- | --- |
+| 1 | `withLock` + `readState` | swarm state |
+| N | `readTaskState` | one per active task in `agent.activeTaskIds` |
+| M ≤ N | `writeTaskState` | one per dirty task (worker bound to the node) |
+
+N is bounded by `agent.maxConcurrentTasks`. This is **extra I/O vs the pre-83a baseline**
+(which did not stamp on tool calls). The cost is honest and bounded, not free.
+
+**C5 R10-1 counting assertion** (in-repo, `extensions/swarm/liveness-progress.test.mjs`):
+
+- **C5** seeds 100 stale-open nodes, asserts ZERO `tmux.list-panes` calls per scan.
+- **C11** seeds 3 active tasks (1 dirty, 2 not), asserts exactly the dirty task is stamped.
+- **Multi-tick lane** (`/tmp/83a-lane/c5-multi-tick.mjs`, deferred for repo promotion): 5 ticks × 55 slots = 275 potential probe slots → ZERO probes fired. Idempotency across ticks.
+
+**Plan deviations** (accepted; documented per R11):
+
+| plan | implementation | rationale |
+| --- | --- | --- |
+| 3 stamp surfaces (tool hook + `swarm_update_task` transitions + `swarm_send_message`) | 1 stamp surface (tool hook only) | The max-anchor picks up `lastActivityAt`, which the assign + update paths already stamp. `swarm_send_message` did not add value (mailbox acks are not "progress" in the worker's task context). |
+| Send orchestrator mailbox nudge on surface | Trace-only surfacing | Pre-existing task-stall nudge machinery (see "Pipeline-stall nudge") already nudges on stalled nodes. Adding a redundant nudge would inflate the idle-streak budget and create double-fire risk. |
+| R10-KR5 (silent-swallow keeper rule) | Documented | Hook's bare-catch is locked in by C9 (integration test exercises the production hook path; swallowed throw fails C9 loudly). |
+| R10-KR6 (seed-diversity keeper rule) | Documented | C3 + C10 together pin both sides of the stale boundary; C11 pins the dirty-task selection. |
+
+**Related tools**
+
+- `/swarm trace` to view `stale_open_surfaced` events.
+- `swarm_task_status` shows `node.staleOpenSurfacedAt` per node.
+
 ## Operator: explicit reuse lease + park mechanism (Issue 82)
 
 By default the task-close sweep stops task-scoped workers (Issue 26) and the heartbeat GC

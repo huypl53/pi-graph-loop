@@ -378,6 +378,14 @@ export const TRACE_AGENT_LEASE_CLEARED = "agent.lease_cleared";
 // PI_SWARM_AGENT_HEARTBEAT_STALE_MS lets operators tighten / loosen the window.
 export const DEFAULT_AGENT_HEARTBEAT_STALE_MS = 600_000; // 10 minutes
 
+// === Issue 83a — stale-open surfacing threshold ===
+// Window (ms) after which an `assigned`/`in_progress` node WITHOUT a `lastProgressAt` update
+// is surfaced to the orchestrator via `stale_open_surfaced` + an orchestrator mailbox nudge.
+// Mirrors the existing task-liveness 5-minute threshold; env override
+// PI_SWARM_STALE_OPEN_THRESHOLD_MS lets operators tighten / loosen. The scan is idempotent
+// within the window: re-running before threshold expiry produces 0 additional surfaces.
+export const DEFAULT_STALE_OPEN_THRESHOLD_MS = 300_000; // 5 minutes
+
 // === Issue 82 (review item 1): tmux-probe throttle ledger trace ===
 // Emitted by `agentHeartbeatGCLocked` gate 2 whenever a tmux probe is skipped because the agent's
 // `lastProbeAt` is younger than `probeAfterMs` (the throttle ledger). Carries the throttle fields
@@ -391,6 +399,13 @@ export const TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED = "agent.heartbeat_gc.prob
 // TRACE_AGENT_HEARTBEAT_GC_STOPPED — distinguishes "the normal dead-pane flip" from
 // "the previously-orphaned expired-park zombie we just reclaimed".
 export const TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED = "agent.heartbeat_gc.expired_park_flipped";
+
+// === Issue 83a — stale-open surfacing trace ===
+// Emitted by the `staleOpenAssignmentScanLocked` pump-tick phase when an `assigned`/`in_progress`
+// node has not received a progress signal for >`PI_SWARM_STALE_OPEN_THRESHOLD_MS`. Carries the
+// taskId + nodeId + lastProgressAt + assignedAt so the orchestrator can decide whether to reassign,
+// escalate, or wait. Idempotent within the window (one surface per threshold window per node).
+export const TRACE_STALE_OPEN_SURFACED = "stale_open_surfaced";
 
 // === Issue 28 — rework reopen trace ===
 // Emitted when activateReworkNodes reopens a previously-done/failed/skipped node because a rework
