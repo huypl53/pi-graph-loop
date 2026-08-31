@@ -460,7 +460,33 @@ export async function evaluateIdleGoalNudgeLocked(
 	// Interval gate: the goal fallback fires only after a FULL continuous all-idle interval measured
 	// from the busy→all-idle edge (or from the last goal emission). Pump ticks between boundaries
 	// are no-ops — no burst.
-	const nextEligibleMs = idleState.nextGoalNudgeAt ? new Date(idleState.nextGoalNudgeAt).getTime() : allIdleSinceMs + intervalMs;
+	// Self-heal (live bug, round 2+3): a nextGoalNudgeAt anchored under an OLD interval (or corrupted
+	// by the round-2 min-only clamp, which pulled it into the past against a fresh lastGoalNudgeAt and
+	// re-fired the nudge every tick) must converge to the legitimate boundary. Row 68 semantics: the
+	// interval is measured from max(allIdleSince, lastGoalNudgeAt). Convergence rules per tick:
+	//   - pinned FUTURE boundary: clamp DOWN only (min) — matches the goal-update re-anchor policy
+	//     (a longer interval never fires sooner than already legitimately scheduled).
+	//   - pinned PAST boundary: replace with the legitimate boundary — a past boundary older than
+	//     lastEmit+interval is stale by definition (nothing legitimate schedules a nudge before
+	//     lastEmit+interval). If the legitimate boundary is also past, the nudge is simply due now.
+	// Cap/back-off own their schedule: while at MAX consecutive nudges or in back-off, the
+	// cap/back-off branches deliberately manage nextGoalNudgeAt (nowMs + interval per slot) —
+	// clamping here would fight them every tick (live: schedule_reanchored + backoff trace spam
+	// each 5s pump tick, discovered 2026-08-31 03:13Z). The clamp only heals schedules that the
+	// EMIT path will consume (below cap, no back-off).
+	const atCap = goal.consecutiveNoResolveNudges >= MAX_CONSECUTIVE_NUDGES_DEFAULT || (goal.backoffTicksRemaining ?? 0) > 0;
+	const lastEmitMs = idleState.lastGoalNudgeAt ? new Date(idleState.lastGoalNudgeAt).getTime() : 0;
+	const correctNextMs = Math.max(allIdleSinceMs, lastEmitMs) + intervalMs;
+	const pinnedMs = idleState.nextGoalNudgeAt ? new Date(idleState.nextGoalNudgeAt).getTime() : null;
+	let clampedNextMs: number;
+	if (pinnedMs === null) clampedNextMs = correctNextMs;
+	else if (pinnedMs > nowMs) clampedNextMs = atCap ? pinnedMs : Math.min(pinnedMs, correctNextMs);
+	else clampedNextMs = atCap ? pinnedMs : correctNextMs;
+	if (pinnedMs !== null && clampedNextMs !== pinnedMs) {
+		await trace(p, "goal.nudge.schedule_reanchored", { goalId: goal.id, from: idleState.nextGoalNudgeAt, to: new Date(clampedNextMs).toISOString(), intervalMs, anchor: lastEmitMs ? "last_nudge" : "idle_epoch", stale: pinnedMs <= nowMs }).catch(() => {});
+		idleState.nextGoalNudgeAt = new Date(clampedNextMs).toISOString();
+	}
+	const nextEligibleMs = clampedNextMs;
 	if (nowMs < nextEligibleMs) {
 		if (!idleState.nextGoalNudgeAt) idleState.nextGoalNudgeAt = new Date(nextEligibleMs).toISOString();
 		return { emitted: false, reason: "idle_interval_pending" };

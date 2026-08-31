@@ -97,6 +97,12 @@ async function setup({ taskId = "task-1", ageMs = 0, withTask = false, taskStatu
 		consecutiveNoResolveNudges: 0,
 	};
 	await writeState(p, st);
+	// Sections K/L: always clear leftover tasks (a previous section's task graph suppresses the
+	// goal fallback with reason active_task even when this section seeds no graph of its own).
+	try {
+		const entries = await readdir(p.tasksDir);
+		for (const entry of entries) await rm(join(p.tasksDir, entry), { recursive: true, force: true });
+	} catch { /* ignore */ }
 	if (withTask) {
 		try {
 			const entries = await readdir(p.tasksDir);
@@ -464,6 +470,110 @@ console.log("\n[K] missing activeTaskIds pointer still suppresses goal fallback"
 	const goalResult = await tickGoal(t0);
 	ok("goal evaluator suppresses when pointer is missing but task.json still shows assigned/in_progress", goalResult.emitted === false && goalResult.reason === "active_task", JSON.stringify(goalResult));
 	ok("fallback scan trace emitted", (await countEvents("goal.nudge.suppressed_by_active_task")) >= 1);
+}
+
+// =============================================================
+// K. Round-2+3 self-heal: stale nextGoalNudgeAt under a changed interval,
+//    and the post-resolve anchor must be max(idle-epoch, last-emit) + interval
+// =============================================================
+console.log("\n[K] schedule self-heal clamps stale boundaries to the CURRENT interval");
+{
+	await setup();
+	const t0 = Date.now();
+	// Simulate the live bug: interval was 1h when the schedule was anchored; user later set 30s
+	// via a path that did NOT re-anchor (pre-fix state on disk). epoch + old interval = far future.
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		ensureOrchestrator(st, dir, p);
+		st.goal = { id: "g-k1", text: "K1 stale schedule", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
+		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 3_600_000).toISOString(), nextGoalNudgeAt: new Date(t0 - 1_800_000).toISOString() }; // wait — stale is FUTURE under 1h
+		// stale boundary from the OLD 1h interval: epoch (t0-1h) + 1h = t0 + 0? Use epoch far past + old interval => boundary in the FUTURE
+		st.idleNudgeState.nextGoalNudgeAt = new Date(t0 + 3_300_000).toISOString(); // ~55min out (old 1h schedule)
+		await writeState(p, st);
+	});
+	// Correct expectation under 30s interval: eligible at epoch+30s = t0-59.5min (long past).
+	// The clamp must pull the future boundary DOWN to max(epoch,last-emit)+30s -> emit NOW.
+	let r = await tickGoal(t0);
+	ok("stale future boundary (old interval) is clamped and nudge fires immediately", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	let st = await getGoalState();
+	const afterEmit = new Date(st.idle.nextGoalNudgeAt).getTime();
+	ok("post-emit schedule = last-emit + current interval", Math.abs(afterEmit - (t0 + 30_000)) < 5, `${st.idle.nextGoalNudgeAt}`);
+	ok("schedule_reanchored trace emitted", (await countEvents("goal.nudge.schedule_reanchored")) >= 1);
+}
+
+console.log("\n[L] after a resolve, next nudge waits the full interval from the LAST EMISSION, not the idle epoch");
+{
+	await setup();
+	const t0 = Date.now();
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		ensureOrchestrator(st, dir, p);
+		st.goal = { id: "g-l1", text: "L1 post-resolve spacing", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
+		// Live bug shape: epoch is 45min old; a resolve just cleared the counter; the v1 clamp
+		// computed epoch+30s = far past => re-fired EVERY tick. v2 must anchor at last-emit.
+		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 2_700_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 5_000).toISOString(), nextGoalNudgeAt: new Date(t0 - 4_999).toISOString() };
+		await writeState(p, st);
+	});
+	// boundary should clamp to last-emit(t0-5s)+30s = t0+25s => NOT eligible yet
+	let r = await tickGoal(t0 + 24_000);
+	ok("not eligible before last-emit + interval", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	r = await tickGoal(t0 + 25_000);
+	ok("eligible at last-emit + interval (no immediate re-fire)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	// And with no prior emission at all, anchor = idle epoch (original Row 68 semantics preserved)
+	await setup();
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		ensureOrchestrator(st, dir, p);
+		st.goal = { id: "g-l2", text: "L2 epoch anchor", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
+		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 20_000).toISOString() };
+		await writeState(p, st);
+	});
+	r = await tickGoal(t0 + 25_000);
+	ok("epoch-anchored: emits once epoch + interval reached", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	r = await tickGoal(t0 + 26_000);
+	ok("epoch-anchored: no immediate re-fire after emit", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+}
+
+// =============================================================
+// M. Orchestrator busy resets the idle epoch (turn_start busy edge)
+// =============================================================
+console.log("\n[M] orchestrator busy during the interval resets the epoch");
+{
+	await setup();
+	const t0 = Date.now();
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		ensureOrchestrator(st, dir, p);
+		st.goal = { id: "g-m1", text: "M1 orchestrator busy", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
+		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 25_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 25_000).toISOString() };
+		await writeState(p, st);
+	});
+	// 5s later the orchestrator goes BUSY (turn_start): epoch + pending boundary dropped.
+	// Row 68 fix: busy orchestrator work must not count toward the idle interval.
+	const hooks = await import(join(here, "src", "hooks.ts"));
+	const handlers = {};
+	const hpi = { on: (ev, fn) => { (handlers[ev] ||= []).push(fn); }, registerTool(){}, registerCommand(){}, exec: pi.exec, setModel: pi.setModel, sendMessage: pi.sendMessage };
+	hooks.registerSwarmHooks(hpi);
+	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	await handlers["turn_start"][0]({ turnIndex: 0 }, { cwd: dir });
+	{
+		const st = await getGoalState();
+		ok("turn_start (orchestrator) drops the idle epoch", st.idle?.allIdleSinceAt === undefined && st.idle?.nextGoalNudgeAt === undefined, JSON.stringify(st.idle));
+	}
+	// 25s of busy work elapse; turn ends at t0+25s. Next pump tick stamps a FRESH epoch
+	// (t0+25s) and the nudge must wait until t0+25s+30s — NOT fire at t0+30s (which would
+	// ignore the busy window, the live bug).
+	let r = await tickGoal(t0 + 30_000);
+	ok("interval measured from the END of orchestrator work (not old epoch)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	{
+		const st = await getGoalState();
+		const fresh = new Date(st.idle.allIdleSinceAt).getTime();
+		ok("fresh epoch stamped after the busy window", fresh >= t0 + 24_000, `${st.idle.allIdleSinceAt}`);
+	}
+	r = await tickGoal(t0 + 59_000);
+	ok("still pending just before fresh epoch + 30s", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	r = await tickGoal(t0 + 61_000);
+	ok("fires at fresh epoch + 30s", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
 }
 
 console.log(`\n${fail === 0 ? "IDLE-NUDGE PASS" : "IDLE-NUDGE FAIL"} (${pass} passed, ${fail} failed)`);
