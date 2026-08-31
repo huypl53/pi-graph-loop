@@ -14,6 +14,13 @@ pi --model glm-5.1 --provider zai-coding-cn   # ONLY if zai-coding-cn has a key 
 pi --model gpt-5.4-mini --provider openai
 ```
 
+## bug fixing: reproduce first (user mandate 2026-08-31)
+- the FIRST step of every bug fix is a reproducing artifact: a failing test or mock-llm lane that exhibits the actual bug symptom — written and observed red BEFORE any source fix is authored
+- trace forensics (events.jsonl, pane captures) is diagnosis, not reproduction: it tells you where to look; only the reproducing artifact proves you found the real cause
+- red-green discipline: the plan node names the reproduction (expected wrong behavior + how to observe it); the implement node runs it red, lands the minimal fix, runs it green; the red artifact IS the regression test — no after-the-fact test authoring for the same bug
+- if a bug cannot be reproduced deterministically, state so explicitly in the plan artifact and name the closest deterministic proxy (seeded state, synthetic clock) — never skip straight to fixing
+- applies to live incidents too: reconstruct the failing state (seed it), observe the wrong behavior, then fix — a fix for an unreproduced bug is a hypothesis, not a fix
+
 ## swarm feature coding: mock-LLM fixtures are compulsory
 - every swarm feature change (new feature, fix, or behavior modification in extensions/swarm/) must ship a mock-llm fixture/scenario exercising the changed behavior end-to-end before it can be considered done
 - the fixture replays the agent-side of the interaction deterministically (extensions/mock-llm/fixtures/*.jsonl — one JSONL line per scripted turn; model id = fixture filename stem); validation lanes run `pi --provider mock-llm --model <scenario> -e ./extensions/mock-llm -e ./extensions/swarm`
