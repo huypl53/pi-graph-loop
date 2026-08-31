@@ -61,7 +61,10 @@ const vals = async (prefix) => (await complete(prefix) ?? []).map((i) => i.value
 
 // 1. Empty prefix -> all subcommands (25 total incl. lifecycle cmds + panes + flow).
 const subs = await vals("");
-ok("empty lists all subcommands", subs.length === 26 && subs.includes("graph") && subs.includes("flow") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("panes") && subs.includes("pool"));
+ok("empty lists all subcommands", subs.length === 27 && subs.includes("graph") && subs.includes("flow") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("goal") && subs.includes("panes") && subs.includes("pool"));
+
+// 1b. goal subcommands include update (goal-interval feature).
+ok("goal <space> offers show/set/update/done", JSON.stringify(await vals("goal ")) === JSON.stringify(["goal show", "goal set", "goal update", "goal done"]));
 
 // 2. Partial subcommand filters by prefix.
 const stSubs = await vals("st");
