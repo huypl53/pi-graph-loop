@@ -825,3 +825,21 @@ Three stacked bugs, all in the goal-nudge family:
 - assignment alone suppresses the idle nudge until pickup or a grace timeout (fixture: assign node → no nudge in window);
 - zero live workers → goal nudge holds (unit test with empty effective agent set);
 - existing goal suites (swarm-goal, idle-nudge) stay green; clamp v3/v4 + busy-epoch semantics untouched.
+
+### Issue 86 — urgent inter-agent messages cannot reach mid-turn agents — P0
+
+**Status:** proposed. **Priority:** P0. **Source:** live incident 2026-08-31 16:17→16:40 (user-observed): a high-priority STOP directive sat `intercepted` for 23 minutes while the recipient's turn ran; mandate arrived after the work it should have redirected was already done.
+
+**Problem.** `message.inject` during an active turn lands in the input queue and is only consumed at the START of the next turn. For normal coordination this is fine; for urgent control traffic (process changes, STOP/redirect, sequencing holds) it is a 23-minute hole. The orchestrator's only escalation today is raw tmux Escape (external to the engine, not durable, not traced).
+
+**Proposal:**
+1. **Interrupt-on-delivery for `priority: high` messages**: when inject happens mid-turn, emit a TUI-level interrupt (same channel as the manual Escape) that ends the current turn, so the queued message is consumed at the next-turn boundary immediately. Degrade gracefully: if the interrupt fails, keep current behavior + trace `message.interrupt_failed`.
+2. **Wake-on-inject for settled agents stays as-is** (already works — settled agents consume immediately).
+3. **Trace surface**: `message.interrupt_requested` / `message.interrupt_effective` with target turn id; the STOP incident becomes a regression scenario.
+4. **Guardrails**: only `priority: high` interrupts; rate-limited per agent (e.g. 1 interrupt / 30s) so a chatty orchestrator cannot livelock a worker; interrupted turn settles through the normal response_missing/settled-idle machinery (already proven by the manual-Escape incident).
+
+**Acceptance criteria:**
+- mock-llm lane: agent mid-turn (delayMs-hung turn) receives priority-high message → turn ends promptly (bounded by poll interval, not turn length) → next turn consumes the message; transcript shows the interrupt trace;
+- rate-limit: second high-priority inject within the window does NOT interrupt again (trace suppressed);
+- normal-priority messages mid-turn keep today's intercept-only behavior (regression case);
+- the 23-minute incident shape (send 09:17, consume 09:40) reproduces as consume-within-seconds under the fix.
