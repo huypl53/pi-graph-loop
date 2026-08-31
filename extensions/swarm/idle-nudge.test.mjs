@@ -445,8 +445,12 @@ console.log("\n[J] assigned/in_progress task work suppresses goal fallback");
 	});
 	const t0 = Date.now();
 	const goalResult = await tickGoal(t0);
-	ok("goal evaluator suppresses when task node is assigned/in_progress", goalResult.emitted === false && goalResult.reason === "active_task", JSON.stringify(goalResult));
-	ok("active-work suppression trace emitted", (await countEvents("goal.nudge.suppressed_by_active_task")) >= 1);
+	// Issue 85 (task-202608310905, bug #2): the assignment-pointer fast path now fires BEFORE the
+	// throttled task-dir scan, so the reason is `assignment_in_flight` (more diagnostic than the
+	// generic `active_task`). The downstream task-dir scan is still the fallback for missing-pointer
+	// cases (section K below).
+	ok("goal evaluator suppresses when task node is assigned/in_progress (via assignment pointer)", goalResult.emitted === false && goalResult.reason === "assignment_in_flight", JSON.stringify(goalResult));
+	ok("assignment-in-flight suppression trace emitted", (await countEvents("goal.nudge.suppressed_by_assignment_in_flight")) >= 1);
 }
 
 // =============================================================
@@ -574,6 +578,97 @@ console.log("\n[M] orchestrator busy during the interval resets the epoch");
 	ok("still pending just before fresh epoch + 30s", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
 	r = await tickGoal(t0 + 61_000);
 	ok("fires at fresh epoch + 30s", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+}
+
+// =============================================================
+// L. Assignment pointer suppresses goal nudge (post-assign pre-pickup) — Issue 85 bug #2
+// =============================================================
+console.log("\n[L] assignment pointer suppresses goal nudge (post-assign pre-pickup)");
+{
+	await setup({ taskId: "task-l-pointer", ageMs: 120_000 });
+	// Pre-condition: one effective idle worker, no in-flight task graph, goal set.
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		st.goal.nudgeIntervalMs = 1000; // tight cadence so we'd notice a stray emit
+		await writeState(p, st);
+	});
+	// Simulate a fresh assignment: agent still flagged runtimeStatus="idle" (hasn't picked up the
+	// assignment message yet) but carries an `activeTaskIds` pointer. This is the post-assign
+	// pre-pickup window the bug fires in.
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		st.agents["worker-a"].activeTaskIds = ["task-l-pointer"];
+		st.agents["worker-a"].runtimeStatus = "idle";
+		await writeState(p, st);
+	});
+	const t0 = Date.now();
+	let r = await tickGoal(t0);
+	ok("goal suppressed by assignment pointer (assignment_in_flight)", r.emitted === false && r.reason === "assignment_in_flight", JSON.stringify(r));
+	ok("goal.nudge.suppressed_by_assignment_in_flight trace recorded", (await countEvents("goal.nudge.suppressed_by_assignment_in_flight")) >= 1);
+	// Tick again 2s later — still no active task in tasksDir, still pointer only — must stay suppressed.
+	// Pre-fix this would have been throttled (active-task scan every intervalMs) and could emit; the
+	// pointer fast path closes the window.
+	r = await tickGoal(t0 + 2000);
+	ok("second tick also suppresses via pointer (no scan-throttle race)", r.emitted === false && r.reason === "assignment_in_flight", JSON.stringify(r));
+	// Now mark the worker busy — still pointer + busy — must stay suppressed but with the generic
+	// agent_busy reason (the pointer is no longer the only signal).
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		st.agents["worker-a"].runtimeStatus = "busy";
+		await writeState(p, st);
+	});
+	r = await tickGoal(t0 + 3000);
+	ok("busy worker suppresses with agent_busy (pointer no longer the leading signal)", r.emitted === false && r.reason === "agent_busy", JSON.stringify(r));
+}
+
+// =============================================================
+// M. Vacuous idle: zero effective agents holds the goal nudge — Issue 85 bug #3
+// =============================================================
+console.log("\n[M] vacuous idle: zero effective agents holds goal nudge");
+{
+	await setup({ taskId: "task-m-vacuous", ageMs: 120_000 });
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		st.goal.nudgeIntervalMs = 1000;
+		await writeState(p, st);
+	});
+	// Remove every non-orchestrator agent from st.agents so `agentIsEffectivelyAlive` filter is empty.
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		delete st.agents["worker-a"];
+		delete st.agents["worker-b"];
+		await writeState(p, st);
+	});
+	const t0 = Date.now();
+	let r = await tickGoal(t0);
+	ok("zero effective agents suppresses with reason no_live_workers", r.emitted === false && r.reason === "no_live_workers", JSON.stringify(r));
+	ok("goal.nudge.held_no_live_workers trace recorded", (await countEvents("goal.nudge.held_no_live_workers")) >= 1);
+	// Tick again 2s later — still vacuous — must stay held. Pre-fix this would fire forever.
+	r = await tickGoal(t0 + 2000);
+	ok("subsequent vacuous tick stays held (no emission forever)", r.emitted === false && r.reason === "no_live_workers", JSON.stringify(r));
+}
+
+// =============================================================
+// N. Ghost agents do not count as effective workers (vacuous sanity) — Issue 85 bug #3 edge
+// =============================================================
+console.log("\n[N] ghost agents do not count as effective workers (vacuous sanity)");
+{
+	await setup({ taskId: "task-n-ghosts", ageMs: 120_000 });
+	// Turn both workers into ghosts: tmuxAlive=false filters them out of the effective-alive set.
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		st.agents["worker-a"].tmuxAlive = false;
+		st.agents["worker-a"].status = "stopped";
+		st.agents["worker-a"].health = "unhealthy";
+		st.agents["worker-b"].tmuxAlive = false;
+		st.agents["worker-b"].status = "stopped";
+		st.agents["worker-b"].health = "unhealthy";
+		await writeState(p, st);
+	});
+	const t0 = Date.now();
+	const r = await tickGoal(t0);
+	ok("ghosts-only swarm (effective=0) suppresses with no_live_workers", r.emitted === false && r.reason === "no_live_workers", JSON.stringify(r));
+	ok("vacuous trace recorded for ghost-only swarm", (await countEvents("goal.nudge.held_no_live_workers")) >= 1);
 }
 
 console.log(`\n${fail === 0 ? "IDLE-NUDGE PASS" : "IDLE-NUDGE FAIL"} (${pass} passed, ${fail} failed)`);

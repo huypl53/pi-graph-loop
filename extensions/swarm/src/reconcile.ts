@@ -316,8 +316,28 @@ function agentIsEffectivelyAlive(a: { status?: string; runtimeStatus?: string; t
 
 function allEffectiveIdleAgents(st: SwarmState, nowMs: number) {
 	const idleAgents = Object.values(st.agents).filter((a) => a.id !== "orchestrator" && agentIsEffectivelyAlive(a, nowMs));
+	// Issue 85 (task-202608310905, bug #3): when zero effective non-orchestrator agents remain (post-prune,
+	// all stopped, all stale), there's nothing to nudge about. Vacuous-idle: report allIdle=false so the
+	// pump short-circuits the goal nudge with reason "no_live_workers" (see evaluateIdleGoalNudgeLocked
+	// below) instead of firing forever into an empty swarm. `vacuous: true` lets callers distinguish
+	// "no workers exist" from "workers exist and one is busy" — the goal evaluator needs the distinction
+	// to trace `goal.nudge.held_no_live_workers` exactly once per transition.
+	if (idleAgents.length === 0) return { idleAgents, allIdle: false, vacuous: true };
+	// Issue 85 (task-202608310905, bug #2): an effective agent with `activeTaskIds.length > 0` carries an
+	// assignment pointer even when its `runtimeStatus` is still `idle` (the post-assign / pre-pickup
+	// window before the worker has consumed the assignment message). The pump must treat the swarm as
+	// NOT idle in that window so the goal nudge does not race ahead of the throttled task-dir scan
+	// (findAssignedOrInProgressTaskWork) — the assignment pointer is durable in-memory state and is the
+	// faster, more accurate signal. `assignmentInFlight: true` lets the goal evaluator emit the more
+	// diagnostic `goal.nudge.suppressed_by_assignment_in_flight` trace instead of the generic
+	// `agent_busy` from updateIdleEpochLocked. The check must be specifically for idle+pointer agents
+	// (not busy+pointer): when a worker is mid-tool AND carrying an assignment pointer, the
+	// runtimeStatus="busy" signal is the more informative cause and the goal evaluator should surface
+	// `agent_busy` rather than `assignment_in_flight`.
+	const idleWithPointer = idleAgents.filter((a) => a.runtimeStatus === "idle" && (a.activeTaskIds?.length ?? 0) > 0);
+	if (idleWithPointer.length > 0) return { idleAgents, allIdle: false, vacuous: false };
 	const allIdle = idleAgents.every((a) => a.runtimeStatus === "idle");
-	return { idleAgents, allIdle };
+	return { idleAgents, allIdle, vacuous: false };
 }
 
 async function scanTaskDirsForActiveWork(p: Paths, taskIds?: Iterable<string>): Promise<{ taskId: string; nodeId: string; assignee?: string; status: "assigned" | "in_progress" } | null> {
@@ -398,9 +418,9 @@ export function isStallNudgeEligibleTaskStatus(status: TaskState["status"]): boo
 //     all-idle edge re-arms emission immediacy) and trace once.
 // Stopped/stale ghost records never participate (agentIsEffectivelyAlive filters them), so they can
 // neither block idle detection nor reset the epoch.
-export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ allIdle: boolean; idleAgents: SwarmAgent[] }> {
+export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ allIdle: boolean; idleAgents: SwarmAgent[]; vacuous?: boolean }> {
 	const idleState: SwarmIdleNudgeState = st.idleNudgeState ||= {};
-	const { idleAgents, allIdle } = allEffectiveIdleAgents(st, nowMs);
+	const { idleAgents, allIdle, vacuous } = allEffectiveIdleAgents(st, nowMs);
 	if (!allIdle) {
 		if (idleState.allIdleSinceAt || idleState.nextGoalNudgeAt) {
 			// Busy edge: restart stall spacing so the next all-idle edge re-arms emission immediacy.
@@ -417,14 +437,14 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 		}
 		delete idleState.allIdleSinceAt;
 		delete idleState.nextGoalNudgeAt;
-		return { allIdle, idleAgents };
+		return { allIdle, idleAgents, vacuous };
 	}
 	if (!idleState.allIdleSinceAt) {
 		idleState.allIdleSinceAt = new Date(nowMs).toISOString();
 		delete idleState.nextGoalNudgeAt;
 		await trace(p, "idle.epoch.started", { allIdleSinceAt: idleState.allIdleSinceAt, idleAgents: idleAgents.length }).catch(() => {});
 	}
-	return { allIdle, idleAgents };
+	return { allIdle, idleAgents, vacuous };
 }
 
 async function hasActionableGraphWork(p: Paths): Promise<{ actionable: boolean; taskId?: string; nodeId?: string; role?: string }> {
@@ -485,10 +505,34 @@ export async function evaluateIdleGoalNudgeLocked(
 	// Row 68: the idle epoch is maintained by the SHARED helper (the pump also runs it, so this is
 	// idempotent within a tick) so the busy→all-idle edge anchors to the swarm-level state, not to
 	// goal presence. Ghosts excluded; a busy effective agent resets the epoch.
+	// Issue 85 (task-202608310905, bug #2 + bug #3): `updateIdleEpochLocked` (via `allEffectiveIdleAgents`)
+	// now also flips `allIdle=false` when (a) zero effective agents remain (vacuous — bug #3) or (b) any
+	// effective agent carries an assignment pointer (bug #2). The pump evaluator distinguishes the two
+	// with distinct reasons + traces so the orchestrator sees WHY the nudge was held.
 	const idleState: SwarmIdleNudgeState = st.idleNudgeState ||= {};
 	const epoch = await updateIdleEpochLocked(p, st, nowMs);
-	const { idleAgents, allIdle } = epoch;
-	if (!allIdle) return { emitted: false, reason: "agent_busy" };
+	const { idleAgents, allIdle, vacuous } = epoch;
+	if (vacuous) {
+		// Bug #3 evidence: hold the goal nudge when zero effective non-orchestrator agents remain.
+		// Trace once per transition so dashboards can count vacuous holds without re-firing every tick.
+		// No epoch reset — the next agent to register will re-establish `allIdleSinceAt` and the goal
+		// evaluator will resume from the live edge (matches existing agent_busy → epoch-reset path).
+		await trace(p, "goal.nudge.held_no_live_workers", { goalId: goal.id, effectiveAgentCount: 0 }).catch(() => {});
+		return { emitted: false, reason: "no_live_workers" };
+	}
+	if (!allIdle) {
+		// Bug #2 evidence: distinguish "worker just got an assignment but hasn't picked it up yet" from
+		// "worker is mid-tool". The assignment-pointer fast path lives in `allEffectiveIdleAgents`; here
+		// we only need to know whether the pointer OR a busy runtimeStatus caused the all-idle break.
+		// If any IDLE-BY-RUNTIME-STATUS agent carries a pointer, that was the cause. If only BUSY agents
+		// are present (with or without pointers), the diagnostic is the generic `agent_busy`.
+		const pointerAssignee = idleAgents.find((a) => a.runtimeStatus === "idle" && (a.activeTaskIds?.length ?? 0) > 0);
+		if (pointerAssignee) {
+			await trace(p, "goal.nudge.suppressed_by_assignment_in_flight", { goalId: goal.id, assignee: pointerAssignee.id, taskIds: pointerAssignee.activeTaskIds }).catch(() => {});
+			return { emitted: false, reason: "assignment_in_flight" };
+		}
+		return { emitted: false, reason: "agent_busy" };
+	}
 	const allIdleSinceMs = new Date(idleState.allIdleSinceAt!).getTime();
 	if (!Number.isFinite(allIdleSinceMs)) {
 		delete idleState.allIdleSinceAt;

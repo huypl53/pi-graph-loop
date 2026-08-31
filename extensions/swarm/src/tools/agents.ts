@@ -588,6 +588,15 @@ if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs
 					}
 					const goalId = requestedId;
 					const inheritSeq = previousId === requestedId ? (st.goal?.nudgeSeq ?? 0) : 0;
+					// Issue 85 (task-202608310905, bug #1): on a fresh set that REPLACES an existing goal,
+					// inherit the prior intervalMs when the caller did NOT pass an explicit interval. Without
+					// this, `swarm_set_goal({ text })` after a tuned (e.g. 600 000 ms) goal resets the cadence
+					// back to the 5 s default and the pump emits 3 nudges in 15 s (live incident 2026-08-31
+					// 09:00). Only inherit when `nudgeIntervalMs === undefined`; an explicit value (including
+					// explicit null / zero) MUST keep its "override" semantics. No interval inheritance on
+					// the update path — update leaves the existing interval untouched.
+					const inheritedIntervalMs = nudgeIntervalMs === undefined ? st.goal?.nudgeIntervalMs : undefined;
+					const resolvedIntervalMs = nudgeIntervalMs ?? inheritedIntervalMs ?? defaultIntervalMs;
 					st.goal = {
 						id: goalId,
 						text,
@@ -595,12 +604,12 @@ if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs
 						setBy: currentAgentId(),
 						consecutiveNoResolveNudges: 0,
 						nudgeSeq: inheritSeq,
-						nudgeIntervalMs: nudgeIntervalMs ?? defaultIntervalMs,
+						nudgeIntervalMs: resolvedIntervalMs,
 					};
 					delete st.goal.lastNudgeAt;
 					delete st.goal.lastResolvedAt;
 					delete st.goal.backoffTicksRemaining;
-					await trace(p, "goal.set", { goalId, previousId, setBy: currentAgentId(), length: text.length, via: "tool", nudgeIntervalMs: st.goal.nudgeIntervalMs });
+					await trace(p, "goal.set", { goalId, previousId, setBy: currentAgentId(), length: text.length, via: "tool", nudgeIntervalMs: st.goal.nudgeIntervalMs, inheritedIntervalMs: inheritedIntervalMs ?? null });
 					await writeState(p, st);
 					return { updated: false, goalId, previousId, goal: st.goal };
 				});

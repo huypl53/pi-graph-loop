@@ -102,7 +102,11 @@ console.log("\n[2] swarm_set_goal replaces existing goal (resets counter, clears
 	ok("consecutiveNoResolveNudges reset to 0", after.consecutiveNoResolveNudges === 0);
 	ok("lastNudgeAt cleared", after.lastNudgeAt === undefined);
 	ok("backoffTicksRemaining cleared", after.backoffTicksRemaining === undefined);
-	ok("existing interval falls back to default when not provided", after.nudgeIntervalMs === 5000);
+	// Issue 85 (task-202608310905, bug #1): when the caller does NOT pass an explicit intervalMs, the
+	// replacement INHERITS the prior goal's nudgeIntervalMs (was: fell back to default 5s). This is the
+	// fix — pre-fix this let a single text-only replacement silently reset a tuned cadence and emit
+	// 3 nudges in 15s. See swarm-goal.test.mjs [14] for the new test coverage + regression matrix.
+	ok("existing interval INHERITS on text-only replace (Issue 85 bug #1)", after.nudgeIntervalMs === 25000, `actual=${after.nudgeIntervalMs}`);
 	ok("goal.id is different from previous (replacement, not idempotency)", r.details.goalId !== st.goal.id);
 }
 
@@ -277,6 +281,63 @@ console.log("\n[13] /swarm goal update preserves goalId and counters, and swarm_
 	ok("tool update=true updates interval in place", after.nudgeIntervalMs === 9000);
 	ok("tool update=true does not clear counters", after.consecutiveNoResolveNudges === 4);
 	ok("tool update=true reports updated", toolResult.details.updated === true);
+	await commands.swarm("goal done", ctx);
+}
+
+// =============================================================
+// [14] Issue 85 (task-202608310905, bug #1): swarm_set_goal inherits prior intervalMs on replace.
+// Tool + /swarm goal set command parity.
+// =============================================================
+console.log("\n[14] swarm_set_goal inherits prior intervalMs on replace (Issue 85 bug #1)");
+{
+	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	const notifications = [];
+	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
+	// Clear any leftover goal from previous sections.
+	await commands.swarm("goal done", ctx);
+	notifications.length = 0;
+
+	// 1. Set with explicit 600_000 ms interval.
+	await call("swarm_set_goal", { text: "Goal A", intervalMs: 600_000, cwd: scratch });
+	ok("step1: goal stored with 600_000ms interval", readSwarmState().goal.nudgeIntervalMs === 600_000);
+
+	// 2. Replace via tool with text only (no intervalMs). MUST inherit 600_000.
+	await call("swarm_set_goal", { text: "Goal B", cwd: scratch });
+	ok("step2: tool replace without interval INHERITS prior 600_000ms", readSwarmState().goal.nudgeIntervalMs === 600_000, `actual=${readSwarmState().goal.nudgeIntervalMs}`);
+
+	// 3. Replace again with explicit interval. MUST override (no inheritance).
+	await call("swarm_set_goal", { text: "Goal C", intervalMs: 30_000, cwd: scratch });
+	ok("step3: tool replace WITH explicit interval OVERRIDES prior", readSwarmState().goal.nudgeIntervalMs === 30_000);
+
+	// 4. Replace via /swarm goal set command (no -i). MUST inherit.
+	await commands.swarm("goal done", ctx);
+	await call("swarm_set_goal", { text: "Goal D", intervalMs: 600_000, cwd: scratch });
+	await commands.swarm("goal set Goal E", ctx); // command-path replace, no -i
+	ok("step4a: command replace without -i INHERITS prior 600_000ms", readSwarmState().goal.nudgeIntervalMs === 600_000, `actual=${readSwarmState().goal.nudgeIntervalMs}`);
+
+	// 5. Replace via /swarm goal set -i explicit. MUST override.
+	await commands.swarm("goal set -i 30s Goal F", ctx);
+	ok("step5: command replace with -i OVERRIDES prior", readSwarmState().goal.nudgeIntervalMs === 30_000);
+
+	// 6. goal.set trace carries inheritedIntervalMs on inherit path, null on override path.
+	await commands.swarm("goal done", ctx);
+	await call("swarm_set_goal", { text: "Trace A", intervalMs: 600_000, cwd: scratch });
+	await call("swarm_set_goal", { text: "Trace B", cwd: scratch }); // inherit
+	await call("swarm_set_goal", { text: "Trace C", intervalMs: 9000, cwd: scratch }); // override
+	const eventsTxt = readFileSync(join(scratch, ".pi", "swarm", "traces", "events.jsonl"), "utf8");
+	const allSets = eventsTxt.split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.event === "goal.set" && e.via === "tool");
+	const inheritSet = allSets[allSets.length - 2]; // second-to-last: the inherit one (Trace B)
+	ok("step6a: goal.set trace on inherit carries inheritedIntervalMs: 600_000", inheritSet?.inheritedIntervalMs === 600_000, JSON.stringify(inheritSet));
+	const overrideSet = allSets[allSets.length - 1]; // last: the override one (Trace C)
+	ok("step6b: goal.set trace on override carries inheritedIntervalMs: null", overrideSet?.inheritedIntervalMs === null, JSON.stringify(overrideSet));
+
+	// 7. /swarm goal update (text change with no -i) keeps current interval unchanged (NOT a fresh set).
+	await commands.swarm("goal done", ctx);
+	await call("swarm_set_goal", { text: "Update baseline", intervalMs: 600_000, cwd: scratch });
+	await commands.swarm("goal update Update refreshed", ctx);
+	ok("step7: /swarm goal update preserves current interval (no inheritance path)", readSwarmState().goal.nudgeIntervalMs === 600_000);
+
 	await commands.swarm("goal done", ctx);
 }
 

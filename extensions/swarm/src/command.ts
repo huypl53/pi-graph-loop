@@ -1085,7 +1085,14 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						return;
 					}
 						if (isUpdate && !text && !hasInterval) { ctx.ui.notify("Usage: /swarm goal update [-i|--interval <time>] [<text>]", "warning"); return; }
-						const intervalMs = hasInterval ? parsedInterval!.ms : (isUpdate ? undefined : resolveGoalNudgeIntervalMs());
+						// Issue 85 (task-202608310905, bug #1): only resolve a default intervalMs up-front when
+						// this is the FRESH-SET path AND no -i was passed AND there's no prior goal to inherit
+						// from. When a prior goal exists and no -i was passed, leave intervalMs undefined so
+						// the withLock block can inherit the prior goal's nudgeIntervalMs (the original bug:
+						// `/swarm goal set <text>` after a tuned (e.g. 600 000 ms) goal was resetting the
+						// cadence to 5 s). Update path keeps `intervalMs = undefined` so it leaves the
+						// existing goal interval untouched (existing behaviour).
+						const intervalMs = hasInterval ? parsedInterval!.ms : (isUpdate ? undefined : undefined);
 						const st = await withLock(p, async () => {
 							const s = await readState(p, ctx.cwd);
 							if (isUpdate) {
@@ -1111,6 +1118,16 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 							const ts = now();
 							const goalId = `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
 							const previousId = s.goal?.id;
+							// Issue 85 (task-202608310905, bug #1): on a fresh /swarm goal set that REPLACES an
+							// existing goal, inherit the prior nudgeIntervalMs when no -i/--interval was passed.
+							// Without this, `/swarm goal set <text>` after a tuned (e.g. 600 000 ms) goal resets
+							// the cadence back to the 5 s default (live incident 2026-08-31 09:00). Mirror of the
+							// tool path at tools/agents.ts:594. Only inherit when `hasInterval === false`; an
+							// explicit `-i` (resolved to a numeric ms) keeps its override semantics. The
+							// `resolveGoalNudgeIntervalMs()` default is the final fallback when there's no prior
+							// goal to inherit from.
+							const inheritedIntervalMs = !hasInterval ? s.goal?.nudgeIntervalMs : undefined;
+							const resolvedIntervalMs = intervalMs ?? inheritedIntervalMs ?? resolveGoalNudgeIntervalMs();
 							s.goal = {
 								id: goalId,
 								text,
@@ -1118,12 +1135,12 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 								setBy: "orchestrator",
 								consecutiveNoResolveNudges: 0,
 								nudgeSeq: previousId === goalId ? (s.goal?.nudgeSeq ?? 0) : 0,
-								nudgeIntervalMs: intervalMs,
+								nudgeIntervalMs: resolvedIntervalMs,
 							};
 							delete s.goal.lastNudgeAt;
 							delete s.goal.lastResolvedAt;
 							delete s.goal.backoffTicksRemaining;
-							await trace(p, "goal.set", { goalId, previousId, via: "command", length: text.length, nudgeIntervalMs: s.goal.nudgeIntervalMs });
+							await trace(p, "goal.set", { goalId, previousId, via: "command", length: text.length, nudgeIntervalMs: s.goal.nudgeIntervalMs, inheritedIntervalMs: inheritedIntervalMs ?? null });
 							await writeState(p, s);
 							return { updated: false, goal: s.goal, goalId, previousId };
 						});
