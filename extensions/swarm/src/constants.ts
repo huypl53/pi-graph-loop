@@ -48,10 +48,6 @@ export const DEFAULT_MODEL = "glm-5.1";
 
 export const DEFAULT_PROVIDER = "zai-coding-cn";
 
-export const FAST_MODEL = "gpt-5.4-mini";
-
-export const FAST_PROVIDER = "openai";
-
 // Model pool defaults.
 export const POOL_COOLDOWN_MS = 15 * 60 * 1000; // bench a failing slot for 15 minutes
 
@@ -256,6 +252,14 @@ export const PI_SWARM_MINIMAL_PROTOCOL =
 // Exported so tests + dashboards import the same string the engine emits. Payload:
 // { taskId, nodeId, seq, key, cap, cooldownMs }.
 export const TRACE_GRAPH_ADVANCE_NUDGE_EMITTED = "graph.advance_nudge_emitted";
+
+// === Issue 81 (task-202608310900): goal-clear authority guard ===
+// Emitted by swarm_mark_goal_done / swarm_set_goal / /swarm goal done|set|update when the goal-
+// clear authority guard refuses an operation on a user-origin goal. Payload:
+// { goalId, origin, reason, actor, action: "clear"|"replace", via: "tool"|"command",
+//   approvedByUser?: boolean }. Distinct from goal.cleared (success path) so dashboards can split
+// refusals vs. legitimate clears.
+export const TRACE_GOAL_CLEAR_REFUSED = "goal.clear_refused";
 
 // === Issue 25 Phase 1: stable telemetry trace event names ===
 // Exported as constants so tests and dashboards import the same string the engine emits.

@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Paths, PreflightError, RecentSpawn, ReusableAgentMatch, SwarmAgent, SwarmState } from "./types.ts";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, FAST_MODEL, ORPHAN_SPAWN_WARNING_TIMEOUT_MS, SPAWN_SETTLE_MS } from "./constants.ts";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, ORPHAN_SPAWN_WARNING_TIMEOUT_MS, SPAWN_SETTLE_MS } from "./constants.ts";
 import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux } from "./tmux.ts";
 import { childPiArgs, currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { pickSlot, poolStatus, preflightSpawn, formatPreflightError } from "./pool.ts";
@@ -195,7 +195,7 @@ export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state:
 		provider = provider || currentProvider(model);
 	}
 	if (poolReason) await trace(p, "pool.spawn_pick", { agentId: id, slot: `${provider}/${model}`, reason: poolReason }).catch(() => {});
-	const providerFallback = !input.provider && !poolReason && provider === DEFAULT_PROVIDER && model !== DEFAULT_MODEL && model !== FAST_MODEL;
+	const providerFallback = !input.provider && !poolReason && provider === DEFAULT_PROVIDER && model !== DEFAULT_MODEL;
 	if (providerFallback) await trace(p, "agent.spawn.provider_fallback", { agentId: id, model, provider, note: "no provider configured for model; fell back to DEFAULT_PROVIDER at spawn boundary" }).catch(() => {});
 	const window = id;
 	const target = `${state.tmuxSession}:${window}.0`;
