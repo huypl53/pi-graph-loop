@@ -99,12 +99,22 @@ export function orchSession(st: SwarmState, nowMs: number): { ids: string[]; tri
 // (task,node); auto-acked once the node is assigned/terminal. The harness never assigns (the orchestrator
 // is the actor) — it only surfaces the stall and the fix. Assumes the caller holds the state lock.
 async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, nodeId: string, role: string, key: string): Promise<void> {
-	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) return; // idempotent: one assign nudge per node
+	// Issue: graph-advance nudge was one-shot per node — an ack with a deferral note (e.g. "scope
+	// conflict, will assign when the lease closes") consumed the ONLY nudge, and when the node later
+	// became ready-but-unassigned again the watcher stayed silent forever (live: 71-min stall on
+	// task-202608310022 review node). Re-arm policy mirrors reconcileInitialReadyLocked: per-key cap of
+	// NOTIFY_DEFAULT_MAX_NUDGES sends + NOTIFY_DEFAULT_COOLDOWN_MS between sends. Auto-acks for
+	// left-ready nodes do NOT count toward the cap (only real sends do).
+	const prior = Object.values(st.messages || {}).filter((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+	if (prior.length >= NOTIFY_DEFAULT_MAX_NUDGES) return; // cap: orchestrator has ignored the stall
+	const lastSent = prior.map((r) => r.createdAt || "").sort().pop() || "";
+	if (lastSent && Date.now() - new Date(lastSent).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) return; // cooldown
+	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key) && !prior.some((r) => r.ackedAt)) return; // in-flight, unacked: idempotent
 	try {
 		await deliverMessageLocked(pi, cwd, p, st, {
 			to: "orchestrator",
 			subject: `Node ${nodeId} (${role}) is READY but unassigned — advance task ${taskId} now`,
-			body: `Task ${taskId} has stalled mid-graph: node \`${nodeId}\` (${role}) is READY (its dependencies are satisfied) but it is still unassigned, so no agent is working on it.\n\nAssign it now:\n  swarm_assign_task(taskId="${taskId}", nodeId="${nodeId}")\n\nThen KEEP DRIVING the graph to completion in the same turn — do not stop to summarize. After ${nodeId} completes, call swarm_next_nodes + swarm_assign_task for the next ready node, and repeat until every node is terminal. Never end a turn by merely describing the next step — ACT on it (call the tool).\n\n(Action required; this safety net auto-acknowledges once the node is assigned.)`,
+			body: `Task ${taskId} has stalled mid-graph: node \`${nodeId}\` (${role}) is READY (its dependencies are satisfied) but it is still unassigned, so no agent is working on it.\n\nAssign it now:\n  swarm_assign_task(taskId="${taskId}", nodeId="${nodeId}")\n\nThen KEEP DRIVING the graph to completion in the same turn — do not stop to summarize. After ${nodeId} completes, call swarm_next_nodes + swarm_assign_task for the next ready node, and repeat until every node is terminal. Never end a turn by merely describing the next step — ACT on it (call the tool).\n\n(Action required; this safety net auto-acknowledges once the node is assigned. If you cannot assign yet — e.g. scope conflict with an in-flight lease — ack and note the blocker; the nudge will re-arm after the cooldown, up to the cap.)`,
 			requiresAck: true,
 			idempotencyKey: key,
 		});
