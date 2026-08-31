@@ -873,3 +873,29 @@ Three stacked bugs, all in the goal-nudge family:
 - rate-limit: second high-priority inject within the window does NOT interrupt again (trace suppressed);
 - normal-priority messages mid-turn keep today's intercept-only behavior (regression case);
 - the 23-minute incident shape (send 09:17, consume 09:40) reproduces as consume-within-seconds under the fix.
+
+### Row R10-1 — Cost-bound claims require counting assertions — P1
+
+**Source:** R10 synthesis (Issue 82 round-1 REJECT lesson). Any plan/code-comment/report claiming a cost bound (probe rate, lock-hold, memory, message rate; trigger words only/at most/bounded/throttled/rate-limited/once-per) must carry a counting assertion at the real I/O boundary that fails when violated. State-assertions see "what happened once", never "how often". Checklist in task-202608311410 artifacts/a3.md; C10 template: seed rejected population → counting mock at boundary → N≥2 passes → assert ≤bound → surgical-RED by reverting only the bound.
+
+### Row R10-2 — Re-review-after-reject graph gap — P2
+
+**Source:** R10 synthesis. Rework cycle (review rejected → fix → test) re-opens fix+test but NOT the review node (terminal after rejected) — orchestrator must force-reopen. Graph should re-arm review automatically when a rejected-outcome review's downstream rework completes.
+
+### Row R10-3 — Orchestrator pre-patch pump shapes after commits — P1
+
+**Source:** R10 synthesis (live: vacuous-idle nudges fired 09:00→14:03 from an orchestrator running pre-b4d0f88 code). Policy + convention needed: commits touching pump/hooks behavior should trigger orchestrator-session restart (or hot-reload notice); commit messages should flag "orchestrator restart advised".
+
+### Row R10-4 — requiresResponse fence bookkeeping tax — P2
+
+**Source:** R10 synthesis. Every implement/fix close leaves a requiresResponse fence requiring self-ack ritual. Candidate: auto-ack-on-verdict-delivered when the result message content matches the node outcome.
+
+### Row R10-5 — Tester lane-harness patterns → shared lane-lib — P2
+
+**Source:** R10 synthesis. Worker-role 2-session harness, real-dead-pane kill, multi-tick probe counting patterns reinvented per-task (86/82). Extract a shared lane-lib so each new test plan starts from proven harness shapes.
+
+### Row R10-6 — Safety-net nudges fire on parked/sequenced nodes — P2
+
+**Source:** R10 synthesis. Graph-advance nudges cannot distinguish "unassigned because forgotten" from "unassigned because orchestrated sequencing" (fired 4× on Issue 81/86 holds today). Add node deferReason or orchestrator-declared queue-intent so the checker skips deliberately held nodes.
+
+**R10 sequencing decision:** Issue 83 (Row 76 phase-1) next, then 84. R10-1 rule applies to 83c metric capture; R10-3 applies to 83a new pump phases — land both rows' guidance before R11 batch starts.
