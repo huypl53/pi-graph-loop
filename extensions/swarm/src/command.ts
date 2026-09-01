@@ -494,6 +494,17 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				else ctx.ui.notify(`Reminder NOT sent: ${outcome.reason}${outcome.repaired ? " (crash-repaired the attempt reminder record)" : ""}`, "warning");
 				return;
 				}
+				if (cmd === "metrics") {
+					// Orchestrator-only, read-only proxy metric snapshot for Issue 83c.
+					if (currentAgentId() !== "orchestrator") {
+						ctx.ui.notify("/swarm metrics is orchestrator-only", "warning");
+						return;
+					}
+					const st = await readState(p, ctx.cwd);
+					const proxy = st.proxyMetrics || { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0 };
+					ctx.ui.notify(`proxy metrics: hungButAlive=${proxy.hungButAlive} staleOpen=${proxy.staleOpen} supersessionChurn=${proxy.supersessionChurn}${proxy.lastEmitAt ? ` lastEmitAt=${proxy.lastEmitAt}` : ""}`, "info");
+					return;
+				}
 				if (cmd === "validate") {
 					// Structural + optional runtime validation. Mirrors swarm_validate_graph.
 					// Arg = list index | task-id | unique prefix.

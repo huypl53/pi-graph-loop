@@ -17,7 +17,14 @@ process.chdir(scratch);
 let pass = 0, fail = 0;
 const ok = (name, cond, detail) => { if (cond) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name, detail ? `(${detail})` : ""); } };
 const expectReject = async (fn, predicate, name) => {
-	try { await fn(); ok(name, false, "expected rejection"); return null; }
+	try {
+		const result = await fn();
+		// Issue 83b — supersession refusal envelope is a successful tool result with
+		// details.refused=true, not a thrown error. Accept it as a rejection signal.
+		const refusal = result?.details?.refused === true;
+		ok(name, refusal || predicate(new Error("__NOT_THROWN__")), refusal ? "refused:supersession" : "expected rejection (no throw, no refusal)");
+		return result ?? null;
+	}
 	catch (err) { ok(name, predicate(err), err?.errorCode || err?.message || String(err)); return err; }
 };
 const readJson = async (file) => JSON.parse(await readFile(file, "utf8"));

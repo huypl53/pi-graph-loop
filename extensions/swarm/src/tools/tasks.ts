@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
-import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PI_SWARM_REASSIGN_RATE_LIMIT, PI_SWARM_REASSIGN_RATE_WINDOW_MS, PREFLIGHT_ASSIGN_GRACE_MS, REASSIGN_RATE_LIMITED, TERMINAL_NODE_STATUSES, TRACE_LATE_RESULT_REJECTED, TRACE_REASSIGN_RATE_LIMITED, LATE_RESULT_REFUSAL_REASON } from "../constants.ts";
+import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PI_SWARM_REASSIGN_RATE_LIMIT, PI_SWARM_REASSIGN_RATE_WINDOW_MS, PREFLIGHT_ASSIGN_GRACE_MS, REASSIGN_RATE_LIMITED, TERMINAL_NODE_STATUSES, TRACE_LATE_RESULT_REJECTED, TRACE_REASSIGN_RATE_LIMITED, TRACE_LIFECYCLE_DERIVED, TRACE_TASK_ATTEMPT_FORCE_REOPEN, LATE_RESULT_REFUSAL_REASON } from "../constants.ts";
 import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isGraphTerminalNode, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveCommitNodeEvidence, resolveNodeScope, scopesOverlap, suppressPriorAttemptForForceReopen, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
 import { resolveTaskStallLocked } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";

@@ -452,6 +452,18 @@ export const TRACE_LATE_RESULT_REJECTED = "message.late_result_rejected";
 // can self-correct (read the latest assignment message) without an unbounded retry loop.
 export const LATE_RESULT_REFUSAL_REASON = "supersession";
 
+// === Issue 83c — proxy metric emit trace ===
+// Emitted by the new proxy-metric pump phase after it snapshots the cheap counters into
+// `SwarmState.proxyMetrics`. The emission is bounded by PI_SWARM_PROXY_METRIC_INTERVAL_MS
+// (default 60s) so the trace census stays cheap while still surfacing hung-but-alive residuals,
+// stale-open assignment counts, and supersession churn.
+export const TRACE_PROXY_METRIC_EMIT = "proxy.metric_emit";
+export const DEFAULT_PROXY_METRIC_INTERVAL_MS = 60_000;
+export const PI_SWARM_PROXY_METRIC_INTERVAL_MS =
+	Number(process.env.PI_SWARM_PROXY_METRIC_INTERVAL_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_PROXY_METRIC_INTERVAL_MS))
+		: DEFAULT_PROXY_METRIC_INTERVAL_MS;
+
 // === Issue 28 — rework reopen trace ===
 // Emitted when activateReworkNodes reopens a previously-done/failed/skipped node because a rework
 // edge activated. Payload includes priorAttemptId so operators can correlate with the canonical

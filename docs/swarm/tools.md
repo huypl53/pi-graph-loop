@@ -129,6 +129,8 @@ needs structured parameters or machine-readable results.
 - `/swarm graph <task-id> [text|mermaid|json]`
 - `/swarm flow <task-id> [--events N]` — read-only task graph, agent lanes, and
   recent events; opens an interactive Flow dialog in TUI mode.
+- `/swarm metrics` — orchestrator-only, read-only proxy metric snapshot (hung-but-alive,
+  stale-open, supersession-churn); surfaces `SwarmState.proxyMetrics` without mutating state.
 
 ### Lifecycle commands
 

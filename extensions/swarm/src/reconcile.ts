@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmAgent, SwarmIdleNudgeState, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
 import { ACK_MISSING_MS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LATE_RESULT_REJECTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED, TRACE_STALE_OPEN_SURFACED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
-import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention, staleOpenAssignmentScanLocked } from "./taskgraph.ts";
+import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention, proxyMetricEmitLocked, staleOpenAssignmentScanLocked } from "./taskgraph.ts";
 
 export function resolveGoalNudgeIntervalMs(nudgeIntervalMs?: number | null): number {
 	if (typeof nudgeIntervalMs === "number" && Number.isFinite(nudgeIntervalMs) && nudgeIntervalMs > 0) return Math.floor(nudgeIntervalMs);
@@ -1432,6 +1432,12 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// scan failure never kills the tick.
 		try { await staleOpenAssignmentScanLocked(p, st, nowMs); }
 		catch (err: any) { await trace(p, "stale_open.scan.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}); }
+		// === Issue 83c — proxy metric snapshot phase [restart-required pump phase] ===
+		// Read-only, cheap snapshot of hung-but-alive residuals + stale-open count + supersession
+		// churn. Bounded by PI_SWARM_PROXY_METRIC_INTERVAL_MS, and the snapshot is stored on
+		// SwarmState.proxyMetrics for `/swarm status` / `/swarm metrics` to surface.
+		try { await proxyMetricEmitLocked(p, st, nowMs); }
+		catch (err: any) { await trace(p, "proxy.metric_emit.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// Mid-graph stall safety net: nudge the orchestrator to assign any ready-but-unassigned node in an
 		// in_progress task. The nudge is idempotent, so it is safe to run on every pump tick.
 		try { await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
@@ -2203,17 +2209,19 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 			taskLines.push(`task ${task.taskId} ${pm} current=[${current.join(",") || "-"}] next=[${ready.join(",") || "-"}] unacked=${unacked}`);
 		}
 	}
+	const proxy = st.proxyMetrics || { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0 };
 	const closureLine = `closure: ${byTaskStatus["done"] || 0} done, ${byTaskStatus["in_progress"] || 0} in_progress, ${(byTaskStatus["blocked"] || 0) + (byTaskStatus["stale"] || 0)} blocked/stale, ${byTaskStatus["failed"] || 0} failed`;
 	const lines = [
 		`swarm ${st.swarmId}: ${runningAgents}/${agents.length} agents running, tmux ${st.tmuxSession}`,
 		`agents by runtime: ${Object.entries(byRuntime).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`,
 		`agents by health: ${Object.entries(byHealth).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`,
 		`tasks: ${scanned} scanned, ${Object.entries(byTaskStatus).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}; staleNodes=${staleNodes}; ackMissing=${ackMissing}`,
+		`proxy metrics: hungButAlive=${proxy.hungButAlive} staleOpen=${proxy.staleOpen} supersessionChurn=${proxy.supersessionChurn}${proxy.lastEmitAt ? ` lastEmitAt=${proxy.lastEmitAt}` : ""}`,
 		st.goal ? `goal: ${st.goal.id} interval=${resolveGoalNudgeIntervalMs(st.goal.nudgeIntervalMs)}ms nudges=${st.goal.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}` : `goal: none`,
 		closureLine,
 		...taskLines,
 	];
-	return { text: lines.join("\n"), details: { swarmId: st.swarmId, runningAgents, totalAgents: agents.length, byRuntime, byHealth, tasksScanned: scanned, byTaskStatus, staleNodes, ackMissing, closure: closureLine, taskLines } };
+	return { text: lines.join("\n"), details: { swarmId: st.swarmId, runningAgents, totalAgents: agents.length, byRuntime, byHealth, tasksScanned: scanned, byTaskStatus, staleNodes, ackMissing, proxyMetrics: proxy, closure: closureLine, taskLines } };
 }
 
 // Deterministic, indexed task list shared by `/swarm tasks` and the no-arg / number forms of

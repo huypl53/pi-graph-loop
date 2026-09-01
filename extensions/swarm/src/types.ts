@@ -480,6 +480,8 @@ export type SwarmState = {
 	// bounded by the active task surface and pruned alongside the message ledger by swarm_gc. Absent on
 	// pre-policy swarms — lazily initialized inside reconcileGraphAdvanceLocked's lock.
 	graphAdvanceNudgeState?: SwarmGraphAdvanceNudgeState;
+	// Issue 83c — proxy metric snapshot surfaced by the pump + /swarm metrics.
+	proxyMetrics?: { hungButAlive: number; staleOpen: number; supersessionChurn: number; lastEmitAt?: string };
 	// Issue 20: pool-scaffold write-once flag. Set by the orchestrator session_start hook AFTER the
 	// first successful `.pi/settings.json` scaffold + notify emission. Absent === never notified, which
 	// is the correct initial state. `readState` does NOT back-fill this field (mirrors `goal`): a

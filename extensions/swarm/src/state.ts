@@ -88,6 +88,7 @@ export function defaultState(cwd: string): SwarmState {
 		agents: {},
 		delivered: {},
 		messages: {},
+		proxyMetrics: { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0 },
 		createdAt: ts,
 		updatedAt: ts,
 	};

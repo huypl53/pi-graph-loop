@@ -618,6 +618,34 @@ The rec-level superseded-message guard in `reconcile.ts` (the `isActionableOrche
 - `/swarm trace` to view `message.late_result_rejected` and `reassign.rate_limited` events.
 - `swarm_task_status` shows `node.supersessionCount` and `node.supersessionWindowStart` per node.
 
+## Operator: Proxy metrics (Issue 83 sub-task c, P1)
+
+Proxy metrics are a cheap, proxy-first snapshot of the swarm's stall surface. The pump writes
+`SwarmState.proxyMetrics` after stale-open scanning and before the idle/goal nudge pass, and
+`/swarm metrics` reports the same snapshot read-only.
+
+**Snapshot fields**
+
+- `hungButAlive` — count of agents that are running, effectively idle, have a fresh heartbeat,
+  and still carry at least one assigned/in_progress node that has gone stale.
+- `staleOpen` — count of assigned/in_progress nodes whose `lastProgressAt`/`lastActivityAt`
+  anchor is older than `PI_SWARM_STALE_OPEN_THRESHOLD_MS`.
+- `supersessionChurn` — count of per-node reassign churn observed within the current
+  `PI_SWARM_PROXY_METRIC_INTERVAL_MS` window.
+
+**Environment override**
+
+- `PI_SWARM_PROXY_METRIC_INTERVAL_MS` (default 60_000 = 1 min) — bounds how often the pump emits
+  a fresh `proxy.metric_emit` trace and refreshes the durable snapshot.
+
+**Trace event**: `proxy.metric_emit` payload `{ emitAt, hungButAlive, staleOpen, supersessionChurn, intervalMs, thresholdMs, heartbeatStaleMs }`.
+
+**Related tools**
+
+- `/swarm metrics` to read the current proxy snapshot.
+- `/swarm status` to see the same snapshot in the rollup line.
+- `/swarm trace` to census `proxy.metric_emit` alongside the other Issue 83 traces.
+
 ## Operator: explicit reuse lease + park mechanism (Issue 82)
 
 By default the task-close sweep stops task-scoped workers (Issue 26) and the heartbeat GC

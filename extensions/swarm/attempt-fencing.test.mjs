@@ -63,7 +63,15 @@ const awaitAs = async (agentId, name, params) => {
 };
 const expectErrorCode = async (agentId, name, params, code) => {
 	try {
-		await awaitAs(agentId, name, params);
+		const result = await awaitAs(agentId, name, params);
+		// Issue 83b — supersession refusal envelope is a successful tool result with
+		// details.refused=true, not a thrown error. Accept it as the ATTEMPT_TOKEN_MISMATCH
+		// signal when the caller presented a superseded attemptId (the late-result path).
+		const refusal = result?.details?.refused === true && result?.details?.reason === "supersession";
+		if (code === "ATTEMPT_TOKEN_MISMATCH" && refusal) {
+			ok(`expect ${code} (got refused:supersession envelope)`, true);
+			return result;
+		}
 		ok(`expect ${code}`, false);
 		return null;
 	} catch (err) {
