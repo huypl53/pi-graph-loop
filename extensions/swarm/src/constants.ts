@@ -407,6 +407,51 @@ export const TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED = "agent.heartbeat_gc
 // escalate, or wait. Idempotent within the window (one surface per threshold window per node).
 export const TRACE_STALE_OPEN_SURFACED = "stale_open_surfaced";
 
+// === Issue 83b — supersession fencing for late results + reassign churn ===
+// Fixed-window per-node supersession rate limit. A `swarm_assign_task` that would push the node
+// past `PI_SWARM_REASSIGN_RATE_LIMIT` reassigns within `PI_SWARM_REASSIGN_RATE_WINDOW_MS` is
+// refused with `REASSIGN_RATE_LIMITED` + emits this trace. Distinct from `task.attempt.superseded`
+// (which fires per supersede event) — this trace is the gate refusal itself, used by ops to
+// distinguish "real supersede churn" from "caller hitting the rate cap".
+export const TRACE_REASSIGN_RATE_LIMITED = "reassign.rate_limited";
+export const REASSIGN_RATE_LIMITED = "REASSIGN_RATE_LIMITED";
+
+// Window (ms) for the supersession rate-limit gate. Reset to `nowMs` when the window expires
+// (fixed-window semantics: simple O(1) per reassign). Default 60s (one minute); operators can
+// override via PI_SWARM_REASSIGN_RATE_WINDOW_MS.
+export const DEFAULT_REASSIGN_RATE_WINDOW_MS = 60_000;
+
+// Maximum reassigns per node per window. Mirrors the orchestrator's tolerance for churn before
+// we suspect an automation loop; default 5/min per node. Operators can override via
+// PI_SWARM_REASSIGN_RATE_LIMIT. The gate is HARD: refusals do not queue — the caller must wait
+// for the window to expire.
+export const DEFAULT_REASSIGN_RATE_LIMIT = 5;
+
+// Env-evaluated values (read once at module load, same pattern as PI_SWARM_ORPHAN_TIMEOUT_MS).
+// PI_SWARM_REASSIGN_RATE_LIMIT: integer > 0 (else falls back to DEFAULT_REASSIGN_RATE_LIMIT).
+// PI_SWARM_REASSIGN_RATE_WINDOW_MS: integer > 0 (else falls back to DEFAULT_REASSIGN_RATE_WINDOW_MS).
+export const PI_SWARM_REASSIGN_RATE_LIMIT =
+	Number(process.env.PI_SWARM_REASSIGN_RATE_LIMIT) > 0
+		? Math.floor(Number(process.env.PI_SWARM_REASSIGN_RATE_LIMIT))
+		: DEFAULT_REASSIGN_RATE_LIMIT;
+export const PI_SWARM_REASSIGN_RATE_WINDOW_MS =
+	Number(process.env.PI_SWARM_REASSIGN_RATE_WINDOW_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_REASSIGN_RATE_WINDOW_MS))
+		: DEFAULT_REASSIGN_RATE_WINDOW_MS;
+
+// === Issue 83b — late-result rejection trace ===
+// Emitted when a worker (the previous assignee) attempts `swarm_update_task` after the node has
+// been reassigned: the caller's `attemptId` is a SUPERSEDED attempt and the node has a NEWER active
+// attempt. Distinct from `message.reply_rejected_superseded` (which guards message-layer replies):
+// this guards the tool-layer `swarm_update_task` late-result path. Payload includes the
+// superseded attemptId + the current activeAttemptId + lateArrivalAt (so ops can compute the
+// late-window). No node mutation occurs.
+export const TRACE_LATE_RESULT_REJECTED = "message.late_result_rejected";
+// Error code returned by the `swarm_update_task` tool when a late-result is rejected. Surfaced
+// in the tool result envelope as `{ refused: true, reason: "supersession", ... }` so the caller
+// can self-correct (read the latest assignment message) without an unbounded retry loop.
+export const LATE_RESULT_REFUSAL_REASON = "supersession";
+
 // === Issue 28 — rework reopen trace ===
 // Emitted when activateReworkNodes reopens a previously-done/failed/skipped node because a rework
 // edge activated. Payload includes priorAttemptId so operators can correlate with the canonical

@@ -182,6 +182,17 @@ export type MessageRecord = {
 	// Set when a newer assignment supersedes this open assignment message (idempotency/supersede fix).
 	superseded?: { at: string; by: string; supersededBy: string };
 
+	// === Issue 83b — late-result rejection count ===
+	// Number of times a worker attempted to apply a result against this message's `attemptId`
+	// after the attempt was superseded. Distinct from the message-level `superseded` field
+	// (which records the supersede event itself): `lateResultRejectionCount` counts the
+	// late-arrival rejections — a quality signal for orchestrators to detect a stuck worker
+	// that is still trying to apply results against its old lease.
+	lateResultRejectionCount?: number;
+	// ISO timestamp of the most recent late-result rejection. Paired with `lateResultRejectionCount`
+	// for ops dashboards (`/swarm status` / trace census).
+	lastLateResultRejectionAt?: string;
+
 	// --- Issue 25 Phase 1: v2 lifecycle evidence schema ---
 	// Each field has a distinct meaning (see proposal §A); none of them overloads the
 	// existing delivered/ack fields. Under gate=0 these are SHADOW ONLY: the engine does
@@ -609,6 +620,15 @@ export type TaskNode = {
 	// skip (already surfaced within the window). Cleared on `swarm_update_task` forward
 	// transitions so progress resets the surface cycle.
 	staleOpenSurfacedAt?: string;
+	// === Issue 83b — supersession fencing ===
+	// Per-node fixed-window supersession counter. Incremented on every fresh mintNodeAttempt
+	// (genuine reassign, not duplicate retry). Reset when `supersessionWindowStart` is older
+	// than `PI_SWARM_REASSIGN_RATE_WINDOW_MS` ms. Read+written by the per-node rate-limit gate
+	// in `swarm_assign_task` (refuses with REASSIGN_RATE_LIMITED when count > PI_SWARM_REASSIGN_RATE_LIMIT).
+	supersessionCount?: number;
+	// ISO timestamp anchoring the current rate-limit window. Set on first supersession within a
+	// window; reset when the window expires (`now - supersessionWindowStart > window`).
+	supersessionWindowStart?: string;
 };
 
 export type TaskEdge = {

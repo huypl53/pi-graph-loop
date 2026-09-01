@@ -273,6 +273,7 @@ prints the action directly so the operator never has to guess the fix.
 - **Cross-reference**: Issue 17 commit `1016d7c` introduced the gate. Issue 19 adds the constants extraction (`extensions/swarm/src/constants.ts`), this documentation, the operator-facing traces, and the manual override commands.
 - Health state persists in `.pi/swarm/pool-state.json` (includes the classified error); all read-modify-write cycles run under a dedicated lock so concurrent agent processes cannot lose updates. Provider errors classify as `quota` | `rate_limit` | `auth` | `transient`; anything else (e.g. context overflow) is traced (`pool.turn_error_unclassified`) but never benches or swaps a slot. A slot must resolve under its own provider in the model registry — slots with no explicit provider are rejected with `pool.swap_model_not_found`.
 - Traces: `pool.slot_failure`, `pool.swap`, `pool.swap_failed`, `pool.swap_no_candidate`, `pool.swap_chain_capped`, `pool.swap_model_not_found`, `pool.swap_gated_by_engine_retry`, `pool.engine_retry_exhausted`, `pool.engine_retry_recovered`, `pool.swap_forced_by_manual_override`, `pool.bench_forced_by_manual_override`, `pool.manual_rotate_no_alternative`, `pool.manual_rotate_model_not_found`, `pool.manual_rotate_no_current_slot`, `pool.slot_success`, `pool.turn_error_unclassified` (`.pi/swarm/traces/`).
+- `message.late_result_rejected` — emitted when a worker tries to apply a stale result against a superseded assignment attempt. The trace appears from both the tool-layer `swarm_update_task` fence and the rec-level superseded-message guard, so operators can count late arrivals in the same trace census regardless of where the refusal was detected.
 - Commands: `/swarm pool list`, `/swarm pool cooldown <provider/model> <ms>`, `/swarm pool clear <provider/model>`, `/swarm pool rotate now` (orchestrator-only; force-swap current slot, bypass gate), `/swarm pool rotate next` (orchestrator-only; bench current slot for `rotation.cooldownMs`, advance organically), `/swarm pool show`, `/swarm pool validate`, `/swarm pool help`, `/swarm pool preview-preflight`.
 - Without `modelPool`, the single `defaultModel`/`defaultProvider` behavior is unchanged.
 
@@ -576,6 +577,46 @@ N is bounded by `agent.maxConcurrentTasks`. This is **extra I/O vs the pre-83a b
 
 - `/swarm trace` to view `stale_open_surfaced` events.
 - `swarm_task_status` shows `node.staleOpenSurfacedAt` per node.
+
+## Operator: Late-result fencing (Issue 83 sub-task b, P1)
+
+Two related guards protect against late worker results and reassign churn:
+
+1. **Tool-layer fence** in `swarm_update_task` — when a worker calls `swarm_update_task` against a node whose `activeAttemptId` no longer matches the caller's `attemptId` (because the node was reassigned since the worker was assigned), the tool returns the refusal envelope `{ refused: true, reason: "supersession", ... }`, emits the `message.late_result_rejected` trace, increments `MessageRecord.lateResultRejectionCount`, and **leaves the node untouched** (no status mutation, no evidence rewrite, no shared-context merge). The caller is expected to read the latest assignment message and self-correct.
+
+2. **Reassign rate-limit gate** in `swarm_assign_task` — a fixed-window per-node gate (`supersessionCount` / `supersessionWindowStart` on `TaskNode`) refuses fresh reassigns with `REASSIGN_RATE_LIMITED` once the node has accumulated `PI_SWARM_REASSIGN_RATE_LIMIT` reassigns within `PI_SWARM_REASSIGN_RATE_WINDOW_MS`. The refusal emits `reassign.rate_limited` with the current count, limit, and `windowResetAt`. The gate is HARD — refusals do not queue; the caller must wait for the window to expire.
+
+The rec-level superseded-message guard in `reconcile.ts` (the `isActionableOrchestratorMessage` predicate used by pump re-trigger and migration back-fill) also emits `message.late_result_rejected` with `reason: "rec_superseded"` so operators can count late arrivals from both the tool-layer and rec-level paths in the same trace census.
+
+**Environment overrides**
+
+- `PI_SWARM_REASSIGN_RATE_LIMIT` (default 5) — maximum reassigns per node per window. Must be a positive integer; non-positive falls back to default.
+- `PI_SWARM_REASSIGN_RATE_WINDOW_MS` (default 60_000 = 1 min) — fixed-window length in milliseconds. Positive integer; non-positive falls back to default.
+
+**Trace events**
+
+| trace | when | payload |
+| --- | --- | --- |
+| `message.late_result_rejected` | Tool-layer fence refuses `swarm_update_task` because the caller's attemptId is superseded, OR rec-level superseded-message guard drops a record in pump/migration | `{ taskId, nodeId, attemptId?, supersededBy, lateArrivalAt?, reason: "supersession" \| "rec_superseded" }` |
+| `reassign.rate_limited` | `swarm_assign_task` would exceed the per-node rate limit | `{ taskId, nodeId, currentCount, limit, windowMs, windowStart, windowResetAt }` |
+
+**Durable observability fields**
+
+- `TaskNode.supersessionCount` (number) and `TaskNode.supersessionWindowStart` (ISO timestamp) — the per-node gate ledger; reset to fresh window when `(nowMs - windowStart) > PI_SWARM_REASSIGN_RATE_WINDOW_MS`.
+- `MessageRecord.lateResultRejectionCount` (number) and `MessageRecord.lastLateResultRejectionAt` (ISO timestamp) — additive observability for repeated late-result attempts against the same message record.
+
+**C9/C10 R10-1 counting assertions** (in-repo, `extensions/swarm/supersession-fencing.test.mjs`):
+
+- **C1/C2** seed 1 hot node + 1 cold node; run 6 reassigns against the hot node within the window. Asserts exactly 5 succeed and the 6th produces `REASSIGN_RATE_LIMITED` + `reassign.rate_limited` trace; the cold node is untouched. After the window expires, a fresh reassign succeeds.
+- **C3** seeds a superseded attempt + a newer active attempt; the late-result path returns `{ refused: true, reason: "supersession" }`, emits exactly one `message.late_result_rejected` trace, and asserts NO node mutation (status, evidence, shared-context unchanged across re-reads).
+- **C4** asserts the rec-level guard emits `message.late_result_rejected` with `reason: "rec_superseded"` for superseded messages dropped in the pump re-trigger path.
+
+**Mock-LLM fixture**: `extensions/mock-llm/fixtures/supersession-late-result.jsonl` — stale worker attempts to close a node after its attempt was superseded; exercised end-to-end through the mock-LLM registry. Lane command: `pi --no-extensions --provider mock-llm --model supersession-late-result -e ./extensions/mock-llm -e ./extensions/swarm`.
+
+**Related tools**
+
+- `/swarm trace` to view `message.late_result_rejected` and `reassign.rate_limited` events.
+- `swarm_task_status` shows `node.supersessionCount` and `node.supersessionWindowStart` per node.
 
 ## Operator: explicit reuse lease + park mechanism (Issue 82)
 

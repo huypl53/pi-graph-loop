@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmAgent, SwarmIdleNudgeState, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED, TRACE_STALE_OPEN_SURFACED } from "./constants.ts";
+import { ACK_MISSING_MS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LATE_RESULT_REJECTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED, TRACE_STALE_OPEN_SURFACED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention, staleOpenAssignmentScanLocked } from "./taskgraph.ts";
 
@@ -1139,10 +1139,34 @@ export function isActionableOrchestratorMessage(
 	nowMs: number,
 	retriggerCounts: Record<string, number>,
 	strictForMigration: boolean,
+	p?: Paths,
 ): { ok: boolean; reason: string } {
 	if (rec.ackedAt) return { ok: false, reason: "acked" };
 	if (rec.status === "dead_letter") return { ok: false, reason: "dead_letter" };
-	if (rec.superseded) return { ok: false, reason: "superseded" };
+	if (rec.superseded) {
+		// === Issue 83b — rec-level late-result trace (round-4 KR5 fix) ===
+		// Mirror the tool-layer TRACE_LATE_RESULT_REJECTED so the rec-level guard (the path that
+		// runs in `reconcile` / pump re-trigger / migration back-fill) is also observable in the
+		// trace census. The caller MUST thread `p: Paths` so the trace writes through the real
+		// `taskPaths(p, taskId)` and lands in the durable events.jsonl. No silent swallow: if the
+		// durable write fails we surface it as `swarm.rec_late_result_trace_failed` so the failure
+		// is observable in the trace census. The predicate itself never throws.
+		if (p) {
+			const taskNodeRef = parseTaskNodeRef(rec.conversationId);
+			if (taskNodeRef && taskNodeRef.taskId && taskNodeRef.nodeId) {
+				const task = taskIndex[taskNodeRef.taskId];
+				if (task) {
+					const tp = taskPaths(p, task.taskId);
+					traceTask(tp, TRACE_LATE_RESULT_REJECTED, { taskId: task.taskId, nodeId: taskNodeRef.nodeId, messageId: rec.id, supersededBy: rec.superseded?.supersededBy, reason: "rec_superseded" })
+						.catch((err: any) => {
+							// KR5: surface durable-write failure instead of silent swallow.
+							return trace(p, "swarm.rec_late_result_trace_failed", { taskId: task.taskId, nodeId: taskNodeRef.nodeId, messageId: rec.id, error: String(err?.message || err) });
+						});
+				}
+			}
+		}
+		return { ok: false, reason: "superseded" };
+	}
 	if (rec.to !== "orchestrator") return { ok: false, reason: "wrong_recipient" };
 
 	// Task-scoped predicate (covers terminal task, cancelled, terminal node, reassigned node).
@@ -1471,7 +1495,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 				// Use the actionability predicate; non-actionable messages get a receipt.
 				// Note: do NOT short-circuit on rec.ackedAt here — the predicate returns reason="acked"
 				// and we want the receipt entry written so a reincarnated consumer reads it.
-				const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ true);
+				const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ true, p);
 				if (!v.ok) {
 					migrationEntries[rec.id] = {
 						surfacedAt: rec.updatedAt || rec.createdAt,
@@ -1514,7 +1538,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 				if (surfaced.has(m.id)) return false; // per-pid surfaced (retrigger bound)
 
 				// Actionability predicate (binding C5): skip non-actionable messages and batch-count suppressions.
-				const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ false);
+				const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ false, p);
 				return v.ok;
 			});
 
@@ -1532,7 +1556,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 			if (st.consumerReceipts?.orchestrator?.entries?.[m.id]) { suppressedCounts.informational_already_consumed++; continue; }
 			if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) { suppressedCounts.informational_already_consumed++; continue; }
 			if (surfaced.has(m.id)) continue; // not suppressed - already surfaced this session
-			const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, false);
+			const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, false, p);
 			if (!v.ok) {
 				const key = v.reason === "retrigger_budget_exhausted" ? "retrigger_budget_exhausted" : v.reason;
 				suppressedCounts[key] = (suppressedCounts[key] || 0) + 1;
