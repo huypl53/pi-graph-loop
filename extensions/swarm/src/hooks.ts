@@ -1,7 +1,7 @@
 // === swarm/hooks.ts — event hooks + orchestrator mailbox pump (verbatim from index.ts) ===
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname, relative, sep } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import type { MessageResponseStatus, Paths } from "./types.ts";
 import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_KEY_SETTLE_STALE, ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, formatNotifyKey } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
@@ -18,6 +18,8 @@ import { ensureNodeActivityStamp, scanAgentOpenAssignments, checkStallNotificati
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { tmux } from "./tmux.ts";
 import { ensurePoolScaffold } from "./pool-scaffold.ts";
+import { maybeRotateTraces } from "./tools/audit.ts";
+import { DEFAULT_TRACE_ROTATE_BYTES } from "./constants.ts";
 
 // Orchestrator mailbox pump state. Module-level so the PM pump can be (re)started from outside the
 // session_start hook — notably by `/swarm register here orchestrator`, which opts a running session in
@@ -44,6 +46,7 @@ let orchestratorMailboxTimer: NodeJS.Timeout | undefined;
 let orchestratorMailboxPumpRunning = false;
 let orchestratorPumpCtx: any = undefined;
 let orchestratorPumpCtxFresh: boolean = false;
+let traceRotationInFlight = false;
 
 // Pump tick interval (kept identical to the previous `setInterval` cadence so dashboards/expectations
 // don't shift). Exposed as a constant so tests can shorten the wait for the watchdog test.
@@ -196,6 +199,14 @@ function armOrchestratorPumpWatchdog(ctx: any) {
 export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, agentId: string, reason: string) {
 	if (currentAgentId() !== agentId) return { surfaced: 0, ids: [] as string[] };
 	const idleAtStart = ctx.mode === "tui" ? ctx.isIdle() : false;
+	try {
+		if (existsSync(p.events) && statSync(p.events).size >= DEFAULT_TRACE_ROTATE_BYTES && !traceRotationInFlight) {
+			traceRotationInFlight = true;
+			void maybeRotateTraces(p, {}).catch((err: any) => trace(p, "trace.retention.rotate_error", { reason, error: String((err as Error)?.message || err) }).catch(() => {})).finally(() => { traceRotationInFlight = false; });
+		}
+	} catch (err: any) {
+		await trace(p, "trace.retention.rotate_probe_error", { reason, error: String((err as Error)?.message || err) }).catch(() => {});
+	}
 	const result = await withLock(p, async () => {
 		const st = await readState(p, ctx.cwd);
 		st.agentSurfaced ||= {};

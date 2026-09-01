@@ -813,7 +813,7 @@ Row 76 is ready to start, but the batch must stay narrow so evidence remains int
 
 ### Issue 84 — swarm audit tooling + trace retention — P1
 
-**Status:** proposed. **Priority:** P1. **Source:** user request 2026-08-31 + orchestrator trace-debt review (1.16M events / 256MB in one session; analysis is ad-hoc grep today).
+**Status:** implemented-pending-verify. **Priority:** P1. **Source:** user request 2026-08-31 + orchestrator trace-debt review (1.16M events / 256MB in one session; analysis is ad-hoc grep today).
 
 The append-only `events.jsonl` audit trail is complete but unprocessed: no reader tooling, no retention, no invariant checks. Ritual agents and humans grep 256MB by hand.
 

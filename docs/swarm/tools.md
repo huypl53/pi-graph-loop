@@ -205,7 +205,7 @@ state or authorization path.
 | `swarm_set_goal` | Persists a swarm-level goal to `swarm-state.json.goal`. | **Orchestrator-only** (server-side `requireOrchestratorAuthority`). `text` required, `id` optional. Replaces any current goal and resets `consecutiveNoResolveNudges` + clears back-off. While set, the orchestrator pump emits an idempotent idle-streak nudge when every non-orchestrator agent is `runtimeStatus: "idle"` with zero assigned/in_progress task nodes. Pair with `swarm_mark_goal_done` when finished. |
 | `swarm_mark_goal_done` | Clears the swarm goal and stops the idle nudge loop entirely. | **Orchestrator-only** (server-side `requireOrchestratorAuthority`). Optional `goalId` is a safety fence (clear fails if it does not match the current goal). Idempotent: a clear with no active goal is a `noop`. |
 
-## Messaging and reconcile (5)
+## Messaging and reconcile (6)
 
 | Tool | What it does | Key inputs / operating notes |
 | --- | --- | --- |
@@ -214,6 +214,7 @@ state or authorization path.
 | `swarm_ack_message` | Records `seen`, `processing`, `done`, or `failed`. | A `requiresResponse` message needs a validated result message before `done`. ACK is lifecycle state, not the work result. |
 | `swarm_message_status` | Shows delivery/ACK/response lifecycle records. | Filter by message, recipient, or lifecycle status. |
 | `swarm_reconcile` | Repairs delivery visibility and surfaces/stamps task drift or staleness. | Scope by `agentId` for mailbox-only sweep. Prefer `dryRun=true`; `mark=true` persists derived task-status repairs. It never auto-fails a node. |
+| `swarm_audit` | Reads append-only trace history, reconstructs message timelines, probes anomalies, checks invariants, and can rotate trace archives. | Filters: `--event`, `--since`, `--until`, `--agent`, `--task`, `--cid`; modes: `events`, `timeline`, `probes`, `invariants`, `rotate`, `all`. JSON shape: `{ schema: "swarm-audit/v1", mode, generatedAt, durationMs, filters, source, counts, events?, timeline?, probes?, invariants?, rollup? }`. Use `--json` when you want the machine-readable payload, or omit it for the same JSON text in the terminal. |
 
 ### Message completion protocol
 

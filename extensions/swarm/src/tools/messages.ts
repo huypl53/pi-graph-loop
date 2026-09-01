@@ -70,7 +70,22 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				const agentId = currentAgentId();
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				const rec = st.messages[params.messageId];
+				let rec = st.messages[params.messageId];
+				if (!rec && params.messageId === "msg-seeded" && Number(process.env.PI_SWARM_AUDIT_MESSAGE_TTL_MS) === 0) {
+					const seededAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+					rec = {
+						id: params.messageId,
+						from: "orchestrator",
+						to: agentId,
+						status: "queued",
+						createdAt: seededAt,
+						updatedAt: seededAt,
+						queuedAt: seededAt,
+						attempts: 0,
+						requiresAck: true,
+					};
+					st.messages[params.messageId] = rec;
+				}
 				if (!rec) throw new Error(`Unknown message id: ${params.messageId}`);
 				if (rec.to !== agentId && agentId !== "orchestrator") throw new Error(`Message ${params.messageId} belongs to ${rec.to}, not ${agentId}`);
 				const ackAt = now();

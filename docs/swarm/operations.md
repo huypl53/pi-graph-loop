@@ -318,6 +318,22 @@ for authority-sensitive mutations. The durable record lives in `swarm-state.json
 The leadership blind spot is a documented trade-off, not a semantic failure: the harness treats the
 stale record as recoverable state, not evidence that a worker may take over.
 
+## Trace audit + retention
+
+`swarm audit` is the supported reader for `.pi/swarm/traces/events.jsonl` and the gzip generations produced by trace rotation.
+
+Common use cases:
+
+- `swarm audit --event message. --limit 20` — filter the hot trace stream by event prefix.
+- `swarm audit --timeline --message <id> --json` — reconstruct the enqueue → deliver → inject → ack → response path for one message.
+- `swarm audit --probes --json` — inspect P1–P4 anomaly probes.
+- `swarm audit --invariants --json` — check INV1–INV3 over current swarm state.
+- `swarm audit --rotate` — manually rotate traces when the file exceeds the configured cap.
+
+Rotation is retention-aware: the hot `events.jsonl` is size-gated, compressed generations are kept in `events.<n>.gz`, and `events.rollup.json` retains the cumulative generation index. tmux pane captures in `.pi/swarm/traces/tmux/` use the same age window and are pruned by the same rotate pass.
+
+The JSON result shape is stable for ritual artifacts: it includes `schema: "swarm-audit/v1"`, `durationMs`, `counts`, and a `source` block. Timeline mode returns `timeline.stages[]`, probes mode returns `probes`, and invariants mode returns `invariants`.
+
 ## Recommended debugging flow
 
 ### Message did not arrive

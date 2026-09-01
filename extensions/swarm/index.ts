@@ -6,6 +6,7 @@ import { registerAgentsTools } from "./src/tools/agents.ts";
 import { registerMessagesTools } from "./src/tools/messages.ts";
 import { registerTasksTools } from "./src/tools/tasks.ts";
 import { registerGcTools } from "./src/tools/gc.ts";
+import { registerAuditTools } from "./src/tools/audit.ts";
 export { isDeliveryFailureRetryable } from "./src/delivery.ts";
 export { providerForModel, currentProvider } from "./src/session.ts";
 export { pickSlot, poolStatus, recordProviderError, recordSlotSuccess, setSlotCooldown, slotKey, effectiveConfig } from "./src/pool.ts";
@@ -18,5 +19,6 @@ export default function (pi: ExtensionAPI) {
 	registerMessagesTools(pi);
 	registerTasksTools(pi);
 	registerGcTools(pi);
+	registerAuditTools(pi);
 	registerSwarmCommand(pi);
 }

@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveGoalNudgeIntervalMs, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
 import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from "./tmux.ts";
 import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, checkStallNotificationStale, deriveNodeAttention, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
+import { maybeRotateTraces } from "./tools/audit.ts";
 import { buildFlowSnapshot } from "./observability.ts";
 import { openFlowDialog, pickFlowTask } from "./flow-dialog.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
@@ -665,6 +666,70 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await restartAgent(pi, ctx.cwd, p, st, safeId(id)); await writeState(p, st); return r; });
 						ctx.ui.notify(`Restarted ${result.agent.id} at ${result.agent.tmuxTarget} (kill=${result.kill.method})`, "info");
 					} catch (err: any) { ctx.ui.notify(`Restart failed: ${err?.message || err}`, "warning"); }
+					return;
+				}
+				if (cmd === "audit") {
+					let mode = rest[0] && !String(rest[0]).startsWith("--") ? rest.shift() : "events";
+					let json = false;
+					let messageId: string | undefined;
+					let limit: number | undefined;
+					let event: string | undefined;
+					let since: string | number | undefined;
+					let until: string | number | undefined;
+					let agent: string | undefined;
+					let task: string | undefined;
+					let cid: string | undefined;
+					let rollupWindowMs: number | undefined;
+					let generations: boolean | undefined;
+					let rotate = false;
+					for (let i = 0; i < rest.length; i++) {
+						const t = rest[i];
+						if (t === "--json") json = true;
+						else if (t === "--probes") mode = "probes";
+						else if (t === "--invariants") mode = "invariants";
+						else if (t === "--timeline") mode = "timeline";
+						else if (t === "--events") mode = "events";
+						else if (t === "--rotate") rotate = true;
+						else if (t === "--event") event = rest[++i];
+						else if (t === "--since") since = rest[++i];
+						else if (t === "--until") until = rest[++i];
+						else if (t === "--agent") agent = rest[++i];
+						else if (t === "--task") task = rest[++i];
+						else if (t === "--cid") cid = rest[++i];
+						else if (t === "--message") messageId = rest[++i];
+						else if (t === "--limit") limit = Number(rest[++i]);
+						else if (t === "--rollup-window") rollupWindowMs = Number(rest[++i]);
+						else if (t === "--no-generations") generations = false;
+					}
+					if (rotate || mode === "rotate") {
+						const res = await maybeRotateTraces(p, {});
+						ctx.ui.notify(json ? JSON.stringify(res, null, 2) : `Trace rotation: ${JSON.stringify(res)}`, "info");
+						return;
+					}
+					const { readAuditEvents, auditTimeline, checkInvariants } = await import("./tools/audit.ts");
+					const filters = { event, since, until, agent, task, cid, limit };
+					if (mode === "timeline") {
+						const res = await auditTimeline(p, String(messageId || ""), { ...filters, generations });
+						ctx.ui.notify(json ? JSON.stringify(res, null, 2) : JSON.stringify(res.timeline, null, 2), "info");
+						return;
+					}
+					if (mode === "invariants") {
+						const st = await readState(p, ctx.cwd);
+						const res = await checkInvariants(p, st);
+						ctx.ui.notify(json ? JSON.stringify(res, null, 2) : JSON.stringify(res.invariants, null, 2), "info");
+						return;
+					}
+					if (mode === "probes") {
+						const st = await readState(p, ctx.cwd);
+						const eventsRes = await readAuditEvents(p, { ...filters, generations, rollupWindowMs });
+						const payload = { ...eventsRes, probes: { P1: [], P2: [], P3: [], P4: [] } };
+						const auditMod = await import("./tools/audit.ts");
+						payload.probes = { P1: auditMod.__test.probeP1(st), P2: auditMod.__test.probeP2(st), P3: auditMod.__test.probeP3(eventsRes.events || []), P4: auditMod.__test.probeP4(eventsRes.events || []) };
+						ctx.ui.notify(json ? JSON.stringify(payload, null, 2) : JSON.stringify(payload.probes, null, 2), "info");
+						return;
+					}
+					const res = await readAuditEvents(p, { ...filters, generations, rollupWindowMs });
+					ctx.ui.notify(json ? JSON.stringify(res, null, 2) : JSON.stringify(res, null, 2), "info");
 					return;
 				}
 				if (cmd === "pool") {
