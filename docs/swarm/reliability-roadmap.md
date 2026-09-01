@@ -858,21 +858,42 @@ Three stacked bugs, all in the goal-nudge family:
 
 ### Issue 86 — urgent inter-agent messages cannot reach mid-turn agents — P0
 
-**Status:** proposed. **Priority:** P0. **Source:** live incident 2026-08-31 16:17→16:40 (user-observed): a high-priority STOP directive sat `intercepted` for 23 minutes while the recipient's turn ran; mandate arrived after the work it should have redirected was already done.
+**Status:** fixed (commit `90d16b1`, R10 review grade A). **Priority:** P0. **Source:** live incident 2026-08-31 16:17→16:40 (user-observed): a high-priority STOP directive sat `intercepted` for 23 minutes while the recipient's turn ran; mandate arrived after the work it should have redirected was already done.
 
-**Problem.** `message.inject` during an active turn lands in the input queue and is only consumed at the START of the next turn. For normal coordination this is fine; for urgent control traffic (process changes, STOP/redirect, sequencing holds) it is a 23-minute hole. The orchestrator's only escalation today is raw tmux Escape (external to the engine, not durable, not traced).
+**Original proposal (preserved for historical fidelity):**
 
-**Proposal:**
+`message.inject` during an active turn lands in the input queue and is only consumed at the START of the next turn. For normal coordination this is fine; for urgent control traffic (process changes, STOP/redirect, sequencing holds) it is a 23-minute hole. The orchestrator's only escalation today is raw tmux Escape (external to the engine, not durable, not traced).
+
+Proposal:
 1. **Interrupt-on-delivery for `priority: high` messages**: when inject happens mid-turn, emit a TUI-level interrupt (same channel as the manual Escape) that ends the current turn, so the queued message is consumed at the next-turn boundary immediately. Degrade gracefully: if the interrupt fails, keep current behavior + trace `message.interrupt_failed`.
 2. **Wake-on-inject for settled agents stays as-is** (already works — settled agents consume immediately).
 3. **Trace surface**: `message.interrupt_requested` / `message.interrupt_effective` with target turn id; the STOP incident becomes a regression scenario.
 4. **Guardrails**: only `priority: high` interrupts; rate-limited per agent (e.g. 1 interrupt / 30s) so a chatty orchestrator cannot livelock a worker; interrupted turn settles through the normal response_missing/settled-idle machinery (already proven by the manual-Escape incident).
 
-**Acceptance criteria:**
+**Resolution (2026-08-31, commit `90d16b1`; reviewed grade A in `docs/swarm/r10-postbatch-synthesis/consolidated-findings.md` row 86).** Recipient-side `pi.on("input", ...)` hook now branches on `priority: "high" && !ctx.isIdle()`: when the rate-limit ledger (`SwarmAgent.lastHighInterruptAt`, default window 30s, env override `PI_SWARM_HIGH_INTERRUPT_WINDOW_MS`) is outside the window, the hook calls `ctx.abort()` (TUI-level interrupt, same channel as manual Escape) so urgent directives are consumed at the next-turn boundary; the durable followUp message still lands at the same boundary regardless. Orchestrator pseudo-agent is exempt from the ledger. Graceful degrade: if `ctx.abort()` throws, the message is still queued as followUp and `message.interrupt_failed` is traced.
+
+**Trace contract** (all in `extensions/swarm/src/hooks.ts` around lines 990–1057):
+- `message.input_intercept` — every swarm message on intercept
+- `message.interrupt_requested` — before `ctx.abort()` call (rate-limit pass)
+- `message.interrupt_effective` — after `ctx.abort()` returns without throwing
+- `message.interrupt_failed` — when `ctx.abort()` throws (graceful-degrade fallback)
+- `message.interrupt_suppressed` — rate-limit window blocks the abort (`{reason: "rate_limited", windowMs, lastInterruptAt}`)
+
+**R10-1 cost-bound counting assertion** is at the real `ctx.abort()` boundary: the unit test counts `abortCallCount === 0` on the second inject inside the window (C2/S3); the second-inject-after-window (C3) lifts the gate by advancing `lastHighInterruptAt` directly, not by mutating the gate predicate.
+
+Acceptance criteria:
 - mock-llm lane: agent mid-turn (delayMs-hung turn) receives priority-high message → turn ends promptly (bounded by poll interval, not turn length) → next turn consumes the message; transcript shows the interrupt trace;
 - rate-limit: second high-priority inject within the window does NOT interrupt again (trace suppressed);
 - normal-priority messages mid-turn keep today's intercept-only behavior (regression case);
 - the 23-minute incident shape (send 09:17, consume 09:40) reproduces as consume-within-seconds under the fix.
+
+**Verification (post-fix, all green):**
+- `extensions/swarm/high-priority-interrupt.test.mjs` — 36/0 PASS (C1–C8)
+- `extensions/swarm/priority-high-interrupt-stream-resolve.test.mjs` — 30/0 PASS (S1–S4); end-to-end hung→interrupt→consume = **88 ms** vs 23 min live incident
+- `extensions/mock-llm/fixtures/priority-high-interrupt.jsonl` — hung-turn phase `{"type":"hang","delayMs":15,"until":"abort"}` + resumed-turn ack pair
+- `extensions/mock-llm/fixtures/priority-high-interrupt-rate-limited.jsonl` — rate-limit double-inject shape
+- Transcripts at `.pi/mock-llm/transcripts/priority-high-interrupt/` across multiple bursts (2026-08-31 09:17–16:20 live-replay lane, plus R10 review bursts)
+- Worker-lane harness used (single-session orchestrator-mode lane cannot fire `pi.on("input")` mid-turn because `pumpOrchestratorMailbox` uses `pi.sendMessage`, not stdin — R10 documented design caveat)
 
 ### Row R10-1 — Cost-bound claims require counting assertions — P1
 
