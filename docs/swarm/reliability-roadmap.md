@@ -918,3 +918,20 @@ Test gap: no test drives GC→epoch→goal-evaluator on one st in a single tick 
 ### Row R11-2 — Node re-open doesn't hold the task open / issue fresh attempt — P1
 
 **Source:** Same incident. Orchestrator force-reopening a single node after task closure: (a) the pump's closure roll-up re-derived `task.status=done` from the other 5/6 terminal nodes and re-closed the task, re-triggering the `task_closed` delivery fence on the new assignment; (b) force-setting node status to `assigned` directly did not mint a fresh attempt token, so the assignee's `swarm_update_task` calls hit `ATTEMPT_NOT_ACTIVE` and the agent (correctly) refused to act on a task it couldn't close — then settled with the node open, feeding R11-1. Graph mechanics need an orchestrator re-open path that (1) pins task.status open until the re-opened node re-closes, (2) requires going through the standard assign path to mint an attempt.
+
+### Row R11-3 — External swarm-doctor: out-of-engine liveness watchdog — P1
+
+**Source:** Live incidents 2026-09-01 (12h idle-lock caught by the human, not the engine; 4 worker-pane silent exits caught only by manual `swarm_agent_status`). Core SRE principle the swarm violates today: the monitor shares fate with the monitored. Every in-engine check (goal pump, heartbeat GC, delivery fences) runs on the same pre-patch process, the same event loop, and the same assumptions as the bug it should catch. The effective watchdog today is the human operator.
+
+**Design: dumb, stateless, external.** A `swarm-doctor` script run by cron/launchd — NOT inside pi, NOT in the swarm tmux session, NOT dependent on the pump. It only reads JSON state files and compares timestamps; no graph semantics, no locks, no LLM:
+
+1. **Idle-lock detector**: active goal + all workers idle + a node `assigned`/`in_progress` with `lastActivityAt` older than threshold → append priority-high mail to the orchestrator mailbox (reuses the Issue 86 high-priority interrupt machinery to abort the orchestrator's idle turn and wake it).
+2. **Suppression streak detector**: N consecutive `goal.nudge.suppressed_*` trace events with no intervening `goal.idle_nudge` → alert (catches R11-1's shape even before R11-1's engine fix lands).
+3. **Pane-liveness probe**: agent record `running` but `pane_pid` dead (`kill -0`) → alert (catches the 4 silent pane exits today).
+4. **Status drift detector**: stored vs derived `task.status` mismatch persisting > threshold → alert (catches R11-2's roll-up shape).
+
+**Escalation path**: mailbox priority-high (mechanism exists, Issue 86); optionally a second channel outside the swarm entirely (log file / terminal bell) since mailbox delivery itself can be fenced.
+
+**Tradeoffs accepted**: false positives on deliberate sequencing (mitigated by R10-6 deferReason — doctor skips deliberately-held nodes once graph records intent; land together); who-watches-the-watchdog (kept dumb + stateless so cron failure is visible as silence + a heartbeat log line per run); no mock-llm fixture needed (no LLM in the loop — pure script over fixture state dirs; validation = seeded-state unit tests).
+
+**Sequencing note**: this is the one roadmap row that does NOT require a restart-gated pump change — it can land and protect immediately, even while the orchestrator runs pre-patch code.
