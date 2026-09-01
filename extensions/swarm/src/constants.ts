@@ -236,6 +236,12 @@ export const NOTIFY_KEY_GRAPH_ADVANCE = "task:{taskId}:node:{nodeId}:nudge:assig
 // the session_shutdown site too via the same predicate gating.
 export const NOTIFY_KEY_SETTLE_STALE = "task:{taskId}:agent:{agentId}:nudge:settle-stale";
 
+// R11-1 completion — stale-open assignment nudge (surfacing was trace-only; the orchestrator
+// had to poll proxyMetrics by hand, and the swarm idled for hours). Same template family as the
+// graph-advance nudge: idempotent by seq, capped, cooled down.
+export const NOTIFY_KEY_STALE_OPEN = "task:{taskId}:node:{nodeId}:nudge:stale-open:seq:{seq}";
+export const TRACE_STALE_OPEN_NUDGE_EMITTED = "stale_open.nudge_emitted";
+
 // Orchestrator pump per-tick batch suppression trace key (issue 11 / binding C6). Emitted on
 // EVERY pump tick including total===0 so dashboards counting silent-tick baselines render
 // correctly. The trace shape is { ts, cid, total, counts: { reason -> n, ... } }.

@@ -4,7 +4,7 @@ import { readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, PI_SWARM_PROXY_METRIC_INTERVAL_MS, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_PROXY_METRIC_EMIT, TRACE_STALE_OPEN_SURFACED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
+import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, NODE_ICON, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, PI_SWARM_PROXY_METRIC_INTERVAL_MS, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_PROXY_METRIC_EMIT, TRACE_STALE_OPEN_NUDGE_EMITTED, TRACE_STALE_OPEN_SURFACED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
 import { paths, readTaskState, taskPaths, trace, traceTask, writeState } from "./state.ts";
@@ -1292,15 +1292,16 @@ export function ensureNodeActivityStamp(task: TaskState, nodeId: string, tsIso: 
 // ~100 file reads per ~5 s tick (no interval gate yet; future PI_SWARM_STALE_OPEN_SCAN_INTERVAL_MS
 // is a follow-up). The scan is wrapped in `try { ... } catch { ... }` so a single tick failure
 // does not crash the pump; errors surface via the standard `trace()` events.
-export async function staleOpenAssignmentScanLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ surfaced: number; inspected: number; alreadySurfaced: number }> {
+export async function staleOpenAssignmentScanLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ surfaced: number; inspected: number; alreadySurfaced: number; surfacedNodes: Array<{ taskId: string; nodeId: string; assignee?: string }> }> {
 	const thresholdMs = Number(process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ?? DEFAULT_STALE_OPEN_THRESHOLD_MS);
 	let surfaced = 0, inspected = 0, alreadySurfaced = 0;
+	const surfacedNodes: Array<{ taskId: string; nodeId: string; assignee?: string }> = [];
 	// Discover tasks via the swarm's tasks dir.
 	let taskDirs: string[] = [];
 	try {
 		const { readdirSync } = await import("node:fs");
 		taskDirs = readdirSync(p.tasksDir).filter((d) => d.startsWith("task-"));
-	} catch { return { surfaced, inspected, alreadySurfaced }; }
+	} catch { return { surfaced, inspected, alreadySurfaced, surfacedNodes }; }
 	for (const taskDir of taskDirs) {
 		const tp = taskPaths(p, taskDir);
 		let task: TaskState;
@@ -1333,6 +1334,7 @@ export async function staleOpenAssignmentScanLocked(p: Paths, st: SwarmState, no
 			node.staleOpenSurfacedAt = now;
 			dirty = true;
 			surfaced++;
+			surfacedNodes.push({ taskId: task.taskId, nodeId, assignee: node.assignee || undefined });
 			await traceTask(tp, TRACE_STALE_OPEN_SURFACED, {
 				taskId: task.taskId,
 				nodeId,
@@ -1348,7 +1350,64 @@ export async function staleOpenAssignmentScanLocked(p: Paths, st: SwarmState, no
 			await writeTaskState(tp, task).catch(() => {});
 		}
 	}
-	return { surfaced, inspected, alreadySurfaced };
+	return { surfaced, inspected, alreadySurfaced, surfacedNodes };
+}
+
+// === R11-1 completion — stale-open assignment NUDGE (surfacing alone was a radar without a bell) ===
+// Called by the pump right after staleOpenAssignmentScanLocked surfaces nodes. Delivers ONE
+// high-priority orchestrator nudge per surfaced (task, node), idempotent within the surfacing
+// window (the scan's staleOpenSurfacedAt stamp), capped + cooled down like the graph-advance
+// nudge. Returns true when a nudge was emitted.
+export async function staleOpenNudgeLocked(
+	pi: import("@earendil-works/pi-coding-agent").ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	taskId: string,
+	nodeId: string,
+): Promise<boolean> {
+	const { deliverMessageLocked, findIdempotentMessage } = await import("./mailbox.ts");
+	const { formatNotifyKey, NOTIFY_KEY_STALE_OPEN } = await import("./constants.ts");
+	const keyPrefix = `task:${taskId}:node:${nodeId}:nudge:stale-open:seq:`;
+	// Defense-in-depth: only nudge nodes the scan ACTUALLY surfaced (staleOpenSurfacedAt fresh
+	// within the threshold window). A direct call for a fresh-progress node is a no-op.
+	const tp = taskPaths(paths(cwd), taskId);
+	try {
+		const t = await readTaskState(tp.taskJson);
+		const n = t.nodes[nodeId];
+		const thresholdMs = Number(process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ?? DEFAULT_STALE_OPEN_THRESHOLD_MS);
+		const surfacedMs = n?.staleOpenSurfacedAt ? new Date(n.staleOpenSurfacedAt).getTime() : 0;
+		if (!surfacedMs || Date.now() - surfacedMs > thresholdMs) return false;
+	} catch { return false; }
+	const prior = Object.values(st.messages || {}).filter((r: any) => r.to === "orchestrator" && (r.idempotencyKey?.startsWith(keyPrefix) ?? false));
+	if (prior.length >= NOTIFY_DEFAULT_MAX_NUDGES) return false; // cap
+	const seq = prior.length + 1;
+	const key = formatNotifyKey(NOTIFY_KEY_STALE_OPEN, { taskId, nodeId, seq: String(seq) });
+	const lastSent = prior.map((r: any) => r.createdAt || "").sort().pop() || "";
+	if (lastSent && Date.now() - new Date(lastSent).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) return false; // cooldown
+	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key) && !prior.some((r: any) => r.ackedAt)) return false; // in-flight
+	try {
+		await deliverMessageLocked(pi, cwd, p, st, {
+			to: "orchestrator",
+			priority: "high",
+			subject: `STALE OPEN: node ${nodeId} of ${taskId} assigned but no progress — worker may have settled idle`,
+			body: `Node \`${nodeId}\` of task ${taskId} is assigned but has shown NO progress past the stale threshold (see trace stale_open_surfaced). The assignee may have settled idle with the node open (idle-lock pattern, 5 live incidents on 2026-09-1).
+
+Act NOW in this turn:
+  1. Check the assignee pane (swarm_agent_status) — if idle with the node open, send a high-priority directive naming the exact close action (swarm_update_task to done/failed/blocked + result message).
+  2. If the pane is dead, restart the agent with the brief (swarm_restart_agent) — the assignment record persists.
+  3. If the node is genuinely long-running (evidence of progress in artifacts), ack this nudge done with a note; it will not re-fire within the window.
+
+(Auto-clears when the node records progress or closes. Capped at ${NOTIFY_DEFAULT_MAX_NUDGES} nudges per node; ${Math.round(NOTIFY_DEFAULT_COOLDOWN_MS / 60000)}min cooldown.)`,
+			requiresAck: true,
+			idempotencyKey: key,
+		});
+		await trace(p, TRACE_STALE_OPEN_NUDGE_EMITTED, { taskId, nodeId, seq, cap: NOTIFY_DEFAULT_MAX_NUDGES, cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS }).catch(() => {});
+		return true;
+	} catch (err: any) {
+		await trace(p, "stale_open.nudge_failed", { taskId, nodeId, seq, error: String((err as Error)?.message || err) }).catch(() => {});
+		return false;
+	}
 }
 
 // === Issue 83c — proxy metric emit (pump-tick phase) ===
