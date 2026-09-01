@@ -27,7 +27,21 @@ export function readOrchestratorLeader(st: SwarmState, nowMs: number): Orchestra
 	const l = st.orchestratorLeader;
 	if (!l) return { kind: "vacant" };
 	const ageMs = nowMs - new Date(l.lastHeartbeatAt).getTime();
-	return ageMs > ORCHESTRATOR_LEADER_STALE_MS ? { kind: "stale", leader: l, ageMs } : { kind: "claimed", leader: l, ageMs };
+	if (ageMs > ORCHESTRATOR_LEADER_STALE_MS) return { kind: "stale", leader: l, ageMs };
+	// R11-4: pid-liveness probe. A leader whose process is gone is dead regardless of heartbeat
+	// age — an orphaned leader (pid survives pane close, pump kept the lease fresh) or a
+	// freshly-killed one must not lock out a new claim. Only heartbeat staleness OR a dead pid
+	// makes the lease replaceable; a live pid with a fresh heartbeat still denies.
+	if (!isPidAlive(l.pid)) return { kind: "stale", leader: l, ageMs };
+	return { kind: "claimed", leader: l, ageMs };
+}
+
+// Liveness probe via signal 0 (no-op signal; throws ESRCH when the pid is gone). PID reuse
+// cannot fully be ruled out without a process-identity check, but the window is tiny and the
+// failure mode is benign (a reused pid reports alive → old behavior: wait for heartbeat TTL).
+function isPidAlive(pid: number): boolean {
+	if (!pid || pid <= 0) return false;
+	try { process.kill(pid, 0); return true; } catch (err: any) { return err?.code === "EPERM"; }
 }
 
 export function claimOrchestratorLeader(st: SwarmState, nowMs: number, me: number) {

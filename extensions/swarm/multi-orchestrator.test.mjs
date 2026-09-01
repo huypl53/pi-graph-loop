@@ -1,3 +1,5 @@
+import { spawn as _spawn, spawnSync } from "node:child_process";
+
 // Multi-orchestrator strict-reject tests (roadmap issue 8)
 // Run: node extensions/swarm/multi-orchestrator.test.mjs
 
@@ -59,8 +61,8 @@ const ok = (name, cond, detail = "") => { if (cond) { pass++; console.log(`  ok 
 seedState();
 process.env.PI_SWARM_AGENT_ID = "orchestrator";
 process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
-setLeaderPid(111);
-ok("T1 leader seeded", readJson().orchestratorLeader.pid === 111);
+setLeaderPid(process.pid); // real live pid (R11-4 probe: dead pid => stale => replaceable)
+ok("T1 leader seeded", readJson().orchestratorLeader.pid === process.pid);
 
 // T2: stale leader can be replaced
 setLeaderStale(222);
@@ -68,8 +70,9 @@ let st = readJson();
 let claim = (await importIdentity()).claimOrchestratorLeader(st, Date.now(), 333);
 ok("T2 stale claim succeeds", claim.kind === "claimed" && st.orchestratorLeader.pid === 333);
 
-// T3: heartbeat deny with foreign live pid
-st.orchestratorLeader = { pid: 333, sessionStartedAt: new Date().toISOString(), claimedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(), agentRecordId: "orchestrator" };
+// T3: heartbeat deny with foreign LIVE pid (real live pid — the probe in readOrchestratorLeader
+// treats a dead pid as stale, so a fabricated pid no longer exercises the deny path)
+st.orchestratorLeader = { pid: process.pid, sessionStartedAt: new Date().toISOString(), claimedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(), agentRecordId: "orchestrator" };
 let denied = false;
 try { (await importIdentity()).heartbeatOrchestratorLeader(st, Date.now(), 444, "test"); } catch (e) { denied = String(e?.message || e).includes("ORCHESTRATOR_LEADER_DENIED"); }
 ok("T3 heartbeat deny stable", denied);
@@ -78,7 +81,7 @@ ok("T3 heartbeat deny stable", denied);
 seedState(); seedAgents();
 process.env.PI_SWARM_AGENT_ID = "orchestrator"; process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
 await makeTask("t4"); await makeTask("t5", true);
-setLeaderPid(111);
+setLeaderPid(process.pid); // real live pid: a dead-pid leader is now replaceable (R11-4), so the deny path needs a live leader
 process.env.PI_SWARM_AGENT_ID = "worker"; process.env.PI_SWARM_IS_ORCHESTRATOR = "";
 ok("T4 assign denied worker", await expectErr(() => call("swarm_assign_task", { taskId: "t4", nodeId: "a" }), "ORCHESTRATOR_AUTHORITY_REQUIRED"));
 
@@ -94,8 +97,12 @@ ok("T7 stop denied worker", await expectErr(() => call("swarm_stop_agent", { age
 // T8: release_agent_task denied worker
 ok("T8 release denied worker", await expectErr(() => call("swarm_release_agent_task", { agentId: "worker" }), "ORCHESTRATOR_AUTHORITY_REQUIRED"));
 
-// T9: reconcile(mark=true) denied for non-leader (foreign live leader pid=111 holds claim)
+// T9: reconcile(mark=true) denied for non-leader (a DIFFERENT live process holds the claim — a
+// real spawned+alive child pid, since R11-4 makes dead pids immediately replaceable)
+const t9Child = _spawn(process.execPath, ["-e", "setTimeout(()=>{}, 60000)"], { stdio: "ignore" });
+setLeaderPid(t9Child.pid);
 ok("T9 reconcile mark denied non-leader", await expectErr(() => call("swarm_reconcile", { mark: true, dryRun: false }), "ORCHESTRATOR_LEADER_DENIED"));
+try { t9Child.kill("SIGKILL"); } catch { /* already gone */ }
 
 // T10: create_task allowed orchestrator (stale leader replaced by self claim)
 seedState(); seedAgents(); setLeaderStale(111); process.env.PI_SWARM_AGENT_ID = "orchestrator"; process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
@@ -155,6 +162,52 @@ seedState();
 process.env.PI_SWARM_AGENT_ID = "worker"; process.env.PI_SWARM_IS_ORCHESTRATOR = "";
 ok("T21 worker create denied on vacant state", await expectErr(() => call("swarm_create_task", { taskId: "worker-claim", title: "w", goal: "g", priority: "normal", nodes: { a: { role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [] } }, edges: [], acceptanceCriteria: [], validationCommands: [] }), "ORCHESTRATOR_AUTHORITY_REQUIRED"));
 ok("T21 vacant leader record unchanged by worker", !readJson().orchestratorLeader);
+
+// === R11-4: dead-leader pid probe (reproduce-first) ===
+// User-reported bug (2026-09-01, other project): after closing the orchestrator pane, a NEW pane
+// cannot claim leadership — "Orchestrator already active" — because the deny logic only consults
+// heartbeat age (60s TTL), never liveness of the leader pid. Two failure shapes:
+//   (a) fresh-death window: process killed, heartbeat < 60s old → deny for up to 60s (annoyance).
+//   (b) orphaned leader: pid survives the pane close (SIGHUP ignored mid-turn), pump heartbeat
+//       keeps the lease fresh FOREVER → permanent lockout (the actual reported bug).
+// Fix: claim/read must probe pid liveness; a dead pid is stale immediately regardless of heartbeat.
+{
+	const { spawnSync } = await import("node:child_process");
+	const deadPid = spawnSync(process.execPath, ["-e", "process.exit(0)"], { timeout: 2000 }).pid;
+	ok("R1 setup: dead pid acquired", deadPid > 0);
+
+	// R1 (RED, shape b): leader pid is DEAD but heartbeat is FRESH — must be replaceable.
+	const stR1 = readJson();
+	stR1.orchestratorLeader = { pid: deadPid, sessionStartedAt: new Date().toISOString(), claimedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(), agentRecordId: "orchestrator" };
+	writeFileSync(statePath, JSON.stringify(stR1, null, 2));
+	const claimR1 = (await importIdentity()).claimOrchestratorLeader(readJson(), Date.now(), 424242);
+	ok("R1 dead-pid fresh-heartbeat leader is claimable (the reported bug)", claimR1.kind === "claimed", `got ${claimR1.kind}`);
+
+	// R2: live leader (this process) stays denied — the probe must not break the healthy case.
+	const stR2 = readJson();
+	stR2.orchestratorLeader = { pid: process.pid, sessionStartedAt: new Date().toISOString(), claimedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(), agentRecordId: "orchestrator" };
+	writeFileSync(statePath, JSON.stringify(stR2, null, 2));
+	const claimR2 = (await importIdentity()).claimOrchestratorLeader(readJson(), Date.now(), 424243);
+	ok("R2 live-pid fresh-heartbeat leader still denies", claimR2.kind === "denied", `got ${claimR2.kind}`);
+
+	// R3: readOrchestratorLeader reports stale for dead pid (affects reconcile leader gate at reconcile.ts:1368).
+	const stR3 = readJson();
+	stR3.orchestratorLeader = { pid: deadPid, sessionStartedAt: new Date().toISOString(), claimedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(), agentRecordId: "orchestrator" };
+	writeFileSync(statePath, JSON.stringify(stR3, null, 2));
+	const readR3 = (await importIdentity()).readOrchestratorLeader(readJson(), Date.now());
+	ok("R3 readOrchestratorLeader: dead pid => stale", readR3.kind === "stale", `got ${readR3.kind}`);
+
+	// R4: heartbeatOrchestratorLeader from a NON-leader against dead leader must not throw deny
+	//     (dead leader replaced instead of ERR_ORCHESTRATOR_LEADER_DENIED).
+	const stR4 = readJson();
+	stR4.orchestratorLeader = { pid: deadPid, sessionStartedAt: new Date().toISOString(), claimedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(), agentRecordId: "orchestrator" };
+	try {
+		(await importIdentity()).heartbeatOrchestratorLeader(stR4, Date.now(), process.pid, "test-r4");
+		ok("R4 heartbeat adopts dead leader without throwing", stR4.orchestratorLeader.pid === process.pid);
+	} catch (e) {
+		ok("R4 heartbeat adopts dead leader without throwing", false, String(e).slice(0, 90));
+	}
+}
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);
 process.env.PI_SWARM_AGENT_ID = ORIGINAL_AGENT;
