@@ -122,7 +122,7 @@ console.log("\n[C1] sole-task worker without lease → stopped (existing behavio
 		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
 		"worker-c1": makeAgent("worker-c1", { spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c1.0" }),
 	});
-	const task = makeTask(taskId, { "node-c1": { id: "node-c1", assignee: "worker-c1", status: "in_progress" } });
+	const task = makeTask(taskId, { "node-c1": { id: "node-c1", assignee: "worker-c1", status: "done" } });
 	await writeStateFile(state);
 	await setupTaskJson(taskId, task);
 	const { pi } = makePiMock();
@@ -157,7 +157,7 @@ console.log("\n[C2] sole-task worker WITH leaseKind:'reuse' + valid leaseUntil �
 			leaseKind: "reuse", leaseUntil: futureIso, leaseReason: "reuse across tasks",
 		}),
 	});
-	const task = makeTask(taskId, { "node-c2": { id: "node-c2", assignee: "worker-c2", status: "in_progress" } });
+	const task = makeTask(taskId, { "node-c2": { id: "node-c2", assignee: "worker-c2", status: "done" } });
 	await writeStateFile(state);
 	await setupTaskJson(taskId, task);
 	const { pi } = makePiMock();
@@ -192,7 +192,7 @@ console.log("\n[C3] sole-task worker WITH leaseKind:'park' + valid leaseUntil �
 			leaseKind: "park", leaseUntil: futureIso, leaseReason: "park for inspection",
 		}),
 	});
-	const task = makeTask(taskId, { "node-c3": { id: "node-c3", assignee: "worker-c3", status: "in_progress" } });
+	const task = makeTask(taskId, { "node-c3": { id: "node-c3", assignee: "worker-c3", status: "done" } });
 	await writeStateFile(state);
 	await setupTaskJson(taskId, task);
 	const { pi } = makePiMock();
@@ -232,7 +232,7 @@ console.log("\n[C4] lease with EXPIRED leaseUntil → default behavior (stop)");
 			leaseKind: "reuse", leaseUntil: expiredIso, leaseReason: "expired",
 		}),
 	});
-	const task = makeTask(taskId, { "node-c4": { id: "node-c4", assignee: "worker-c4", status: "in_progress" } });
+	const task = makeTask(taskId, { "node-c4": { id: "node-c4", assignee: "worker-c4", status: "done" } });
 	await writeStateFile(state);
 	await setupTaskJson(taskId, task);
 	const { pi } = makePiMock();
@@ -266,7 +266,7 @@ console.log("\n[C5] lease valid but cross-task → cross-task rule wins (skipped
 			leaseKind: "reuse", leaseUntil: futureIso, leaseReason: "reuse",
 		}),
 	});
-	const task = makeTask(taskId, { "node-c5": { id: "node-c5", assignee: "worker-c5", status: "in_progress" } });
+	const task = makeTask(taskId, { "node-c5": { id: "node-c5", assignee: "worker-c5", status: "done" } });
 	await writeStateFile(state);
 	await setupTaskJson(taskId, task);
 	const { pi } = makePiMock();
@@ -318,7 +318,7 @@ console.log("\n[C7] PI_SWARM_KEEP_TASK_WORKERS=1 → opt-out");
 		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
 		"worker-c7": makeAgent("worker-c7", { spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c7.0" }),
 	});
-	const task = makeTask(taskId, { "node-c7": { id: "node-c7", assignee: "worker-c7", status: "in_progress" } });
+	const task = makeTask(taskId, { "node-c7": { id: "node-c7", assignee: "worker-c7", status: "done" } });
 	await writeStateFile(state);
 	await setupTaskJson(taskId, task);
 	const { pi } = makePiMock();
@@ -348,7 +348,7 @@ console.log("\n[C8] idempotent re-invocation: second call is a no-op");
 		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
 		"worker-c8": makeAgent("worker-c8", { spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c8.0" }),
 	});
-	const task = makeTask(taskId, { "node-c8": { id: "node-c8", assignee: "worker-c8", status: "in_progress" } });
+	const task = makeTask(taskId, { "node-c8": { id: "node-c8", assignee: "worker-c8", status: "done" } });
 	await writeStateFile(state);
 	await setupTaskJson(taskId, task);
 	const { pi } = makePiMock();
@@ -368,6 +368,41 @@ console.log("\n[C8] idempotent re-invocation: second call is a no-op");
 	const eventsAfter2 = await readEvents();
 	const tracesForWorker = eventsAfter2.filter((e) => e.event === "agent.task_sweep_stopped" && e.agentId === "worker-c8");
 	ok("C8 exactly ONE task_sweep_stopped trace (idempotent)", tracesForWorker.length === 1, `got ${tracesForWorker.length}`);
+}
+
+
+// =============================================================================
+// CASE C-R11-2: live assignment in closing graph → worker is NEVER swept
+// (kill-sweep blast-radius guard; 2026-09-01: 6 workers force-killed mid-cycle)
+// =============================================================================
+console.log("\n[C-R11-2] live assigned/in_progress node → skipped as live_assignment_in_graph");
+{
+	await clearEvents();
+	const taskId = "task-c-r112";
+	const state = makeState({
+		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
+		"worker-c1": makeAgent("worker-c1", { spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c1.0" }),
+	});
+	// Re-armed sub-task cycle: one node closed, one node LIVE (assigned to the same worker).
+	const task = makeTask(taskId, {
+		"node-a": { id: "node-a", assignee: "worker-c1", status: "done" },
+		"node-b": { id: "node-b", assignee: "worker-c1", status: "assigned" },
+	});
+	await writeStateFile(state);
+	await setupTaskJson(taskId, task);
+	const { pi } = makePiMock();
+	const path = paths(scratch);
+	const result = await withLock(path, async () => {
+		const st = await readState(path, scratch);
+		const out = await sweepTaskWorkersLocked(pi, scratch, st, taskId, task);
+		await writeState(path, st);
+		return out;
+	});
+	ok("C-R11-2 worker NOT stopped", result.stopped?.includes("worker-c1") !== true, JSON.stringify(result));
+	ok("C-R11-2 skipped reason live_assignment_in_graph", result.skipped?.some((s) => s.agentId === "worker-c1" && s.reason === "live_assignment_in_graph") === true, JSON.stringify(result));
+	const finalState = await readStateFile();
+	ok("C-R11-2 worker still running", finalState.agents["worker-c1"]?.status === "running");
+	ok("C-R11-2 activeTaskIds preserved", Array.isArray(finalState.agents["worker-c1"]?.activeTaskIds) && finalState.agents["worker-c1"].activeTaskIds.includes(taskId));
 }
 
 console.log(`\nAGENT-RETIREMENT-SWEEP ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);

@@ -38,7 +38,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs, trace } = await import(join(here, "src", "state.ts"));
 const { evaluateTaskGraphStallNudgeLocked, evaluateIdleGoalNudgeLocked, resolveTaskStallLocked } = await import(join(here, "src", "reconcile.ts"));
 const { ensureOrchestrator } = await import(join(here, "src", "identity.ts"));
-const { applyTaskStatus, computeReadyNodes, mintNodeAttempt, resolveNodeScope } = await import(join(here, "src", "taskgraph.ts"));
+const { applyTaskStatus, computeReadyNodes, mintNodeAttempt, resolveNodeScope, computeTaskStatus } = await import(join(here, "src", "taskgraph.ts"));
 
 const dir = await mkdtemp(join(tmpdir(), "task-liveness-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
@@ -442,6 +442,28 @@ console.log("\n[14] terminal=true -> trace task_stall.nudge.resolved emitted");
 	// Trace is fire-and-forget; give it a tick to flush
 	await new Promise((r) => setTimeout(r, 50));
 	ok("task_stall.nudge.resolved trace emitted", (await countEvents("task_stall.nudge.resolved")) >= 1);
+}
+
+// R11-2 (kill-sweep root cause): `done` must require that NO live assignment remains in the
+// graph, not merely that every graph-terminal node is done. Regression: 2026-09-01, 6 force-kills
+// — a re-armed sub-task node (assigned) + done terminal set derived `done`, triggering
+// releaseTaskFromAllAgents + sweepTaskWorkersLocked on live assignees.
+{
+	const mkNode = (status, assignee) => ({ status, assignee, attempts: 1, role: "worker" });
+	const task = {
+		taskId: "r112", title: "t", goal: "g", status: "in_progress",
+		nodes: {
+			commit: mkNode("done", "orchestrator"),
+			test: mkNode("done", "r80-tester"),
+			implement: mkNode("assigned", "fs-implementer"),
+		},
+		edges: [ { from: "implement", to: "test" }, { from: "test", to: "commit" } ],
+	};
+	ok("R11-2: done terminals + assigned re-armed node != done", computeTaskStatus(task) !== "done");
+	const closed = { ...task, nodes: { ...task.nodes, implement: mkNode("done", "fs-implementer") } };
+	ok("R11-2: all nodes done (incl. non-terminal) => done", computeTaskStatus(closed) === "done");
+	const freshCycle = { ...task, nodes: { ...task.nodes, implement: mkNode("ready", undefined) } };
+	ok("R11-2: ready (unassigned, pending work) node != done", computeTaskStatus(freshCycle) !== "done");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

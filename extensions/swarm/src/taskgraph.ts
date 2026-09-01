@@ -1,9 +1,10 @@
 // === swarm/taskgraph.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { existsSync, readFileSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, DEFAULT_STALE_OPEN_THRESHOLD_MS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_STALE_OPEN_SURFACED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
+import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, PI_SWARM_PROXY_METRIC_INTERVAL_MS, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_PROXY_METRIC_EMIT, TRACE_STALE_OPEN_SURFACED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
 import { paths, readTaskState, taskPaths, trace, traceTask, writeState } from "./state.ts";
@@ -940,7 +941,12 @@ export function computeTaskStatus(task: TaskState): TaskStatus {
 	const nodes = Object.values(task.nodes).filter((n) => n.status !== "cancelled");
 	if (nodes.some((n) => n.status === "failed")) return "failed";
 	const terminals = Object.keys(task.nodes).filter((id) => isGraphTerminalNode(task, id) && task.nodes[id].status !== "cancelled").map((id) => task.nodes[id]);
-	if (terminals.length && terminals.every((n) => n.status === "done" || n.status === "skipped")) return "done";
+	// R11-2: `done` additionally requires that NO live assignment remains anywhere in the graph.
+	// Graph-terminal completion alone is insufficient when a sub-task cycle re-arms an earlier node
+	// (rework/reuse): a done terminal set + an assigned/in_progress/ready node must stay in_progress,
+	// or the task-close worker sweep force-kills agents mid-assignment (6 kills, 2026-09-01).
+	const liveAssignment = nodes.some((n) => n.status === "assigned" || n.status === "in_progress" || n.status === "ready");
+	if (terminals.length && !liveAssignment && terminals.every((n) => n.status === "done" || n.status === "skipped")) return "done";
 	// Task-level blocked: every active (non-terminal, non-pending) node is blocked => the task cannot
 	// make progress. Pure (derived from node states, not the possibly-stale task.currentNodes); resumable
 	// (a node leaving `blocked` returns the task to in_progress/done). Cancelled nodes are excluded.
@@ -1079,6 +1085,7 @@ export async function sweepTaskWorkersLocked(
 	cwd: string,
 	st: SwarmState,
 	taskId: string,
+	freshTask?: TaskState,
 ): Promise<SweepOutcome> {
 	// Opt-out check (first — short-circuit before any state read or trace).
 	if (process.env[PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV] === "1") {
@@ -1093,12 +1100,17 @@ export async function sweepTaskWorkersLocked(
 	//   - cur has other tasks, no taskId -> pre-release = [taskId, ...cur] (cross-task agent).
 	//   - cur empty AND no link          -> pre-release = [] (never on this task).
 	const tp = taskPaths(paths(cwd), taskId);
-	let task: TaskState | null = null;
-	try { task = await readTaskState(tp.taskJson); } catch { /* missing/unreadable: skip graph check */ }
+	let task: TaskState | null = freshTask ?? null;
+	// Prefer the caller's in-memory snapshot (terminal close mutates nodes AFTER the last disk
+	// write in some paths — R11-2 guard must not read a stale graph). Fall back to disk read.
+	if (!task) { try { task = await readTaskState(tp.taskJson); } catch { /* missing/unreadable: skip graph check */ } }
 	const assignedInClosingTask = new Set<string>();
 	if (task) {
 		for (const n of Object.values(task.nodes)) {
-			if (n.assignee && n.assignee !== "orchestrator" && (n.status === "assigned" || n.status === "in_progress")) {
+			// R11-2: any node CURRENTLY OR FORMERLY assigned (assignee stamp survives closure) —
+			// with the fresh in-memory snapshot, terminal nodes are already done at sweep time and
+			// the old assigned/in_progress filter would drop the very workers this sweep exists for.
+			if (n.assignee && n.assignee !== "orchestrator") {
 				assignedInClosingTask.add(n.assignee);
 			}
 		}
@@ -1137,6 +1149,19 @@ export async function sweepTaskWorkersLocked(
 		if (!eligible) {
 			if (wasInClosingTask && remainingAfterClose.length > 0) skipped.push({ agentId: agent.id, reason: "cross_task_active" });
 			continue;
+		}
+		// R11-2 blast-radius guard (belt to the computeTaskStatus suspenders): never stop an
+		// agent that still holds a live assignment (assigned/in_progress/ready node) in the
+		// closing task's graph, whatever the roll-up derived. Re-armed sub-task cycles depend
+		// on this when a stale task.status=done is repaired by a later path (reconcile mark).
+		if (task) {
+		const stillAssigned = Object.values(task.nodes).some(
+				(n) => n.assignee === agent.id && (n.status === "assigned" || n.status === "in_progress"),
+			);
+			if (stillAssigned) {
+				skipped.push({ agentId: agent.id, reason: "live_assignment_in_graph" });
+				continue;
+			}
 		}
 		// === Issue 82: lease-aware park-or-stop (precedes stop) ===
 		// When the orchestrator stamped an explicit lease on the agent, honor it BEFORE stopping.
@@ -1314,6 +1339,65 @@ export async function staleOpenAssignmentScanLocked(p: Paths, st: SwarmState, no
 		}
 	}
 	return { surfaced, inspected, alreadySurfaced };
+}
+
+// === Issue 83c — proxy metric emit (pump-tick phase) ===
+// Cheap, read-only snapshot of the stale-open / hung-but-alive / supersession surface.
+// The pump calls this AFTER stale-open scanning and BEFORE nudges so the snapshot reflects
+// the current tick's repairs. Emission is bounded by PI_SWARM_PROXY_METRIC_INTERVAL_MS and
+// is idempotent within the interval: repeated calls only refresh the in-memory snapshot.
+export async function proxyMetricEmitLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ emitted: boolean; reason: string; metrics: { hungButAlive: number; staleOpen: number; supersessionChurn: number; lastEmitAt?: string } }> {
+	const intervalMs = Number(process.env.PI_SWARM_PROXY_METRIC_INTERVAL_MS ?? PI_SWARM_PROXY_METRIC_INTERVAL_MS);
+	const thresholdMs = Number(process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ?? DEFAULT_STALE_OPEN_THRESHOLD_MS);
+	const heartbeatStaleMs = DEFAULT_AGENT_HEARTBEAT_STALE_MS;
+	const metrics = (st.proxyMetrics ||= { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0 });
+	const lastEmitMs = metrics.lastEmitAt ? new Date(metrics.lastEmitAt).getTime() : 0;
+	if (lastEmitMs && nowMs - lastEmitMs < intervalMs) {
+		return { emitted: false, reason: "interval_pending", metrics: { ...metrics } };
+	}
+	let staleOpen = 0;
+	let supersessionChurn = 0;
+	const hungCandidates = new Set<string>();
+	if (existsSync(p.tasksDir)) {
+		let taskDirs: string[] = [];
+		try { taskDirs = await readdir(p.tasksDir); } catch { taskDirs = []; }
+		for (const taskDir of taskDirs) {
+			const tp = taskPaths(p, taskDir);
+			if (!existsSync(tp.taskJson)) continue;
+			let task: TaskState;
+			try { task = await readTaskState(tp.taskJson); } catch { continue; }
+			for (const node of Object.values(task.nodes)) {
+				if (!node || (node.status !== "assigned" && node.status !== "in_progress")) continue;
+				const lastProgressMs = node.lastProgressAt ? new Date(node.lastProgressAt).getTime() : 0;
+				const lastActivityMs = node.lastActivityAt ? new Date(node.lastActivityAt).getTime() : 0;
+				const anchorMs = Math.max(lastProgressMs, lastActivityMs);
+				const staleAtMs = anchorMs ? nowMs - anchorMs : Number.POSITIVE_INFINITY;
+				if (staleAtMs > thresholdMs) {
+					staleOpen++;
+					if (node.assignee) hungCandidates.add(node.assignee);
+				}
+				const windowStartMs = node.supersessionWindowStart ? new Date(node.supersessionWindowStart).getTime() : 0;
+				if (node.supersessionCount && windowStartMs && nowMs - windowStartMs <= intervalMs) supersessionChurn += node.supersessionCount;
+			}
+		}
+	}
+	let hungButAlive = 0;
+	for (const agentId of hungCandidates) {
+		const agent = st.agents[agentId];
+		if (!agent) continue;
+		ensureAgentDefaults(agent);
+		if (agent.status !== "running" || agent.runtimeStatus !== "idle") continue;
+		const hbMs = agent.lastHeartbeatAt ? new Date(agent.lastHeartbeatAt).getTime() : 0;
+		if (!hbMs || nowMs - hbMs > heartbeatStaleMs) continue;
+		if ((agent.activeTaskIds?.length ?? 0) === 0) continue;
+		hungButAlive++;
+	}
+	metrics.hungButAlive = hungButAlive;
+	metrics.staleOpen = staleOpen;
+	metrics.supersessionChurn = supersessionChurn;
+	metrics.lastEmitAt = new Date(nowMs).toISOString();
+	await trace(p, TRACE_PROXY_METRIC_EMIT, { emitAt: metrics.lastEmitAt, hungButAlive, staleOpen, supersessionChurn, intervalMs, thresholdMs, heartbeatStaleMs }).catch(() => {});
+	return { emitted: true, reason: "emitted", metrics: { ...metrics } };
 }
 
 // Apply gate updates { gateName: { status, by?, artifact? } }. `by` defaults to the acting agent.

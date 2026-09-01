@@ -237,7 +237,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// that happens the auto-close path already released assignments via releaseNodeAssignment,
 				// but workers spawned-for-task with empty active-task sets still linger. The sweep runs
 				// only on terminal transitions and is a no-op when nothing is eligible.
-				if (createTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, taskId);
+				if (createTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, taskId, task);
 				// Actionable = newly-ready nodes PLUS already-ready unassigned nodes (e.g. a fresh task's start node,
 				// which is born status:"ready" and lands in `current`, not the raw `ready` set). Keeps the "Ready:"
 				// report consistent with swarm_next_nodes so orchestrators see what is assignable right now.
@@ -616,7 +616,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// Issue 26 — task-close worker sweep (terminal transition site #2). Auto-closing an
 				// orchestrator terminal node via this assign (e.g. a one-node graph or terminal-edge
 				// node) drives the task terminal; sweep the freshly-spawned exclusive workers.
-				if (assignTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId);
+				if (assignTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId, task);
 
 				const replyTarget = params.replyTarget || me;
 				const conversationId = `task:${task.taskId}:${params.nodeId}`;
@@ -800,7 +800,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						resolveTaskStallLocked(p, st, task.taskId, "claim");
 						// Issue 26 — task-close worker sweep (terminal transition site #3). A claim
 						// that closes the task (e.g. a terminal-node claim) drives the sweep path.
-						if (claimTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId);
+						if (claimTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId, task);
 						await writeTaskState(tp, task);
 						await writeState(p, st);
 						await traceTask(tp, "task.node.claimed", { taskId, nodeId: params.nodeId, claimer: me, priorAssignee: null, priorStatus, attemptId, created: minted.created });
@@ -1114,7 +1114,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					// sweep runs AFTER releaseTaskFromAllAgents so every closed-task pointer is
 					// gone from agents before eligibility is computed. Safe under concurrent
 					// close because we are inside the same withLock(p) the caller holds.
-					await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId);
+					await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId, task);
 				}
 				const isNodeClosing = newStatus === "done" || newStatus === "failed" || newStatus === "blocked" || newStatus === "cancelled";
 				if (isNodeClosing || taskStatusChange.terminal) {
