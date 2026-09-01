@@ -796,7 +796,7 @@ round-2 cross-task lane. The R9 a3 cross-task agents that still hold an
 
 ### Issue 83 — Row 76 phase 1 sub-tasks and metric staging — P1
 
-**Status:** proposed. **Priority:** P1. **Source:** R9 a4/a5 sequencing review.
+**Status:** fixed 2026-09-01 (`f5f2025` 83a, `8b05e31` 83b, `044bf2b` 83c; review APPROVED per sub-task). **Priority:** P1. **Source:** R9 a4/a5 sequencing review.
 
 Row 76 is ready to start, but the batch must stay narrow so evidence remains interpretable. The next phase should be split into explicit sub-tasks rather than bundled with broader lifecycle cleanup.
 
@@ -813,7 +813,7 @@ Row 76 is ready to start, but the batch must stay narrow so evidence remains int
 
 ### Issue 84 — swarm audit tooling + trace retention — P1
 
-**Status:** implemented-pending-verify. **Priority:** P1. **Source:** user request 2026-08-31 + orchestrator trace-debt review (1.16M events / 256MB in one session; analysis is ad-hoc grep today).
+**Status:** fixed 2026-09-01 (`d3ad4da`; REJECT F1-F13 → full correction round → APPROVE with operational proof: 288MB live trace auto-rotated to 313KB during review, INV1 verified end-to-end 28ms). **Priority:** P1. **Source:** user request 2026-08-31 + orchestrator trace-debt review (1.16M events / 256MB in one session; analysis is ad-hoc grep today).
 
 The append-only `events.jsonl` audit trail is complete but unprocessed: no reader tooling, no retention, no invariant checks. Ritual agents and humans grep 256MB by hand.
 
