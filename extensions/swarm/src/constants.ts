@@ -305,12 +305,14 @@ export const ORCHESTRATOR_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
 	"swarm_update_task",
 	"swarm_task_status",
 	"swarm_reconcile",
+	"swarm_audit",
 	// Orchestration surface (5 additional):
 	"swarm_agent_status",
 	"swarm_list_agents",
 	"swarm_spawn_agent",
 	"swarm_create_task",
 	"swarm_assign_task",
+	"swarm_audit",
 	// Goal tools (2):
 	"swarm_set_goal",
 	"swarm_mark_goal_done",
@@ -390,7 +392,7 @@ export const DEFAULT_AGENT_HEARTBEAT_STALE_MS = 600_000; // 10 minutes
 // Mirrors the existing task-liveness 5-minute threshold; env override
 // PI_SWARM_STALE_OPEN_THRESHOLD_MS lets operators tighten / loosen. The scan is idempotent
 // within the window: re-running before threshold expiry produces 0 additional surfaces.
-export const DEFAULT_STALE_OPEN_THRESHOLD_MS = 300_000; // 5 minutes
+export const DEFAULT_STALE_OPEN_THRESHOLD_MS = 30_000; // 30s — interactive swarm liveness (user directive 2026-09-01: 5min meant ≥5min of silence before the first nudge; real work updates lastProgressAt on every tool_execution_end, so 30s idle+no-progress is a settled worker with near-certainty). Env PI_SWARM_STALE_OPEN_THRESHOLD_MS still overrides for long-running tools.
 
 // === Issue 82 (review item 1): tmux-probe throttle ledger trace ===
 // Emitted by `agentHeartbeatGCLocked` gate 2 whenever a tmux probe is skipped because the agent's
@@ -469,6 +471,22 @@ export const PI_SWARM_PROXY_METRIC_INTERVAL_MS =
 	Number(process.env.PI_SWARM_PROXY_METRIC_INTERVAL_MS) > 0
 		? Math.floor(Number(process.env.PI_SWARM_PROXY_METRIC_INTERVAL_MS))
 		: DEFAULT_PROXY_METRIC_INTERVAL_MS;
+
+// === Issue 84: trace audit + rotation retention policy ===
+// Audit reads stay bounded even on very large trace ledgers. Rotation trims the hot trace file
+// outside the swarm lock and keeps only a few days / a few generations of compressed history.
+export const DEFAULT_TRACE_ROTATE_BYTES =
+	Number(process.env.PI_SWARM_TRACE_ROTATE_BYTES) > 0
+		? Math.floor(Number(process.env.PI_SWARM_TRACE_ROTATE_BYTES))
+		: 50 * 1024 * 1024;
+export const DEFAULT_TRACE_RETENTION_MS =
+	Number(process.env.PI_SWARM_TRACE_RETENTION_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_TRACE_RETENTION_MS))
+		: 3 * 24 * 60 * 60 * 1000;
+export const DEFAULT_TRACE_KEEP_GENERATIONS =
+	Number(process.env.PI_SWARM_TRACE_KEEP_GENERATIONS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_TRACE_KEEP_GENERATIONS))
+		: 5;
 
 // === Issue 28 — rework reopen trace ===
 // Emitted when activateReworkNodes reopens a previously-done/failed/skipped node because a rework

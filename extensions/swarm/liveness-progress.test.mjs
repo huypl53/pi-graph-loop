@@ -22,6 +22,9 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
+// Pin the threshold for these fixtures (ages 1-8min scale). The DEFAULT (30s, interactive
+// liveness per user directive 2026-09-01) is asserted separately at the bottom (C-default).
+process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS = "300000";
 const tg = await import(join(here, "src/taskgraph.ts"));
 const { staleOpenAssignmentScanLocked, ensureNodeActivityStamp } = tg;
 const { paths, withLock, readState, writeState } = await import(join(here, "src/state.ts"));
@@ -110,6 +113,15 @@ function makeState(scratch, tasks) {
 // =============================================================================
 // CASE 1: ensureNodeActivityStamp stamps lastProgressAt on tool execution
 // =============================================================================
+// =============================================================================
+// C-default: interactive liveness default is 30s (user directive 2026-09-01)
+// =============================================================================
+{
+	const { DEFAULT_STALE_OPEN_THRESHOLD_MS } = await import(join(here, "src", "constants.ts"));
+	ok("C-default stale-open threshold is 30_000", DEFAULT_STALE_OPEN_THRESHOLD_MS === 30_000, String(DEFAULT_STALE_OPEN_THRESHOLD_MS));
+}
+
+
 console.log("\n[C1] ensureNodeActivityStamp stamps lastProgressAt on tool execution (in-memory + durable)");
 {
 	const scratch = await newScratch();
