@@ -332,6 +332,7 @@ export function checkStallNotificationStale(
 	nodeId: string,
 	agentId: string,
 	nowMs: number,
+	opts?: { freshAssignment?: boolean },
 ): NotificationStaleness {
 	const evidence: string[] = [];
 	const node = task.nodes[nodeId];
@@ -393,6 +394,15 @@ export function checkStallNotificationStale(
 	}
 
 	// (6) Agent stopped / unhealthy with grace (SETTLE_NOTIFY_COOLDOWN_MS per plan §2 C4).
+	// R11-5: NEVER applies to a fresh assignment mint (swarm_assign_task passes freshAssignment) —
+	// an agent being `stopped` at assign time is the normal restart-the-pane flow; fencing the
+	// brand-new canonical assignment because the OLD canonId is old deadlocks the worker
+	// (live incident 2026-09-01 08:25: task.assign.fenced agent_stopped → worker self-assign
+	// attempt → ORCHESTRATOR_AUTHORITY_REQUIRED → settled idle with the node open).
+	if (opts?.freshAssignment) {
+		evidence.push("fresh_assignment: skipping agent-stopped staleness (assign path)");
+		return { stale: false, reason: null, evidence };
+	}
 	const agent = st.agents[agentId];
 	if (agent && (agent.status === "stopped" || agent.health === "unhealthy")) {
 		const assignmentAge = canonId && st.messages[canonId]?.createdAt

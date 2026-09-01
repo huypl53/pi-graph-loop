@@ -630,7 +630,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// sequence that leaves the node in an inconsistent state. The assignment record still
 				// mutates (the worker holds the lease) but the canonical assignment message is suppressed
 				// and replaced with an informational fence trace.
-				const assignStaleCheck = checkStallNotificationStale(st, task, params.nodeId, assignee.id, Date.now());
+				const assignStaleCheck = checkStallNotificationStale(st, task, params.nodeId, assignee.id, Date.now(), { freshAssignment: true });
 				if (assignStaleCheck.stale) {
 					await traceTask(tp, "notification.stale.suppressed", { site: "swarm_assign_task.assignment", taskId, nodeId: params.nodeId, reason: assignStaleCheck.reason, evidence: assignStaleCheck.evidence });
 					const fencedKey = `${idempotencyKey}:fenced`;
