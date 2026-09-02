@@ -1,0 +1,30 @@
+# orchestrator-visible-surface-gap: R24. A worker's swarm_send_message result to the orchestrator
+# on a DONE implement node must surface visibly at L3 (pi.sendMessage at the real boundary) WITHOUT
+# the orchestrator needing to manually call swarm_check_mailbox. Live incident 2026-09-02T15:26:06Z:
+# msg-1788362766708-64f55b39 (R23 implement-done result) was durably enqueued (L1/C1 +
+# L1/C2 mailbox_delivered) but suppressed by the per-tick actionability gate (notification.stale
+# .suppressed reason:node_terminal) for 5+ minutes, only surfacing via a manual swarm_check_mailbox
+# at 15:31:09.993Z. R24 fix: result-class exemption in isActionableOrchestratorMessage
+# (requiresAck && !requiresResponse && replyTo) bypasses node_terminal/task_terminal suppression
+# for the close-out shape; nudges keep full gating.
+#
+# Pattern 2 (seeded world + single-actor script) per .agents/skills/mock-llm-scenarios/SKILL.md:
+# launch.sh seeds task-r24-fixture (in_progress, implement node DONE), the worker's
+# swarm_send_message result msg-r24-result-1 (requiresAck:true, requiresResponse:false,
+# replyTo:"msg-r24-assignment", conversationId:"task:task-r24-fixture:implement", idempotencyKey:
+# "r24-result-1") enqueued DURING the orchestrator session_start (idle=true), then this fixture's
+# first turn receives the surfaced result via the pump's real pi.sendMessage call (C4 visible).
+# No manual swarm_check_mailbox is required. Fixture turn 1 ack closes the lifecycle (C5
+# LLM consumption: this fixture turn explicitly invokes swarm_ack_message on the surfaced msg).
+# Replay fixture (orchestrator-visible-surface-gap-replay) drives a second pump tick and asserts
+# zero additional pi.sendMessage for the same logical surface (replay dedupe).
+#
+# Evidence cites (independent per R24 §7.6):
+#   C1 durable append: message.enqueue trace + mailbox JSONL byte delta;
+#   C2 mailbox_delivered: message.deliver.mailbox_only trace (orchestrator has no tmux by design);
+#   C3 real send: pi.sendMessage boundary call count >=1 at the pump (R10-1 counter);
+#   C4 visible surface: pump surfaced the result to the orchestrator session (no manual poll);
+#   C5 LLM consumption: provider transcript records this fixture's first turn receiving the
+#      pump-surfaced result in its request context (customType=swarm-message + display:true).
+{"name":"r24 result surfaced","stopReason":"stop","events":[{"type":"text","delayMs":100,"text":"The worker's R24 result message just surfaced via the real pi.sendMessage boundary on my session_start — no manual swarm_check_mailbox needed. Closing the lifecycle: ack done.","chunks":["The worker's R24 result message just surfaced ","via the real pi.sendMessage boundary on my session_start ","— no manual swarm_check_mailbox needed."]},{"type":"toolcall","delayMs":15,"name":"swarm_ack_message","id":"ack-r24-1","arguments":{"messageId":"msg-r24-result-1","status":"done","note":"R24 result surfaced via L3 (pi.sendMessage at real boundary) — closing lifecycle"}},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"r24 replay tick — dedupe","stopReason":"stop","events":[{"type":"text","delayMs":80,"text":"Second pump tick on the same already-surfaced result: zero new pi.sendMessage calls (per-pid surfaced replay dedupe holds).","chunks":["Second pump tick on the same already-surfaced result: ","zero new pi.sendMessage calls ","(per-pid surfaced replay dedupe holds)."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

@@ -1668,13 +1668,38 @@ export function isActionableOrchestratorMessage(
 		if (idem) taskNodeRef = { taskId: idem[1], nodeId: idem[2] || undefined };
 	}
 	if (taskNodeRef && taskNodeRef.taskId && taskNodeRef.nodeId) {
+		// === R24 result-class exemption (2026-09-03) — task-scoped RESULT messages are not
+		// suppressed by node_terminal/task_terminal. The pump's per-tick actionability gate
+		// misclassifies these as moot historical alerts (the node they report on IS done), but
+		// the recipient — typically the orchestrator PM — needs the result visible at the
+		// surface to advance the task graph. Live incident 2026-09-02T15:26:06Z:
+		// msg-1788362766708-64f55b39 (R23 implement-done result) was durably enqueued
+		// (L1/C1 + L1/C2 mailbox_delivered) and durably classified node_terminal in
+		// `isActionableOrchestratorMessage`, suppressing every pump tick for 5+ minutes
+		// (notification.stale.suppressed reason:node_terminal) and only surfacing via a
+		// manual swarm_check_mailbox at 15:31:09.993Z. The fix: detect result-class by the
+		// minimal fingerprint (requiresAck && !requiresResponse && replyTo set) and treat the
+		// message as actionable so the surface plan carries it. Nudges (canonical
+		// `task:<id>:node:<id>:nudge:...` idempotencyKey) keep full gating — only the close-out
+		// shape is exempted. This predicate is also called from migration back-fill (strictForMigration
+		// = true) and re-trigger (false), so the exemption applies uniformly across the call sites
+		// that filter the per-tick surface plan.
+		// Predicate order: check `isResultClass` FIRST so nudges (which also lack replyTo in our
+		// fingerprint) keep falling through to the existing task/node terminal gates.
+		const isResultClass = Boolean(rec.requiresAck) && rec.requiresResponse === false && Boolean(rec.replyTo);
 		const task = taskIndex[taskNodeRef.taskId];
 		if (!task) return { ok: false, reason: "task_missing" };
+		if (isResultClass) {
+			if (task.status === "done") return { ok: true, reason: "result_class_exempt_task_done" };
+			if (task.status === "failed") return { ok: true, reason: "result_class_exempt_task_failed" };
+			if (task.status === "cancelled") return { ok: true, reason: "result_class_exempt_task_cancelled" };
+		}
 		if (task.status === "done") return { ok: false, reason: "task_done" };
 		if (task.status === "failed") return { ok: false, reason: "task_failed" };
 		if (task.status === "cancelled") return { ok: false, reason: "task_cancelled" };
 		const node = task.nodes[taskNodeRef.nodeId];
 		if (!node) return { ok: false, reason: "node_missing" };
+		if (isResultClass) return { ok: true, reason: "result_class_exempt_node_terminal" };
 		if (TERMINAL_NODE_STATUSES.has(node.status)) return { ok: false, reason: "node_terminal" };
 		// Reassign race: a later assignment message carries a newer idempotencyKey for the same
 		// (task,node) and stamped `superseded` on the prior one. The rec-level superseded flag

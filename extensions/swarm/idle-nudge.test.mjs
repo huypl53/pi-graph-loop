@@ -1112,6 +1112,31 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	ok("R23C-5 nudgeSeq bounded (no storm — seq ≤ 3 OR seq=4 from the first legitimate re-arm in drain)", st.goal.nudgeSeq <= 4, `seq=${st.goal.nudgeSeq}`);
 	ok(`R23C-6 ≤1 total emissions across 5 orbits (storm dead)`, r23cEmissions <= 1, `emissions=${r23cEmissions}`);
 
+	// === R24 section: result-class exemption in the surface-time liveness gate (reconcile.ts).
+	// Plan §4.1 + §7.4: a task-scoped message that is a RESULT — requiresAck && !requiresResponse
+	// && replyTo set — must NOT be suppressed by node_terminal/task_terminal (the states it
+	// reports). Nudges (canonical task:<id>:node:<id>:nudge:* idempotencyKey) keep full gating.
+	// The unit assertions below exercise `isActionableOrchestratorMessage` directly (the predicate
+	// the per-tick actionability filter uses to build `windowMsgs`).
+	const { isActionableOrchestratorMessage } = await import(join(here, "src", "reconcile.ts"));
+	const r24TaskId = "task-r24-result-class";
+	const r24TaskNodeRef = { taskId: r24TaskId, nodeId: "implement" };
+	const r24TaskDone = { id: r24TaskId, status: "done", nodes: { implement: { nodeId: "implement", status: "done" } }, handoffs: [] };
+	const r24TaskInProgress = { id: r24TaskId, status: "in_progress", nodes: { implement: { nodeId: "implement", status: "done" } }, handoffs: [] };
+	const r24ResultRec = { id: "m-result", to: "orchestrator", requiresAck: true, requiresResponse: false, replyTo: "msg-1788360728586-75f828bd", conversationId: `task:${r24TaskId}:implement`, idempotencyKey: "r24-result-1" };
+	const r24NudgeRec = { id: "m-nudge", to: "orchestrator", requiresAck: true, requiresResponse: false, conversationId: `task:${r24TaskId}:node:implement:nudge:stale-open:seq:1`, idempotencyKey: `task:${r24TaskId}:node:implement:nudge:stale-open:seq:1` };
+	const r24TaskIndex = { [r24TaskId]: r24TaskDone };
+	const r24TaskIndexInProgress = { [r24TaskId]: r24TaskInProgress };
+	ok("R24-1 result-class message on DONE implement node → actionable (exempted from node_terminal)", isActionableOrchestratorMessage(r24ResultRec, r24TaskIndex, Date.now(), {}, false).ok === true, "result-class must surface");
+	ok("R24-2 nudge-shaped message on DONE implement node → node_terminal (gate intact)", isActionableOrchestratorMessage(r24NudgeRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal", "nudges keep full gating");
+	ok("R24-3 result-class message on DONE task → result_class_exempt_task_done", isActionableOrchestratorMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "done", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_done");
+	ok("R24-4 result-class message on FAILED task → result_class_exempt_task_failed", isActionableOrchestratorMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "failed", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_failed");
+	ok("R24-5 result-class message on CANCELLED task → result_class_exempt_task_cancelled", isActionableOrchestratorMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "cancelled", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_cancelled");
+	ok("R24-6 result-class message WITHOUT replyTo → falls through to node_terminal (gate intact)", isActionableOrchestratorMessage({ ...r24ResultRec, replyTo: undefined }, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
+	ok("R24-7 result-class message with requiresResponse:true → falls through to node_terminal (gate intact)", isActionableOrchestratorMessage({ ...r24ResultRec, requiresResponse: true }, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
+	ok("R24-8 result-class message on in-progress task + done node → result_class_exempt_node_terminal", isActionableOrchestratorMessage(r24ResultRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "result_class_exempt_node_terminal");
+	ok("R24-9 nudge-shaped on in-progress task + done node → node_terminal (gate intact)", isActionableOrchestratorMessage(r24NudgeRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
+
 	// ---- G6: active-task emission gate still enforced (reset must not bypass it).
 	await setup();
 	const t9 = Date.now();

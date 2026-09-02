@@ -1547,3 +1547,62 @@ node extensions/mock-llm/selftest.test.mjs                                      
 - R23C task: `task-202609030005-r23c-memo-mint-rework`. Same-epoch cap/backoff (R23-G7), R23-B/R23B storm shape (1 reset, 3 emissions, churn rejected), active-task gate (R23-G6), R21 `idle_epoch_advanced`, R22 worker-busy surface rule all preserved.
 - Known corner (documented, accepted): a real worker break followed by turn-start-only churn can carry a stale `["worker-a"]` stamp into one churn epoch → at most ONE wrong-cause reset per genuine worker break. Bounded, not a storm; tightening (stamp at every clear site including future ones) is follow-up hardening.
 - The `turn_start` handler now writes swarm state from a Pi lifecycle hook — a new Pi-runtime boundary crossing. See `pi-runtime-contract.md §10 F15` row (AMENDED 2026-09-03 R23C) for the boundary-counter assertions.
+
+## Operator: R24 worker result is invisible to the orchestrator without manual `swarm_check_mailbox` (2026-09-03)
+
+### When this matters
+
+A worker's `swarm_send_message` result to the orchestrator (the close-out shape: `requiresAck && !requiresResponse && replyTo` set, conversationId task-scoped) is durably enqueued (L1/C1 + L1/C2 `message.deliver.mailbox_only`) but never visibly surfaces — the orchestrator only sees it after a manual `swarm_check_mailbox` poll. Tell: `notification.stale.suppressed site=orchestrator_pump.surface reason:node_terminal` traces repeatedly with ZERO `pi.sendMessage` at the pump boundary, followed by a single `message.lifecycle_derived_shadow source=mailbox.surfaced via=swarm_check_mailbox` when the human PM (or test node) finally polls the mailbox. Live incident 2026-09-02T15:26:06.708Z: `msg-1788362766708-64f55b39` (R23 implement-done result), durably enqueued at 15:26:06.714Z, durably suppressed at 15:26:06.913Z + 15:28:08.886Z, manual surfaced at 15:31:09.993Z. Adjacent cases: any task-scoped RESULT/REPLY/ASSIGNMENT message on a terminal node/task — the recipient PM cannot advance the graph without polling.
+
+### Field diagnosis
+
+1. Confirm the suppression pattern in the durable trace:
+   ```bash
+   swarm_audit({mode:"events", event:"notification.stale.suppressed", since:"<window>"})
+   # Look for site=orchestrator_pump.surface reason=node_terminal on a message with
+   # conversationId matching task:<id>:<node> and replyTo pointing at a prior assignment.
+   ```
+2. Confirm the message was durably delivered (the L1/L2 part of the contract still holds):
+   ```bash
+   tail -100 .pi/swarm/traces/events.jsonl | grep <msgId> | grep -E "message.enqueue|message.deliver.mailbox_only"
+   ```
+3. Confirm the manual-poll recovery path is the only visible surface:
+   ```bash
+   tail -200 .pi/swarm/traces/events.jsonl | grep <msgId> | grep "lifecycle_derived_shadow"
+   ```
+   Pre-R24: this is the FIRST visible surface the recipient ever sees (5+ min after enqueue).
+   Post-R24: the recipient sees the result via the pump's real `pi.sendMessage` boundary within
+   the first eligible tick (`agent_settled` / `session_start` / watchdog), NO manual poll needed.
+
+### Verify commands
+
+```bash
+node .pi/swarm/tasks/task-202609022235-r24-orchestrator-visible-surface-gap/artifacts/r24-visible-surface-gap.red.mjs  # RED: 0 pi.sendMessage, 1+ suppression trace / GREEN: 1 pi.sendMessage, 0 suppression trace, 1 control-nudge suppression trace
+node extensions/swarm/idle-nudge.test.mjs                                                          # 145 passed incl. R24 section (9 assertions)
+node extensions/swarm/swarm-goal.test.mjs                                                          # 67 passed
+node extensions/swarm/stale-open-nudge.test.mjs                                                    # 6 passed
+node extensions/swarm/r15-normal-orchestrator-result.test.mjs                                       # 15 passed
+node extensions/swarm/r13-orchestrator-unknown-target.test.mjs                                     # 24 passed
+node extensions/mock-llm/selftest.test.mjs                                                         # 71 scenario models incl. orchestrator-visible-surface-gap
+# Real mock-llm lane (dedicated tmux):
+bash .pi/swarm/tasks/task-202609022235-r24-orchestrator-visible-surface-gap/artifacts/lanes/orchestrator-visible-surface-gap/launch.sh /tmp/r24-lane
+# Evidence captured in <scratch>/.pi/swarm/traces/events.jsonl:
+#   - mailbox.orchestrator_pump reason=session_start count=1 ids=["msg-r24-result-1"]
+#   - message.ack status=done (fixture turn 1 ack closes the lifecycle — C5 LLM consumption)
+#   - Subsequent watchdog ticks count=0, deferred=0 (replay dedupe holds)
+```
+
+### What changed
+
+- `extensions/swarm/src/reconcile.ts` `isActionableOrchestratorMessage` task-scoped branch: a message whose fingerprint is `requiresAck && !requiresResponse && replyTo` (the close-out shape) is exempted from `node_terminal` / `task_done` / `task_failed` / `task_cancelled` suppression. Predicate checks `isResultClass` BEFORE the task-terminal legs so nudges (which lack `replyTo`) keep full gating.
+- No new `pi.sendMessage` call site is introduced (the existing pump boundary counts at the real `pumpOrchestratorRealSend` counter). The change is a predicate flip on the existing per-tick actionability filter that builds `windowMsgs`.
+- The semantic distinction (durable mailbox delivery does not imply visible Pi surface or LLM consumption) is now TRUE for result-class messages: L1+C1 + L2+C2 mailbox_only delivers as before; L3+C3+C4 visible surface now fires; L4+L5 (LLM consumption) only fires when the pump surfaces it via real `pi.sendMessage` with `triggerTurn: true` (C5 not asserted unless provider transcript proves it — fixture's first turn does ack `done` which proves C5).
+- Nudges (canonical `task:<id>:node:<id>:nudge:*` idempotencyKey without `replyTo`) keep full gating — proven by the R24-2/R24-6/R24-7/R24-9 unit assertions and the driver CONTROL-nudge that still produces a suppression trace under the fix.
+- Stale filtering preserved: `acked` / `dead_letter` / `superseded` / `wrong_recipient` early-return paths are unchanged; `notification.batch.suppressed` census still counts terminal suppressions for observable behavior.
+- Priority/abort semantics unchanged: `deliverAs` / `priority` plumbing is untouched; the `bypassBusyForHigh` R13 P0 / R13 P1 surface gate is untouched; high-priority unknown-target orchestrator bypass still works for high-priority nudges.
+- Replay dedupe preserved: per-pid `surfaced` ledger + `consumerReceipts.orchestrator.entries` still bound the surface to once per recipient per pid per session; subsequent watchdog ticks for the same already-surfaced msgId produce `count=0, deferred=0` (verified in the live lane events.jsonl).
+- The result-class fingerprint is intentionally NARROW (`requiresAck && !requiresResponse && replyTo`): only the close-out shape is exempted. A nudge that someone sloppily attaches `replyTo` to would also pass — but that's a producer-side bug (nudges are produced by the swarm, not user code, so this is bounded).
+- Mock-LLM fixture `extensions/mock-llm/fixtures/orchestrator-visible-surface-gap.jsonl` + selftest count (71). Lane launcher at `artifacts/lanes/orchestrator-visible-surface-gap/launch.sh` seeds the live-incident shape (task in_progress + implement DONE + result-class msg mailbox JSONL appended) and runs `pi --provider mock-llm --model orchestrator-visible-surface-gap` in a dedicated tmux window.
+- R24 task: `task-202609022235-r24-orchestrator-visible-surface-gap`. No related regressions: R13 P0 bypass + R13 P1 liveness gate (R13-ORCHESTRATOR-UNKNOWN-TARGET 24/24 PASS), R15 normal-priority surface (R15-NORMAL-ORCHESTRATOR-RESULT 15/15 PASS), R22 worker-busy surface rule (R22-REGRESSION 1/1 PASS), R23C storm guard (idle-nudge 145/0 PASS incl. R23/R23B/R23C sections), all preserved.
+- Known corner (documented, accepted): the predicate exemption applies to the close-out shape regardless of whether `replyTo` points at an existing message. A result message with a stale `replyTo` (e.g., pointing at a superseded assignment) will still surface — bounded by the `acked` / `dead_letter` / `superseded` early-return paths and the `consumerReceipts` dedupe ledger, so it's at most once per recipient.
+- New Pi-runtime boundary crossing counted: the live lane's real `pi.sendMessage` boundary call (`pumpOrchestratorRealSend`) at `mailbox.orchestrator_pump reason=session_start count=1 ids=["msg-r24-result-1"]` is the C-R24-1 boundary assertion. C-R24-2 (replay dedupe ≥0 subsequent watchdog ticks) and C-R24-3 (CONTROL nudge control suppressed in the driver — gate intact) round out the R10-1 boundary discipline. See `pi-runtime-contract.md §10 F16` row for the contract claim being corrected.
