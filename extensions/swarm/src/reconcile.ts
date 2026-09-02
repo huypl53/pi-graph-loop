@@ -1590,8 +1590,10 @@ function fingerprintMessage(rec: { id: string; updatedAt?: string; createdAt?: s
 // Acceptance criterion: "Deferred stale nudge is suppressed if node was assigned or an agent became
 // busy before delivery." A nudge queued while a stall condition held may be stale by the time the
 // pump is idle and able to surface it. This predicate re-checks at surface time:
-//   - goal-idle nudges: suppressed if any effective agent became busy, actionable graph work
-//     appeared, or the idle epoch advanced past the message's creation (stale idle window);
+//   - goal-idle nudges: suppressed if actionable graph work appeared on a LIVE task, or
+//     the idle epoch advanced past the message's creation (stale idle window). R22
+//     (2026-09-02): the previous "any effective agent became busy" leg was REMOVED — see
+//     the goalKey branch comment below for the emission-vs-surface starvation rationale.
 //   - graph-stall nudges: suppressed if agents are busy or no actionable unassigned node remains;
 //   - graph-advance / initial-ready nudges: suppressed via checkStallNotificationStale (node
 //     assigned/terminal/reassigned/task closed).
@@ -1633,10 +1635,26 @@ export async function staleSurfaceReason(
 	let staleReason: string | null = null;
 	let evidence: string[] = [];
 	if (goalKey) {
-		if (!liveIdle) {
-			staleReason = "agent_busy";
-			evidence = ["effective-agent-set-not-idle"];
-		} else if (liveGraphActionable) {
+		// === R22 (2026-09-02) — the agent_busy leg is REMOVED for goal keys. ===
+		// Emission (evaluateIdleGoalNudgeLocked) already required
+		// allEffectiveIdleAgents().allIdle, so a worker that turned busy AFTER emission is
+		// the nudge's own requested action succeeding (the orchestrator assigned work), not
+		// message staleness. Re-checking it here contradicted the emission-time gate and
+		// starved every queued goal nudge at surface time: live incident
+		// 2026-09-02T12:03:36..12:30Z — nudges goal-1788350610025-7efafe
+		// (msg-1788350616129-691b4e7c / -0aea3216 / -c6f752b8) suppressed with
+		// `notification.stale.suppressed site=orchestrator_pump.surface reason=agent_busy`,
+		// mailbox.orchestrator_pump_stuck_escalated every tick for 26+ min, ZERO
+		// pi.sendMessage at the boundary, while consecutiveNoResolveNudges burned to
+		// max+backoff on messages the orchestrator LLM never saw. R21 principle: surface
+		// revalidation must AGREE with emission-time gating, never contradict it.
+		// The legs that can make the MESSAGE itself false remain:
+		//   - LIVE actionable graph work (R21 C-R21-3 preserved);
+		//   - idle-epoch advanced past creation (the busy→idle edge after emission anchors a
+		//     NEW epoch — this is the anti-immortality guard that bounds nudge lifetime).
+		// The R10 anti-storm gate is unaffected: it lives at EMISSION time
+		// (goal.nudge.suppressed_by_active_task in evaluateIdleGoalNudgeLocked).
+		if (liveGraphActionable) {
 			staleReason = "actionable_graph";
 			evidence = ["actionable-graph-work-present"];
 		} else if (Number.isFinite(idleAnchorMs) && createdAt < idleAnchorMs) {

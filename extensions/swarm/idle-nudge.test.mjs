@@ -22,8 +22,8 @@ process.env.PI_SWARM_TASK_STALL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs } = await import(join(here, "src", "state.ts"));
-const { evaluateIdleGoalNudgeLocked, evaluateTaskGraphStallNudgeLocked, staleSurfaceReason, updateIdleEpochLocked } = await import(join(here, "src", "reconcile.ts"));
-const { ensureOrchestrator } = await import(join(here, "src", "identity.ts"));
+const { evaluateIdleGoalNudgeLocked, evaluateTaskGraphStallNudgeLocked, staleSurfaceReason, updateIdleEpochLocked, pumpOrchestratorMailbox } = await import(join(here, "src", "reconcile.ts"));
+const { ensureOrchestrator, heartbeatOrchestratorLeader } = await import(join(here, "src", "identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "src", "mailbox.ts"));
 
 const dir = await mkdtemp(join(tmpdir(), "idle-nudge-"));
@@ -679,6 +679,152 @@ console.log("\n[N] ghost agents do not count as effective workers (vacuous sanit
 	const r = await tickGoal(t0);
 	ok("ghosts-only swarm (effective=0) suppresses with no_live_workers", r.emitted === false && r.reason === "no_live_workers", JSON.stringify(r));
 	ok("vacuous trace recorded for ghost-only swarm", (await countEvents("goal.nudge.held_no_live_workers")) >= 1);
+}
+
+// =============================================================
+// R22 — goal nudges must survive worker-busy at surface time.
+// Live incident 2026-09-02T12:03:36..12:30Z: 3 goal nudges emitted under the all-idle
+// gate, then a worker turned busy (the nudge's requested action succeeded), and
+// staleSurfaceReason's goal-key agent_busy leg dropped them at orchestrator_pump.surface
+// FOREVER: stuck_escalated every tick, ZERO pi.sendMessage at the boundary for 26+ min.
+// R21 principle: surface-time revalidation must AGREE with emission-time gating, not
+// re-check a condition emission already guaranteed. Fix (b): the goal-key branch drops
+// the agent_busy leg; the idle_epoch_advanced + live-actionable-graph legs remain.
+// =============================================================
+console.log("\n[R22] goal nudges starve at surface when a worker turns busy after emission");
+{
+	await setup(); // no tasks on disk: the graph leg of staleSurfaceReason passes trivially
+	const t0 = Date.now();
+
+	// ---- Emit 3 goal nudges through the REAL production path while all-idle holds.
+	// Interval env = 1000ms (file header), so ticks at +1000/+2000/+3000 each emit.
+	await tickGoal(t0); // starts the idle epoch (allIdleSinceAt = t0)
+	const e1 = await tickGoal(t0 + 1000);
+	ok("R22 emission: nudge 1 emitted under the all-idle gate", e1.emitted === true && e1.reason === "emitted", JSON.stringify(e1));
+	await tickGoal(t0 + 2000);
+	await tickGoal(t0 + 3000);
+	let st = await getGoalState();
+	const goalMsgs = Object.values(st.messages)
+		.filter((m) => m.idempotencyKey?.startsWith(`goal:${st.goal.id}:nudge:idle-streak`))
+		.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+	ok("R22 three nudges durably enqueued", goalMsgs.length === 3, `got ${goalMsgs.length}`);
+
+	// ---- THE STARVATION TRIGGER: worker-a turns busy (tool_running) after emission.
+	// This is the nudge's own requested action succeeding (orchestrator assigned work).
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.agents["worker-a"].runtimeStatus = "tool_running";
+		s.agents["worker-a"].tmuxAlive = true; // R10-1 fixture rule: explicit aliveness
+		s.agents["worker-a"].lastHeartbeatAt = new Date(t0 + 3100).toISOString();
+		await writeState(p, s);
+	});
+
+	// ---- R22-S1 (unit, root cause): the goal-key message must NOT be surface-stale
+	// merely because a worker turned busy after emission.
+	st = await getGoalState();
+	const vS1 = await staleSurfaceReason(p, st, goalMsgs[0], /* taskIndex */ {}, t0 + 3200);
+	// RED today: {stale:true, reason:"agent_busy", evidence:["effective-agent-set-not-idle"]}
+	// POST-FIX: stale:false — busy leg removed for goal keys; epoch leg passes
+	// (createdAt ~t0+1000 > anchor t0); graph leg passes (empty taskIndex).
+	ok("R22-S1 goal nudge with post-emission busy worker is NOT surface-stale", vS1.stale === false, JSON.stringify(vS1));
+	if (vS1.stale) ok("R22-S1 (diagnostic) suppression reason", vS1.reason === "<not-stale>", `reason=${vS1.reason}`);
+
+	// ---- Control C2: the idle_epoch_advanced leg must SURVIVE the fix. Workers idle,
+	// fresh anchor, message created an hour before the anchor -> still stale.
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.agents["worker-a"].runtimeStatus = "idle";
+		s.idleNudgeState = { ...(s.idleNudgeState || {}), allIdleSinceAt: new Date(t0 + 4000).toISOString() };
+		await writeState(p, s);
+	});
+	st = await getGoalState();
+	const oldGoalMsg = { id: "r22-synthetic-old-goal", idempotencyKey: `goal:${st.goal.id}:nudge:idle-streak:1`, createdAt: new Date(t0 - 3_600_000).toISOString() };
+	const vC2 = await staleSurfaceReason(p, st, oldGoalMsg, {}, t0 + 5000);
+	ok("R22-C2 epoch-advanced goal nudge stays stale (immortality guard kept)", vC2.stale === true && vC2.reason === "idle_epoch_advanced", JSON.stringify(vC2));
+
+	// ---- Control C3: LIVE actionable graph still suppresses goal keys (C-R21-3 kept).
+	// Synthetic in-memory taskIndex only — the disk stays clean for S2's pump.
+	const vC3 = await staleSurfaceReason(p, st, goalMsgs[0], {
+		"task-r22-ctl-live": {
+			taskId: "task-r22-ctl-live", status: "in_progress", start: "a", edges: [], handoffs: [],
+			nodes: { a: { status: "ready", assignee: undefined, dependsOn: [] } },
+		},
+	}, t0 + 5100);
+	ok("R22-C3 live actionable graph still suppresses goal nudge", vC3.stale === true && vC3.reason === "actionable_graph", JSON.stringify(vC3));
+
+	// ---- Control C1: taskKey graph-stall nudges keep the busy suppression (fix is
+	// goal-key-scoped; synthetic assigned node + busy worker). Reproduces section F
+	// scenario 1 in isolation with the busy worker.
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.agents["worker-a"].runtimeStatus = "tool_running";
+		s.agents["worker-a"].tmuxAlive = true;
+		s.agents["worker-a"].lastHeartbeatAt = new Date(t0 + 5200).toISOString();
+		await writeState(p, s);
+	});
+	st = await getGoalState();
+	const stallCtlMsg = { id: "r22-synthetic-stall", idempotencyKey: "task:task-r22-ctl-stall:node:a:nudge:graph-stall:1", createdAt: new Date(t0 + 5000).toISOString() };
+	const vC1 = await staleSurfaceReason(p, st, stallCtlMsg, {
+		"task-r22-ctl-stall": {
+			taskId: "task-r22-ctl-stall", status: "in_progress", start: "a", edges: [], handoffs: [],
+			nodes: { a: { status: "assigned", assignee: "worker-a", dependsOn: [] } },
+		},
+	}, t0 + 5300);
+	ok("R22-C1 taskKey graph-stall nudge still suppressed by busy worker", vC1.stale === true && vC1.reason === "agent_busy", JSON.stringify(vC1));
+
+	// ---- R22-S2 (R10-1 boundary): idle-orchestrator pump tick must surface the queued
+	// nudges through the REAL pi.sendMessage boundary — not an internal helper. The pi
+	// object's sendMessage pushes into the shared sentMessages array (R10-1 counter).
+	// Claim the leader (as production session_start does) so the pump's second-line
+	// defense doesn't deny the tick — same reason the R13 harness claims it.
+	const prevAgentId = process.env.PI_SWARM_AGENT_ID;
+	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		ensureOrchestrator(s, dir, p);
+		heartbeatOrchestratorLeader(s, t0 + 5400, process.pid, "r22_test_seed");
+		await writeState(p, s);
+	});
+	const ctx = { cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } };
+	// RED today: 0 calls (the stale gate empties toSurface before the send loop).
+	// POST-FIX: >= 1 call; coalescing surfaces exactly ONE per goal group per tick.
+	// Isolate the pump slice to THIS section's incident: the file shares one scratch dir
+	// across all sections, so every prior section's never-pumped goal nudge is still an
+	// unsurfaced requiresAck candidate, and the busy worker clears the idle anchor (pump
+	// phase updateIdleEpochLocked) which would otherwise epoch-suppress that history. Keep
+	// only the current goal's nudges in mailbox + message records — the live-incident slice.
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		const keep = new Set(Object.values(s.messages)
+			.filter((m) => m.idempotencyKey?.startsWith(`goal:${s.goal.id}:nudge:idle-streak`))
+			.map((m) => m.id));
+		for (const id of Object.keys(s.messages)) if (!keep.has(id)) delete s.messages[id];
+		const mb = join(dir, ".pi", "swarm", "mailboxes", "orchestrator.jsonl");
+		try {
+			const lines = (await readFile(mb, "utf8")).trim().split("\n").filter(Boolean)
+				.map((l) => JSON.parse(l)).filter((e) => keep.has(e.id));
+			await writeFile(mb, lines.map((e) => JSON.stringify(e)).join("\n") + "\n");
+		} catch { /* no mailbox yet */ }
+		await writeState(p, s);
+	});
+
+	const sendsAtPumpStart = sentMessages.length;
+	const pump1 = await pumpOrchestratorMailbox(pi, ctx, p, "r22_starve_tick");
+	ok("R22-S2 pump delivers the queued goal nudge (delivered >= 1)", (pump1?.delivered ?? 0) >= 1, `delivered=${pump1?.delivered}`);
+	ok("R22-S2 pi.sendMessage called >= 1 at the real boundary", sentMessages.length - sendsAtPumpStart >= 1, `sends=${sentMessages.length - sendsAtPumpStart}`);
+	if (sentMessages.length - sendsAtPumpStart >= 1) {
+		ok("R22-S2 surfaced as swarm-message", sentMessages[sendsAtPumpStart]?.m?.customType === "swarm-message", `got ${sentMessages[sendsAtPumpStart]?.m?.customType}`);
+		ok("R22-S2 first surface carries triggerTurn", sentMessages[sendsAtPumpStart]?.o?.triggerTurn === true, JSON.stringify(sentMessages[sendsAtPumpStart]?.o));
+	}
+	ok("R22-S2 coalescing surfaces ONE message per goal group (not 3)", sentMessages.length - sendsAtPumpStart === 1, `sends=${sentMessages.length - sendsAtPumpStart}`);
+
+	// Replay guard (R13-S2 pattern): a second idle tick must NOT re-surface the same nudge.
+	const sendsAfterFirst = sentMessages.length;
+	const pump2 = await pumpOrchestratorMailbox(pi, ctx, p, "r22_starve_replay");
+	ok("R22-S2 replay tick does not duplicate surface", sentMessages.length === sendsAfterFirst && (pump2?.delivered ?? 0) === 0, `sends=${sentMessages.length - sendsAfterFirst} delivered=${pump2?.delivered} ids=${JSON.stringify(pump2?.ids)}`);
+
+	if (prevAgentId === undefined) delete process.env.PI_SWARM_AGENT_ID;
+	else process.env.PI_SWARM_AGENT_ID = prevAgentId;
 }
 
 console.log(`\n${fail === 0 ? "IDLE-NUDGE PASS" : "IDLE-NUDGE FAIL"} (${pass} passed, ${fail} failed)`);

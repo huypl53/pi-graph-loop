@@ -1211,3 +1211,34 @@ A second, related problem: the orchestrator repeatedly misread `swarm_agent_stat
 - `C-R21-5` durable surface transition: surfaced messages still update the receipt/surfaced ledger as before (no replay regressions)
 
 **Sequencing:** R21 is a surface-layer parity fix. It does not alter emission-time gating, graph-stall Row 75 semantics, or task close behavior. The only change is the terminal-task exclusion in the goal-key surface revalidation path.
+
+### Row R22 — Goal nudges starve at pump surface when a worker turns busy after emission — P0 (FIXED 2026-09-02)
+
+**Source:** Live incident 2026-09-02T12:03:36–12:30Z. Three goal idle-streak nudges (`msg-1788350616129-691b4e7c`, `-0aea3216`, `-c6f752b8` for goal `goal-1788350610025-7efafe`) were emitted under the all-idle gate and durably enqueued; when a worker then turned `tool_running` (the nudge's requested action succeeding — the orchestrator assigned work), the `staleSurfaceReason()` goal-key `agent_busy` leg suppressed all three at `orchestrator_pump.surface` (`notification.stale.suppressed … reason=agent_busy evidence=[effective-agent-set-not-idle]` at 12:04:08Z) on every subsequent tick: `mailbox.orchestrator_pump_stuck_escalated` fired continuously with an EMPTY surface set (the stale gate runs before coalescing, so the stuck-busy escalation had nothing to steer), ZERO `pi.sendMessage` calls at the pump boundary for 26+ minutes, while `consecutiveNoResolveNudges` burned to max + back-off on messages the orchestrator LLM never saw. This is the `agent_busy` twin of the R21 `actionable_graph` leg — the same emission-vs-surface contradiction (F13) on a different leg.
+
+**Fix:** fix option (b) from the incident review — the goal-key branch of `staleSurfaceReason()` no longer re-validates worker busy-ness. Emission (`evaluateIdleGoalNudgeLocked`) already required `allEffectiveIdleAgents().allIdle`; a worker that turned busy after emission is the success of the nudge's own action, not staleness (R21 principle: surface-time revalidation must AGREE with emission-time gating, never contradict it). The two legs that can make the MESSAGE false remain: `idle_epoch_advanced` (anti-immortality: a nudge created before the current all-idle anchor still drops) and `liveGraphActionable` on LIVE tasks (R21 C-R21-3 preserved). Alternatives rejected: (a) emitting goal nudges priority-high would misuse the R13 P0 unknown-target safety-net semantics and the Issue 86 abort-on-delivery interrupt for a routine floor reminder (and the R13 comment explicitly warns that extending the bypass to normal traffic risks re-arming the R10 suppression storm — the storm gate itself lives at emission and is untouched); (c) making stuck-escalation bypass the stale gate only patches the busy-ORCHESTRATOR sub-case, leaves the idle-orchestrator starvation intact, and substitutes time-pressure (120s) for correctness.
+
+**Files touched:**
+- `extensions/swarm/src/reconcile.ts` — goal-key branch of `staleSurfaceReason()`: `agent_busy` leg removed (epoch + live-graph legs kept), header comment updated
+- `extensions/swarm/idle-nudge.test.mjs` — R22 section: S1 unit (goal key NOT surface-stale with post-emission busy worker), S2 real-boundary assertions via `pumpOrchestratorMailbox` (`pi.sendMessage` ≥1 at the real boundary, coalescing 3→1, replay dedupe), controls C1 (taskKey busy suppression kept) / C2 (epoch leg kept) / C3 (live-graph leg kept)
+- `extensions/mock-llm/fixtures/goal-nudge-surface-starve.jsonl` — Pattern-2 seeded-world fixture + `launch.sh` lane seeding the live-incident snapshot (3 queued nudges + busy worker); BEFORE lane = 3× `reason=agent_busy` suppressions, AFTER lane = surfaced + LLM-consumed + acked
+- `docs/swarm/pi-runtime-contract.md` — §10 F14 row (agent_busy leg of the goal-key surface revalidation contradicted emission-time all-idle gating)
+- `docs/swarm/operations.md` — R22 operator troubleshooting subsection
+
+**Acceptance evidence:**
+- RED lane captured at `.pi/swarm/tasks/task-202609021945-r22-goal-nudge-surface-starve/artifacts/red-lane.txt` (R22-S1 FAIL with the live shape `{stale:true, reason:"agent_busy"}`; R22-S2 FAIL with 0 `pi.sendMessage` calls)
+- GREEN lane captured at `.pi/swarm/tasks/task-202609021945-r22-goal-nudge-surface-starve/artifacts/green-lane-idle-nudge.txt` (81/0 PASS)
+- Mock-llm BEFORE/AFTER lanes: BEFORE = 3× `notification.stale.suppressed reason=agent_busy` + escalated-but-empty (`artifacts/lanes/goal-nudge-surface-starve/traces-before/pump-lines.txt`); AFTER = `mailbox.orchestrator_pump count:1`, zero suppressions, coalesced 3→1, orchestrator acked the surfaced nudge (`traces-after/pump-lines.txt`, `transcripts/`, TUI pane `tmux-snapshots/r22-goal-nudge-surface-starve/pane-after.txt`)
+- Full regression green: all named suites pass (idle-nudge 81, swarm-goal 67, stale-open-nudge 6, R21 5, R20 20+16, R19 22, R16 25, R14 14, R13 24, R12 21+36, CT phase-2 38); the only failing suites repo-wide (orchestrator-wake 3, model-routing 1, minimal-protocol-authoritative 18) fail IDENTICALLY on pre-fix code (verified via stash) and are pre-existing baseline failures outside R22 scope
+
+**Boundary counters:**
+- `C-R22-1` real-boundary surfacing: `pi.sendMessage` called ≥1 via `pumpOrchestratorMailbox` with a busy worker + queued goal nudges (RED: 0 calls)
+- `C-R22-2` first-surface trigger: first sendMessage carries `triggerTurn: true`
+- `C-R22-3` coalescing: freshest of the streak surfaces exactly once per goal group per tick; older nudges get `notification.coalesced.suppressed` + consumer receipts
+- `C-R22-4` replay dedupe: second idle tick does not re-surface (R13-S2 pattern)
+- `C-R22-5` suppression census: `notification.stale.suppressed` count for goal keys with busy worker = 0 post-fix (was ≥1 per message pre-fix)
+- `C-R22-6` taskKey preservation: graph-stall key still suppressed `agent_busy` by a busy worker (C1)
+- `C-R22-7` epoch preservation: goal key created before the idle anchor still suppressed `idle_epoch_advanced` (C2)
+- `C-R22-8` live-graph preservation: goal key still suppressed `actionable_graph` by a LIVE actionable task (C3)
+
+**Sequencing:** R22 is a surface-layer parity fix symmetric to R21: it removes one over-broad leg of the goal-key surface revalidation. It does not alter emission-time gating (the R10 `suppressed_by_active_task` storm gate is untouched), priority semantics (goal nudges remain `normal` — the R13 P0 high-priority bypass and Issue 86 interrupt path are unchanged), delivery/escalation machinery, or taskKey (graph-stall / stale-open) suppression behavior.

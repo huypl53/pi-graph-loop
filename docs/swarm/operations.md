@@ -1390,3 +1390,45 @@ node extensions/swarm/task-liveness.test.mjs
 - `staleSurfaceReason()` now excludes terminal/abandoned tasks from the goal-key branch's `liveGraphActionable` check.
 - Live `in_progress` / `ready` tasks still suppress goal nudges as `actionable_graph`.
 - Closed/taskKey paths still behave the same for graph-stall and stale-open messages.
+
+## Operator: R22 goal nudges starve at pump surface when a worker turns busy after emission (2026-09-02)
+
+### When this matters
+
+Goal nudges are emitted under the all-idle gate, then a worker turns busy (because the orchestrator did what the nudge asked — assigned work) and every queued goal nudge is dropped at surface time forever: `notification.stale.suppressed site=orchestrator_pump.surface reason=agent_busy evidence=[effective-agent-set-not-idle]` on goal-key messages, `mailbox.orchestrator_pump_stuck_escalated` every watchdog tick with an empty surface set, and ZERO `pi.sendMessage` at the pump boundary while `consecutiveNoResolveNudges` burns to max + back-off on messages the orchestrator LLM never saw. Live incident: 2026-09-02T12:04:08Z, nudges `msg-1788350616129-691b4e7c` / `-0aea3216` / `-c6f752b8` (goal `goal-1788350610025-7efafe`), starved 26+ minutes. This was the `agent_busy` twin of the R21 `actionable_graph` leg — same F13 disease, different leg.
+
+### Field diagnosis
+
+1. Confirm the suppression shape:
+   ```bash
+   swarm_audit({mode:"events", event:"notification.stale.suppressed", since:"2026-09-02T12:04:00Z"})
+   ```
+   Look for `site=orchestrator_pump.surface reason=agent_busy` on messages whose `idempotencyKey` matches `goal:<gid>:nudge:idle-streak:*`.
+2. Confirm the starvation window (escalating but never surfacing):
+   ```bash
+   swarm_audit({mode:"events", event:"mailbox.orchestrator_pump_stuck_escalated"})
+   ```
+   Repeated `queued>=1` with `mailbox.orchestrator_pump count:0` every tick = the stale gate is eating the surface set.
+3. Pre-R22 code shows the suppression; post-R22 the same goal-key message surfaces once (coalesced to the freshest of the streak) and the busy worker no longer suppresses it.
+
+### Verify commands
+
+```bash
+node extensions/swarm/idle-nudge.test.mjs          # R22 section: S1 unit + S2 real-pi.sendMessage boundary + C1–C3 controls
+node extensions/swarm/swarm-goal.test.mjs
+node extensions/swarm/stale-open-nudge.test.mjs
+node extensions/swarm/r21-goal-surface-suppression.test.mjs
+```
+
+Mock-llm lane (seeded live-incident snapshot; BEFORE lane shows 3× `reason=agent_busy` suppressions, AFTER lane surfaces + the orchestrator acks):
+
+```bash
+bash .pi/swarm/tasks/task-202609021945-r22-goal-nudge-surface-starve/artifacts/lanes/goal-nudge-surface-starve/launch.sh /tmp/r22-starve-lane
+# evidence: .pi/mock-llm/transcripts/goal-nudge-surface-starve/ + scratch .pi/swarm/traces/events.jsonl
+```
+
+### What changed
+
+- `staleSurfaceReason()` goal-key branch no longer re-checks `allEffectiveIdleAgents().allIdle`. That condition was guaranteed at emission time; re-checking it at surface time contradicted the emission gate (the R21 principle) and made the nudge undeliverable the moment its own requested action succeeded.
+- The two legs that can make the MESSAGE false remain: `idle_epoch_advanced` (anti-immortality guard — a nudge created before the current all-idle anchor still drops) and `liveGraphActionable` on LIVE tasks (R21 C-R21-3 preserved).
+- TaskKey (graph-stall / stale-open) busy suppression is untouched; the R10 anti-storm gate (`goal.nudge.suppressed_by_active_task`) is untouched at emission time.
