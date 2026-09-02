@@ -21,6 +21,53 @@ import { ensurePoolScaffold } from "./pool-scaffold.ts";
 import { maybeRotateTraces } from "./tools/audit.ts";
 import { DEFAULT_TRACE_ROTATE_BYTES } from "./constants.ts";
 
+// === R16 (2026-09-02): turn-end resolve-action detector (module-scope export) ===
+// A turn_end{stop, role=assistant} is a RESOLVE only if the orchestrator ADVANCED the goal
+// in that turn — i.e., the message contains a swarm tool call (swarm_spawn_agent /
+// swarm_assign_task / swarm_mark_goal_done / swarm_set_goal / swarm_restart_agent /
+// swarm_send_message / swarm_reconcile / swarm_update_task / swarm_create_task /
+// swarm_stop_agent / swarm_release_agent_task) OR an explicit user-direction message
+// was sent via a tool call in the same turn. Pure ack text does NOT count.
+// Exported for direct unit testing by r16-idle-goal-regression.test.mjs.
+export const SWARM_RESOLVE_TOOLS: ReadonlySet<string> = new Set([
+	"swarm_spawn_agent",
+	"swarm_assign_task",
+	"swarm_mark_goal_done",
+	"swarm_set_goal",
+	"swarm_restart_agent",
+	"swarm_send_message",
+	"swarm_reconcile",
+	"swarm_update_task",
+	"swarm_create_task",
+	"swarm_stop_agent",
+	"swarm_release_agent_task",
+]);
+export function turnEndIsResolveAction(event: any): { resolve: boolean; reason: string; toolNames?: string[] } {
+	const msg: any = event?.message;
+	const toolResults: any[] = Array.isArray(event?.toolResults) ? event.toolResults : [];
+	// Path A: content blocks expose tool_use calls.
+	const blocks: any[] = Array.isArray(msg?.content) ? msg.content : [];
+	const toolNamesFromContent: string[] = [];
+	for (const block of blocks) {
+		if (!block || typeof block !== "object") continue;
+		const t = block.type;
+		if (t === "tool_use" || t === "toolCall") {
+			const name = block.name || block.toolName;
+			if (typeof name === "string" && SWARM_RESOLVE_TOOLS.has(name)) toolNamesFromContent.push(name);
+		}
+	}
+	// Path B: toolResults carry the toolName too.
+	const toolNamesFromResults: string[] = [];
+	for (const tr of toolResults) {
+		const name = tr?.toolName || tr?.name;
+		if (typeof name === "string" && SWARM_RESOLVE_TOOLS.has(name)) toolNamesFromResults.push(name);
+	}
+	const swarmToolNames = Array.from(new Set([...toolNamesFromContent, ...toolNamesFromResults]));
+	if (swarmToolNames.length > 0) return { resolve: true, reason: "swarm_tool_call", toolNames: swarmToolNames };
+	// No tool calls: NOT a resolve (pure ack text or silent turn).
+	return { resolve: false, reason: "no_resolve_action" };
+}
+
 // Orchestrator mailbox pump state. Module-level so the PM pump can be (re)started from outside the
 // session_start hook — notably by `/swarm register here orchestrator`, which opts a running session in
 // as the orchestrator after startup. `swarmPi` is captured once in registerSwarmHooks (always called
@@ -517,19 +564,37 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		}
 	});
 
-	// === Issue 18: Goal idle-streak resolve detection ===
+	// === Issue 18 + R16: Goal idle-streak resolve detection ===
 	// Registered AFTER the model-pool swap branch above so pi's per-event handler loop runs the
 	// resolve AFTER any in-process swap (binding C-2 of the plan review). Both handlers acquire the
 	// same withLock independently, so they serialise; source order ensures the resolve observes the
-	// post-swap state. This branch resets consecutiveNoResolveNudges on ANY orchestrator turn that
-	// ends stopReason="stop" + role="assistant" — the act of ending a turn (vs staying silent) is
-	// the resolve signal; we do not require an explicit ack or a result message. A turn_end
-	// {error} is intentionally NOT a resolve: tool/model failures are not "I addressed the goal".
-	// A non-orchestrator turn_end is also NOT a resolve: workers don't decide the goal.
+	// post-swap state.
+	//
+	// R16 fix: a turn_end{stop, role=assistant} is a RESOLVE only if the orchestrator actually
+	// ADVANCED the goal in that turn — i.e., the message contains a swarm tool call
+	// (swarm_spawn_agent / swarm_assign_task / swarm_mark_goal_done / swarm_set_goal /
+	// swarm_restart_agent / swarm_send_message / swarm_reconcile / swarm_update_task /
+	// swarm_create_task / swarm_stop_agent / swarm_release_agent_task) OR an explicit user-
+	// direction message was sent via a tool call in the same turn.
+	//
+	// Pure ack text ("Got it, will continue", "Acknowledged", "Will keep going") does NOT count:
+	// it would let an idle orchestrator reset the counter forever on the same template, never
+	// reaching MAX_CONSECUTIVE_NUDGES_DEFAULT, never engaging back-off, never surfacing the
+	// bounded escalation chain. Live incident 2026-09-02: 47 idle_nudge / 36 resolved in 10 min
+	// for goal-1788266039522-6eae40.
+	//
+	// A turn_end {error} is intentionally NOT a resolve: tool/model failures are not "I addressed
+	// the goal". A non-orchestrator turn_end is also NOT a resolve: workers don't decide the goal.
+	// An empty-message turn_end (silent) is NOT a resolve either — unchanged from pre-fix.
+	//
+	// The action detector is exported at module scope (SWARM_RESOLVE_TOOLS + turnEndIsResolveAction)
+	// so r16-idle-goal-regression.test.mjs can drive the PRODUCTION detector end-to-end. The
+	// turn_end handler below calls `turnEndIsResolveAction(event)` to gate the counter reset.
 	pi.on("turn_end", async (event, ctx) => {
 		const msg: any = (event as any)?.message;
 		if (!msg || msg.role !== "assistant" || msg.stopReason !== "stop") return;
 		if (currentAgentId() !== "orchestrator") return;
+		const action = turnEndIsResolveAction(event);
 		const p = paths(ctx.cwd);
 		try {
 			await withLock(p, async () => {
@@ -539,10 +604,32 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				const nudges = goal.consecutiveNoResolveNudges;
 				const hadBackoff = Boolean(goal.backoffTicksRemaining && goal.backoffTicksRemaining > 0);
 				if (nudges === 0 && !hadBackoff) return; // nothing to resolve
+				// R16: pure ack text does NOT count as a resolve. Track when a turn was a
+				// non-resolve so the trace distinguishes ack vs resolve clearly for ops/dashboards.
+				if (!action.resolve) {
+					goal.lastNonResolveTurnAt = new Date().toISOString();
+					await trace(p, "goal.nudge.turn_no_resolve_action", {
+						goalId: goal.id,
+						nudges,
+						hadBackoff,
+						detectionReason: action.reason,
+					}).catch(() => {});
+					await writeState(p, st);
+					return;
+				}
 				goal.consecutiveNoResolveNudges = 0;
 				delete goal.backoffTicksRemaining;
 				goal.lastResolvedAt = new Date().toISOString();
-				await trace(p, "goal.nudge.resolved", { goalId: goal.id, nudges, hadBackoff, by: "turn_end" });
+				goal.lastResolveActionAt = new Date().toISOString();
+				goal.lastResolveActionTools = action.toolNames;
+				await trace(p, "goal.nudge.resolved", {
+					goalId: goal.id,
+					nudges,
+					hadBackoff,
+					by: "turn_end",
+					actionReason: action.reason,
+					actionTools: action.toolNames,
+				});
 				await writeState(p, st);
 			});
 		} catch (err: any) {

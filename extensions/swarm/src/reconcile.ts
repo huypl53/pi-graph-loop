@@ -547,8 +547,17 @@ export async function evaluateIdleGoalNudgeLocked(
 		// `idleNudgeState.lastWasVacuous` so it persists across the swarm→orchestrator
 		// restarts. Cleared in updateIdleEpochLocked's not-all-idle branch (the
 		// pool-recovered edge).
+		//
+		// R16 Fix B (2026-09-02): decouple the dedupe flag's persistence from the pump tail
+		// writeState (reconcile.ts:1929). Even after the orchestrator /reload's, the
+		// `lastWasVacuous` + `lastPoolEmptyEscalationAt` mutations MUST survive an immediate
+		// readState. We persist via the dedicated writeState at the end of this vacuous
+		// branch (added below) so the dedupe survives independently of whether the pump
+		// tail writeState runs. The pump tail is still the source of truth for OTHER
+		// mutations; this is the minimum additional write that closes the persistence gap.
 		const idleStateVac: SwarmIdleNudgeState = st.idleNudgeState ||= {};
-		if (!idleStateVac.lastWasVacuous) {
+		const wasVacuous = idleStateVac.lastWasVacuous === true;
+		if (!wasVacuous) {
 			await trace(p, "goal.nudge.held_no_live_workers", { goalId: goal.id, effectiveAgentCount: 0 }).catch(() => {});
 		}
 		idleStateVac.lastWasVacuous = true;
@@ -580,16 +589,41 @@ export async function evaluateIdleGoalNudgeLocked(
 					cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS,
 				}).catch(() => {});
 				idleStateVac.lastPoolEmptyEscalationAt = new Date(nowMs).toISOString();
+				// === R16 Fix C (2026-09-02): action-oriented nudge body ===
+				// Replace the generic diagnostic dump with condition-specific next-action hints
+				// per the orchestrator's note: "Nudges must be action-oriented per user direction:
+				// condition-specific next-action hints." The poolDiag already classifies agents
+				// by tmuxAlive/runtimeStatus/heartbeatAgeSec; we classify the actionable subset
+				// into the four hint buckets and join the relevant ones into the body.
+				const deadAgents = poolDiag.filter((d) => d.tmuxAlive === false);
+				const stoppedAgents = poolDiag.filter((d) => d.runtimeStatus === "stopped");
+				const staleAgents = poolDiag.filter((d) => d.heartbeatAgeSec !== null && d.heartbeatAgeSec > 600 && d.tmuxAlive !== false && d.runtimeStatus !== "stopped");
+				const hints: string[] = [];
+				if (deadAgents.length > 0) {
+					const ids = deadAgents.map((a) => a.id).join(", ");
+					hints.push(`Dead panes (${deadAgents.length}): ${ids}. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace, or \`swarm_restart_agent(agentId=...)\` if panes are recoverable.`);
+				}
+				if (stoppedAgents.length > 0 && deadAgents.length === 0) {
+					const ids = stoppedAgents.map((a) => a.id).join(", ");
+					hints.push(`Stopped agents (${stoppedAgents.length}): ${ids}. Run \`swarm_restart_agent(agentId=...)\` for each, or spawn fresh.`);
+				}
+				if (staleAgents.length > 0 && deadAgents.length === 0 && stoppedAgents.length === 0) {
+					hints.push(`All agents stale (>10min no heartbeat). Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to mint a fresh worker.`);
+				}
+				if (hints.length === 0) {
+					hints.push(`No live workers but no clear ghost classification. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` or ask the user for direction.`);
+				}
+				hints.push(`Or scope a step: \`swarm_create_task(title=..., goal=..., workflow=feature-dev)\` and assign to a fresh worker.`);
+				hints.push(`Or clear the goal if it is no longer relevant: \`swarm_mark_goal_done(goalId="${goal.id}")\`.`);
 				await deliverMessageLocked(pi, cwd, p, st, {
 					to: "orchestrator",
 					priority: "high",
 					subject: `Goal escalation: worker pool empty (goal ${goal.id})`,
-					body: `User-origin goal is held with zero effective live workers. ` +
-						`Text: ${String(goal.text || "").slice(0, 200)}. ` +
-						`Pool diag: ${JSON.stringify(poolDiag)}. ` +
-						`The orchestrator is unknown-target by design — this nudge is durably ` +
-						`enqueued in the orchestrator mailbox and will surface once the ` +
-						`orchestrator's own agent_settled or next idle watchdog tick processes it.`,
+					body: `User-origin goal is held with zero effective live workers (cooldown: ${Math.round(NOTIFY_DEFAULT_COOLDOWN_MS / 1000)}s).\n` +
+						`Goal text: ${String(goal.text || "").slice(0, 200)}.\n\n` +
+						`Pool diag: ${JSON.stringify(poolDiag)}.\n\n` +
+						`Next action (one of):\n` +
+						hints.map((h, i) => `  ${i + 1}. ${h}`).join("\n"),
 					requiresAck: true,
 					requiresResponse: false,
 					conversationId: `goal:${goal.id}:escalation:pool-empty:cooldown:${NOTIFY_DEFAULT_COOLDOWN_MS}`,
@@ -597,6 +631,15 @@ export async function evaluateIdleGoalNudgeLocked(
 				});
 			}
 		}
+
+		// R16 Fix B (2026-09-02): persist the vacuous-branch mutations IMMEDIATELY so the
+		// dedupe flag + cooldown timestamp survive an immediate readState (e.g., an
+		// orchestrator /reload right after the pump). The pump tail writeState at
+		// reconcile.ts:1929 still runs (it's the source of truth for ALL pump mutations),
+		// but this explicit write closes the persistence gap discovered by R16: the
+		// pre-R14-+-no-tail shape meant a re-entering pump saw lastWasVacuous=undefined
+		// and re-fired the held trace every tick.
+		await writeState(p, st);
 		return { emitted: false, reason: "no_live_workers" };
 	}
 	if (!allIdle) {

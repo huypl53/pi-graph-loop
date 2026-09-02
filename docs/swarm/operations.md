@@ -1107,3 +1107,119 @@ pi.sendMessage → orchestrator                    (×1 — R13 P0 high-priority
 - `swarm_check_mailbox` — inspect the durable escalation nudge in the
   orchestrator mailbox (R13 boundary; unchanged).
 - `/swarm trace` — view the trace census above.
+
+## Operator: R16 idle-goal ACK-loop + vacuous persistence (2026-09-02)
+
+R16 fixes two regressions that survived R14:
+
+1. **ACK-reset loop:** the resolve hook at `hooks.ts:524-549` reset
+   `consecutiveNoResolveNudges` on any text-bearing turn_end, so a
+   pure ack ("Got it", "Acknowledged", "Will keep going") reset the counter
+   every cycle and the cap at MAX_CONSECUTIVE_NUDGES_DEFAULT=3 was never
+   reached. Live incident: 47 idle_nudge / 36 resolved in 10 min for
+   `goal-1788266039522-6eae40`.
+2. **Post-R14 vacuous state persistence failure:** the `lastWasVacuous` +
+   `lastPoolEmptyEscalationAt` mutations lived in RAM and persisted only
+   via the pump tail writeState. Live incident: 331 held_no_live_workers
+   traces over 27m 54s with zero escalations because the orchestrator
+   process had not been /reload'd since before R14 landed.
+
+### When this matters
+
+- The orchestrator emits plain ack text in response to goal nudges (any
+  LLM-driven orchestrator does this by default).
+- The orchestrator /reload's mid-conversation while a standing user
+  goal is still active.
+
+### What R16 changed
+
+- **hooks.ts** — module-scope `SWARM_RESOLVE_TOOLS` set + `turnEndIsResolveAction(event)`
+  detector. The turn_end handler gates the counter reset on
+  `turnEndIsResolveAction(event).resolve` (true only when the turn
+  contained a swarm tool call). Ack-only turns emit
+  `goal.nudge.turn_no_resolve_action` (new trace) instead of resetting.
+- **reconcile.ts** — vacuous branch ends with an explicit
+  `writeState(p, st)` so `lastWasVacuous` + `lastPoolEmptyEscalationAt`
+  survive an immediate readState (orchestrator /reload right after the
+  pump). The pump tail writeState at `reconcile.ts:1929` still runs as
+  the source of truth for OTHER pump mutations; this is the minimum
+  additional write that closes the persistence gap.
+- **reconcile.ts** — escalation body builder classifies `poolDiag` into
+  dead-panes / stopped-agents / stale-heartbeats / fallback hint buckets
+  and joins them with `swarm_spawn_agent` / `swarm_restart_agent` /
+  `swarm_create_task` / `swarm_mark_goal_done` references. The body is
+  now action-oriented per the orchestrator's note.
+- **state.ts** — `idleNudgeState` back-fill: narrow to a plain object so
+  legacy swarm-state.json files with `idleNudgeState: null` or
+  non-object values don't crash the evaluator.
+- **types.ts** — `SwarmGoal` extended with optional `lastNonResolveTurnAt`,
+  `lastResolveActionAt`, `lastResolveActionTools` (observability metadata;
+  not used by the evaluator).
+
+### Ten R10-1 boundary counters
+
+| # | counter | boundary | file:line |
+| --- | --- | --- | --- |
+| C1 | `goal.idle_nudge` trace count | real trace | `reconcile.ts:744` |
+| C2 | `goal.nudge.resolved` trace count | real trace | `hooks.ts:545` |
+| C3 | `goal.nudge.held_no_live_workers` trace count | real trace | `reconcile.ts:552` |
+| C4 | `goal.escalation.pool_empty` trace count | real trace | `reconcile.ts:572` |
+| C5 | `escalationMailboxAppendCount` | durable mailbox append | `mailbox.ts:445` |
+| C6 | `escalationSendMessageCount` | real sendMessage | `reconcile.ts:1763-1773` |
+| C7 | `consecutiveNoResolveNudges` value | real state mutation | `reconcile.ts:741` / `hooks.ts:540` |
+| C8 | `lastWasVacuous` across reload | real persisted flag | `reconcile.ts:551-595` (write) + `state.ts:141-149` (back-fill) |
+| C9 | `lastPoolEmptyEscalationAt` across reload | real persisted flag | `reconcile.ts:582` (set) + `reconcile.ts:564` (read) |
+| C10 | `backoffTicksRemaining` value | real state mutation | `reconcile.ts:683` (decrement) + `hooks.ts:540` (clear) |
+
+### Diagnosing in the field
+
+- **High `goal.nudge.resolved` rate with no cap reached:** the orchestrator is
+  acking (text-only turn_end) without doing work. Look for
+  `goal.nudge.turn_no_resolve_action` traces — these are the ack signals
+  the fix surfaces.
+- **Many `goal.nudge.held_no_live_workers` + zero `goal.escalation.pool_empty`:**
+  the orchestrator is running pre-R16 code (no /reload'd yet) OR the
+  vacuous-branch writeState is failing silently. Check the file's mtime
+  on `swarm-state.json` after a held trace to confirm the writeState
+  reached disk.
+- **Many `goal.escalation.pool_empty` within NOTIFY_DEFAULT_COOLDOWN_MS:**
+  the cooldown flag isn't persisting. Inspect the `lastPoolEmptyEscalationAt`
+  field on `idleNudgeState` via `swarm_audit({mode:"events", ...})`.
+
+### Verify the fix locally
+
+```
+node extensions/swarm/r16-idle-goal-regression.test.mjs
+node extensions/swarm/r14-goal-empty-pool-escalation.test.mjs
+node extensions/swarm/idle-nudge.test.mjs
+node extensions/swarm/swarm-goal.test.mjs
+```
+
+All four MUST be green in the post-fix shape. The R14 + idle-nudge +
+swarm-goal tests must continue to pass (no regression of R14 fix).
+
+### Trace census (post-fix)
+
+After R16 lands, a standing user goal on a vacuous pool produces:
+
+```
+goal.nudge.held_no_live_workers   1   (one per false→true transition; suppressed on every subsequent vacuous tick)
+goal.escalation.pool_empty        1   (one per NOTIFY_DEFAULT_COOLDOWN_MS=5min window)
+escalationMailboxAppendCount      1   (durable append per escalation)
+escalationSendMessageCount        1   (when the orchestrator is idle at surface time; 0 if busy)
+goal.nudge.turn_no_resolve_action N   (one per ack-only turn_end; N climbs as the orchestrator stalls)
+```
+
+The post-R16 trace census is bounded: `goal.nudge.held_no_live_workers`
+fires once per transition (not every tick), `goal.escalation.pool_empty`
+fires once per cooldown (not per tick), and `goal.nudge.turn_no_resolve_action`
+fires once per ack turn (observability, not a counter reset).
+
+### Related tools / commands
+
+- `swarm_set_goal({origin:"user",...})` — set a goal with escalation.
+- `swarm_mark_goal_done({approvedByUser:true})` — clear a user-origin
+  goal (the legitimate resolve path).
+- `swarm_audit({mode:"events", since:..., until:..., event:"goal.nudge.turn_no_resolve_action"})` —
+  inspect the ack-only turn history.
+- `/swarm trace` — view the trace census above.

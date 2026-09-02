@@ -382,6 +382,12 @@ export type SwarmGoal = {
 	lastNudgeAt?: string;               // ISO; set on every successful nudge emission
 	lastResolvedAt?: string;            // ISO; set on every successful counter reset
 	backoffTicksRemaining?: number;     // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
+	// R16 (2026-09-02): track orchestrator turns that did NOT resolve the goal (pure ack text or
+	// silent) so dashboards can distinguish ack from resolve. Not used by the evaluator — purely
+	// observational metadata that mirrors the `goal.nudge.turn_no_resolve_action` trace.
+	lastNonResolveTurnAt?: string;
+	lastResolveActionAt?: string;
+	lastResolveActionTools?: string[];
 };
 
 // Row 68 idle-nudge state. `allIdleSinceAt` anchors the continuous all-idle interval used by the

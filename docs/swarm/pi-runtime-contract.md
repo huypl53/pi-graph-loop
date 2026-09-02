@@ -167,7 +167,7 @@ Extension errors (e.g. `tool_call` that throws) are logged, agent continues. `to
 
 ---
 
-## 10. R12–R15 false / unproven claims register
+## 10. R12–R16 false / unproven claims register
 
 **This is the load-bearing section for the contract's purpose.** Every false or unproven claim surfaced by the R13–R15 Pi-facing incidents is named here with source line, severity, and citation. R12's shared-worker-pool mass sweep is documented in the reliability roadmap as a swarm-internal eligibility-logic bug; it is deliberately not attributed to a Pi runtime surface here.
 
@@ -178,6 +178,8 @@ Extension errors (e.g. `tool_call` that throws) are logged, agent continues. `to
 | **F1** | `await pi.sendMessage(...)` waits for delivery | (pattern, not a literal line; agents-session.js:1846-1852 wrapper drops the promise) | **R13, R15** | High | [VERIFIED evidence §1.1, agent-session.js:1846-1852, auditor F1] |
 | **F4** | `agent_busy` only fires on user-tool busy | reconcile.ts busy-suppression gate | **R13 P1, R14** | Medium | [VERIFIED evidence §3.1, auditor F4] |
 | **F5** | Captured `ctx.signal` is always defined outside turn events | (background timers + module-load captures) | Lifecycle | Medium | [VERIFIED evidence §3.3, auditor F5] |
+| **F9** | `turn_end{stop}` is always a goal-resolve signal | hooks.ts:524-549 (pre-R16) | **R16** | High | **FIXED 2026-09-02 (R16 Fix A)**: `turnEndIsResolveAction(event)` gates the reset on a swarm tool call (swarm_spawn_agent / swarm_assign_task / swarm_mark_goal_done / swarm_set_goal / swarm_restart_agent / swarm_send_message / swarm_reconcile / swarm_update_task / swarm_create_task / swarm_stop_agent / swarm_release_agent_task). Pure ack text emits `goal.nudge.turn_no_resolve_action` (new trace) instead. See roadmap Row R16 + operations.md R16. |
+| **F10** | Vacuous-branch dedupe/cooldown flags persist on their own | reconcile.ts:516-595 (pre-R16: only via pump tail writeState) | **R16** | High | **FIXED 2026-09-02 (R16 Fix B)**: explicit `writeState(p, st)` at the end of the vacuous branch; `state.ts:141-149` back-fill for legacy swarm-state.json with non-object `idleNudgeState`. See roadmap Row R16 + operations.md R16. |
 | **F6** | Captured `pi`/`ctx` valid after reload / newSession / switch / fork | (background timers + module-load captures) | Lifecycle | Medium | [VERIFIED evidence §4.3 + §4.4, runner.js:352, auditor F6] |
 | **F7** | `agent_end` is the "surface after fully idle" boundary | (not literal code, but hook-level) | **R13 P1** | Low | [VERIFIED evidence §6, auditor F7] |
 | **F8** | `nextTurn` + `triggerTurn: true` starts a turn | (any swarm code using `nextTurn` for nudges) | **R13, R15** | Low | [VERIFIED evidence §2.1, auditor F8] |

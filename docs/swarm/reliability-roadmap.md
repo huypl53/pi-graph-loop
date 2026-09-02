@@ -1044,6 +1044,52 @@ Test gap: no test drives GC→epoch→goal-evaluator on one st in a single tick 
 
 **Sequencing:** Minimal source change in `tools/messages.ts:42-48` only. No restart-gated pump change. The orchestrator pump, mailbox delivery, busy-defer, busy-suppression, and R13 bypass paths are all untouched.
 
+### Row R16 — Idle-goal ACK-reset loop + post-R14 vacuous state persistence — P0 (FIXED 2026-09-02)
+
+**Source:** Live trace sequence 2026-09-02. Two regressions surfaced in the same live trace window:
+
+1. **ACK-reset loop (window 04:59:18Z – 05:08:55Z):** 47 `goal.idle_nudge` events + 35 `goal.nudge.resolved` events for the standing `goal-1788266039522-6eae40` user-origin goal (nudgeIntervalMs=5000). Every resolved trace had `by: "turn_end"`. The resolve hook at `hooks.ts:524-549` reset `consecutiveNoResolveNudges` on ANY orchestrator turn that ended `stopReason:"stop"`, regardless of whether the turn advanced the goal. The cap at MAX_CONSECUTIVE_NUDGES_DEFAULT=3 was never reached; the back-off never engaged; the same nudge template repeated at 5s cadence with no escalation.
+
+2. **Post-R14 vacuous state persistence failure (window 05:09:01Z – 05:36:55Z):** 331 `goal.nudge.held_no_live_workers` events at ~5s cadence over 27m 54s with ZERO `goal.escalation.pool_empty` events. Two layers: (a) the orchestrator process PID 42682 had not been /reload'd since well before R14 landed, so the active code path was pre-R14 (the fix was on disk in commit `40e1dd1` but unreachable). (b) Latently — even after /reload — R14's `lastWasVacuous` and `lastPoolEmptyEscalationAt` mutations lived in RAM and persisted only via the pump tail `writeState` at `reconcile.ts:1929`; the R14 test did NOT exercise the `readState → mutate → writeState → readState` round-trip.
+
+**Root causes (verified by plan §1, isolated code-located):**
+
+1. **Resolve hook too permissive** (`hooks.ts:524-549`): the `pi.on("turn_end", ...)` branch reset the counter on any text-bearing turn. A pure ack ("Got it", "Acknowledged", "Will keep going") was indistinguishable from a real resolve-action. Fix A gates the reset on a `turnEndIsResolveAction(event)` detector that returns `{resolve: true, toolNames}` only when the turn contained a swarm tool call (`swarm_spawn_agent`, `swarm_assign_task`, `swarm_mark_goal_done`, `swarm_set_goal`, `swarm_restart_agent`, `swarm_send_message`, `swarm_reconcile`, `swarm_update_task`, `swarm_create_task`, `swarm_stop_agent`, `swarm_release_agent_task`).
+2. **Vacuous-branch writeState coupling** (`reconcile.ts:516-595`): the `lastWasVacuous` + `lastPoolEmptyEscalationAt` mutations depended on the pump tail `writeState` for persistence. Fix B adds a dedicated `writeState(p, st)` at the end of the vacuous branch, decoupled from the pump tail, so the dedupe + cooldown flags survive an immediate readState (e.g., an orchestrator /reload right after the pump).
+3. **readState structural robustness** (`state.ts:124-150`): a pre-R14 `swarm-state.json` could have `idleNudgeState` as `null` or a non-object value, which would crash the evaluator when it read `idleNudgeState.lastWasVacuous`. Fix B mirrors the `consumerReceipts` back-fill pattern at line 132 to narrow `idleNudgeState` to a plain object in any case.
+4. **Generic escalation body** (`reconcile.ts:719-731`): the escalation message body was a diagnostic dump with no action hint. Per the orchestrator's note ("Nudges must be action-oriented per user direction: condition-specific next-action hints"), Fix C classifies the pool topology (dead panes / stopped agents / stale heartbeats / fallback) and joins the appropriate `swarm_spawn_agent` / `swarm_restart_agent` / `swarm_create_task` / `swarm_mark_goal_done` hint into the body.
+
+**Fix (per plan §6, R16 envelope):**
+
+- `extensions/swarm/src/hooks.ts:55-95` Fix A — module-scope export `SWARM_RESOLVE_TOOLS` + `turnEndIsResolveAction(event)` detector (lifted out of the `registerSwarmHooks` closure for unit testing).
+- `extensions/swarm/src/hooks.ts:528-602` Fix A — turn_end handler gates the reset on `turnEndIsResolveAction(event).resolve`; ack-only turns emit `goal.nudge.turn_no_resolve_action` (new trace) instead of resetting.
+- `extensions/swarm/src/reconcile.ts:551-625` Fix B + Fix C — vacuous branch ends with explicit `writeState(p, st)`; escalation body builder classifies `poolDiag` into dead/stopped/stale/fallback hint buckets and joins them with `swarm_spawn_agent` / `swarm_restart_agent` / `swarm_create_task` / `swarm_mark_goal_done` references.
+- `extensions/swarm/src/state.ts:141-149` Fix B — `idleNudgeState` back-fill: narrow to plain object so legacy state files with `idleNudgeState: null` don't crash the evaluator.
+- `extensions/swarm/src/types.ts:386-389` — `SwarmGoal` extended with optional `lastNonResolveTurnAt`, `lastResolveActionAt`, `lastResolveActionTools` (observability metadata for ops/dashboards; not used by the evaluator).
+
+**Acceptance evidence (R10-1 boundary counters at REAL boundaries):**
+
+- `extensions/swarm/r16-idle-goal-regression.test.mjs` — RED→GREEN, 25/0 PASS. R10-1 counters at the real boundaries: `goal.idle_nudge` trace (`reconcile.ts:744`), `goal.nudge.resolved` trace (`hooks.ts:545`), `goal.nudge.held_no_live_workers` trace (`reconcile.ts:552`), `goal.escalation.pool_empty` trace (`reconcile.ts:572`), `goal.nudge.turn_no_resolve_action` trace (new), durable mailbox append (`mailbox.ts:445`), `pi.sendMessage` loop (`reconcile.ts:1763-1773`), `consecutiveNoResolveNudges` mutation (`reconcile.ts:741` / `hooks.ts:540`), `lastWasVacuous` + `lastPoolEmptyEscalationAt` across reload, `backoffTicksRemaining`.
+  - R16-S1 (Config C1 ack-with-text on settled-but-alive pool): counter reaches cap (=3), back-off engages — pre-fix this drove 9+ nudges with reset every turn (live incident shape).
+  - R16-S2 (Config C2 ack-without-text control): unchanged — counter still reaches cap (=3), no regression of silent-turn handling.
+  - R16-S3 (Config C3 12-tick persistent vacuous + reload boundary): `lastWasVacuous` PERSISTED across `readState → mutate → writeState → readState`; held trace fires exactly once (once per false→true transition); escalation fires once.
+  - R16-S4 (Config C4 same as C3 + heartbeat-GC `status=stopped`): same invariants hold — dedupe + cooldown independent of GC.
+  - R16-S5 (Config C5 cooldown survives state reload): `lastPoolEmptyEscalationAt` PERSISTED; escalation count across 24 ticks = 1 (not 2).
+  - R16-S6 (Config C6 goal clear mid-cooldown): no_goal short-circuit stops escalation; held + escalation counts unchanged post-clear.
+  - R16-S7 (action-oriented nudge body): escalation body contains at least one of `swarm_spawn_agent` / `swarm_restart_agent` / `swarm_create_task` / `ask the user` / `next action` / `recovery` / `empty pool`.
+  - R16-S8 (state.ts back-fill robustness): legacy swarm-state.json with `idleNudgeState: { ... }` does NOT crash readState; the evaluator tick does NOT throw.
+- `extensions/mock-llm/fixtures/r16-idle-goal-regression.jsonl` — 1 scripted turn (ack-shaped text with `stopReason:"stop"`). Lane output captured at `tmux-snapshots/r16-idle-goal-regression/lane-output.txt`.
+- RED evidence preserved at `tmux-snapshots/r16-idle-goal-regression/red-lane.txt` (test output pre-fix: R16-S1 9+ nudges; R16-S7 body lacked action hint).
+- GREEN evidence preserved at `tmux-snapshots/r16-idle-goal-regression/green-lane.txt` (test output post-fix: 25/0 PASS).
+- `docs/swarm/operations.md` R16 subsection added (boundary counters, ack-vs-resolve semantics, reload invariants, verify steps, trace census).
+- `docs/swarm/pi-runtime-contract.md` updated: §10 R16 row marks F4 (`turn_end` resolve-action detection) and F5 (vacuous-branch writeState decoupling) as VERIFIED via R10-1 boundary counters.
+
+**Preservation matrix (all GREEN post-fix):** R12 (36+21), R14 (14), R15 (15), idle-nudge (69), swarm-goal (67), task-close-sweep (52), agent-retirement-sweep (33), R13 unknown-target (24), high-priority-interrupt (36), priority-high-interrupt-stream-resolve (30), liveness-progress (40), supersession-fencing (20), graph-advance-nudge-rearm (24), cancellation (42), heartbeat-gc (67), goal-clear-auth (34), proxy-metrics (14), r12-shared-pool-sweep (36), r12-pool-depleted-nudge (21).
+
+**Pre-existing failures NOT caused by R16 (verified via git stash):** `model-routing.test.mjs` (1 failure: `fast model -> openai preset` — env-dependent), `orchestrator-wake.test.mjs` (3 failures: `notification.backfill.receipts_written` + `notification.coalesced.suppressed` — unrelated to goal/resolve semantics). Both reproduce on master HEAD without R16 changes.
+
+**Sequencing:** Fix A (ack-vs-resolve gating) + Fix B (vacuous-branch writeState + state.ts back-fill) + Fix C (action-oriented body) landed together in a single commit. The orchestrator MUST /reload to pick up Fix A's reset semantics; Fix B's persistence gap fix is observable on the first pump tick after /reload; Fix C's body change is observable on the next user-origin escalation. Pre-existing R14 dedupe + cooldown invariants hold (verified by R14 test suite green).
+
 ### Row R14 — Active user-origin goal must escalate when worker pool is empty — P0 (FIXED 2026-09-02)
 
 **Source:** Live trace sequence 2026-09-01. `goal-1788266039522-6eae40`, origin=user, nudgeIntervalMs=5000. 7_278 `goal.nudge.held_no_live_workers` traces fired over ~16h at exactly 5s cadence. ZERO orchestrator-bound recovery nudges — the pump is in a deadlock state: the user sees nothing, the operator sees only the spam trace, the goal never escalates.
