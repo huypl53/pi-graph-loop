@@ -1432,3 +1432,118 @@ bash .pi/swarm/tasks/task-202609021945-r22-goal-nudge-surface-starve/artifacts/l
 - `staleSurfaceReason()` goal-key branch no longer re-checks `allEffectiveIdleAgents().allIdle`. That condition was guaranteed at emission time; re-checking it at surface time contradicted the emission gate (the R21 principle) and made the nudge undeliverable the moment its own requested action succeeded.
 - The two legs that can make the MESSAGE false remain: `idle_epoch_advanced` (anti-immortality guard — a nudge created before the current all-idle anchor still drops) and `liveGraphActionable` on LIVE tasks (R21 C-R21-3 preserved).
 - TaskKey (graph-stall / stale-open) busy suppression is untouched; the R10 anti-storm gate (`goal.nudge.suppressed_by_active_task`) is untouched at emission time.
+
+## Operator: R23 goal goes silent after saturation — fresh idle epoch never re-arms the floor (2026-09-02)
+
+### When this matters
+
+A user-origin goal stops producing nudges entirely: the pool is fully idle, a fresh all-idle epoch is running, but no `goal.idle_nudge` fires and nothing reaches the orchestrator. The tell is `goal.consecutiveNoResolveNudges === 3` (MAX) with `goal.backoffTicksRemaining` cycling `2→1→0→2` on every eligible tick, and `idleNudgeState.allIdleSinceAt` NEWER than `goal.lastNudgeAt`. This is the post-R22 successor: R22 lets nudges survive a busy worker, but when the legacy burst is already surface-invalidated by the epoch advance (`idle_epoch_advanced`), it can never be delivered — and the cap loop blocks every fresh emission. Live incident: goal `goal-1788350610025-7efafe`, 2026-09-02T14:44:37..14:45:17Z.
+
+### Field diagnosis
+
+1. Confirm the starvation loop:
+   ```bash
+   swarm_audit({mode:"events", event:"goal.nudge.backoff", since:"<window>"})
+   ```
+   Repeated `backoff` / `backoff_just_exhausted` / `backoff` cycles with NO `goal.idle_nudge` = the cap loop.
+2. Confirm the stale-saturation shape:
+   ```bash
+   swarm_task_status / swarm state: goal.consecutiveNoResolveNudges === 3 && goal.nudgeSeq frozen && new Date(idleNudgeState.allIdleSinceAt) > new Date(goal.lastNudgeAt)
+   ```
+3. Pre-R23 code re-arms backoff forever; post-R23 the first eligible tick past a fresh anchor traces `goal.nudge.saturation_reset_on_epoch` and emits the next seq once.
+
+### Verify commands
+
+```bash
+node .pi/swarm/tasks/task-202609022150-r23-goal-backoff-epoch-starvation/artifacts/r23-goal-backoff-epoch-starvation.red.mjs   # RED driver (2 RED-leg assertions invert post-fix)
+node extensions/swarm/idle-nudge.test.mjs
+node extensions/swarm/swarm-goal.test.mjs
+bash .pi/swarm/tasks/task-202609022150-r23-goal-backoff-epoch-starvation/artifacts/lanes/goal-nudge-backoff-epoch-rearm/launch.sh /tmp/r23-rearm-lane
+```
+
+### What changed
+
+- The goal-floor cap branch now distinguishes SAME-epoch saturation (still enforced — no storm) from CROSS-EPOCH stale saturation (anchor postdates the last emission; prior nudges `idle_epoch_advanced`-invalidated; no resolve possible while starved) — the latter resets ONCE per epoch anchor and emits the fresh nudge immediately.
+- The reset also fires on the real busy→idle edge (`updateIdleEpochLocked`), covering the live case where the epoch starts while the goal is already saturated.
+- Same-epoch cap/backoff, the active-task emission gate, the R21 `idle_epoch_advanced` surface rule, and the R22 worker-busy surface rule are all preserved (suite controls G1/G6/G7/C5).
+
+## Operator: R23B storm — saturation reset fires on every busy→idle edge (worker-breaker guard, 2026-09-02)
+
+### When this matters
+
+A goal-floor `goal.idle_nudge` seq marches past the planned MAX+backoff window (e.g. seq 4 → 38 instead of seq 4 → 6) and `goal.nudge.saturation_reset_on_epoch` fires many times across a short window (e.g. 12 in ~3 minutes) — the floor is re-arming on every churn edge, not just the legitimate R23 re-arm. Tell: `goal.nudgeSeq` keeps climbing past the post-cap backoff (`backoffTicksRemaining` cleared repeatedly); `goal.consecutiveNoResolveNudges` keeps resetting to 0 instead of being preserved at MAX; `idleNudgeState.lastEpochBusyAgents` shows ONLY `["orchestrator"]` between resets (orchestrator-turn churn, NOT a worker break). Live storm: implementer lane 2026-09-02T15:19:06..15:21:46Z, `mailbox.orchestrator_pump_stuck_escalated` ×34 (suppressed legacy pair stayed queued and re-escalated every watchdog tick — secondary observation, not blocking).
+
+### Field diagnosis
+
+1. Confirm the storm shape:
+   ```bash
+   swarm_audit({mode:"events", event:"goal.nudge.saturation_reset_on_epoch", since:"<window>"})
+   ```
+   Multiple resets within a single idle epoch window = the storm. Pre-R23B this could fire on EVERY busy→idle edge in the epoch.
+2. Confirm the churn signal:
+   ```bash
+   swarm_audit({mode:"events", event:"idle.epoch.reset", since:"<window>"})
+   ```
+   Each reset trace carries a `busyAgents` array. Storm shape: only `["orchestrator"]` (orchestrator-turn churn); legitimate R23 re-arm shape: contains a non-orchestrator id (e.g. `["worker-a"]`).
+3. Pre-R23B the reset fires on every edge; post-R23B the cap branch is the SOLE reset site AND the worker-breaker guard (`lastEpochBusyAgents?.some(id => id !== "orchestrator")`) rejects orchestrator-turn churn. Storm ≤ 1 reset per anchor; counter preserved at MAX; backoff engages.
+
+### Verify commands
+
+```bash
+node .pi/swarm/tasks/task-202609022240-r23b-reset-storm-rework/artifacts/r23b-reset-storm.red.mjs   # GREEN driver (1 reset total; storm eliminated)
+node extensions/swarm/idle-nudge.test.mjs                                            # 126 passed incl. R23B section
+node extensions/swarm/swarm-goal.test.mjs                                            # 67 passed
+node extensions/swarm/stale-open-nudge.test.mjs                                      # 6 passed
+node extensions/mock-llm/selftest.test.mjs                                           # PASS
+```
+
+### What changed
+
+- The edge-site reset inside `updateIdleEpochLocked` is DELETED. The cap branch of `evaluateIdleGoalNudgeLocked` is the SOLE reset site (it consults the `r23LastEpochAnchor` memo and now also the `lastEpochBusyAgents` worker-breaker guard).
+- Every anchor-clearing busy edge now stamps `idleNudgeState.lastEpochBusyAgents = busyAgents` (same array already passed to the `idle.epoch.reset` trace). Stamped at the busy edge, cleared at the busy→idle edge stamp.
+- The cap-branch reset fires ONLY when the most recent anchor-clearing busy edge was caused by a WORKER (any busy id !== "orchestrator"). Orchestrator-turn churn that briefly flips a worker busy/idle does NOT qualify; the cap branch falls into the `arm backoff` path and returns `max_nudges`.
+- Storm-shape regression test in `extensions/swarm/idle-nudge.test.mjs` R23B section (12 assertions): cap-branch reset + 3 emissions, ≥2 churn edges rejected, counter preserved at MAX, backoff engaged, `nudgeSeq` bounded to 6 (no seq 7+ storm).
+- R23B task: `task-202609022240-r23b-reset-storm-rework`. Same-epoch cap/backoff (G7), active-task gate (G6), R21 `idle_epoch_advanced` (C5), and R22 worker-busy surface rule are all preserved.
+
+## Operator: R23C storm reroute — cap-branch breaker absent (anchor provenance at every clear site, 2026-09-03)
+
+### When this matters
+
+Even after R23B (edge-site reset deleted, worker-breaker guard added), `goal.nudge.saturation_reset_on_epoch` continues firing on every orchestrator turn boundary (storm rerouted through the cap branch instead of the edge site). Live evidence: `artifacts/tester-turnstart-probe.mjs` against the R23B-only tree — 2 resets, 4 emissions, seq 4→7 across 5 turn cycles. Tell: `idleNudgeState.lastEpochBusyAgents` is `null` at the cap-branch reset trace (the breaker field never made it from the clear site to the eval); `idle.epoch.reset reason:"orchestrator_busy"` fires from `hooks.ts turn_start` (the orchestrator's busy edge that bypasses `updateIdleEpochLocked`).
+
+### Field diagnosis
+
+1. Confirm the rerouted storm:
+   ```bash
+   node .pi/swarm/tasks/task-202609030005-r23c-memo-mint-rework/artifacts/tester-turnstart-probe.mjs
+   # Pre-R23C: 2 resets, 4 emissions, seq 4→7 (STORM)
+   # Post-R23C: 0 resets, 0 emissions, seq 3 unchanged (storm-safe)
+   ```
+2. Confirm the breaker is null at reset time (the bug signature):
+   ```bash
+   swarm_audit({mode:"events", event:"goal.nudge.saturation_reset_on_epoch", since:"<window>"})
+   ```
+   Each reset trace carries a `lastEpochBusyAgents` field. Rerouted-storm shape: `null` (breaker never stamped at the clear site). R23C-correct shape: `["orchestrator"]` (hooks.ts stamped provenance at turn_start) or `["worker-a"]` (busy edge stamped real agents).
+3. Pre-R23C the hook bypasses `updateIdleEpochLocked`; post-R23C the hook stamps provenance first, the mint branch preserves it, and the cap branch breaker rejects orchestrator-churn anchors.
+
+### Verify commands
+
+```bash
+node .pi/swarm/tasks/task-202609030005-r23c-memo-mint-rework/artifacts/tester-turnstart-probe.mjs  # GREEN: ≤1 emission
+node .pi/swarm/tasks/task-202609022240-r23b-reset-storm-rework/artifacts/tester-memo-probe.mjs     # GREEN: 1 reset, cap-branch reachable
+node .pi/swarm/tasks/task-202609022240-r23b-reset-storm-rework/artifacts/tester-breaker-probe.mjs # GREEN: A reject / B reset / C legacy reset
+node extensions/swarm/idle-nudge.test.mjs                                                         # 136 passed incl. R23C section (9 assertions)
+node extensions/swarm/swarm-goal.test.mjs                                                         # 67 passed
+node extensions/swarm/stale-open-nudge.test.mjs                                                   # 6 passed
+node extensions/mock-llm/selftest.test.mjs                                                        # PASS
+```
+
+### What changed
+
+- `extensions/swarm/src/hooks.ts` `turn_start` handler: stamps `idleState.lastEpochBusyAgents = ["orchestrator"]` before clearing the anchor. This is the orchestrator's busy edge (bypasses `updateIdleEpochLocked`); without the stamp the cap branch sees `breaker = undefined` → absent→reset legacy default → storm.
+- `extensions/swarm/src/reconcile.ts` mint branch in `updateIdleEpochLocked`: PRESERVES `lastEpochBusyAgents` (does NOT clear it). Provenance must survive from the clear site to the next atCap eval; clearing at mint erased the stamp from hooks.ts and re-opened the storm window.
+- `extensions/swarm/idle-nudge.test.mjs` G2b + R23B section seeds now include `r23LastEpochAnchor = allIdleSinceAt` (production-mint shape — the legacy R23 code stamped the memo at mint, real sessions hold this state). New R23C section: 9 assertions, invokes the REAL `hooks.ts turn_start` handler via `registerSwarmHooks` mock pi (not an inline replica), so removing the stamp from hooks.ts makes the test go RED (blindness control both ways verified).
+- Lane launcher `goal-nudge-backoff-epoch-rearm/launch.sh` re-copied under R23C artifacts with `r23LastEpochAnchor` seeded.
+- R23C task: `task-202609030005-r23c-memo-mint-rework`. Same-epoch cap/backoff (R23-G7), R23-B/R23B storm shape (1 reset, 3 emissions, churn rejected), active-task gate (R23-G6), R21 `idle_epoch_advanced`, R22 worker-busy surface rule all preserved.
+- Known corner (documented, accepted): a real worker break followed by turn-start-only churn can carry a stale `["worker-a"]` stamp into one churn epoch → at most ONE wrong-cause reset per genuine worker break. Bounded, not a storm; tightening (stamp at every clear site including future ones) is follow-up hardening.
+- The `turn_start` handler now writes swarm state from a Pi lifecycle hook — a new Pi-runtime boundary crossing. See `pi-runtime-contract.md §10 F15` row (AMENDED 2026-09-03 R23C) for the boundary-counter assertions.

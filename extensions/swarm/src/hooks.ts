@@ -554,9 +554,20 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				const idleState = st.idleNudgeState;
 				if (!idleState?.allIdleSinceAt && !idleState?.nextGoalNudgeAt && !idleState?.lastGoalNudgeAt) return;
 				const prev = idleState.allIdleSinceAt ?? null;
+				// === R23C (2026-09-03) — stamp orchestrator provenance at the turn_start clear site ===
+				// turn_start is the orchestrator's busy edge (the live R23 storm source — `agent_settled`
+				// fires at every orchestrator turn boundary, briefly marking the orchestrator busy/idle).
+				// The cap branch's worker-breaker guard reads `lastEpochBusyAgents` to distinguish a
+				// worker-driven fresh epoch (qualifies for reset) from orchestrator-turn churn (must
+				// NOT qualify). Without this stamp, every turn_start-cleared anchor reaches the cap
+				// branch with breaker=undefined → absent→reset legacy default → STORM. Stamping
+				// `["orchestrator"]` here lets the breaker reject orchestrator-churn anchors. Live
+				// evidence: tester-turnstart-probe.mjs (R23C artifacts; pre-fix RED 2 resets/4 emissions
+				// seq 4→7, post-fix GREEN ≤1 emission).
+				idleState.lastEpochBusyAgents = ["orchestrator"];
 				delete idleState.allIdleSinceAt;
 				delete idleState.nextGoalNudgeAt;
-				await trace(p, "idle.epoch.reset", { reason: "orchestrator_busy", previousAllIdleSinceAt: prev }).catch(() => {});
+				await trace(p, "idle.epoch.reset", { reason: "orchestrator_busy", previousAllIdleSinceAt: prev, busyAgents: ["orchestrator"] }).catch(() => {});
 				await writeState(p, st);
 			});
 		} catch (err: any) {

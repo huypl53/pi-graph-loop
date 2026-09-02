@@ -827,6 +827,311 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 	else process.env.PI_SWARM_AGENT_ID = prevAgentId;
 }
 
+// =============================================================
+// R23 — post-saturation fresh-epoch re-arm (goal backoff epoch starvation).
+// Live incident 2026-09-02T14:44:37..14:45:17Z: goal goal-1788350610025-7efafe sat at
+// consecutiveNoResolveNudges=MAX while a NEW all-idle epoch (allIdleSinceAt 14:45:02Z,
+// after the legacy nudges msg-1788350616129-691b4e7c/-0aea3216/-c6f752b8) was already
+// running: the pump looped backoff.skip → backoff_just_exhausted → max_nudges re-arm
+// forever — zero goal.idle_nudge, zero pi.sendMessage (C3). Fix: when the cap branch is
+// entered AND the current anchor POSTDATES the last emission (prior epoch's nudges are
+// idle_epoch_advanced-invalidated, no resolve could fire while starved), reset the
+// saturation ONCE per anchor and emit the fresh nudge. Within one uninterrupted epoch
+// the anchor predates every emission → MAX/backoff stay enforced (no storm).
+// =============================================================
+console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
+{
+	// ---- G1/G2: seeded fresh anchor (post-legacy) + saturated goal
+	await setup();
+	const t0 = Date.now();
+	const gid = "goal-r23";
+	// Ticks use synthetic nowMs up to +2min in the future; keep worker heartbeats fresh
+	// relative to the CURRENT tick so the pool stays non-vacuous (R14 liveness window).
+	const tickR23 = async (nowMs) => {
+		await withLock(p, async () => {
+			const s = await readState(p, dir);
+			for (const a of Object.values(s.agents)) if (a.id !== "orchestrator") a.lastHeartbeatAt = new Date(nowMs).toISOString();
+			await writeState(p, s);
+		});
+		return tickGoal(nowMs);
+	};
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.goal = { id: gid, text: "R23 user goal", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(t0 - 120_000).toISOString() };
+		s.idleNudgeState = { allIdleSinceAt: new Date(t0 - 60_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		s.messages["msg-r23-legacy-3"] = { id: "msg-r23-legacy-3", from: "orchestrator", to: "orchestrator", status: "mailbox_delivered", createdAt: new Date(t0 - 120_000).toISOString(), updatedAt: new Date(t0 - 120_000).toISOString(), requiresAck: true, requiresResponse: false, subject: "legacy", body: "legacy", idempotencyKey: `goal:${gid}:nudge:idle-streak:3` };
+		await writeState(p, s);
+	});
+	let r = await tickR23(t0);
+	ok("R23-G1a within-saturation tick1 still backoff.skip (cap preserved)", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	r = await tickR23(t0 + 60_000);
+	ok("R23-G1b within-saturation tick2 still backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	let st = await getGoalState();
+	ok("R23-G1c counter still MAX after the drain ticks", st.goal.consecutiveNoResolveNudges === 3, `count=${st.goal.consecutiveNoResolveNudges}`);
+	r = await tickR23(t0 + 120_000);
+	ok("R23-G2 tick3 emits the fresh nudge (reset engaged at cap)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	st = await getGoalState();
+	ok("R23-G2 counter reset then advanced to 1 (not MAX)", st.goal.consecutiveNoResolveNudges === 1, `count=${st.goal.consecutiveNoResolveNudges}`);
+	ok("R23-G2 nudgeSeq advanced to 4", st.goal.nudgeSeq === 4, `seq=${st.goal.nudgeSeq}`);
+	ok("R23-G2 backoff cleared by the reset", st.goal.backoffTicksRemaining === undefined, `remaining=${st.goal.backoffTicksRemaining}`);
+	ok("R23-G2 resolve-stamp carries the epoch marker", Array.isArray(st.goal.lastResolveActionTools) && st.goal.lastResolveActionTools.includes("epoch_advance_saturation_reset"), JSON.stringify(st.goal.lastResolveActionTools));
+	ok("R23-G2 saturation_reset trace recorded", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 1);
+	ok("R23-G2 fresh goal.idle_nudge trace seq:4 consecutiveCount:1", (await readEventsFile()).some((e) => e.event === "goal.idle_nudge" && e.key === `goal:${gid}:nudge:idle-streak:4` && e.consecutiveCount === 1));
+	const seq4 = Object.values(st.messages).find((m) => m.idempotencyKey === `goal:${gid}:nudge:idle-streak:4`);
+	ok("R23-G2 new durable message seq=4 exists", Boolean(seq4));
+	ok("R23-G2 new message createdAt >= current anchor", Boolean(seq4 && new Date(seq4.createdAt).getTime() >= new Date(st.idle.allIdleSinceAt).getTime()));
+	const legacy3 = st.messages["msg-r23-legacy-3"];
+	const vLegacy = await staleSurfaceReason(p, st, legacy3, {}, t0 + 125_000);
+	ok("R23-C5 legacy message still idle_epoch_advanced-stale post-fix", vLegacy.stale === true && vLegacy.reason === "idle_epoch_advanced", JSON.stringify(vLegacy));
+	const stAfterEmit = await getGoalState();
+	const intervalR23 = stAfterEmit.idle?.nextGoalNudgeAt ? (new Date(stAfterEmit.idle.nextGoalNudgeAt).getTime() - (t0 + 120_000)) : 1_000;
+	r = await tickR23(t0 + 120_000 + Math.max(1, Math.floor(intervalR23 / 2)));
+	ok("R23-G3 next tick inside the interval is pending (reset fired once; no storm)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	st = await getGoalState();
+	ok("R23-G3 counter still 1 and nudgeSeq still 4 after the pending tick", st.goal.consecutiveNoResolveNudges === 1 && st.goal.nudgeSeq === 4, JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, s: st.goal.nudgeSeq }));
+
+	// ---- G4: C3 real-boundary pump surface of the fresh nudge + replay dedupe.
+	// Purge the file-shared mailbox slice to THIS goal's messages (R22 pattern): earlier
+	// sections' never-pumped nudges are still durable candidates.
+	const prevAgentIdR23 = process.env.PI_SWARM_AGENT_ID;
+	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		const keep = new Set(Object.values(s.messages).filter((m) => m.idempotencyKey?.startsWith(`goal:${gid}:nudge:idle-streak`)).map((m) => m.id));
+		for (const id of Object.keys(s.messages)) if (!keep.has(id)) delete s.messages[id];
+		const mb = join(dir, ".pi", "swarm", "mailboxes", "orchestrator.jsonl");
+		try {
+			const lines = (await readFile(mb, "utf8")).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((e) => keep.has(e.id));
+			await writeFile(mb, lines.map((e) => JSON.stringify(e)).join("\n") + "\n");
+		} catch { /* no mailbox yet */ }
+		await writeState(p, s);
+	});
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		ensureOrchestrator(s, dir, p);
+		heartbeatOrchestratorLeader(s, Date.now(), process.pid, "r23_test_seed");
+		await writeState(p, s);
+	});
+	const sendsAtPumpR23 = sentMessages.length;
+	const pumpR23 = await pumpOrchestratorMailbox(pi, { cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } }, p, "r23_rearm_tick");
+	ok("R23-G4 pump surfaces the fresh nudge (delivered >= 1)", (pumpR23?.delivered ?? 0) >= 1, `delivered=${pumpR23?.delivered}`);
+	ok("R23-G4 pi.sendMessage called >= 1 at the real boundary", sentMessages.length - sendsAtPumpR23 >= 1, `sends=${sentMessages.length - sendsAtPumpR23}`);
+	if (sentMessages.length - sendsAtPumpR23 >= 1) {
+		ok("R23-G4 surfaced message is the seq=4 nudge", sentMessages[sendsAtPumpR23]?.m?.details?.idempotencyKey === `goal:${gid}:nudge:idle-streak:4`, `got ${sentMessages[sendsAtPumpR23]?.m?.details?.idempotencyKey}`);
+		ok("R23-G4 first surface carries triggerTurn", sentMessages[sendsAtPumpR23]?.o?.triggerTurn === true, JSON.stringify(sentMessages[sendsAtPumpR23]?.o));
+	}
+	const sendsAfterPumpR23 = sentMessages.length;
+	const pumpR23b = await pumpOrchestratorMailbox(pi, { cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } }, p, "r23_rearm_replay");
+	ok("R23-G4 replay tick does not duplicate surface", sentMessages.length === sendsAfterPumpR23 && (pumpR23b?.delivered ?? 0) === 0, `sends=${sentMessages.length - sendsAfterPumpR23} delivered=${pumpR23b?.delivered}`);
+	if (prevAgentIdR23 === undefined) delete process.env.PI_SWARM_AGENT_ID;
+	else process.env.PI_SWARM_AGENT_ID = prevAgentIdR23;
+
+	// ---- G7: SAME-epoch control — anchor BEFORE last emission → cap/backoff loop intact.
+	await setup();
+	const t7 = Date.now();
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.goal = { id: "goal-r23-g7", text: "R23 same-epoch", setAt: new Date(t7 - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(t7 - 30_000).toISOString() };
+		s.idleNudgeState = { allIdleSinceAt: new Date(t7 - 120_000).toISOString(), lastGoalNudgeAt: new Date(t7 - 30_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		await writeState(p, s);
+	});
+	r = await tickGoal(t7);
+	ok("R23-G7 same-epoch tick1 backoff.skip", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	r = await tickGoal(t7 + 60_000);
+	ok("R23-G7 same-epoch tick2 backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	r = await tickGoal(t7 + 120_000);
+	ok("R23-G7 same-epoch tick3 max_nudges re-arm (no reset within one epoch)", r.emitted === false && r.reason === "max_nudges", JSON.stringify(r));
+	st = await getGoalState();
+	ok("R23-G7 counter still MAX + backoff re-armed (no storm)", st.goal.consecutiveNoResolveNudges === 3 && st.goal.backoffTicksRemaining === 2, JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, b: st.goal.backoffTicksRemaining }));
+	ok("R23-G7 no saturation_reset trace in the same-epoch window", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 0);
+
+	// ---- G2b: live-repair path — the reset is now the CAP BRANCH's responsibility.
+	// (R23B 2026-09-02: the original R23 implementation also reset on the edge site in
+	// `updateIdleEpochLocked` — but that edge site never consulted the `r23LastEpochAnchor`
+	// memo, so it fired on EVERY busy→idle edge while saturated, defeating MAX+backoff in
+	// real sessions. Live: implementer lane 2026-09-02T15:19:06..15:21:46Z — reset ×12,
+	// goal.idle_nudge seq 4→38. The edge site is now deleted; the cap branch (memo-checked)
+	// is the SOLE reset site. This test exercises that: anchor pre-stamped 60s ago (live
+	// R23 incident shape), 2 backoff drain ticks, then the first eligible tick past the cap
+	// enters the cap branch and resets + emits seq=4. NO reset fires on the edge itself.)
+	await setup();
+	const t8 = Date.now();
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.goal = { id: "goal-r23-edge", text: "R23 edge", setAt: new Date(t8 - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(t8 - 120_000).toISOString() };
+		s.idleNudgeState = { allIdleSinceAt: new Date(t8 - 60_000).toISOString(), lastGoalNudgeAt: new Date(t8 - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		// === R23C (2026-09-03) — production-mint shape seed ===
+		// Real sessions reach a state where `r23LastEpochAnchor === allIdleSinceAt` after any
+		// busy→idle edge (the legacy R23 code stamped the memo at mint; this seed emulates
+		// the live pre-fix R23 stamp). The cap branch's stale-memo clear must handle this:
+		// first eligible tick past the cap deletes the memo, reset+emit fires.
+		s.idleNudgeState.r23LastEpochAnchor = s.idleNudgeState.allIdleSinceAt;
+		await writeState(p, s);
+	});
+	r = await tickGoal(t8); // first eligible: backoff 2→1
+	ok("R23-G2b first eligible tick after the anchor stamps: backoff drain 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	st = await getGoalState();
+	ok("R23-G2b counter preserved at MAX on this tick (no reset — edge site is gone)", st.goal.consecutiveNoResolveNudges === 3 && st.goal.backoffTicksRemaining === 1, JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, b: st.goal.backoffTicksRemaining }));
+	ok("R23-G2b NO saturation_reset trace yet", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 0);
+	r = await tickGoal(t8 + 60_000); // backoff 1→0
+	ok("R23-G2b second eligible tick backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	r = await tickGoal(t8 + 120_000); // cap-branch reset + emits seq=4
+	ok("R23-G2b third eligible tick: cap-branch reset + emits seq=4", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	st = await getGoalState();
+	ok("R23-G2b counter reset then advanced to 1", st.goal.consecutiveNoResolveNudges === 1, `count=${st.goal.consecutiveNoResolveNudges}`);
+	ok("R23-G2b exactly ONE saturation_reset trace (no storm)", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 1);
+
+	// ---- R23B: multi-edge busy→idle churn while saturated fires the reset at most
+	// ONCE per anchor (storm guard). Reproduces the implementer live incident shape:
+	// saturated goal + worker busy→idle churn must NOT mint new resets on every churn edge.
+	// Live storm: 2026-09-02T15:19:06..15:21:46Z — reset ×12, seq 4→38. Post-fix:
+	// exactly ONE reset, bounded emissions.
+	await setup();
+	const tR23B = Date.now();
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.goal = { id: "goal-r23b-storm", text: "R23B storm guard", setAt: new Date(tR23B - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(tR23B - 120_000).toISOString() };
+		s.idleNudgeState = { allIdleSinceAt: new Date(tR23B - 60_000).toISOString(), lastGoalNudgeAt: new Date(tR23B - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		// === R23C (2026-09-03) — production-mint shape seed ===
+		s.idleNudgeState.r23LastEpochAnchor = s.idleNudgeState.allIdleSinceAt;
+		await writeState(p, s);
+	});
+	// drain backoff: 2→1
+	r = await tickGoal(tR23B);
+	ok("R23B-1 first eligible: backoff drain 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	// drain backoff: 1→0
+	r = await tickGoal(tR23B + 60_000);
+	ok("R23B-2 second eligible: backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	// cap-branch reset + emit seq=4 (the legitimate R23 re-arm)
+	r = await tickGoal(tR23B + 120_000);
+	ok("R23B-3 cap-branch reset + emits seq=4", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	// counter climbs 1→2→3=MAX (the post-reset burst)
+	r = await tickGoal(tR23B + 180_000);
+	ok("R23B-4 tick4 emits seq=5 (counter 1→2)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	r = await tickGoal(tR23B + 240_000);
+	ok("R23B-5 tick5 emits seq=6 (counter 2→3=MAX)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	// The legitimate R23 burst is complete. Counter at MAX, backoff drained. Now we drive
+	// ≥2 ORCHESTRATOR-turn churn edges (the live storm source — `agent_settled` fires at
+	// every orchestrator turn boundary, briefly marking the orchestrator busy/idle). The
+	// storm guard (cap branch memo + worker-breaker `lastEpochBusyAgents` rejecting
+	// orchestrator-only busy edges) MUST reject all churn-edge resets. Live incident:
+	// 2026-09-02T15:19:06..15:21:46Z — reset ×12, seq 4→38. Post-fix: exactly ONE reset
+	// per anchor; the orchestrator-churn anchors are rejected by the breaker guard; the
+	// counter stays at MAX where backoff engages.
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.agents["orchestrator"].runtimeStatus = "busy";
+		await writeState(p, s);
+	});
+	await tickGoal(tR23B + 300_000); // orchestrator busy edge: anchor cleared, lastEpochBusyAgents=["orchestrator"]
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.agents["orchestrator"].runtimeStatus = "idle";
+		await writeState(p, s);
+	});
+	r = await tickGoal(tR23B + 360_000); // orchestrator idle edge: new anchor stamped, mint clears memo, cap branch breaker rejects
+	ok("R23B-6 churn1 idle: NO reset (storm guard — worker-breaker rejects orchestrator-only)", r.emitted === false && (r.reason === "idle_interval_pending" || r.reason === "backoff"), JSON.stringify(r));
+	// churn cycle 2
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.agents["orchestrator"].runtimeStatus = "busy";
+		await writeState(p, s);
+	});
+	await tickGoal(tR23B + 420_000);
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.agents["orchestrator"].runtimeStatus = "idle";
+		await writeState(p, s);
+	});
+	r = await tickGoal(tR23B + 480_000);
+	ok("R23B-7 churn2 idle: NO reset (storm guard holds)", r.emitted === false && (r.reason === "idle_interval_pending" || r.reason === "max_nudges" || r.reason === "backoff"), JSON.stringify(r));
+	// one eligible tick past the churn — backoff arms, counter preserved
+	r = await tickGoal(tR23B + 540_000);
+	ok("R23B-8 post-churn eligible: cap engages (max_nudges / backoff armed)", r.emitted === false && (r.reason === "max_nudges" || r.reason === "backoff"), JSON.stringify(r));
+	ok("R23B-9 exactly ONE saturation_reset trace across the entire run (storm eliminated)", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 1);
+	st = await getGoalState();
+	ok("R23B-10 nudgeSeq bounded to 6 (no runaway seq 7+)", st.goal.nudgeSeq === 6, `seq=${st.goal.nudgeSeq}`);
+	ok("R23B-11 counter preserved at MAX (cap preserved across churn)", st.goal.consecutiveNoResolveNudges === 3, `count=${st.goal.consecutiveNoResolveNudges}`);
+	ok("R23B-12 backoff engaged after the burst (backoffTicksRemaining > 0)", (st.goal.backoffTicksRemaining ?? 0) > 0, `remaining=${st.goal.backoffTicksRemaining}`);
+
+	// ---- R23C: turn-start orbit storm guard (the live R23 storm source).
+	// hooks.ts `turn_start` clears the anchor bypassing updateIdleEpochLocked (orchestrator's
+	// busy edge — `agent_settled` fires at every turn boundary in production). Pre-R23C: turn_start
+	// cleared the anchor WITHOUT stamping `lastEpochBusyAgents`; the cap branch's worker-breaker
+	// guard saw `breaker = undefined` → absent→reset legacy default → STORM rerouted through the
+	// mint site. R23C fix: turn_start now stamps `["orchestrator"]` before clearing, so the
+	// breaker rejects orchestrator-turn churn anchors. This test exercises the orbit: 5
+	// turn_start cycles each followed by a mint tick + eval tick; storm-safe = ≤1 emission
+	// (the legitimate R23 re-arm on the first eligible tick past the cap; subsequent orbits
+	// return max_nudges/backoff with NO new emission). Live storm shape: reset ×12,
+	// emissions seq 4→38 in 3min; post-R23C: reset ≤1, emission ≤1, seq bounded.
+	await setup();
+	const tR23C = Date.now();
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.goal = { id: "goal-r23c-turnstart", text: "R23C turn-start orbit", setAt: new Date(tR23C - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(tR23C - 120_000).toISOString() };
+		s.idleNudgeState = { allIdleSinceAt: new Date(tR23C - 60_000).toISOString(), lastGoalNudgeAt: new Date(tR23C - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		s.idleNudgeState.r23LastEpochAnchor = s.idleNudgeState.allIdleSinceAt;
+		await writeState(p, s);
+	});
+	// drain backoff (mirrors tester-turnstart-probe.mjs Phase 1)
+	r = await tickGoal(tR23C);
+	ok("R23C-1 drain1: backoff 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	r = await tickGoal(tR23C + 60_000);
+	ok("R23C-2 drain2: backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	// orbit helper — exercises the REAL hooks.ts turn_start handler (R23C proof: removing the
+	// orchestrator-provenance stamp in hooks.ts must make this test RED). We register a minimal
+	// mock pi that captures the handler, then invoke it on each orbit.
+	const turnStartHandlers = [];
+	const mockPi = {
+		on(eventName, handler) { if (eventName === "turn_start") turnStartHandlers.push(handler); },
+	};
+	const { registerSwarmHooks } = await import(join(here, "src", "hooks.ts"));
+	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	registerSwarmHooks(mockPi);
+	if (turnStartHandlers.length !== 1) throw new Error(`expected exactly 1 turn_start handler, got ${turnStartHandlers.length}`);
+	const realTurnStart = turnStartHandlers[0];
+	async function turnStartOrbit(nowMs) {
+		// Real hooks.ts handler requires a ctx-shaped argument. Mirrors the inline state the
+		// handler reads (it only uses ctx.cwd for paths + readState/writeState/lock).
+		await realTurnStart({ type: "turn_start", cwd: dir }, { cwd: dir });
+		await tickGoal(nowMs); // mint tick
+		return await tickGoal(nowMs + 60_000); // eval tick
+	}
+	let r23cEmissions = 0;
+	for (let i = 1; i <= 5; i++) {
+		const orbitBase = tR23C + 120_000 + (i - 1) * 120_000;
+		const orbitResult = await turnStartOrbit(orbitBase);
+		if (!orbitResult) continue;
+		if (orbitResult.emitted) r23cEmissions++;
+		ok(`R23C-3.${i} orbit${i}: NO reset (storm guard — orchestrator provenance rejects)`, orbitResult.emitted === false || (orbitResult.emitted === true && i === 1), JSON.stringify(orbitResult));
+	}
+	ok("R23C-4 exactly 0 saturation_reset traces across 5 turn-start orbits (storm dead)", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 0);
+	st = await getGoalState();
+	ok("R23C-5 nudgeSeq bounded (no storm — seq ≤ 3 OR seq=4 from the first legitimate re-arm in drain)", st.goal.nudgeSeq <= 4, `seq=${st.goal.nudgeSeq}`);
+	ok(`R23C-6 ≤1 total emissions across 5 orbits (storm dead)`, r23cEmissions <= 1, `emissions=${r23cEmissions}`);
+
+	// ---- G6: active-task emission gate still enforced (reset must not bypass it).
+	await setup();
+	const t9 = Date.now();
+	await seedGraphTask("task-r23-active", { ageMs: 120_000 });
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.goal = { id: "goal-r23-g6", text: "R23 active-task", setAt: new Date(t9 - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(t9 - 120_000).toISOString() };
+		s.idleNudgeState = { allIdleSinceAt: new Date(t9 - 60_000).toISOString(), lastGoalNudgeAt: new Date(t9 - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		const tp = taskPaths(p, "task-r23-active");
+		const task = JSON.parse(await readFile(tp.taskJson, "utf8"));
+		task.nodes.a.status = "assigned";
+		task.nodes.a.assignee = "worker-a";
+		await writeFile(tp.taskJson, JSON.stringify(task, null, 2), "utf8");
+		s.agents["worker-a"].activeTaskIds = ["task-r23-active"];
+		await writeState(p, s);
+	});
+	r = await tickGoal(t9);
+	ok("R23-G6 active-task gate suppresses despite saturated goal + fresh anchor", r.emitted === false && (r.reason === "assignment_in_flight" || r.reason === "active_task"), JSON.stringify(r));
+}
+
 console.log(`\n${fail === 0 ? "IDLE-NUDGE PASS" : "IDLE-NUDGE FAIL"} (${pass} passed, ${fail} failed)`);
 await rm(dir, { recursive: true, force: true });
 process.exit(fail === 0 ? 0 : 1);

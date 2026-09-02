@@ -457,12 +457,21 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 			for (const slot of Object.values(st.taskStallState || {})) {
 				if (slot?.nextStallNudgeAt) { delete slot.nextStallNudgeAt; stallSlotsReset.push(slot.taskId); }
 			}
+			// === R23B (2026-09-02) — stamp the cause of every anchor-clearing ===
+			// The cap-branch reset is gated on `lastEpochBusyAgents?.some(id => id !== "orchestrator")`
+			// so the breaker can tell a worker-driven fresh epoch (qualifies) from orchestrator-turn
+			// churn that briefly flipped a worker busy/idle (does NOT qualify). `busyAgents` is the
+			// same array already passed to the `idle.epoch.reset` trace below; persisting it lets the
+			// next fresh-epoch evaluator distinguish worker-busy breaks from orchestrator-driven
+			// ones without a second scan over `st.agents`.
+			const busyAgents = idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id);
 			await trace(p, "idle.epoch.reset", {
 				reason: "agent_busy",
-				busyAgents: idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id),
+				busyAgents,
 				previousAllIdleSinceAt: idleState.allIdleSinceAt ?? null,
 				stallSlotsReset,
 			}).catch(() => {});
+			idleState.lastEpochBusyAgents = busyAgents;
 		}
 		delete idleState.allIdleSinceAt;
 		delete idleState.nextGoalNudgeAt;
@@ -481,7 +490,51 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 		// Row R19 (2026-09-02): clear the once-per-epoch actionable-graph defer guard on the
 		// busy→idle edge so a new epoch can defer one more time (Fix A semantics).
 		delete idleState.actionableGraphDeferredAt;
-		await trace(p, "idle.epoch.started", { allIdleSinceAt: idleState.allIdleSinceAt, idleAgents: idleAgents.length }).catch(() => {});
+		// === R23B (2026-09-02) — delete the edge-site reset. Storm-safety fix: ===
+		// The original R23 fix also reset the counter at the busy→idle EDGE in this
+		// function (when `if (!idleState.allIdleSinceAt)` was true and the goal was
+		// saturated). That edge site never consulted the `r23LastEpochAnchor` memo, so
+		// it fired on EVERY busy→idle edge while saturated — defeating MAX+backoff in
+		// real sessions where `agent_settled` re-stamps the anchor at every orchestrator
+		// turn boundary. Live: implementer lane 2026-09-02T15:19:06..15:21:46Z —
+		// `goal.nudge.saturation_reset_on_epoch` ×12, `goal.idle_nudge` seq 4→38,
+		// `mailbox.orchestrator_pump_stuck_escalated` ×34. The cap branch (memo-checked)
+		// is now the SOLE reset site; the edge site only stamps the memo.
+		//
+		// The fresh nudge still emits on the first eligible tick past the cap because
+		// `r23LastEpochAnchor` was just stamped above — the cap branch's
+		// `notYetAppliedR23 (memo !== anchor)` predicate fails on this same tick, so
+		// no double-reset. (The previous R23 cap-branch path reset the counter and
+		// emitted on the same tick; with the edge site deleted, the very first eligible
+		// tick past the new anchor enters the cap branch and the same code path runs.)
+		//
+		// === R23C (2026-09-03) — PRESERVE `lastEpochBusyAgents` at mint (don't clear) ===
+		// The original R23B mint branch DELETED the breaker (`delete idleState.lastEpochBusyAgents;`)
+		// on the rationale "keeps the data fresh by construction". That was wrong: every production
+		// anchor passes through this mint branch, so deleting the breaker at every mint meant the
+		// cap branch ALWAYS saw `breaker = undefined` → absent→reset legacy default → STORM rerouted
+		// through here once the edge site was gone (live storm continued even with edge-site
+		// deletion). The correct invariant is: `lastEpochBusyAgents` is provenance — it carries the
+		// cause of the most recent anchor CLEAR (the busy edge that caused the prior anchor to be
+		// invalidated) and must SURVIVE from the clear site to the next atCap eval that uses it.
+		// Clear sites that stamp:
+		//   - busy edge in `updateIdleEpochLocked` (`!allIdle` branch, above) → stamps real worker
+		//     agent ids → legitimate R23 re-arm preserved.
+		//   - `hooks.ts` turn_start → now stamps `["orchestrator"]` → orchestrator-turn churn
+		//     rejected by the breaker guard.
+		// Anything else (legacy state file, fresh seed) → breaker absent → absent→reset default
+		// (probe C semantics preserved).
+		// R23B-tester (2026-09-03) — DELETED stamp, not set. The original R23B draft
+		// stamped `r23LastEpochAnchor = allIdleSinceAt` at mint; every production anchor
+		// passes through here, so once minted `memo === anchor` permanently, the cap branch's
+		// `notYetAppliedR23 (memo !== anchor)` check is never true, and the reset never fires
+		// in production (R23 starvation returns). Clear at mint instead: the first
+		// atCap-eligible tick past the cap then sees `memo !== anchor` → reset+emit exactly
+		// once per fresh epoch; later ticks in the same epoch see `memo === anchor` → no
+		// reset; orchestrator-turn churn anchors are also rejected by the worker-breaker
+		// guard above. Probe evidence: tester-memo-probe.{mjs,out.txt}.
+		delete (idleState as { r23LastEpochAnchor?: string }).r23LastEpochAnchor;
+		await trace(p, "idle.epoch.started", { allIdleSinceAt: idleState.allIdleSinceAt, idleAgents: idleAgents.length }).catch(() =>{});
 	}
 	return { allIdle, idleAgents, vacuous };
 }
@@ -788,12 +841,84 @@ export async function evaluateIdleGoalNudgeLocked(
 	// interval window is pushed forward so the pump cannot immediately re-enter the cap branch on the
 	// following 5s tick.
 	if (goal.consecutiveNoResolveNudges >= MAX_CONSECUTIVE_NUDGES_DEFAULT) {
-		if (!goal.backoffTicksRemaining) {
-			goal.backoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
-			idleState.nextGoalNudgeAt = new Date(nowMs + intervalMs).toISOString();
-			await trace(p, "goal.nudge.backoff", { goalId: goal.id, nudges: goal.consecutiveNoResolveNudges, max: MAX_CONSECUTIVE_NUDGES_DEFAULT, backoffTicks: GOAL_NUDGE_BACKOFF_TICKS }).catch(() => {});
+		// === R23 (2026-09-02) — post-saturation fresh-epoch re-arm (cap branch) ===
+		// When the current all-idle anchor POSTDATES the last goal emission, the prior epoch's
+		// nudges are already invalidated at surface time (`idle_epoch_advanced`, R21) and no
+		// orchestrator turn_end resolve could fire while the floor was starved (the cap loop
+		// emits nothing, so there was no turn to resolve) — the "unresolved" count is stale
+		// saturation carried across an epoch boundary (live 2026-09-02T14:44:37..14:45:17Z,
+		// goal goal-1788350610025-7efafe: backoff.skip → backoff_just_exhausted → max_nudges
+		// re-arm loop, ZERO goal.idle_nudge / C3 sends). Reset ONCE per anchor and fall through
+		// so the fresh nudge emits on this same eligible tick. Within ONE uninterrupted
+		// no-resolve epoch the anchor predates every emission, so this never fires and
+		// MAX + backoff stay fully enforced (no goal-nudge storm).
+		//
+		// === R23B (2026-09-02) — worker-breaker guard ===
+		// The reset is ONLY applied when the most recent anchor-clearing busy edge was
+		// caused by a WORKER (any busy agent id !== "orchestrator"). This stops orchestrator-
+		// turn churn (the worker briefly flipping busy between turns, then back to idle)
+		// from minting a fresh anchor that defeats MAX+backoff. Live storm:
+		// 2026-09-02T15:19:06..15:21:46Z — reset ×12, seq 4→38. With this guard, only the
+		// first edge (worker-a taking the R23 incident's task) qualifies; later
+		// orchestrator-churn edges are rejected and the cap+backoff loop re-engages.
+		const anchorR23 = idleState.allIdleSinceAt ?? null;
+		const memoR23 = idleState;
+		const lastEmitR23 = idleState.lastGoalNudgeAt ? Date.parse(idleState.lastGoalNudgeAt) : (goal.lastNudgeAt ? Date.parse(goal.lastNudgeAt) : NaN);
+		const anchorIsFreshR23 = Boolean(anchorR23 && Number.isFinite(lastEmitR23) && Date.parse(anchorR23) > lastEmitR23);
+		// === R23B-rework (2026-09-03) — STALE-MEMO CLEAR (production-mint shape) ===
+		// The original R23 code stamped `r23LastEpochAnchor = allIdleSinceAt` at mint,
+		// leaving production states where the memo equals the anchor. After the R23B
+		// mint-branch delete, NEW mints leave the memo cleared — but legacy state files
+		// (or any non-edge anchor transition that re-stamps both atomically) still hold
+		// `memo === anchor`. The cap branch must NOT be fooled: if anchorIsFreshR23 is
+		// true AND the memo equals the anchor (the stale-shape), the memo is from a prior
+		// reset attempt OR from a legacy state — in either case it does not represent
+		// "this session's cap branch has already reset for this anchor". Clear it once
+		// here so `notYetAppliedR23` becomes true and the reset fires (subject to the
+		// worker-breaker guard below). Crucially, this only fires when anchorIsFreshR23
+		// is true; within the same anchor after a reset, the most-recent emit lands
+		// AFTER the anchor, so anchorIsFreshR23 becomes false and the clear is a no-op
+		// on subsequent ticks — storm guard preserved.
+		if (anchorIsFreshR23 && memoR23.r23LastEpochAnchor === anchorR23) {
+			delete (memoR23 as { r23LastEpochAnchor?: string }).r23LastEpochAnchor;
 		}
-		return { emitted: false, reason: "max_nudges" };
+		const notYetAppliedR23 = Boolean(anchorR23 && memoR23.r23LastEpochAnchor !== anchorR23);
+		// lastEpochBusyAgents is stamped by updateIdleEpochLocked on the busy edge (the
+		// ONLY edge that clears the anchor). Absent (== legacy state, never seen a busy
+		// edge) → the R23 incident default is to RESET, matching pre-R23B behavior for
+		// uninterrupted no-resolve epochs that crossed a worker break. Present and
+		// contains ONLY orchestrator ids → REJECT (storm guard). Present and contains a
+		// non-orchestrator id → worker-driven break, RESET.
+		const breakerAgents = idleState.lastEpochBusyAgents;
+		const workerCaused = !breakerAgents || breakerAgents.some((id) => id !== "orchestrator");
+		if (anchorIsFreshR23 && notYetAppliedR23 && workerCaused) {
+			await trace(p, "goal.nudge.saturation_reset_on_epoch", {
+				goalId: goal.id,
+				consecutiveNoResolveNudges: goal.consecutiveNoResolveNudges,
+				backoffTicksRemaining: goal.backoffTicksRemaining ?? null,
+				newEpochAnchor: anchorR23,
+				lastEmitAt: idleState.lastGoalNudgeAt ?? goal.lastNudgeAt ?? null,
+				lastEpochBusyAgents: breakerAgents ?? null,
+				by: "R23B",
+				site: "cap_branch",
+			}).catch(() => {});
+			goal.consecutiveNoResolveNudges = 0;
+			delete goal.backoffTicksRemaining;
+			goal.lastResolvedAt = new Date(nowMs).toISOString();
+			goal.lastResolveActionAt = goal.lastResolvedAt;
+			goal.lastResolveActionTools = ["epoch_advance_saturation_reset"];
+			idleState.goalConsecutiveNoResolveNudges = 0;
+			delete idleState.goalBackoffTicksRemaining;
+			memoR23.r23LastEpochAnchor = anchorR23;
+			// fall through: counter is now 0 < MAX, the emit chain below runs on this tick.
+		} else {
+			if (!goal.backoffTicksRemaining) {
+				goal.backoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
+				idleState.nextGoalNudgeAt = new Date(nowMs + intervalMs).toISOString();
+				await trace(p, "goal.nudge.backoff", { goalId: goal.id, nudges: goal.consecutiveNoResolveNudges, max: MAX_CONSECUTIVE_NUDGES_DEFAULT, backoffTicks: GOAL_NUDGE_BACKOFF_TICKS }).catch(() => {});
+			}
+			return { emitted: false, reason: "max_nudges" };
+		}
 	}
 
 	// Idempotency: one nudge per (goal, nudge-sequence) emission. The notify key uses goalId plus a

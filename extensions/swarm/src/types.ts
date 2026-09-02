@@ -396,6 +396,16 @@ export type SwarmGoal = {
 // R14 (2026-09-02): `lastWasVacuous` is the once-per-transition dedupe gate for the
 // `goal.nudge.held_no_live_workers` trace; `lastPoolEmptyEscalationAt` is the cooldown
 // anchor for the bounded user-origin escalation nudge.
+// R23 (2026-09-02): `r23LastEpochAnchor` is the once-per-anchor memo for the cap-branch
+// saturation reset. Stamped on the busy→idle edge in `updateIdleEpochLocked`; consulted
+// by `evaluateIdleGoalNudgeLocked`'s cap branch. The reset fires at most once per anchor.
+// R23B (2026-09-02): `lastEpochBusyAgents` is the worker-breaker guard for the cap-branch
+// reset. Stamped on every anchor-clearing busy edge (the same `busyAgents` array passed
+// to the `idle.epoch.reset` trace); cleared when a new anchor is stamped. The reset
+// fires only when this array contains at least one NON-orchestrator id (a worker caused
+// the break) — orchestrator-turn churn (the only "busy" agents between turns being the
+// orchestrator itself) does NOT qualify. Absent (legacy state) → reset, matching pre-
+// R23B behavior for worker-driven breaks that crossed an uninterrupted no-resolve epoch.
 export type SwarmIdleNudgeState = {
 	allIdleSinceAt?: string;
 	nextGoalNudgeAt?: string;
@@ -406,6 +416,8 @@ export type SwarmIdleNudgeState = {
 	lastGoalActiveTaskWork?: { taskId: string; nodeId: string; assignee?: string; status: "assigned" | "in_progress" } | null;
 	lastWasVacuous?: boolean;
 	lastPoolEmptyEscalationAt?: string;
+	r23LastEpochAnchor?: string;
+	lastEpochBusyAgents?: string[];
 };
 
 // In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent
