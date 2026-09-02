@@ -1090,6 +1090,33 @@ Test gap: no test drives GC→epoch→goal-evaluator on one st in a single tick 
 
 **Sequencing:** Fix A (ack-vs-resolve gating) + Fix B (vacuous-branch writeState + state.ts back-fill) + Fix C (action-oriented body) landed together in a single commit. The orchestrator MUST /reload to pick up Fix A's reset semantics; Fix B's persistence gap fix is observable on the first pump tick after /reload; Fix C's body change is observable on the next user-origin escalation. Pre-existing R14 dedupe + cooldown invariants hold (verified by R14 test suite green).
 
+### Row R19 — Goal-nudge actionable_graph deadlock + orphan rework-node eligibility — P0 (FIXED 2026-09-02)
+
+**Source:** Live incident 2026-09-02 (goal-1788327479546-c58a7c). User-origin goal active for 3h 41m with 13× effective idle workers + 1× failed task carrying an unassigned `ready` rework node (task-202609020536-ct-contract-probes-phase/fix). Across the goal's lifetime: 0 `goal.idle_nudge` emits, 480 `goal.nudge.suppressed_by_actionable_graph` traces (476 → fix, 4 → implement), 15 transient `suppressed_by_active_task`, 249 transient `held_no_live_workers`. The orphan `fix` node on the `failed` task permanently silenced the goal floor because (a) `evaluateIdleGoalNudgeLocked`'s `hasActionableGraphWork` gate is a FULL BLOCK (returns `{emitted:false, reason:"actionable_graph"}`), and (b) `isStallNudgeEligibleTaskStatus` admits `failed` to keep the graph-stall nudge working — but the SAME eligibility feeds the goal gate, so an orphan rework on a terminal task is double-counted: it both triggers graph-stall's first emit AND permanently blocks the goal.
+
+**Two coupled defects:**
+1. **Goal floor is conditional, not unconditional.** Per the Issue 18 design the goal nudge is meant to be a "you have a goal standing and no one is doing anything about it" reminder — the floor. Adding the `hasActionableGraphWork` gate (Issue 85) made it conditional on "no actionable graph work", which is the WRONG invariant: actionable graph work in a live task is the legitimate `actionable_graph` case (preserve), but an orphan on a terminal task is NOT actionable graph work — it's an abandoned state the goal nudge MUST surface.
+2. **Orphan rework on terminal tasks counts as actionable graph.** `isStallNudgeEligibleTaskStatus(status === "failed")` was added (Row 75) for graph-stall's own first emission. Reusing the same predicate in `hasActionableGraphWork` made the goal-fallback gate double-count the orphan.
+
+**Fix (per plan §2 + §3, R19 envelope):**
+- **Fix A (reconcile.ts:670-700):** replace the hard `return {emitted:false, reason:"actionable_graph"}` with a soft deferral: trace `goal.nudge.deferred_by_actionable_graph`, push `nextGoalNudgeAt` forward by ONE interval (rate-only), pass the actionable-work hint into the emit body. Fall through to back-off / emit. The floor is unconditional w.r.t. graph state; graph state only adjusts content + rate.
+- **Fix B (reconcile.ts:476-503 + new helper):** add `isTerminalOrAbandonedTaskStatus(status)` and `excludeTerminalTaskOrphans: boolean` to `hasActionableGraphWork`. When `true` (default for the goal-fallback call site), skip `failed` / `cancelled` / `blocked` tasks. Live `in_progress` / `ready` tasks still count (preserves the no-double-fire invariant for the LIVE-task case).
+- **Unchanged:** `evaluateTaskGraphStallNudgeLocked` still admits `failed` (Row 75); `findAssignedOrInProgressTaskWork` still gates the goal on `assigned`/`in_progress` (R11-1 / R10-6); `evaluateIdleGoalNudgeLocked`'s vacuous + agent_busy + assignment_in_flight branches (R14, R16); the goal's max-nudges cap + back-off + interval machinery.
+
+**Acceptance evidence (R10-1 boundary counters at REAL boundaries):**
+- `extensions/swarm/r19-goal-graph-deadlock.test.mjs` — RED→GREEN, 6 scenarios (R19-S1..S6). R10-1 counters at the real boundaries listed in plan §4.1.
+  - R19-S1 (Config C-orphan): failed task + orphan fix + all-idle + interval elapsed → `goal.idle_nudge` emits within ONE interval; `suppressed_by_actionable_graph` count = 0; `deferred_by_actionable_graph` count = 1 (tick 1 only). Pre-fix: 0 emits, 480 suppressed traces.
+  - R19-S2 (Config C-live): in_progress task + ready/unassigned fix + all-idle → graph-stall emits first; goal is deferred-by-actionable-graph (not suppressed); after one interval the goal emits.
+  - R19-S3 (Config C-no-double-fire): live actionable task + goal → graph-stall emits once on tick 1; goal does NOT emit on tick 1; goal does NOT emit on tick 2 (still deferred); after closing the LIVE task's orphan, goal emits exactly once.
+  - R19-S4 (vacuous pool): unchanged — held + escalation invariants preserved.
+  - R19-S5 (all-busy pool): unchanged — agent_busy suppression preserved.
+  - R19-S6 (active-task pool): unchanged — `suppressed_by_active_task` preserved.
+- `extensions/mock-llm/fixtures/r19-goal-graph-deadlock.jsonl` — orchestrator-mid-turn scripted scenario; floor fires at the right interval without a 3h wait; transcript at `.pi/mock-llm/transcripts/r19-goal-graph-deadlock/`. (Follow-up R-row: R19-FU1 — author this fixture.)
+
+**Preservation matrix (all GREEN post-fix):** R16 (25), R14 (14), swarm-goal (67), idle-nudge (69), task-liveness (48). Plus R12 (36+21), R15 (15), task-close-sweep (52), agent-retirement-sweep (33), R13 unknown-target (24), high-priority-interrupt (36), priority-high-interrupt-stream-resolve (30), liveness-progress (40), supersession-fencing (20), graph-advance-nudge-rearm (24), cancellation (42), heartbeat-gc (67), goal-clear-auth (34), proxy-metrics (14), r12-shared-pool-sweep (36), r12-pool-depleted-nudge (21).
+
+**Sequencing:** Fix A + Fix B in one commit (coupled — Fix B without Fix A is useless; Fix A without Fix B is a global firehose on every actionable LIVE task). The orchestrator MUST /reload to pick up the new floor semantics; observable on the next pump tick after /reload.
+
 ### Row R14 — Active user-origin goal must escalate when worker pool is empty — P0 (FIXED 2026-09-02)
 
 **Source:** Live trace sequence 2026-09-01. `goal-1788266039522-6eae40`, origin=user, nudgeIntervalMs=5000. 7_278 `goal.nudge.held_no_live_workers` traces fired over ~16h at exactly 5s cadence. ZERO orchestrator-bound recovery nudges — the pump is in a deadlock state: the user sees nothing, the operator sees only the spam trace, the goal never escalates.

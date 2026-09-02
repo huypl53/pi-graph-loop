@@ -422,6 +422,15 @@ export function isStallNudgeEligibleTaskStatus(status: TaskState["status"]): boo
 	return isActionableTaskStatus(status) || isRecoverableTaskStatus(status);
 }
 
+// Row R19 (2026-09-02): terminal or abandoned tasks whose orphan rework nodes can never auto-advance.
+// A failed/cancelled/blocked task cannot be unblocked by engine action alone — the orchestrator
+// must force-reopen (swarm_update_task force=true) to re-activate it. These tasks should be excluded
+// from `hasActionableGraphWork`'s goal-fallback gate so the orphan does not permanently silence
+// the goal floor. Graph-stall nudge still admits `failed` for its OWN first emission (Row 75).
+export function isTerminalOrAbandonedTaskStatus(status: TaskState["status"]): boolean {
+	return status === "failed" || status === "cancelled" || status === "blocked";
+}
+
 // === Row 68: swarm-level idle epoch ===
 // Maintains `st.idleNudgeState.allIdleSinceAt` — the anchor for the continuous all-idle interval
 // used by BOTH nudge families (goal fallback + graph stall spacing). Called from the pump and from
@@ -457,6 +466,7 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 		}
 		delete idleState.allIdleSinceAt;
 		delete idleState.nextGoalNudgeAt;
+		delete idleState.actionableGraphDeferredAt;
 		return { allIdle, idleAgents, vacuous };
 	}
 	// R14 Fix B (2026-09-02): the vacuous→non-vacuous edge also clears the dedupe
@@ -468,12 +478,20 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 	if (!idleState.allIdleSinceAt) {
 		idleState.allIdleSinceAt = new Date(nowMs).toISOString();
 		delete idleState.nextGoalNudgeAt;
+		// Row R19 (2026-09-02): clear the once-per-epoch actionable-graph defer guard on the
+		// busy→idle edge so a new epoch can defer one more time (Fix A semantics).
+		delete idleState.actionableGraphDeferredAt;
 		await trace(p, "idle.epoch.started", { allIdleSinceAt: idleState.allIdleSinceAt, idleAgents: idleAgents.length }).catch(() => {});
 	}
 	return { allIdle, idleAgents, vacuous };
 }
 
-async function hasActionableGraphWork(p: Paths): Promise<{ actionable: boolean; taskId?: string; nodeId?: string; role?: string }> {
+// Row R19 (2026-09-02): `excludeTerminalTaskOrphans` controls whether terminal/abandoned tasks
+// (failed/cancelled/blocked) participate in the actionable-graph scan. When called from the
+// goal-fallback gate (evaluateIdleGoalNudgeLocked), terminal tasks are EXCLUDED so their orphan
+// rework nodes cannot permanently silence the goal floor (Fix B). When called from graph-stall
+// or stale-open surfaces, terminal tasks are ADMITTED (Row 75 preserved).
+async function hasActionableGraphWork(p: Paths, excludeTerminalTaskOrphans?: boolean): Promise<{ actionable: boolean; taskId?: string; nodeId?: string; role?: string }> {
 	if (!existsSync(p.tasksDir)) return { actionable: false };
 	try {
 		const entries = await readdir(p.tasksDir);
@@ -487,6 +505,11 @@ async function hasActionableGraphWork(p: Paths): Promise<{ actionable: boolean; 
 			// in_progress-only hid never-assigned graphs from the graph nudge AND from goal suppression.
 			// Path A is defined by NON-TERMINAL task + actionable ready/unassigned node.
 			if (!isStallNudgeEligibleTaskStatus(task.status)) continue;
+			// Row R19 (Fix B): when excludeTerminalTaskOrphans is true, skip terminal/abandoned tasks
+			// whose orphan rework nodes can never auto-advance without orchestrator force-reopen.
+			// The graph-stall call site (Row 75) preserves `failed` admission; only the goal-fallback
+			// call site excludes terminal tasks.
+			if (excludeTerminalTaskOrphans && isTerminalOrAbandonedTaskStatus(task.status)) continue;
 			const cr = computeReadyNodes(task);
 			const actionable = new Set([
 				...cr.ready,
@@ -672,10 +695,46 @@ export async function evaluateIdleGoalNudgeLocked(
 		await trace(p, "goal.nudge.suppressed_by_active_task", { goalId: goal.id, taskId: activeTaskWork.taskId, nodeId: activeTaskWork.nodeId, assignee: activeTaskWork.assignee, status: activeTaskWork.status, scanAt: idleState.lastGoalActiveTaskScanAt ?? null }).catch(() => {});
 		return { emitted: false, reason: "active_task" };
 	}
-	const graphWork = await hasActionableGraphWork(p);
+	// Row R19 (Fix A + Fix B, 2026-09-02): graph state is a HINT, not a BLOCK.
+	// hasActionableGraphWork with excludeTerminalTaskOrphans=true skips terminal/abandoned tasks
+	// (Fix B) so orphan rework nodes on failed/cancelled/blocked tasks cannot permanently silence
+	// the goal floor. When actionable work IS found (LIVE tasks), the goal is DEFERRED by one
+	// interval (not fully blocked) so the graph-stall nudge can surface first, then the goal floor
+	// fires unconditionally on the next interval boundary (Fix A).
+	// LIVE-task case retains the "suppressed_by_actionable_graph" trace (the plan §6.2 preserves it);
+	// terminal-task case never reaches this branch thanks to Fix B.
+	const graphWork = await hasActionableGraphWork(p, /*excludeTerminalTaskOrphans=*/ true);
 	if (graphWork.actionable) {
 		await trace(p, "goal.nudge.suppressed_by_actionable_graph", { goalId: goal.id, taskId: graphWork.taskId, nodeId: graphWork.nodeId, role: graphWork.role }).catch(() => {});
-		return { emitted: false, reason: "actionable_graph" };
+		// Fix A: defer by ONE interval (rate-only, not a full block). The defer applies AT MOST
+		// ONCE per idle epoch — after one defer, the goal floor fires unconditionally on the next
+		// legitimate boundary, even if the actionable graph work is still there. This guarantees
+		// "floor fires within ONE interval of the all-idle edge" (plan §2.2 behavioral guarantee)
+		// without the goal being able to perpetually defer on a persistently-actionable LIVE task.
+		//
+		// The defer must be anchored relative to the LEGITIMATE next-boundary
+		// (max(allIdleSinceMs, lastEmitMs) + intervalMs), NOT raw nowMs. Anchoring to raw nowMs
+		// would let the schedule_reanchored clamp (below) pull the defer DOWN to the legitimate
+		// boundary when the all-idle epoch predates nowMs, defeating the defer. Anchoring to
+		// max(nowMs, correctNextMs) + intervalMs gives us a future boundary that the clamp respects.
+		//
+		// The once-per-epoch guard lives on `idleState.actionableGraphDeferredAt` — stamped on the
+		// first defer and cleared on the busy→idle edge (epoch start) via `updateIdleEpochLocked`.
+		// If the defer was already applied for this epoch, fall through to the interval/back-off/emit
+		// chain (no further defer — the goal floor is unconditional w.r.t. graph state).
+		if (idleState.actionableGraphDeferredAt !== idleState.allIdleSinceAt) {
+			const lastEmitMsForDefer = idleState.lastGoalNudgeAt ? new Date(idleState.lastGoalNudgeAt).getTime() : 0;
+			const correctNextMsForDefer = Math.max(allIdleSinceMs, lastEmitMsForDefer) + intervalMs;
+			const deferBase = Math.max(nowMs, correctNextMsForDefer);
+			const deferredUntilMs = deferBase + intervalMs;
+			idleState.nextGoalNudgeAt = new Date(deferredUntilMs).toISOString();
+			idleState.actionableGraphDeferredAt = idleState.allIdleSinceAt ?? new Date(nowMs).toISOString();
+			await trace(p, "goal.nudge.deferred_by_actionable_graph", { goalId: goal.id, taskId: graphWork.taskId, nodeId: graphWork.nodeId, role: graphWork.role, deferredUntil: idleState.nextGoalNudgeAt, intervalMs, deferBase: new Date(deferBase).toISOString() }).catch(() => {});
+			return { emitted: false, reason: "deferred_actionable_graph" };
+		}
+		// Defer already applied for this epoch — fall through to the interval/back-off/emit chain.
+		// The actionable graph work continues to be hinted via the suppressed_by_actionable_graph
+		// trace above but no longer blocks/deferrs the floor.
 	}
 	// Interval gate: the goal fallback fires only after a FULL continuous all-idle interval measured
 	// from the busy→all-idle edge (or from the last goal emission). Pump ticks between boundaries

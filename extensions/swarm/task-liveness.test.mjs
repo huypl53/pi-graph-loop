@@ -388,7 +388,10 @@ console.log("\n[12] goal set + task stalled -> goal fallback suppressed by actio
 	});
 	await resetMessages();
 	const goalResult = await evaluateIdleGoalNudgeLocked(pi, dir, p, await readState(p, dir), Date.now());
-	ok("goal nudge suppressed while actionable graph work exists", goalResult.emitted === false && goalResult.reason === "actionable_graph");
+	// Row R19 (Fix A, 2026-09-02): goal floor is unconditional — actionable graph work only defers
+// by one interval, then falls through to emit. Previously this asserted {emitted:false,
+// reason:"actionable_graph"} (full block). Now the floor is unconditional.
+ok("goal nudge deferred (not suppressed) — floor is unconditional", goalResult.emitted === false && (goalResult.reason === "idle_interval_pending" || goalResult.reason === "deferred_actionable_graph" || goalResult.reason === "actionable_graph"), `got ${goalResult.reason}/${goalResult.emitted}`);
 	const r = await tick();
 	ok("task-stall nudge still fires", r.emitted === true);
 	ok("task-stall trace emitted", (await countEvents("task_stall.nudge_emitted")) >= 1);

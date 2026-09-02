@@ -1223,3 +1223,60 @@ fires once per ack turn (observability, not a counter reset).
 - `swarm_audit({mode:"events", since:..., until:..., event:"goal.nudge.turn_no_resolve_action"})` —
   inspect the ack-only turn history.
 - `/swarm trace` — view the trace census above.
+
+## Operator: R19 goal-nudge actionable_graph deadlock + orphan rework-node eligibility (2026-09-02)
+
+**When this matters:** a user-origin goal with all effective agents idle + at least one terminal/abandoned task carrying an orphan rework node (a `ready` node on a `failed`/`cancelled`/`blocked` task). Pre-R19, the goal floor could be silenced indefinitely by such an orphan. Post-R19, the floor is unconditional: graph state only adjusts content + rate, never fully blocks.
+
+### What R19 changed
+
+- New helper `isTerminalOrAbandonedTaskStatus(status)` in `reconcile.ts:430-432` — returns true for `failed | cancelled | blocked`.
+- New optional parameter `excludeTerminalTaskOrphans: boolean` on `hasActionableGraphWork(p, ...)` — when true, skips terminal/abandoned tasks. The goal-fallback call site passes `true`; graph-stall's first-emission path (Row 75, `reconcile.ts:903`) does NOT pass it, so graph-stall still admits `failed` tasks for its own purpose.
+- New soft-defer branch in `evaluateIdleGoalNudgeLocked` (`reconcile.ts:695-737`): replaces the hard `return {emitted:false, reason:"actionable_graph"}` with `return {emitted:false, reason:"deferred_actionable_graph", actionableGraph: true, deferredUntil: nextGoalNudgeAt}` plus fall-through to back-off/emit. Anchored to `max(nowMs, correctNextMs) + intervalMs` so the defer never lands in the past.
+- New trace event `goal.nudge.deferred_by_actionable_graph` (reconcile.ts:727) — distinguishes "LIVE-task, fall through" from the legacy "any actionable, hard block" semantics.
+- Once-per-epoch guard via `idleState.actionableGraphDeferredAt` (reconcile.ts:466, 478-479, 727) — cleared on busy→idle edge so the floor fires on the next legitimate boundary even if graph work persists.
+- Preserved `goal.nudge.suppressed_by_actionable_graph` for LIVE-task case (reconcile.ts:709) — when `graphWork.actionable` is true AND a LIVE task owns it, the suppression trace still fires (no double-fire invariant, R19-S3).
+- Preserved `findAssignedOrInProgressTaskWork` (R11-1 / R10-6), `agent_busy` (R14), `assignment_in_flight` (R13), `vacuous` + `held_no_live_workers` + `escalation.pool_empty` (R14/R16).
+
+### Ten R10-1 boundary counters
+
+| # | counter | boundary | file:line |
+| --- | --- | --- | --- |
+| C-R19-1 | `goal.idle_nudge` trace count | real trace | `reconcile.ts:744` (post-fix emit) |
+| C-R19-2 | `goal.nudge.deferred_by_actionable_graph` trace count | real trace | `reconcile.ts:727` (post-fix defer) |
+| C-R19-3 | `goal.nudge.suppressed_by_actionable_graph` trace count (LIVE-task case) | real trace | `reconcile.ts:709` (retained) |
+| C-R19-4 | `deliverMessageLocked` for goal-key | durable mailbox append | `reconcile.ts:1709+` (post-fix emit path) |
+| C-R19-5 | `hasActionableGraphWork` return value (true for LIVE task; false for terminal task) | real function call | `reconcile.ts:494-516` |
+| C-R19-6 | `pi.sendMessage` pump loop | real sendMessage | `reconcile.ts:1763-1773` |
+| C-R19-7 | `consecutiveNoResolveNudges` value | real state mutation | `reconcile.ts:752+` |
+| C-R19-8 | `nudgeSeq` value | real state mutation | `reconcile.ts:752+` |
+| C-R19-9 | `nextGoalNudgeAt` bounded | real persisted flag | `reconcile.ts:724` (set) + `:680` (read) |
+| C-R19-10 | `hasActionableGraphWork` scan call count | real function call | `reconcile.ts:706` (goal-fallback call site) |
+
+### Diagnosing in the field
+
+- **High `goal.nudge.suppressed_by_actionable_graph` rate with ZERO `goal.idle_nudge` AND a `failed` task in the dir:** pre-R19 orchestrator (no /reload'd yet). The suppression is permanent because the orphan `fix` node on a `failed` task counts as actionable graph work. **Fix:** /reload.
+- **High `goal.nudge.deferred_by_actionable_graph` rate with `goal.idle_nudge` firing on the next tick:** R19 active and working as designed. The defer is a one-interval rate adjustment; the floor fires on the next legitimate boundary.
+- **LIVE-task `actionable_graph` suppression still firing:** expected. R19 only excludes terminal tasks (`failed`/`cancelled`/`blocked`) from the graph scan. Live `in_progress` / `ready` tasks still suppress/defer correctly.
+- **Orphan rework node on a `failed` task repeatedly fires `goal.idle_nudge`:** post-R19 expected. The floor surfaces abandoned work so the operator (or a fresh worker) can pick it up.
+
+### Verify the fix locally
+
+```
+node extensions/swarm/r19-goal-graph-deadlock.test.mjs
+node extensions/swarm/r16-idle-goal-regression.test.mjs
+node extensions/swarm/r14-goal-empty-pool-escalation.test.mjs
+node extensions/swarm/idle-nudge.test.mjs
+node extensions/swarm/swarm-goal.test.mjs
+node extensions/swarm/task-liveness.test.mjs
+```
+
+All six MUST be green in the post-fix shape. R19-S1 (orphan on `failed` task) is the load-bearing test — pre-fix it yields 0 emits + ≥4 suppressed traces; post-fix it yields ≥1 emit + 0 suppressed.
+
+### Related tools / commands
+
+- `swarm_set_goal({origin:"user",...})` — set a goal; R19 ensures the floor fires even with abandoned orphan rework in flight.
+- `swarm_mark_goal_done({approvedByUser:true})` — clear the goal; legitimate resolve path unaffected by R19.
+- `swarm_audit({mode:"events", since:..., until:..., event:"goal.nudge.deferred_by_actionable_graph"})` — inspect defer history.
+- `swarm_audit({mode:"events", since:..., until:..., event:"goal.nudge.suppressed_by_actionable_graph"})` — distinguish LIVE-task (expected) from terminal-task (post-R19 = 0) suppressions.
+- `/swarm trace` — view the live trace census.
