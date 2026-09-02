@@ -448,8 +448,15 @@ console.log("\n[CT-4.B] ctx.isIdle() === true after compaction completes");
 // ============================================================================
 // CT-5 — ctx.signal is undefined in session_start handler (F5)
 // ============================================================================
-
-console.log("\n[CT-5] ctx.signal undefined in session_start handler (F5 footgun verification)");
+// DEPRECATED 2026-09-02: this unit-harness section used a self-mocked
+// `const ctxAtSessionStart = { signal: undefined, ... }` — a self-mock
+// asserting its own shape, zero information about the real runtime. The
+// audit-mandated remediation lives in `extensions/ct-probe/ct-probe.ts` CT5
+// factory, which captures REAL `ctx.signal` at the REAL `session_start`
+// boundary from a real pi session. The assertions below are kept ONLY as a
+// fast offline regression (they prove the probe's expected shape). The
+// transcript citation is no longer present in §11 P-5 of the contract doc.
+console.log("\n[CT-5] DEPRECATED — see extensions/ct-probe/ct-probe.ts CT5 factory for real-lane evidence");
 {
 	let capturedSignal = Symbol("not-yet-captured");
 	let capturedSignalType = "not-yet-captured";
@@ -504,8 +511,16 @@ console.log("\n[CT-5] ctx.signal undefined in session_start handler (F5 footgun 
 // ============================================================================
 // CT-6 — captured ctx throws after await ctx.reload() (F6 throw-on-stale-use)
 // ============================================================================
-
-console.log("\n[CT-6] captured ctx throws after await ctx.reload() (F6 footgun verification)");
+// DEPRECATED 2026-09-02: this unit-harness section used a self-mocked
+// `const ctx = { ..., registerTool: () => { if (stale) throw new Error("This extension ctx is stale; ..."); } }`
+// — a self-mock with hand-thrown stale message, NOT the real `runner.js:352`
+// throw path. The audit-mandated remediation lives in
+// `extensions/ct-probe/ct-probe.ts` CT6 factory, which performs a REAL
+// `await ctx.reload()` on the real runtime and observes the thrown message
+// from the real stale-ctx guard. The assertions below are kept ONLY as a
+// fast offline regression. The transcript citation is no longer present in
+// §11 P-6 of the contract doc.
+console.log("\n[CT-6] DEPRECATED — see extensions/ct-probe/ct-probe.ts CT6 factory for real-lane evidence");
 {
 	let stale = false;
 	const ctx = {
@@ -576,8 +591,14 @@ console.log("\n[CT-6] captured ctx throws after await ctx.reload() (F6 footgun v
 // ============================================================================
 // CT-7 — agent_end fires before agent_settled (F7 footgun)
 // ============================================================================
-
-console.log("\n[CT-7] agent_end fires before agent_settled (F7 footgun verification)");
+// DEPRECATED 2026-09-02: this unit-harness section self-mocked the lifecycle
+// emitter via a closure-controlled `pi.__emitLifecycle("agent_end")` helper —
+// not the real runtime's agent_end/agent_settled emissions. The audit-mandated
+// remediation lives in `extensions/ct-probe/ct-probe.ts` CT7 factory, which
+// subscribes to the real lifecycle hooks and observes the real ordering.
+// The assertions below are kept ONLY as a fast offline regression. The
+// transcript citation is no longer present in §11 P-7 of the contract doc.
+console.log("\n[CT-7] DEPRECATED — see extensions/ct-probe/ct-probe.ts CT7 factory for real-lane evidence");
 
 // CT-7.A — mid-stream: agent_end observed; agent_settled NOT yet.
 console.log("\n[CT-7.A] mid-stream agent_end observed; agent_settled NOT yet");

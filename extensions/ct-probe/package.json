@@ -1,0 +1,10 @@
+{
+	"name": "ct-probe",
+	"version": "0.0.1",
+	"type": "module",
+	"description": "Real-lane probe for CT-3..CT-7 contract tests. Loaded via -e ./extensions/ct-probe in real pi lanes with mock-llm provider; writes probe-result JSON to $PI_CT_PROBE_SCRATCH.",
+	"main": "ct-probe.ts",
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	}
+}
