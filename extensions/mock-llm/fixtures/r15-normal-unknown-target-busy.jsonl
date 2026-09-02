@@ -1,0 +1,18 @@
+# r15-normal-unknown-target-busy: R15 P0 — normal worker result to unknown-target orchestrator
+# must NOT promise a bounded (~5s) user-visible surface.
+#
+# Reproduces the 2026-09-01 normal-priority worker-result incident in a scripted orchestrator lane:
+#   1. Orchestrator opens its mailbox — a normal-priority worker result is durably enqueued.
+#   2. Orchestrator pumps (busy/orchestrator-own-work shape) — the result stays in the durable
+#      mailbox; the swarm_send_message tool's return text is what the worker audits.
+#   3. Orchestrator settles (agent_settled on the orchestrator) — the legitimate idle path surfaces
+#      the result via pi.sendMessage with triggerTurn: true.
+#
+# RED observation on the pre-fix code: the worker-facing swarm_send_message return text contains
+# the literal "its pump surfaces mailbox messages within ~5s" (a false promise) while the busy
+# orchestrator's pi.sendMessage boundary count stays 0. GREEN after B1 removes the literal text.
+#
+# Deterministic: same outcome on a fresh lane replay. delayMs gates the pump-tick timing.
+{"name":"r15 open mailbox baseline (normal result in durable mailbox)","events":[{"type":"text","delayMs":15,"text":"I'm starting the R15 validation lane. Opening the orchestrator mailbox to observe the normal-priority worker result that is durably enqueued (the R15 incident shape: a worker reported completion via swarm_send_message to an unknown-target orchestrator).","chunks":["I'm starting the R15 validation lane. ","Opening the orchestrator mailbox to observe the normal-priority ","worker result that is durably enqueued."," (the R15 incident shape)"],"actions":[{"type":"toolcall","name":"swarm_check_mailbox","id":"mb-0","arguments":{"pendingOnly":true,"markDelivered":false,"limit":20}}]}]}
+{"name":"r15 verify mailbox durable + send_message text","events":[{"type":"text","delayMs":20,"text":"The durable mailbox append is the L1 layer — it holds the result regardless of orchestrator surface. The worker-facing swarm_send_message return text is what the worker audits; on the pre-fix code that text falsely claims 'surfaces within ~5s'. Re-querying the mailbox confirms the message is still pending (L1 durable; not yet surfaced via L2 pi.sendMessage while the orchestrator is busy).","chunks":["The durable mailbox append is the L1 layer ","— it holds the result regardless of orchestrator surface. ","The worker-facing swarm_send_message return text is what the worker audits; ","on the pre-fix code that text falsely claims 'surfaces within ~5s'. ","Re-querying the mailbox confirms the message is still pending"],"actions":[{"type":"toolcall","name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"markDelivered":false,"limit":20}}]}]}
+{"name":"r15 settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Lane complete: the R15 P0 fix removes the false time-bound surface promise for normal-priority orchestrator results while preserving durable mailbox semantics and the legitimate orchestrator-idle/agent_settled surface path.","chunks":["Lane complete: ","the R15 P0 fix removes the false time-bound surface promise ","for normal-priority orchestrator results ","while preserving durable mailbox semantics ","and the legitimate orchestrator-idle/agent_settled surface path."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

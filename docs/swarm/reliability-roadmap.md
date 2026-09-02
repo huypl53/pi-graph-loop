@@ -1024,3 +1024,22 @@ Test gap: no test drives GC→epoch→goal-evaluator on one st in a single tick 
 - Preservation matrix GREEN: R12 (36+21), task-close-sweep (52), agent-retirement-sweep (33), high-priority-interrupt (36), priority-high-interrupt-stream-resolve (30), idle-nudge (69), liveness-progress (40), supersession-fencing (20), graph-advance-nudge-rearm (24), swarm-goal (67), cancellation (42). Pre-existing orchestrator-wake 3 failures unchanged (verified via `git stash`).
 
 **Sequencing:** No restart-gated pump change required. The fix extends an existing predicate and adds an idempotencyKey fallback — the live pump path is untouched.
+
+### Row R15 — Normal orchestrator result must NOT promise bounded surface — P0 (FIXED 2026-09-02)
+
+**Source:** Live trace sequence 2026-09-01. `swarm_send_message` (extensions/swarm/src/tools/messages.ts:42-48) returned the literal text `"its pump surfaces mailbox messages within ~5s"` to workers reporting completion via `to=orchestrator`, even though the pump defers while the orchestrator is busy (reconcile.ts:1617-1626) and the busy-suppression at reconcile.ts:1665 drops the message from the surface plan entirely. Workers either waited indefinitely or escalated; either way the swarm contract was broken.
+
+**Root cause (isolated, code-located):** The `mailboxOnlyNote` text at `extensions/swarm/src/tools/messages.ts:42-48` conflated L1 (durable mailbox append) with L3 (visible TUI surface) and asserted a false time-bound (`~5s`). The pump has no time-bound guarantee: `agent_settled` is a lifecycle condition, not a time bound (per pi-runtime-contract.md §4).
+
+**Fix (R15 B1 — honest removal per plan §4):** Removed the literal `"~5s"` text from `tools/messages.ts:42-48`. Replaced with an honest durable-no-time-bound contract that names the legitimate surface paths (orchestrator's own `agent_settled` or its next idle watchdog tick). Did NOT alter mailbox append, normal busy suppression, or reconcile behavior. Did NOT change `mailbox.ts:200-203` (mailbox-only short-circuit), `reconcile.ts:1617-1626` (busy-defer), or `reconcile.ts:1665` (busy-suppression site).
+
+**Acceptance evidence:**
+- `extensions/swarm/r15-normal-orchestrator-result.test.mjs` — RED→GREEN, 15/0 PASS. R15-S1 (priority-normal unknown-target + busy: 0 pi.sendMessage + literal `"~5s"` ABSENT from real `swarm_send_message` tool output), R15-S2 (idle-orchestrator explicit `agent_settled`: 1 pi.sendMessage, non-regression), R15-S3 (replay guard: no dup), R15-S4 (R13 high-priority bypass still works: 1 pi.sendMessage), R15-S5 (durable mailbox semantics intact: mailboxOnlyCount=1, deliver.mailbox_only trace), R15-S6 (R13 bypass MUST NOT fire for normal-priority: bypass trace absent).
+- `extensions/mock-llm/fixtures/r15-normal-unknown-target-busy.jsonl` — 3 scripted turns (open mailbox baseline → verify surface → settle).
+- tmux lane `r15-validate:r15.0` captured at `tmux-snapshots/r15-normal-unknown-target-busy-red-lane.txt`; transcript at `.pi/mock-llm/transcripts/r15-normal-unknown-target-busy/`.
+- RED evidence preserved at `tmux-snapshots/r15-test-red-evidence.txt` (test output with literal `"~5s"` captured before B1 fix).
+- `docs/swarm/pi-runtime-contract.md` updated: §1 paragraph notes the fix; §3 deliverAs warning notes the fix; §10 F3 row marked FIXED with B1 evidence.
+
+**Preservation matrix (all GREEN post-fix):** R12 (36+21), task-close-sweep (52), agent-retirement-sweep (33), R13 unknown-target (24), high-priority-interrupt (36), priority-high-interrupt-stream-resolve (30), idle-nudge (69), liveness-progress (40), supersession-fencing (20), graph-advance-nudge-rearm (24), swarm-goal (67), cancellation (42).
+
+**Sequencing:** Minimal source change in `tools/messages.ts:42-48` only. No restart-gated pump change. The orchestrator pump, mailbox delivery, busy-defer, busy-suppression, and R13 bypass paths are all untouched.

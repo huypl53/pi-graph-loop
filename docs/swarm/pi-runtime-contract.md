@@ -25,7 +25,7 @@ Between L1 and L2 is the **swarm→Pi bridge**. Between L2 and L3 is the **Pi in
 - A `pi.sendMessage` call that returns `void` synchronously is **not** a TUI-visible surface at L3.
 - A visible TUI notification at L3 is **not** an LLM-consumed context at L4 until the next assistant turn reads it.
 
-This is the **R15 false-promise shape**: `extensions/swarm/src/tools/messages.ts:42-48` conflates L1 → L3 with the line `"its pump surfaces mailbox messages within ~5s"` — there is no such guarantee. See §10 R15 row.
+This is the **R15 false-promise shape** (FIXED 2026-09-02 via R15 B1 — the literal `"its pump surfaces mailbox messages within ~5s"` was removed from `extensions/swarm/src/tools/messages.ts:42-48`; see §10 R15 row and roadmap Row R15 for evidence): the orchestrator's pump conflates L1 → L3, and there is no time-bound surface guarantee. The orchestrator's own `agent_settled` or its next idle watchdog tick is the only legitimate surface path.
 
 ---
 
@@ -67,7 +67,7 @@ From [VERIFIED evidence §2.1]:
 
 `nextTurn` only exists on `pi.sendMessage`. `pi.sendUserMessage` accepts only `steer` | `followUp`. [VERIFIED evidence §2.1]
 
-> **Swarm footgun (F3 / R15):** The swarm MUST NOT promise a time-bound user-visible surface based on `followUp` or `nextTurn`. The orchestrator's pump cannot guarantee any specific delay; `agent_settled` is a lifecycle condition, not a time bound. This is the R15 fix territory and §3 surfaces it before any contributor writes a sleep/retry.
+> **Swarm footgun (F3 / R15, FIXED 2026-09-02):** The swarm MUST NOT promise a time-bound user-visible surface based on `followUp` or `nextTurn`. The orchestrator's pump cannot guarantee any specific delay; `agent_settled` is a lifecycle condition, not a time bound. **R15 B1 fix:** the literal `"~5s"` text in `extensions/swarm/src/tools/messages.ts:42-48` was removed; the honest durable-no-time-bound text now reports "surfaces when the orchestrator's own agent_settled fires or its next idle watchdog tick processes the mailbox". Section §3 surfaces this footgun before any contributor writes a sleep/retry.
 
 ---
 
@@ -173,7 +173,7 @@ Extension errors (e.g. `tool_call` that throws) are logged, agent continues. `to
 
 | # | Claim | Where in code | R-row | Severity | Citation |
 |---|-------|---------------|-------|----------|----------|
-| **F3** | "Mailbox-only delivery to unknown-target orchestrator surfaces within ~5s" | `extensions/swarm/src/tools/messages.ts:42-48` (literal text `"its pump surfaces mailbox messages within ~5s"`) | **R15** | **CRITICAL** | [VERIFIED evidence §1.1 + §10 / auditor F3] |
+| **F3** | "Mailbox-only delivery to unknown-target orchestrator surfaces within ~5s" | `extensions/swarm/src/tools/messages.ts:42-48` (literal text `"its pump surfaces mailbox messages within ~5s"`) | **R15** | **CRITICAL** | [VERIFIED evidence §1.1 + §10 / auditor F3] — **FIXED 2026-09-02 (R15 B1)**: literal removed; honest durable-no-time-bound text; see roadmap Row R15 |
 | **F2** | Orchestrator `tmuxTarget === "unknown"` is exceptional | (incorrect framing in R13 narrative; factually true in code: `identity.ts:67-69, 80, 106`) | **R13** | High | [VERIFIED evidence §1.1 + identity.ts:67-69,80,106, auditor F2] |
 | **F1** | `await pi.sendMessage(...)` waits for delivery | (pattern, not a literal line; agents-session.js:1846-1852 wrapper drops the promise) | **R13, R15** | High | [VERIFIED evidence §1.1, agent-session.js:1846-1852, auditor F1] |
 | **F4** | `agent_busy` only fires on user-tool busy | reconcile.ts busy-suppression gate | **R13 P1, R14** | Medium | [VERIFIED evidence §3.1, auditor F4] |
@@ -182,7 +182,7 @@ Extension errors (e.g. `tool_call` that throws) are logged, agent continues. `to
 | **F7** | `agent_end` is the "surface after fully idle" boundary | (not literal code, but hook-level) | **R13 P1** | Low | [VERIFIED evidence §6, auditor F7] |
 | **F8** | `nextTurn` + `triggerTurn: true` starts a turn | (any swarm code using `nextTurn` for nudges) | **R13, R15** | Low | [VERIFIED evidence §2.1, auditor F8] |
 
-Each row in this table is referenced by the §1 four-layer table so a contributor can navigate from a layer gap to the offending code path. **R15 critical:** the false promise in `tools/messages.ts:42-48` is named explicitly here so reviewers can grep production code for it and so the R15 production fix task can locate the line without archaeology.
+Each row in this table is referenced by the §1 four-layer table so a contributor can navigate from a layer gap to the offending code path. **R15 critical (FIXED 2026-09-02):** the false promise in `tools/messages.ts:42-48` was removed; reviewers can grep the file for the literal `"within ~5s"` and find it absent. The R15 row tracks the durable-no-time-bound text + R10-1 boundary-counting assertion (R15 B1).
 
 ---
 
