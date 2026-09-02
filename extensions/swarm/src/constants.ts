@@ -366,6 +366,15 @@ export const TRACE_AGENT_TMUX_LIVENESS_CORRECTION = "agent.tmux_liveness_correct
 // of stopped) because of a valid `leaseKind: "park"` lease. Companion to TRACE_AGENT_TASK_SWEEP_STOPPED.
 export const TRACE_AGENT_TASK_SWEEP_PARKED = "agent.task_sweep_parked";
 
+// === R12 P0: pool-depletion nudge (companion to task-close sweep) ===
+// Emitted from taskgraph.ts:sweepTaskWorkersLocked when a close CALL actually transitions the
+// effective live non-orchestrator agent pool from ≥1 to 0. Exactly one per depleting close call;
+// not emitted on `0 → 0` or `≥1 → ≥1` transitions; not emitted on idempotent re-invocations
+// (`stopped.length === 0`). Companion message: a high-priority orchestrator nudge is delivered
+// via deliverMessageLocked at the same call site so the Issue 86 interrupt machinery wakes the
+// orchestrator and either re-spawns workers or downgrades the goal.
+export const TRACE_POOL_DEPLETED_NUDGE = "pool.depleted_nudge";
+
 // === Issue 82: lease stamping trace (tools/tasks.ts:swarm_assign_task) ===
 // Emitted when the orchestrator passes a `lease` parameter to swarm_assign_task and the assignee's
 // record is stamped with the lease fields. Carries the lease kind, until timestamp, and reason

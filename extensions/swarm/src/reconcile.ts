@@ -1122,9 +1122,22 @@ export async function evaluateSlotRecoveryLocked(
 // Helper to parse taskId/nodeId from conversationId (format: "task:${taskId}:${nodeId}").
 function parseTaskNodeRef(conversationId: string | undefined): { taskId?: string; nodeId?: string } | null {
 	if (!conversationId) return null;
-	const m = conversationId.match(/^task:([^:]+):([^:]+)$/);
-	if (!m) return null;
-	return { taskId: m[1], nodeId: m[2] };
+	// Canonical formats observed in production:
+	//   - "task:{taskId}:{nodeId}"                — graph-advance nudge (line 844)
+	//   - "task:{taskId}:node:{nodeId}:nudge:{kind}:seq:{n}" — stale-open / pool_depleted variants
+	// The compact form must be matched first so a 3-segment conversationId is not mis-parsed as
+	// the long form (where nodeId would be the literal "node").
+	const compact = conversationId.match(/^task:([^:]+):([^:]+)$/);
+	if (compact && !["node", "pool_depleted", "nudge"].includes(compact[2])) {
+		return { taskId: compact[1], nodeId: compact[2] };
+	}
+	const long = conversationId.match(/^task:([^:]+):(?:node:([^:]+):nudge:|pool_depleted(?:$|:))/);
+	if (long) return { taskId: long[1], nodeId: long[2] || null };
+	// Last-resort: any leading "task:{taskId}:" — return taskId without a nodeId so the predicate
+	// can still gate on task-terminal status even when the node ref is absent or unknown.
+	const taskOnly = conversationId.match(/^task:([^:]+):/);
+	if (taskOnly) return { taskId: taskOnly[1], nodeId: undefined };
+	return null;
 }
 
 // Actionability predicate for historical orchestrator PM messages (issue 11, §5). Returns { ok: false }
@@ -1170,8 +1183,15 @@ export function isActionableOrchestratorMessage(
 	if (rec.to !== "orchestrator") return { ok: false, reason: "wrong_recipient" };
 
 	// Task-scoped predicate (covers terminal task, cancelled, terminal node, reassigned node).
-	// Parse task/node reference from conversationId.
-	const taskNodeRef = parseTaskNodeRef(rec.conversationId);
+	// Parse task/node reference from conversationId, falling back to the canonical
+	// idempotencyKey format `task:{taskId}:node:{nodeId}:nudge:{kind}:seq:{n}` (production
+	// stale-open / pool_depleted don't always set conversationId, but the idempotencyKey
+	// always encodes the task+node ref).
+	let taskNodeRef = parseTaskNodeRef(rec.conversationId);
+	if ((!taskNodeRef || !taskNodeRef.taskId) && rec.idempotencyKey) {
+		const idem = String(rec.idempotencyKey).match(/^task:([^:]+):(?:node:([^:]+):)?/);
+		if (idem) taskNodeRef = { taskId: idem[1], nodeId: idem[2] || undefined };
+	}
 	if (taskNodeRef && taskNodeRef.taskId && taskNodeRef.nodeId) {
 		const task = taskIndex[taskNodeRef.taskId];
 		if (!task) return { ok: false, reason: "task_missing" };
@@ -1662,13 +1682,93 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		for (const item of surfacePlan) {
 			const v = await staleSurfaceReason(p, st, item.msg, taskIndex, nowMs);
 			if (v.stale) {
-				await traceStaleSuppressedOnce(p, "orchestrator_pump.surface", {
-					messageId: item.msg.id,
-					idempotencyKey: String(item.rec.idempotencyKey || item.msg.idempotencyKey || ""),
-					reason: v.reason,
-					evidence: v.evidence,
-				});
-				continue;
+				// === R13 P0 (2026-09-01) — priority-high unknown-target orchestrator safety-net bypass ===
+				// The orchestrator pseudo-agent has tmuxTarget === "unknown" by design (identity.ts:69)
+				// and a worker in `tool_running` state causes `staleSurfaceReason` to return
+				// `{stale: true, reason: "agent_busy"}` — suppressing the durable nudge so the user
+				// never sees it even though `deliverMessageLocked` reported success via mailbox_only.
+				// Live incident 2026-09-01T13:10:27 trace: priority-high STALE-OPEN nudge durably
+				// enqueued, mailbox_only logged, then `notification.stale.suppressed site=
+				// orchestrator_pump.surface reason=agent_busy` with zero `pi.sendMessage` calls at the
+				// reconcile.ts:1763-1773 boundary. Fix: for priority-high nudges bound for the
+				// unknown-target orchestrator pseudo-agent, BYPASS the busy-suppression gate so the
+				// safety nudge still surfaces locally. Normal-priority traffic still respects the
+				// gate (otherwise the `goal.nudge.suppressed_by_active_task` storm from R10 returns).
+				const recForBypass = item.rec;
+				// Priority lives on the mailbox entry (item.msg — what windowMsgs read from the JSONL),
+				// NOT on the st.messages record (upsertMessageRecord does not persist priority). Fall
+				// back to the raw mailbox entry when the record's priority is absent.
+				const bypassPriority = String((recForBypass.priority ?? (item.msg as any)?.priority) || "").toLowerCase();
+				const isHighPriority = bypassPriority === "high";
+				const recipient = st.agents[recForBypass.to];
+				const isUnknownTargetOrchestrator = recipient?.id === "orchestrator" && (!recipient.tmuxTarget || recipient.tmuxTarget === "unknown");
+				// === R13 P1 (2026-09-02) — liveness gate: the bypass MUST NOT rescue nudges whose
+				// referenced task/node is already terminal. Live incident 2026-09-02: pre-R13
+				// priority-high stale-open nudges that were durably enqueued on 2026-09-01
+				// (when their tasks/nodes were still live) began re-surfacing on 2026-09-02
+				// after those tasks/nodes closed overnight — the bypass converted a moot
+				// historical alert into a user-visible "act now" message. Gate the bypass on
+				// referenced-task liveness by parsing the canonical idempotencyKey format
+				// (task:taskId:node:nodeId:nudge:*:seq:*) and reading taskIndex; fall back to
+				// conversationId via parseTaskNodeRef for the production pool_depleted shape
+				// (task:taskId:pool_depleted).
+				const idemForLiveness = String(recForBypass.idempotencyKey || (item.msg as any)?.idempotencyKey || "");
+				const idemMatch = idemForLiveness.match(/^task:([^:]+):(?:node:([^:]+):)?nudge:/);
+				let liveTaskId: string | null = idemMatch ? idemMatch[1] : null;
+				let liveNodeId: string | null = idemMatch ? (idemMatch[2] || null) : null;
+				if (!liveTaskId) {
+					const convRef = parseTaskNodeRef(recForBypass.conversationId || (item.msg as any)?.conversationId);
+					if (convRef?.taskId) {
+						liveTaskId = convRef.taskId;
+						liveNodeId = convRef.nodeId || null;
+					}
+				}
+				let liveTaskIsTerminal = false;
+				let liveTerminalReason: string | null = null;
+				if (liveTaskId) {
+					const task = taskIndex[liveTaskId];
+					if (!task) {
+						liveTaskIsTerminal = true;
+						liveTerminalReason = "task_missing";
+					} else if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
+						liveTaskIsTerminal = true;
+						liveTerminalReason = `task_${task.status}`;
+					} else if (liveNodeId && task.nodes[liveNodeId] && TERMINAL_NODE_STATUSES.has(task.nodes[liveNodeId].status)) {
+						liveTaskIsTerminal = true;
+						liveTerminalReason = "node_terminal";
+					}
+				}
+				const bypassBusyForHigh = isHighPriority && isUnknownTargetOrchestrator && v.reason === "agent_busy" && !liveTaskIsTerminal;
+				if (liveTaskIsTerminal) {
+					// Do NOT bypass — surface the historical nudge's terminal state via the
+					// standard suppression trace + counters so it is observable in the
+					// notification.batch.suppressed census (task_done / node_terminal).
+					await traceStaleSuppressedOnce(p, "orchestrator_pump.surface", {
+						messageId: item.msg.id,
+						idempotencyKey: String(recForBypass.idempotencyKey || ""),
+						reason: liveTerminalReason || "task_terminal",
+						evidence: [liveTerminalReason || "task_terminal", "r13_p1_liveness_gate"],
+					});
+					continue;
+				}
+				if (bypassBusyForHigh) {
+					await trace(p, "notification.surface.bypass_high_unknown_target", {
+						messageId: item.msg.id,
+						idempotencyKey: String(recForBypass.idempotencyKey || ""),
+						suppressedReason: v.reason,
+						suppressedEvidence: v.evidence,
+						by: "R13 P0",
+					}).catch(() => {});
+					// Fall through to the coalescing path (do NOT continue past this item).
+				} else {
+					await traceStaleSuppressedOnce(p, "orchestrator_pump.surface", {
+						messageId: item.msg.id,
+						idempotencyKey: String(item.rec.idempotencyKey || item.msg.idempotencyKey || ""),
+						reason: v.reason,
+						evidence: v.evidence,
+					});
+					continue;
+				}
 			}
 			const existing = coalesced.get(item.groupKey);
 			if (!existing) {

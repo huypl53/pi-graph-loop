@@ -224,10 +224,12 @@ function resetIsolation() {
 }
 
 // ============================================================
-// Scenario 2: cross-task worker (active on another task) is NEVER stopped
+// Scenario 2: cross-task worker (active on another task) is NEVER stopped;
+//            shared-pool sole-task worker is also preserved (R12 P0 contract);
+//            dedicated per-task worker IS swept.
 // ============================================================
 {
-	console.log("\n--- Scenario 2: cross-task worker is never stopped ---");
+	console.log("\n--- Scenario 2: cross-task + shared-pool preserved; dedicated swept ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	withKeep(undefined);
@@ -243,10 +245,10 @@ function resetIsolation() {
 	// Cross-task worker: active on BOTH taskA AND taskB, spawned for taskA only.
 	await seedAgentRecord("multi-worker-01", { activeTaskIds: [taskA, taskB], spawnedForTaskId: taskA });
 	await stampNodeAssignee(taskA, "implement", "multi-worker-01");
-	// Sole-task worker: active on taskA only (eligible for sweep).
-	await seedAgentRecord("solo-worker-01",  { activeTaskIds: [taskA], spawnedForTaskId: taskA });
-	await stampNodeAssignee(taskA, "plan", "solo-worker-01");
-	// Reuse-pool worker: active on taskA only, no spawnedForTaskId (eligible via sole-active-task rule).
+	// Dedicated per-task worker: spawned for taskA, sole active task (eligible via spawnedForTaskId link).
+	await seedAgentRecord("dedicated-worker-01", { activeTaskIds: [taskA], spawnedForTaskId: taskA });
+	await stampNodeAssignee(taskA, "plan", "dedicated-worker-01");
+	// Shared-pool worker: active on taskA only, no spawnedForTaskId (R12 P0: MUST be preserved).
 	await seedAgentRecord("reuse-worker-01", { activeTaskIds: [taskA] });
 	await stampNodeAssignee(taskA, "review", "reuse-worker-01");
 
@@ -259,14 +261,17 @@ function resetIsolation() {
 	ok("cross-task worker NOT stopped (still running)", st.agents["multi-worker-01"]?.status === "running");
 	ok("cross-task worker activeTaskIds still includes taskB", st.agents["multi-worker-01"]?.activeTaskIds.includes(taskB));
 	ok("cross-task worker activeTaskIds dropped taskA", !st.agents["multi-worker-01"]?.activeTaskIds.includes(taskA));
-	ok("sole-task worker stopped",                       st.agents["solo-worker-01"]?.status === "stopped");
-	ok("reuse-pool worker stopped (sole active task)",   st.agents["reuse-worker-01"]?.status === "stopped");
+	ok("dedicated worker swept (spawnedForTaskId link)", st.agents["dedicated-worker-01"]?.status === "stopped");
+	ok("shared-pool worker preserved (R12 P0 contract)",  st.agents["reuse-worker-01"]?.status === "running");
+	ok("shared-pool worker activeTaskIds === []",        Array.isArray(st.agents["reuse-worker-01"]?.activeTaskIds) && st.agents["reuse-worker-01"].activeTaskIds.length === 0);
 
 	const events = await readGlobalEvents();
 	const perAgent = events.filter((e) => e.event === "agent.task_sweep_stopped");
 	ok("per-agent sweep trace: NOT for multi-worker-01", !perAgent.some((e) => e.agentId === "multi-worker-01"));
-	ok("per-agent sweep trace: present for solo-worker-01", perAgent.some((e) => e.agentId === "solo-worker-01"));
-	ok("per-agent sweep trace: present for reuse-worker-01", perAgent.some((e) => e.agentId === "reuse-worker-01"));
+	ok("per-agent sweep trace: NOT for reuse-worker-01 (shared-pool preserved)", !perAgent.some((e) => e.agentId === "reuse-worker-01"));
+	ok("per-agent sweep trace: present for dedicated-worker-01", perAgent.some((e) => e.agentId === "dedicated-worker-01"));
+	const dedicatedTrace = perAgent.find((e) => e.agentId === "dedicated-worker-01");
+	ok("dedicated trace releaseReason === 'spawned_for_task'", dedicatedTrace?.releaseReason === "spawned_for_task");
 }
 
 // ============================================================
@@ -364,8 +369,8 @@ function resetIsolation() {
 	ok("existing worker has spawnedForTaskId=undefined before assignment", stBefore.agents["existing-worker-01"]?.spawnedForTaskId === undefined);
 
 	// Drive a tiny subset of assign_task: we verify the additive contract by reading the field
-	// back through a fresh seed-and-sweep — if spawnedForTaskId is undefined for a non-task
-	// worker, sweep falls back to sole-active-task (already covered by scenario 2 reuse-worker-01).
+	// back through a fresh seed-and-sweep — R12 contract: shared-pool workers without
+	// spawnedForTaskId are preserved; only the durable ownership link makes a worker eligible.
 	await seedAgentRecord("existing-worker-01", { activeTaskIds: [taskId], spawnedForTaskId: taskId });
 	const stAfter = await readStateFile();
 	ok("spawnedForTaskId is settable additively", stAfter.agents["existing-worker-01"]?.spawnedForTaskId === taskId);

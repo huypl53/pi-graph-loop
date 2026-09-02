@@ -4,7 +4,7 @@ import { readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, NODE_ICON, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, PI_SWARM_PROXY_METRIC_INTERVAL_MS, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_PROXY_METRIC_EMIT, TRACE_STALE_OPEN_NUDGE_EMITTED, TRACE_STALE_OPEN_SURFACED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
+import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, NODE_ICON, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, PI_SWARM_PROXY_METRIC_INTERVAL_MS, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_POOL_DEPLETED_NUDGE, TRACE_PROXY_METRIC_EMIT, TRACE_STALE_OPEN_NUDGE_EMITTED, TRACE_STALE_OPEN_SURFACED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
 import { paths, readTaskState, taskPaths, trace, traceTask, writeState } from "./state.ts";
@@ -1105,37 +1105,52 @@ export async function sweepTaskWorkersLocked(
 	// sweep at every terminal transition site, so an agent whose only active task was the closing
 	// task now shows `activeTaskIds === []`. We rebuild the pre-release set per agent so the
 	// eligibility rule + per-agent trace evidence stay accurate. Reconstruction rules:
-	//   - cur includes taskId           -> pre-release = cur (release didn't touch them).
-	//   - cur empty AND link/assignment -> pre-release = [taskId] (sole-worker closure).
-	//   - cur has other tasks, no taskId -> pre-release = [taskId, ...cur] (cross-task agent).
-	//   - cur empty AND no link          -> pre-release = [] (never on this task).
+	//   - cur includes taskId                          -> pre-release = cur (release didn't touch).
+	//   - cur empty AND spawnedForTaskId === taskId    -> pre-release = [taskId] (sole-worker closure
+	//                                                     of a task-spawned worker).
+	//   - cur has other tasks (no taskId post-release) -> pre-release = [taskId, ...cur] (cross-task
+	//                                                     agent: keeps the closing task on its
+	//                                                     history so `cross_task_active` skip fires).
+	//   - cur empty AND no durable ownership link      -> pre-release = [] (never on this task —
+	//                                                     shared-pool agents belong to the role pool,
+	//                                                     not the task; node.assignee stamps are role
+	//                                                     evidence, not ownership evidence).
+	//
+	// R12 P0 (2026-09-01 mass-sweep fix): the previous branch-B also synthesized `[taskId]` when
+	// the agent appeared in `task.nodes[*].assignee` AND `cur.length === 0`. That synthesis
+	// conflated role evidence (the worker did the work) with ownership evidence (the worker belongs
+	// to this task) and made shared-pool workers (no `spawnedForTaskId` link) appear eligible for
+	// sweep, killing the entire role pool on a single task close. The fix removes the assignee-stamp
+	// synthesis from the empty-active-set branch; ownership is the durable `spawnedForTaskId` link
+	// only. Cross-task agents (with other active tasks beyond the closing one) still get the
+	// `[taskId, ...cur]` reconstruction so the `cross_task_active` skip reason remains accurate.
 	const tp = taskPaths(paths(cwd), taskId);
 	let task: TaskState | null = freshTask ?? null;
 	// Prefer the caller's in-memory snapshot (terminal close mutates nodes AFTER the last disk
 	// write in some paths — R11-2 guard must not read a stale graph). Fall back to disk read.
 	if (!task) { try { task = await readTaskState(tp.taskJson); } catch { /* missing/unreadable: skip graph check */ } }
-	const assignedInClosingTask = new Set<string>();
-	if (task) {
-		for (const n of Object.values(task.nodes)) {
-			// R11-2: any node CURRENTLY OR FORMERLY assigned (assignee stamp survives closure) —
-			// with the fresh in-memory snapshot, terminal nodes are already done at sweep time and
-			// the old assigned/in_progress filter would drop the very workers this sweep exists for.
-			if (n.assignee && n.assignee !== "orchestrator") {
-				assignedInClosingTask.add(n.assignee);
-			}
-		}
-	}
 	const priorActiveByAgent = new Map<string, string[]>();
 	for (const agent of Object.values(st.agents)) {
 		ensureAgentDefaults(agent);
 		const cur = agent.activeTaskIds.slice();
 		if (cur.includes(taskId)) {
+			// Race: release didn't strip taskId from this agent yet (concurrent path).
 			priorActiveByAgent.set(agent.id, cur);
-		} else if (cur.length === 0) {
-			const wasInTask = agent.spawnedForTaskId === taskId || assignedInClosingTask.has(agent.id);
-			priorActiveByAgent.set(agent.id, wasInTask ? [taskId] : []);
-		} else {
+		} else if (cur.length > 0) {
+			// Cross-task: agent has other active tasks beyond the closing one. Reconstructed
+			// pre-release = [taskId, ...cur] so the cross_task_active skip reason + per-agent
+			// trace evidence remain accurate when the agent has the durable ownership link
+			// (spawnedForTaskId === taskId) but is currently also serving another task.
 			priorActiveByAgent.set(agent.id, [taskId, ...cur]);
+		} else if (agent.spawnedForTaskId === taskId) {
+			// Sole-worker closure: agent was freshly spawned for this task and no other tasks
+			// remain. The durable ownership link is the only signal that makes this worker
+			// task-scoped (R12: node.assignee stamps alone are NOT sufficient).
+			priorActiveByAgent.set(agent.id, [taskId]);
+		} else {
+			// cur empty AND no durable ownership link: shared-pool agent. NEVER synthesized as
+			// sole-active-task from assignee stamps (R12 fix). Pre-release is empty.
+			priorActiveByAgent.set(agent.id, []);
 		}
 	}
 	const stopped: string[] = [];
@@ -1234,6 +1249,91 @@ export async function sweepTaskWorkersLocked(
 		skippedCount: skipped.length,
 		by: "sweepTaskWorkersLocked",
 	});
+
+	// === R12 P0 — pool-depletion nudge ===
+	// When a task close transitions the effective live non-orchestrator agent pool from ≥1 to 0,
+	// wake the orchestrator with a high-priority nudge (mailbox + Issue 86 interrupt machinery)
+	// so it can either re-spawn workers or downgrade the goal. The transition is computed at
+	// sweep time: we know exactly which agent ids were stopped/parked in this call (the `stopped`
+	// list); the live count is taken from `st.agents` AFTER the loop, so any just-stopped agent
+	// already reflects `status: "stopped"` or `paused: true`.
+	//
+	// Transitions that DO NOT nudge:
+	//   - 0 → 0 (pool was already empty before this close — nothing to convey; also covers
+	//          idempotent re-invocations on a closed task where stopped.length === 0 anyway).
+	//   - ≥1 → ≥1 (sweep stopped some, but ≥1 non-orchestrator still running afterwards).
+	//
+	// Idempotency: a re-invoked sweep sees stopped=[] and returns at the guard above without
+	// nudging. The threshold is "≥1 → 0" only, so any single close call emits at most one nudge.
+	try {
+		const liveNonOrchestrator = Object.values(st.agents).filter(
+			(a) => a.id !== "orchestrator" && a.status !== "stopped" && !a.paused,
+		).length;
+		if (liveNonOrchestrator === 0) {
+			const key = `pool_depleted:${taskId}`;
+			// Compute pre-sweep live count by adding back the just-stopped set (stopped[] includes
+			// both freshly-stopped agents and lease_parked agents; both were 'running' pre-sweep).
+			const stoppedSet = new Set(stopped);
+			const preSweepLive = Object.values(st.agents).filter(
+				(a) => a.id !== "orchestrator" && a.status !== "stopped" && !a.paused,
+			).length + (Array.from(stoppedSet).filter((id) => {
+				const ag = st.agents[id];
+				return ag && ag.id !== "orchestrator";
+			}).length);
+			const stoppedForReport = Array.from(stoppedSet);
+			const p = paths(cwd);
+			await trace(p, TRACE_POOL_DEPLETED_NUDGE, {
+				taskId,
+				preSweepLive,
+				postSweepLive: liveNonOrchestrator,
+				stoppedAgentIds: stoppedForReport,
+				by: "sweepTaskWorkersLocked",
+			});
+			// Only emit the orchestrator nudge when there was actually a ≥1 → 0 transition
+			// (the pre-sweep live count was ≥1, the post-sweep is 0). A close that doesn't
+			// change the live count never reaches this branch because liveNonOrchestrator would
+			// still be ≥1 here. The 0 → 0 case is naturally suppressed by the liveNonOrchestrator
+			// === 0 guard combined with the preSweepLive check below.
+			if (preSweepLive >= 1) {
+				const { deliverMessageLocked } = await import("./mailbox.ts");
+				await deliverMessageLocked(pi, cwd, p, st, {
+					to: "orchestrator",
+					priority: "high",
+					subject: "swarm pool depleted",
+					body: `Task \`${taskId}\` closed and the task-close sweep drained the live non-orchestrator agent pool to 0.
+
+Stopped in this call: ${JSON.stringify(stoppedForReport)}.
+Live non-orchestrator agents remaining: ${liveNonOrchestrator}.
+
+R12 P0 contract: the sweep no longer force-kills shared-pool workers, but a task-scoped worker drain can still empty the pool. Decide now in this turn:
+  1. Re-spawn the role workers needed for the next task (swarm_spawn_agent for each missing role, or rely on swarm_assign_task autoSpawn).
+  2. If no more tasks are expected, mark the goal done (swarm_mark_goal_done) so the idle-streak pump stops nudging.
+
+(Idempotent within the sweep call: at most one nudge per close call. Not emitted on \`≥1 → ≥1\` or \`0 → 0\` transitions.)`,
+					idempotencyKey: key,
+					requiresAck: true,
+					requiresResponse: true,
+					conversationId: `task:${taskId}:pool_depleted`,
+				}).catch((err: any) => {
+					// Best-effort nudge delivery: a transient mailbox failure must not block the
+					// sweep outcome. Surface as a warning trace so observability still has a hook.
+					trace(p, "pool.depleted_nudge.delivery_failed", {
+						taskId,
+						error: String((err as Error)?.message || err).slice(0, 200),
+						by: "sweepTaskWorkersLocked",
+					}).catch(() => {});
+				});
+			}
+		}
+	} catch (err: any) {
+		// Nudge path is best-effort; the sweep outcome is already determined by the per-agent loop.
+		await trace(paths(cwd), "pool.depleted_nudge.error", {
+			taskId,
+			error: String((err as Error)?.message || err).slice(0, 200),
+			by: "sweepTaskWorkersLocked",
+		}).catch(() => {});
+	}
+
 	return { stopped, skipped };
 }
 

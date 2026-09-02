@@ -403,7 +403,7 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
 		agents: {
 			"orchestrator": { id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
-			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [taskId], maxConcurrentTasks: 1, status: "running", runtimeStatus: "response_missing", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: beforeTs },
+			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [taskId], spawnedForTaskId: taskId, maxConcurrentTasks: 1, status: "running", runtimeStatus: "response_missing", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: beforeTs },
 		},
 		delivered: { [workerId]: [assignMsgId] },
 		messages: {
