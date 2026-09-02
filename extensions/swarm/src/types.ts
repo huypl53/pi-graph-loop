@@ -397,15 +397,18 @@ export type SwarmGoal = {
 // `goal.nudge.held_no_live_workers` trace; `lastPoolEmptyEscalationAt` is the cooldown
 // anchor for the bounded user-origin escalation nudge.
 // R23 (2026-09-02): `r23LastEpochAnchor` is the once-per-anchor memo for the cap-branch
-// saturation reset. Stamped on the busy→idle edge in `updateIdleEpochLocked`; consulted
-// by `evaluateIdleGoalNudgeLocked`'s cap branch. The reset fires at most once per anchor.
+// saturation reset. Cleared at the anchor mint (updateIdleEpochLocked — R23C) and stamped
+// by the cap branch itself only AFTER a reset, so the reset fires at most once per anchor
+// (a legacy memo===anchor state is also cleared by the cap branch's stale-memo check).
 // R23B (2026-09-02): `lastEpochBusyAgents` is the worker-breaker guard for the cap-branch
-// reset. Stamped on every anchor-clearing busy edge (the same `busyAgents` array passed
-// to the `idle.epoch.reset` trace); cleared when a new anchor is stamped. The reset
-// fires only when this array contains at least one NON-orchestrator id (a worker caused
-// the break) — orchestrator-turn churn (the only "busy" agents between turns being the
-// orchestrator itself) does NOT qualify. Absent (legacy state) → reset, matching pre-
-// R23B behavior for worker-driven breaks that crossed an uninterrupted no-resolve epoch.
+// reset — the PROVENANCE of the most recent anchor clear. Stamped at every anchor-clear
+// site (the busy edge in updateIdleEpochLocked stamps real worker ids; since R23C the
+// hooks.ts turn_start handler stamps ["orchestrator"]) and PRESERVED across the anchor
+// mint (R23C — the previous mint-clear left the cap branch blind to provenance), so it
+// survives from the clear site to the next atCap evaluation. The reset fires only when
+// this array contains at least one NON-orchestrator id (a worker caused the break) —
+// orchestrator-turn churn does NOT qualify. Absent (legacy state that never saw a clear)
+// → reset, matching pre-R23B behavior.
 export type SwarmIdleNudgeState = {
 	allIdleSinceAt?: string;
 	nextGoalNudgeAt?: string;

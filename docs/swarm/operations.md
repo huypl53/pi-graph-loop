@@ -1532,7 +1532,7 @@ Even after R23B (edge-site reset deleted, worker-breaker guard added), `goal.nud
 node .pi/swarm/tasks/task-202609030005-r23c-memo-mint-rework/artifacts/tester-turnstart-probe.mjs  # GREEN: ≤1 emission
 node .pi/swarm/tasks/task-202609022240-r23b-reset-storm-rework/artifacts/tester-memo-probe.mjs     # GREEN: 1 reset, cap-branch reachable
 node .pi/swarm/tasks/task-202609022240-r23b-reset-storm-rework/artifacts/tester-breaker-probe.mjs # GREEN: A reject / B reset / C legacy reset
-node extensions/swarm/idle-nudge.test.mjs                                                         # 136 passed incl. R23C section (9 assertions)
+node extensions/swarm/idle-nudge.test.mjs                                                         # 136 passed incl. R23C section (10 assertions at runtime)
 node extensions/swarm/swarm-goal.test.mjs                                                         # 67 passed
 node extensions/swarm/stale-open-nudge.test.mjs                                                   # 6 passed
 node extensions/mock-llm/selftest.test.mjs                                                        # PASS
@@ -1542,7 +1542,7 @@ node extensions/mock-llm/selftest.test.mjs                                      
 
 - `extensions/swarm/src/hooks.ts` `turn_start` handler: stamps `idleState.lastEpochBusyAgents = ["orchestrator"]` before clearing the anchor. This is the orchestrator's busy edge (bypasses `updateIdleEpochLocked`); without the stamp the cap branch sees `breaker = undefined` → absent→reset legacy default → storm.
 - `extensions/swarm/src/reconcile.ts` mint branch in `updateIdleEpochLocked`: PRESERVES `lastEpochBusyAgents` (does NOT clear it). Provenance must survive from the clear site to the next atCap eval; clearing at mint erased the stamp from hooks.ts and re-opened the storm window.
-- `extensions/swarm/idle-nudge.test.mjs` G2b + R23B section seeds now include `r23LastEpochAnchor = allIdleSinceAt` (production-mint shape — the legacy R23 code stamped the memo at mint, real sessions hold this state). New R23C section: 9 assertions, invokes the REAL `hooks.ts turn_start` handler via `registerSwarmHooks` mock pi (not an inline replica), so removing the stamp from hooks.ts makes the test go RED (blindness control both ways verified).
+- `extensions/swarm/idle-nudge.test.mjs` G2b + R23B section seeds now include `r23LastEpochAnchor = allIdleSinceAt` (production-mint shape — the legacy R23 code stamped the memo at mint, real sessions hold this state). New R23C section: 10 assertions at runtime (6 source sites — 2 drains, 5 in-loop orbit rejections, 3 bounds), invokes the REAL `hooks.ts turn_start` handler via `registerSwarmHooks` mock pi (not an inline replica), so removing the stamp from hooks.ts makes the test go RED (blindness control both ways verified).
 - Lane launcher `goal-nudge-backoff-epoch-rearm/launch.sh` re-copied under R23C artifacts with `r23LastEpochAnchor` seeded.
 - R23C task: `task-202609030005-r23c-memo-mint-rework`. Same-epoch cap/backoff (R23-G7), R23-B/R23B storm shape (1 reset, 3 emissions, churn rejected), active-task gate (R23-G6), R21 `idle_epoch_advanced`, R22 worker-busy surface rule all preserved.
 - Known corner (documented, accepted): a real worker break followed by turn-start-only churn can carry a stale `["worker-a"]` stamp into one churn epoch → at most ONE wrong-cause reset per genuine worker break. Bounded, not a storm; tightening (stamp at every clear site including future ones) is follow-up hardening.
