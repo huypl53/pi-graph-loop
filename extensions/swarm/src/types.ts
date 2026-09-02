@@ -387,6 +387,9 @@ export type SwarmGoal = {
 // Row 68 idle-nudge state. `allIdleSinceAt` anchors the continuous all-idle interval used by the
 // goal fallback; `lastGoalNudgeAt` and `goalConsecutiveNoResolveNudges` keep the emission/backoff
 // accounting on actual nudge emissions rather than pump ticks.
+// R14 (2026-09-02): `lastWasVacuous` is the once-per-transition dedupe gate for the
+// `goal.nudge.held_no_live_workers` trace; `lastPoolEmptyEscalationAt` is the cooldown
+// anchor for the bounded user-origin escalation nudge.
 export type SwarmIdleNudgeState = {
 	allIdleSinceAt?: string;
 	nextGoalNudgeAt?: string;
@@ -395,6 +398,8 @@ export type SwarmIdleNudgeState = {
 	goalBackoffTicksRemaining?: number;
 	lastGoalActiveTaskScanAt?: string;
 	lastGoalActiveTaskWork?: { taskId: string; nodeId: string; assignee?: string; status: "assigned" | "in_progress" } | null;
+	lastWasVacuous?: boolean;
+	lastPoolEmptyEscalationAt?: string;
 };
 
 // In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent

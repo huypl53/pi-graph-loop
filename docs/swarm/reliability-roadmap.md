@@ -1043,3 +1043,34 @@ Test gap: no test drives GC→epoch→goal-evaluator on one st in a single tick 
 **Preservation matrix (all GREEN post-fix):** R12 (36+21), task-close-sweep (52), agent-retirement-sweep (33), R13 unknown-target (24), high-priority-interrupt (36), priority-high-interrupt-stream-resolve (30), idle-nudge (69), liveness-progress (40), supersession-fencing (20), graph-advance-nudge-rearm (24), swarm-goal (67), cancellation (42).
 
 **Sequencing:** Minimal source change in `tools/messages.ts:42-48` only. No restart-gated pump change. The orchestrator pump, mailbox delivery, busy-defer, busy-suppression, and R13 bypass paths are all untouched.
+
+### Row R14 — Active user-origin goal must escalate when worker pool is empty — P0 (FIXED 2026-09-02)
+
+**Source:** Live trace sequence 2026-09-01. `goal-1788266039522-6eae40`, origin=user, nudgeIntervalMs=5000. 7_278 `goal.nudge.held_no_live_workers` traces fired over ~16h at exactly 5s cadence. ZERO orchestrator-bound recovery nudges — the pump is in a deadlock state: the user sees nothing, the operator sees only the spam trace, the goal never escalates.
+
+**Three root causes (verified by plan §1):**
+
+1. **Vacuous predicate** (`reconcile.ts:308-316` `agentIsEffectivelyAlive`) returns false for settled-but-alive workers whose heartbeat is >10min stale. Fix A widens the predicate: `tmuxAlive === true && runtimeStatus === "idle"` workers count as effective even when heartbeat is stale.
+2. **Trace fires every tick** (`reconcile.ts:516-520`). The comment promised once-per-transition; the code fired per tick. Fix B adds `lastWasVacuous` dedupe flag on `st.idleNudgeState`, cleared on the pool-recovered edge in `updateIdleEpochLocked`.
+3. **No escalation path** (`reconcile.ts:520` return). The function returned `{emitted:false,reason:"no_live_workers"}` with no surface. Fix C adds a bounded user/system/batch-origin escalation: ONE high-priority orchestrator-bound nudge per `NOTIFY_DEFAULT_COOLDOWN_MS` (5min), durably enqueued via the existing R13 P0 surface.
+
+**Fix (R14 B+C+A in plan §5 order):**
+
+- `extensions/swarm/src/reconcile.ts:308-322` Fix A — `agentIsEffectivelyAlive` predicate widened (3 lines + comment).
+- `extensions/swarm/src/reconcile.ts:516-590` Fix B + Fix C — vacuous branch now dedupes via `lastWasVacuous` AND emits a cooldown-bounded escalation for user/system/batch origins.
+- `extensions/swarm/src/reconcile.ts:455-470` Fix B clear — `updateIdleEpochLocked` clears `lastWasVacuous` on the vacuous→non-vacuous edge.
+- `extensions/swarm/src/types.ts:393-403` — `SwarmIdleNudgeState` extended with `lastWasVacuous?: boolean` and `lastPoolEmptyEscalationAt?: string`.
+
+**Acceptance evidence:**
+
+- `extensions/swarm/r14-goal-empty-pool-escalation.test.mjs` — RED→GREEN, 15/0 PASS. R14-S1 (Config A settled-but-alive: idleAgentsCount=3, vacuous=false, no held trace), R14-S2 (Config B 12-tick genuinely-vacuous: held=1, escalation=1, mailbox=1), R14-S3 (Config C 4-tick transition: held=2 once per false→true), R14-S4 (Config D 12-tick: escalation=1, mailbox=1 priority=high), R14-S5 (Config F active pool: held=0, suppressed_by_assignment_in_flight fires, escalation=0), R14-S6 (Config E goal clear mid-cooldown: escalation stays at 1, heldAfter=1, evaluator returns at no_goal guard).
+- `extensions/mock-llm/fixtures/r14-goal-empty-pool-vacuous.jsonl` — 3 scripted turns (inspect goal/workers, set goal idempotently, settle).
+- tmux lanes `r14-validate:r14.0` (RED + GREEN) captured at `tmux-snapshots/r14-goal-empty-pool-vacuous-red-lane.txt` and `tmux-snapshots/r14-empty-pool-pane-green.txt`.
+- RED evidence preserved at `tmux-snapshots/r14-test-red-evidence.txt` (test output pre-fix with held=12, escalation=0).
+- GREEN evidence preserved at `tmux-snapshots/r14-test-green-evidence.txt` (test output post-fix with all GREEN).
+- `docs/swarm/operations.md` R14 subsection added (boundary counters, cooldown, field diagnostics, verify steps, trace census).
+- Mock-LLM transcripts at `.pi/mock-llm/transcripts/r14-goal-empty-pool-vacuous/`.
+
+**Preservation matrix (all GREEN post-fix):** R12 (36+21), task-close-sweep (52), agent-retirement-sweep (33), R13 unknown-target (24), R15 normal-result (15), high-priority-interrupt (36), priority-high-interrupt-stream-resolve (30), idle-nudge (69), liveness-progress (40), supersession-fencing (20), graph-advance-nudge-rearm (24), swarm-goal (67), cancellation (42).
+
+**Sequencing:** Order of fixes per plan §5 is B (dedupe) → C (escalation) → A (predicate). Fix C alone would emit one escalation per tick; Fix B dedupes first so the escalation is once per transition; Fix A prevents the vacuous branch from firing on healthy-but-stale-heartbeat pools (which is the dominant real-world case).

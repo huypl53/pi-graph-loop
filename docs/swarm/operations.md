@@ -1001,3 +1001,109 @@ A migration run is additive-only. Deleting the `migrationRunId` and `migratedAt`
 
 - `/swarm trace` — view the migration trace.
 - `swarm_message_status` — inspect a single record's v2 fields (admin/diagnostic; not model-exposed by default).
+
+---
+
+## Operator: R14 pool-empty escalation (2026-09-02)
+
+### When this matters
+
+You have set a user-origin goal (`swarm_set_goal({origin:"user",...})`) and the
+worker pool has been empty for >5 minutes. The orchestrator has not seen any
+recovery nudge — the pump fired `goal.nudge.held_no_live_workers` every tick
+(7_278 traces over ~16h was the live incident; `goal-1788266039522-6eae40`).
+Without R14 the user sees a silent stall; the operator sees only the spam
+trace; the goal never escalates.
+
+### What R14 changed
+
+Three coupled fixes (live `reconcile.ts`):
+
+- **Fix A — settled-but-alive liveness predicate**
+  (`reconcile.ts:308-322` `agentIsEffectivelyAlive`). A worker with
+  `tmuxAlive === true`, `status === "running"`, `runtimeStatus === "idle"`,
+  and a stale heartbeat (>10min) is now counted as effective. Pre-fix, such
+  workers were misclassified as dead; their swarms were always vacuous. The
+  `tmuxAlive === false`, `status !== "running"`, and
+  `runtimeStatus === "stopped"` early-returns (the genuine ghost signals)
+  stay.
+- **Fix B — once-per-transition trace dedupe**
+  (`reconcile.ts:516+` vacuous branch). `goal.nudge.held_no_live_workers`
+  fires only on the `idleAgents.length > 0` → `0` transition (the
+  once-per-transition promise in the comment was never enforced; the code
+  fired every tick). The flag lives on `st.idleNudgeState.lastWasVacuous`
+  and is cleared on the pool-recovered edge
+  (`reconcile.ts:updateIdleEpochLocked`).
+- **Fix C — bounded user-origin escalation** (new path inside the
+  vacuous branch). For an active user/system/batch-origin goal whose pool is
+  genuinely vacuous (no worker passes the predicate), the pump emits ONE
+  high-priority orchestrator-bound nudge per
+  `NOTIFY_DEFAULT_COOLDOWN_MS` (5min default). The nudge goes through the
+  existing R13 P0 high-priority surface (mailbox-only durable append +
+  pump's R13 bypass). The escalation stops when:
+  - the goal clears/cancels (`swarm_mark_goal_done`),
+  - the pool becomes non-vacuous (`vacuous: false` for ≥30s — soft reset),
+  - the existing escalation message is `acked` with `status: "done"`.
+
+### Six R10-1 boundary counters
+
+| counter | boundary | expected |
+| --- | --- | --- |
+| `idleAgentsCount` | `reconcile.ts:318` filter | `>0` for settled-but-alive pool (Fix A); `0` for genuinely-vacuous pool |
+| `heldNoLiveWorkersTraceCount` | `reconcile.ts:520` trace | `1` per false→true transition (Fix B); `0` once the pool recovers |
+| `escalationSendCount` | `reconcile.ts:escalation.deliverMessageLocked` | `1` per cooldown (Fix C); `0` for orchestrator-origin goals |
+| `mailboxAppendCount` | `mailbox.ts:362,445` durable append | `1` per escalation (durable contract intact) |
+| `sendMessageCallCount` | `reconcile.ts:1763-1773` pump | `1` per escalation when orchestrator idle (R13 path; unchanged) |
+| `escalationCancelledOnClearCount` | `goals.ts:32-51` clear | `1` when goal clears mid-cooldown; `0` escalations after clear |
+
+### Diagnosing in the field
+
+If `goal.nudge.held_no_live_workers` is firing repeatedly and
+`goal.escalation.pool_empty` is NOT firing:
+
+1. Check `goal.origin`. The escalation only fires for
+   `user` / `system` / `batch` origin (NOT `orchestrator`). Use
+   `swarm_set_goal({origin:"user",...})` if the goal was set by an automated
+   orchestrator and you want escalation.
+2. Check the cooldown. `idleNudgeState.lastPoolEmptyEscalationAt` is the
+   anchor; one nudge per `NOTIFY_DEFAULT_COOLDOWN_MS` (5min default). The
+   second escalation within the cooldown is expected to be silent.
+3. Confirm the pool is GENUINELY vacuous. The escalation path runs only
+   inside the `if (vacuous)` branch — Fix A makes settled-but-alive pools
+   non-vacuous, so a healthy pool with stale-heartbeat workers will resume
+   the normal goal-nudge path (NOT the escalation path).
+
+### Verify the fix locally
+
+```bash
+# RED shape (pre-fix would yield 12 held traces + 0 escalations):
+git stash push extensions/swarm/src/reconcile.ts -m "r14-red-check"
+node extensions/swarm/r14-goal-empty-pool-escalation.test.mjs  # FAIL R14-S2, R14-S4
+git stash pop
+
+# GREEN shape (post-fix):
+node extensions/swarm/r14-goal-empty-pool-escalation.test.mjs  # PASS 15/0
+
+# Live tmux lane (settled-but-alive shape, 12 ticks):
+tmux new-session -d -s r14-validate -n r14 -c "$REPO"
+tmux send-keys -t r14-validate:r14.0 -l "PI_SWARM_AGENT_ID=orchestrator PI_SWARM_IS_ORCHESTRATOR=1 pi -ne --provider mock-llm --model r14-goal-empty-pool-vacuous -e ./extensions/mock-llm -e ./extensions/swarm" Enter
+# Wait 10s, drive scripted turns, observe escalation surfaced once per cooldown.
+```
+
+### Trace census (post-fix)
+
+```
+goal.set                                         (origin=user, nudgeIntervalMs=5000)
+goal.nudge.held_no_live_workers                  (×1 — once per false→true transition; pre-fix was ×N per tick)
+goal.escalation.pool_empty                       (×1 — one per cooldown; first cooldown-eligible tick)
+message.deliver.mailbox_only                     (×1 — durable escalation append)
+[next orchestrator pump tick when orchestrator is idle]
+pi.sendMessage → orchestrator                    (×1 — R13 P0 high-priority surface; the escalation finally crosses the swarm→Pi boundary)
+```
+
+### Related tools / commands
+
+- `swarm_set_goal({origin:"user",...})` — set a goal with escalation.
+- `swarm_check_mailbox` — inspect the durable escalation nudge in the
+  orchestrator mailbox (R13 boundary; unchanged).
+- `/swarm trace` — view the trace census above.

@@ -310,8 +310,21 @@ function agentIsEffectivelyAlive(a: { status?: string; runtimeStatus?: string; t
 	if (a.tmuxAlive === false) return false;
 	if (a.runtimeStatus === "stopped") return false;
 	const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
-	if (!Number.isFinite(hb)) return false;
-	return nowMs - hb <= AGENT_HEARTBEAT_STALE_MS;
+	const hbFresh = Number.isFinite(hb) && nowMs - hb <= AGENT_HEARTBEAT_STALE_MS;
+	// R14 Fix A (2026-09-02): settled-but-alive workers whose heartbeat is stale (the
+	// 10-min default window) but whose tmux pane is alive AND whose runtimeStatus is
+	// "idle" were being misclassified as dead, producing false vacuous pools and
+	// spammed held_no_live_workers traces. The pane-alive + idle signal is the freshest
+	// liveness check we have for a settled worker; honor it. The `tmuxAlive === false`
+	// early-return above is the genuine ghost-eviction signal and stays. The
+	// `status !== "running"` early-return above is the explicit stopped/retired signal
+	// and stays. The `runtimeStatus === "busy"` case is intentionally NOT rescued by
+	// the tmuxAlive fallback — a busy worker with a stale heartbeat is in the
+	// "stuck" shape; we want the goal nudge to surface (the worker's runtimeStatus
+	// is the authoritative signal for liveness during an in-flight tool call).
+	if (a.tmuxAlive === true && a.runtimeStatus === "idle") return true;
+	if (hbFresh) return true;
+	return false;
 }
 
 function allEffectiveIdleAgents(st: SwarmState, nowMs: number) {
@@ -422,6 +435,13 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 	const idleState: SwarmIdleNudgeState = st.idleNudgeState ||= {};
 	const { idleAgents, allIdle, vacuous } = allEffectiveIdleAgents(st, nowMs);
 	if (!allIdle) {
+		// R14 Fix B (2026-09-02): clearing lastWasVacuous on the all-idle→busy edge
+		// ensures the next vacuous transition (busy→idle-but-no-workers) re-fires the
+		// held_no_live_workers trace exactly once. We only clear when `vacuous` is
+		// FALSE — when `vacuous` is TRUE the pool is still empty and the trace must
+		// stay suppressed (already fired on the false→true edge). Clearing on the
+		// vacuous branch would defeat the dedupe gate.
+		if (!vacuous && idleState.lastWasVacuous) idleState.lastWasVacuous = false;
 		if (idleState.allIdleSinceAt || idleState.nextGoalNudgeAt) {
 			// Busy edge: restart stall spacing so the next all-idle edge re-arms emission immediacy.
 			const stallSlotsReset: string[] = [];
@@ -439,6 +459,12 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 		delete idleState.nextGoalNudgeAt;
 		return { allIdle, idleAgents, vacuous };
 	}
+	// R14 Fix B (2026-09-02): the vacuous→non-vacuous edge also clears the dedupe
+	// gate so the next false→true transition re-fires the held trace exactly once.
+	// When allIdle is true AND vacuous is false the pool is non-empty; we always
+	// clear regardless of whether the edge was just crossed, because the flag
+	// only persists across genuinely-vacuous ticks (the vacuous branch sets it).
+	if (!vacuous && idleState.lastWasVacuous) idleState.lastWasVacuous = false;
 	if (!idleState.allIdleSinceAt) {
 		idleState.allIdleSinceAt = new Date(nowMs).toISOString();
 		delete idleState.nextGoalNudgeAt;
@@ -514,10 +540,63 @@ export async function evaluateIdleGoalNudgeLocked(
 	const { idleAgents, allIdle, vacuous } = epoch;
 	if (vacuous) {
 		// Bug #3 evidence: hold the goal nudge when zero effective non-orchestrator agents remain.
-		// Trace once per transition so dashboards can count vacuous holds without re-firing every tick.
-		// No epoch reset — the next agent to register will re-establish `allIdleSinceAt` and the goal
-		// evaluator will resume from the live edge (matches existing agent_busy → epoch-reset path).
-		await trace(p, "goal.nudge.held_no_live_workers", { goalId: goal.id, effectiveAgentCount: 0 }).catch(() => {});
+		// R14 Fix B (2026-09-02): trace fires only on the `idleAgents.length > 0` → `0`
+		// transition (the once-per-transition promise in the comment above was never
+		// enforced — the code fired every tick of vacuous state, producing 7_278 spam
+		// traces for goal-1788266039522-6eae40 over ~16h). The transition flag lives on
+		// `idleNudgeState.lastWasVacuous` so it persists across the swarm→orchestrator
+		// restarts. Cleared in updateIdleEpochLocked's not-all-idle branch (the
+		// pool-recovered edge).
+		const idleStateVac: SwarmIdleNudgeState = st.idleNudgeState ||= {};
+		if (!idleStateVac.lastWasVacuous) {
+			await trace(p, "goal.nudge.held_no_live_workers", { goalId: goal.id, effectiveAgentCount: 0 }).catch(() => {});
+		}
+		idleStateVac.lastWasVacuous = true;
+		// R14 Fix C (2026-09-02): bounded, durable, high-priority orchestrator recovery
+		// nudge for an active USER-ORIGIN goal whose pool is genuinely vacuous. Cooldown-
+		// bounded by NOTIFY_DEFAULT_COOLDOWN_MS (5min). Stops emitting when the goal
+		// clears/cancels (consult `st.goal` at the top of the evaluator; the no_goal
+		// guard short-circuits before this branch). Bypasses idle gates via the R13 P0
+		// high-priority surface — the orchestrator's tmuxTarget is `unknown` so the
+		// message is durably enqueued in the mailbox and the pump surfaces it once the
+		// orchestrator is idle (R13 P0 path; unchanged).
+		if (goal.origin === "user" || goal.origin === "system" || goal.origin === "batch") {
+			const cooldownUntilMs = idleStateVac.lastPoolEmptyEscalationAt
+				? new Date(idleStateVac.lastPoolEmptyEscalationAt).getTime() + NOTIFY_DEFAULT_COOLDOWN_MS
+				: 0;
+			if (nowMs >= cooldownUntilMs) {
+				const poolDiag = Object.values(st.agents)
+					.filter((a) => a.id !== "orchestrator")
+					.map((a) => {
+						const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
+						const ageSec = Number.isFinite(hb) ? Math.round((nowMs - hb) / 1000) : null;
+						return { id: a.id, tmuxAlive: a.tmuxAlive ?? null, runtimeStatus: a.runtimeStatus, heartbeatAgeSec: ageSec };
+					});
+				await trace(p, "goal.escalation.pool_empty", {
+					goalId: goal.id,
+					origin: goal.origin,
+					effectiveAgentCount: 0,
+					poolDiag,
+					cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS,
+				}).catch(() => {});
+				idleStateVac.lastPoolEmptyEscalationAt = new Date(nowMs).toISOString();
+				await deliverMessageLocked(pi, cwd, p, st, {
+					to: "orchestrator",
+					priority: "high",
+					subject: `Goal escalation: worker pool empty (goal ${goal.id})`,
+					body: `User-origin goal is held with zero effective live workers. ` +
+						`Text: ${String(goal.text || "").slice(0, 200)}. ` +
+						`Pool diag: ${JSON.stringify(poolDiag)}. ` +
+						`The orchestrator is unknown-target by design — this nudge is durably ` +
+						`enqueued in the orchestrator mailbox and will surface once the ` +
+						`orchestrator's own agent_settled or next idle watchdog tick processes it.`,
+					requiresAck: true,
+					requiresResponse: false,
+					conversationId: `goal:${goal.id}:escalation:pool-empty:cooldown:${NOTIFY_DEFAULT_COOLDOWN_MS}`,
+					idempotencyKey: `goal:${goal.id}:escalation:pool-empty:${new Date(nowMs).toISOString().slice(0, 13)}`,
+				});
+			}
+		}
 		return { emitted: false, reason: "no_live_workers" };
 	}
 	if (!allIdle) {
