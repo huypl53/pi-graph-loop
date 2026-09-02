@@ -39,6 +39,28 @@ Checklist:
 5. mention it in `extensions/swarm/README.md` if it changes the contributor-facing map
 6. add validation coverage
 
+### If you add or change Pi-runtime semantics
+Checklist (mandatory per AGENTS.md "Pi runtime contract (mandatory consultation)"):
+- [ ] Consult [`docs/swarm/pi-runtime-contract.md`](./pi-runtime-contract.md) and
+      identify which of the four layers ([§1](./pi-runtime-contract.md#1-the-four-layers))
+      the change crosses (durable mailbox / Pi queue acceptance / visible surface /
+      LLM consumption).
+- [ ] Read the matching section in
+      [`docs/swarm/pi-runtime-evidence.md`](./pi-runtime-evidence.md) for the
+      `[VERIFIED]` / `[INFERRED]` / `[GAP]` citations.
+- [ ] Add or update a row in
+      [`pi-runtime-contract.md §10`](./pi-runtime-contract.md#10-r12r15-false--unproven-claims-register)
+      if the change introduces, removes, or modifies a false / unproven claim
+      about Pi runtime.
+- [ ] Include an R10-1 boundary-counting assertion if the change adds a new
+      code path that crosses a Pi runtime boundary (count at the real
+      `pi.sendMessage` / `ctx.abort` / `pi.registerTool` / `ctx.reload`
+      boundary, not at an internal helper).
+- [ ] If the change touches a claim in
+      [`pi-runtime-contract.md §10`](./pi-runtime-contract.md#10-r12r15-false--unproven-claims-register),
+      file a separate R-row task for the production fix — this KB task does
+      NOT ship swarm behavior changes.
+
 ### If you add a new message lifecycle state or field
 Checklist:
 1. update shared types

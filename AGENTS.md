@@ -34,6 +34,29 @@ pi --model gpt-5.4-mini --provider openai
 - use `extensions/swarm/README.md` for the implementation module map
 - update focused docs in `docs/swarm/` when adding or changing swarm features; do not treat `docs/swarm.md` as the only source of truth
 
+## Pi runtime contract (mandatory consultation)
+
+Before changing swarm code that touches Pi lifecycle, delivery, interrupt, or reload semantics
+(any of `pi.sendMessage`, `pi.sendUserMessage`, `ctx.abort`, `ctx.signal`, `ctx.shutdown`,
+`ctx.reload`, `ctx.newSession`, `ctx.switchSession`, `ctx.fork`, the `input` event,
+the `agent_settled`/`agent_end` lifecycle boundary, the orchestrator pump, or
+`extensions/swarm/src/tools/messages.ts`'s user-visible delivery text), the contributor MUST:
+
+1. Read [`docs/swarm/pi-runtime-contract.md`](docs/swarm/pi-runtime-contract.md) and the
+   matching section in [`docs/swarm/pi-runtime-evidence.md`](docs/swarm/pi-runtime-evidence.md).
+2. Identify which of the four layers (durable mailbox / Pi queue acceptance / visible surface /
+   LLM consumption) the change crosses.
+3. Add or update a row in `pi-runtime-contract.md §10` if the change introduces, removes, or
+   modifies a false / unproven claim about Pi runtime.
+4. If the change adds a new swarm code path that crosses a Pi runtime boundary, include an
+   R10-1 boundary-counting assertion (a test that counts calls at the real `pi.sendMessage` /
+   `ctx.abort` / `pi.registerTool` / `ctx.reload` boundary, not at an internal helper).
+5. If the change touches a claim in `pi-runtime-contract.md §10`, file a separate R-row task
+   for the production fix — this KB task does NOT ship swarm behavior changes.
+
+Reviewers MUST reject any swarm PR that touches Pi runtime semantics and does not cite the
+matching contract § in its diff.
+
 ## extension development flow
 - Deterministic & Offline-First: Tests must execute in milliseconds without making real network requests or requiring paid API tokens.
 - when developing or changing a pi extension, do not stop at code changes; always include a validation/test step in tmux so the extension is exercised in a fresh interactive pi environment

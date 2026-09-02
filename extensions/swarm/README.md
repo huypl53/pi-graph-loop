@@ -46,8 +46,24 @@ docs/swarm/architecture.md          # system model and invariants
 docs/swarm/contributor-guide.md     # contributor workflow + change checklists
 docs/swarm/operations.md            # runtime files, debugging, validation
 docs/swarm/tools.md                 # grouped tools and /swarm commands
+docs/swarm/pi-runtime-contract.md   # Pi lifecycle / delivery / interrupt / reload contract (mandatory consultation per AGENTS.md)
+docs/swarm/pi-runtime-evidence.md   # raw citations backing the contract doc
 docs/swarm.md                       # compact legacy landing/reference
 ```
+
+## Pi runtime contract
+
+Swarm's assumptions about Pi runtime semantics are documented in
+[`../docs/swarm/pi-runtime-contract.md`](../docs/swarm/pi-runtime-contract.md). Contributors
+changing `src/hooks.ts`, `src/reconcile.ts`, `src/tools/messages.ts`, or `src/mailbox.ts`
+MUST consult that contract first. See also the citation artifact
+[`../docs/swarm/pi-runtime-evidence.md`](../docs/swarm/pi-runtime-evidence.md) and the
+standing rule in [`../../AGENTS.md`](../../AGENTS.md#pi-runtime-contract-mandatory-consultation).
+
+The contract enumerates the four layers (durable mailbox state / Pi queue acceptance /
+visible surface / LLM consumption) and the R12–R15 false-claim register that names the
+specific lines in this repo (e.g. `src/tools/messages.ts:42-48`) where swarm has made
+unproven claims about Pi runtime semantics.
 
 Quick start:
 
