@@ -1354,3 +1354,39 @@ task.artifact_progress_nudge_count_reset    # forward-transition reset
 - `swarm_audit({mode:"events", event:"worker.artifact_progress_no_status_update"})` — inspect nudge history.
 - `swarm_audit({mode:"events", event:"worker.artifact_progress_cap_exceeded"})` — inspect cap escalations.
 - `/swarm trace` — view the live trace census.
+
+## Operator: R21 goal-nudge surface suppression by orphan-on-terminal-task (2026-09-02)
+
+### When this matters
+
+You see goal nudges emitted and durably enqueued, but they never become visible at the orchestrator surface. The tell is a goal-key message whose trace shows `notification.stale.suppressed site=orchestrator_pump.surface reason=actionable_graph` even though the task carrying the orphan node is already terminal (`failed`, `cancelled`, or `blocked`). This is the surface-layer twin of the R19 evaluator bug: emission-time gating was fine, but surface-time revalidation was too permissive and swallowed the nudge.
+
+### Field diagnosis
+
+1. Confirm the surface suppression trace:
+   ```bash
+   swarm_audit({mode:"events", event:"notification.stale.suppressed", since: "2026-09-02T10:30:00Z"})
+   ```
+   Look for `site=orchestrator_pump.surface` + `reason=actionable_graph` on a goal-key message.
+2. Inspect the task directory for a terminal task with an orphan `ready` node:
+   ```bash
+   swarm_task_status({taskId:"task-202609020536", includeArtifacts:true, runtime:true})
+   ```
+3. If the trace shows the terminal orphan shape, this is pre-R21 behavior; after the fix, the same goal-key message will surface once and the terminal orphan will no longer suppress it.
+
+### Verify commands
+
+```bash
+node extensions/swarm/r21-goal-surface-suppression.test.mjs
+node extensions/swarm/r20-artifact-progress-nudge.test.mjs
+node extensions/swarm/r19-goal-graph-deadlock.test.mjs
+node extensions/swarm/idle-nudge.test.mjs
+node extensions/swarm/swarm-goal.test.mjs
+node extensions/swarm/task-liveness.test.mjs
+```
+
+### What changed
+
+- `staleSurfaceReason()` now excludes terminal/abandoned tasks from the goal-key branch's `liveGraphActionable` check.
+- Live `in_progress` / `ready` tasks still suppress goal nudges as `actionable_graph`.
+- Closed/taskKey paths still behave the same for graph-stall and stale-open messages.

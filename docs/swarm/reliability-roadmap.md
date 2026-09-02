@@ -1185,3 +1185,29 @@ A second, related problem: the orchestrator repeatedly misread `swarm_agent_stat
 - Preserved: R19/R16/R14 invariants, goal evaluator, graph-stall Row 75 leg, stale-open orchestrator nudge, all existing pump phases.
 
 **Sequencing:** The simplify-half (deriveTaskProgressState) is independent and ships in the same commit. The artifact-progress nudge is gated on the agent being idle (`lastToolAt > 60s`) so it never races with the active-agent path. The forward-transition reset in `tools/tasks.ts` ensures a successful close clears the nudge bookkeeping; a re-opened node starts from a clean counter.
+
+### Row R21 — Goal-nudge surface suppression by orphan-on-terminal-task — P0 (FIXED 2026-09-02)
+
+**Source:** Live incident 2026-09-02 10:31–10:33. Three goal nudge messages (`aa033e3c`, `b689bff4`, `99aef9a2`) were emitted and durably enqueued, then suppressed at `site=orchestrator_pump.surface` with `reason=actionable_graph` because `staleSurfaceReason()` reused live graph actionability too broadly for the goal-key branch. The reproducer is a failed task (`task-202609020536`) carrying an orphan `ready` node: the emission path already agreed the goal was actionable enough to send, but the surface-time revalidator still treated the terminal orphan as active graph work and swallowed it.
+
+**Fix:** goal-surface revalidation now mirrors R19 Fix B at the surface layer: `staleSurfaceReason()` still honors live `in_progress` / `ready` graphs, but the goal-key branch excludes terminal/abandoned tasks (`failed` / `cancelled` / `blocked`) from `liveGraphActionable`. That means terminal orphan rework nodes can no longer silence the goal floor after the message has already been emitted and mailbox-delivered.
+
+**Files touched:**
+- `extensions/swarm/src/reconcile.ts` — goal-key branch guard in `staleSurfaceReason()`
+- `extensions/swarm/r21-goal-surface-suppression.test.mjs` — RED-first regression for terminal-orphan goal suppression + live-task control + closed-task taskKey control
+- `docs/swarm/pi-runtime-contract.md` — §10 F13 row
+- `docs/swarm/operations.md` — R21 operator subsection
+
+**Acceptance evidence:**
+- RED lane captured at `tmux-snapshots/r21-goal-surface-suppression/red-lane.txt` (terminal-orphan goal-key case initially returned `stale:true reason=actionable_graph`)
+- GREEN lane captured at `tmux-snapshots/r21-goal-surface-suppression/green-lane.txt` (5/0 PASS)
+- Full regression green: R21 + R20 (20+16) + R19 (22) + R16 (25) + R14 (14) + swarm-goal (67) + idle-nudge (69) + task-liveness (48)
+
+**Boundary counters:**
+- `C-R21-1` goal-key terminal-orphan: `staleSurfaceReason()` returns `stale:false` instead of `actionable_graph`
+- `C-R21-2` trace census: `notification.stale.suppressed` remains `0` for the terminal-orphan goal-key case
+- `C-R21-3` live-task control: `staleSurfaceReason()` still returns `stale:true reason=actionable_graph` for an `in_progress` graph with an orphan ready node
+- `C-R21-4` closed-task taskKey control: `staleSurfaceReason()` still returns `stale:true reason=no_active_node` for a closed graph-stall message
+- `C-R21-5` durable surface transition: surfaced messages still update the receipt/surfaced ledger as before (no replay regressions)
+
+**Sequencing:** R21 is a surface-layer parity fix. It does not alter emission-time gating, graph-stall Row 75 semantics, or task close behavior. The only change is the terminal-task exclusion in the goal-key surface revalidation path.

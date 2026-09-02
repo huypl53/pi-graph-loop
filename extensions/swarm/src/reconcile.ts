@@ -1609,6 +1609,10 @@ export async function staleSurfaceReason(
 	// actionable graphs, or a goal nudge fires instead of the graph nudge pre-first-assign.
 	const liveGraphActionable = Object.values(taskIndex).some((task) => {
 		if (!isStallNudgeEligibleTaskStatus(task.status)) return false;
+		// Goal-surface suppression must ignore terminal/abandoned tasks so orphan
+		// rework nodes on failed/cancelled/blocked graphs do not permanently
+		// silence the goal floor at surface time. LIVE tasks still count below.
+		if (isTerminalOrAbandonedTaskStatus(task.status)) return false;
 		const cr = computeReadyNodes(task);
 		const actionable = new Set([
 			...cr.ready,
