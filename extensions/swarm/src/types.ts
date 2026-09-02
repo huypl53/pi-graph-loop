@@ -642,6 +642,24 @@ export type TaskNode = {
 	// ISO timestamp anchoring the current rate-limit window. Set on first supersession within a
 	// window; reset when the window expires (`now - supersessionWindowStart > window`).
 	supersessionWindowStart?: string;
+	// === R20 — artifact-progress self-nudge bookkeeping ===
+	// ISO timestamp of the most recent artifact-progress nudge delivered for this node. Acts as
+	// the backoff dedupe gate: subsequent nudges are suppressed until
+	// `nowMs - artifactProgressNudgeAt > ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS`. Pendant of
+	// `staleOpenSurfacedAt` (orchestrator-facing surfacing) but agent-facing (the nudge targets
+	// the worker, not the orchestrator). Cleared on `swarm_update_task` forward transitions in
+	// tools/tasks.ts so a successful close resets the nudge cycle for future node re-opens.
+	artifactProgressNudgeAt?: string;
+	// Per-node monotonic count of artifact-progress nudges emitted. Reset to 0 on forward
+	// transitions (alongside `lastProgressAt`/`staleOpenSurfacedAt`). When this exceeds
+	// `ARTIFACT_PROGRESS_NUDGE_CAP` the trigger short-circuits to a one-line orchestrator
+	// escalation (`worker.artifact_progress_cap_exceeded`) instead of a worker nudge.
+	artifactProgressNudgeCount?: number;
+	// One-shot flag: true after the cap-exceeded escalation has fired for this cycle. Cleared
+	// on forward transitions (same pattern as the other R20 bookkeeping). Prevents repeated
+	// escalations within a single stalled cycle (each nudge count past the cap would otherwise
+	// re-emit the trace; cap_exceeded is per-cycle, not per-nudge).
+	artifactProgressCapSurfaced?: boolean;
 };
 
 export type TaskEdge = {

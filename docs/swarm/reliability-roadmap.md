@@ -1147,3 +1147,41 @@ Test gap: no test drives GC→epoch→goal-evaluator on one st in a single tick 
 **Preservation matrix (all GREEN post-fix):** R12 (36+21), task-close-sweep (52), agent-retirement-sweep (33), R13 unknown-target (24), R15 normal-result (15), high-priority-interrupt (36), priority-high-interrupt-stream-resolve (30), idle-nudge (69), liveness-progress (40), supersession-fencing (20), graph-advance-nudge-rearm (24), swarm-goal (67), cancellation (42).
 
 **Sequencing:** Order of fixes per plan §5 is B (dedupe) → C (escalation) → A (predicate). Fix C alone would emit one escalation per tick; Fix B dedupes first so the escalation is once per transition; Fix A prevents the vacuous branch from firing on healthy-but-stale-heartbeat pools (which is the dominant real-world case).
+
+### Row R20 — Artifact-progress self-nudge + simplified swarm_agent_status — P0 (FIXED 2026-09-02)
+
+**Source:** Live trace sequence 2026-09-01/02. The "settled idle with open assignment" pattern was observed 5+ times in a single session: r16-implementer, r19-implementer, r19-reviewer, twice on r19 commit-close. The mechanism is consistent — the worker does real work (writes artifacts, runs tests), then `agent_settled` fires WITHOUT a call to `swarm_update_task` (close) + `swarm_send_message replyTo` (link the verified result). The orchestrator's recovery ladder (probe pane → directive → restart → force-close) gets stuck on step 1: by the time the orchestrator notices, the agent pane has long settled and the worker won't see the directive without a wake-up.
+
+A second, related problem: the orchestrator repeatedly misread `swarm_agent_status`'s 12 fields and concluded "busy" when the agent was actually `response_missing`. Simplifying the status is part of the same R-row.
+
+**Two coupled fixes:**
+
+1. **Artifact-progress self-nudge** (`reconcile.ts:evaluateArtifactProgressNudgeLocked`, wired at the pump-loop site alongside `evaluateIdleGoalNudgeLocked`): every pump tick, scan `node.allowedFiles ?? task.allowedFiles`, take max mtime (capped at 50 files/node). When the max mtime exceeds `max(lastProgressAt, artifactProgressNudgeAt) + ARTIFACT_PROGRESS_GRACE_MS` AND the agent's `lastToolAt` is older than `ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS` (60s), deliver a high-priority, action-oriented nudge to the AGENT itself (not the orchestrator) naming the exact close-action triple:
+
+   ```
+   swarm_update_task(taskId="...", nodeId="...", status=done|failed|blocked, outcome=...)
+   swarm_send_message(to="orchestrator", replyTo="<assignment msg id>", subject=..., body=...)
+   swarm_ack_message(messageId="<assignment msg id>", status=done, resultMessageId=...)
+   ```
+
+   Backoff: `ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS` (default 5min) per node. Cap: `ARTIFACT_PROGRESS_NUDGE_CAP` (default 3) nudges, then a one-line orchestrator escalation (`worker.artifact_progress_cap_exceeded` trace + durable high-priority mailbox message).
+
+2. **Simplified `swarm_agent_status`**: collapse the 12-field observation into a single top-level `taskProgressState: "active" | "stalled" | "completed_unverified" | "awaiting_input" | "idle_blocked" | "dead"`. New pure helper `deriveTaskProgressState(agent, st, ctx)` in `agents.ts`, exported for testing.
+
+**Files touched:**
+- `extensions/swarm/src/constants.ts` — `ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS`, `ARTIFACT_PROGRESS_NUDGE_CAP`, `ARTIFACT_PROGRESS_GRACE_MS`, `ARTIFACT_PROGRESS_MAX_FILES`, `ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS`, `TRACE_ARTIFACT_PROGRESS_NUDGE`, `TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED`.
+- `extensions/swarm/src/types.ts` — `TaskNode.artifactProgressNudgeAt`, `TaskNode.artifactProgressNudgeCount`, `TaskNode.artifactProgressCapSurfaced`.
+- `extensions/swarm/src/agents.ts` — `deriveTaskProgressState` pure helper + `TaskProgressState` + `DeriveTaskProgressStateCtx` exports.
+- `extensions/swarm/src/tools/agents.ts` — `swarm_agent_status` output includes top-level `taskProgressState`.
+- `extensions/swarm/src/tools/tasks.ts` — `swarm_update_task` forward transitions reset `artifactProgressNudgeAt`/`artifactProgressNudgeCount`/`artifactProgressCapSurfaced` (next to the existing `staleAt` reset pattern).
+- `extensions/swarm/src/reconcile.ts` — `evaluateArtifactProgressNudgeLocked` + pump-loop wiring.
+- `extensions/swarm/r20-artifact-progress-nudge.test.mjs` (new) — 20/0 PASS across R20-S1..S6 + C-R20-1..8 boundary counters.
+- `extensions/swarm/agent-status-derive.test.mjs` (new) — 16/0 PASS across all 6 state cases + exclusivity.
+
+**Acceptance evidence:**
+- RED lane captured at `tmux-snapshots/r20-artifact-progress-nudge/red-lane.txt` (R20-S1 FAIL: 0 nudges when 1 expected; R20-S4 FAIL: 0 cap-exceeded when 1 expected).
+- GREEN lane captured at `tmux-snapshots/r20-artifact-progress-nudge/green-lane.txt` (20/0 PASS, 16/0 PASS).
+- Full regression (8 suites, 281 assertions): R19 (22), R16 (25), R14 (14), idle-nudge (69), swarm-goal (67), task-liveness (48), R20 simplify (16), R20 nudge (20).
+- Preserved: R19/R16/R14 invariants, goal evaluator, graph-stall Row 75 leg, stale-open orchestrator nudge, all existing pump phases.
+
+**Sequencing:** The simplify-half (deriveTaskProgressState) is independent and ships in the same commit. The artifact-progress nudge is gated on the agent being idle (`lastToolAt > 60s`) so it never races with the active-agent path. The forward-transition reset in `tools/tasks.ts` ensures a successful close clears the nudge bookkeeping; a re-opened node starts from a clean counter.

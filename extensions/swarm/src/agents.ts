@@ -679,3 +679,103 @@ export async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: 
 	} catch { /* trace is informational; never fail reuse on it */ }
 	return { matches, recommended: matches[0]?.agentId };
 }
+
+// === R20 — deriveTaskProgressState ===
+// Pure-function helper. Collapses the 12-field swarm_agent_status observation into a single
+// mutually-exclusive taskProgressState (dead | idle_blocked | completed_unverified | stalled |
+// active | awaiting_input). The orchestrator's "3 đường kiểm chứng" rule becomes:
+//   1. read taskProgressState
+//   2. cross-check against disk artifacts
+//   3. cross-check against mailbox/response debt
+// State precedence is fixed: the first matching predicate wins. This file's exhaustive tests
+// (extensions/swarm/agent-status-derive.test.mjs) cover all 6 states + exclusivity.
+//
+// Parameters:
+//   - agent: the SwarmAgent record (live or synthetic).
+//   - st: the live SwarmState (mailbox state read-only).
+//   - ctx: { nowMs, artifactMtimeMs?, tmuxAlive? } — optional, defaults to fs.stat computed by
+//     the caller for the agent's task-relevant file. `tmuxAlive` is supplied by the caller
+//     because the agent record's cached `tmuxAlive` is stale-by-design (see taskgraph.ts).
+//
+// Returns one of:
+//   - "dead":                 tmuxAlive === false OR lastHeartbeatAt > 60s ago
+//   - "idle_blocked":         responseMissing > 0 OR ackMissing > 0 OR deadLetters > 0
+//   - "completed_unverified": artifact mtime in last 5 min AND activeTaskIds.length > 0 AND verifiedResultMsgId === null
+//   - "stalled":              activeTaskIds.length > 0 AND lastToolAt > 10 min ago AND verifiedResultMsgId === null
+//   - "active":               lastToolAt < 60s ago OR (artifact mtime < 5 min AND activeTaskIds.length > 0 AND NOT yet settled)
+//   - "awaiting_input":       (otherwise)
+export type TaskProgressState =
+	| "active"
+	| "stalled"
+	| "completed_unverified"
+	| "awaiting_input"
+	| "idle_blocked"
+	| "dead";
+
+export type DeriveTaskProgressStateCtx = {
+	nowMs?: number;
+	artifactMtimeMs?: number | null;
+	tmuxAlive?: boolean | null;
+};
+
+const DEAD_HEARTBEAT_MS = 60_000;
+const ACTIVE_LAST_TOOL_MS = 60_000;
+const STALLED_LAST_TOOL_MS = 10 * 60_000;
+const ARTIFACT_FRESH_MS = 5 * 60_000;
+
+export function deriveTaskProgressState(
+	agent: SwarmAgent,
+	st: SwarmState,
+	ctx: DeriveTaskProgressStateCtx = {},
+): TaskProgressState {
+	const nowMs = typeof ctx.nowMs === "number" ? ctx.nowMs : Date.now();
+
+	// 1) dead: tmuxAlive === false OR lastHeartbeatAt > 60s ago
+	// `tmuxAlive` defaults to TRUE when absent on the agent record (the field is supplied
+	// fresh by the swarm_agent_status tool via a live tmux probe; absent == unknown, which we
+	// treat as alive so we don't dead-false-positive on legacy / synthetic records).
+	const tmuxAlive = ctx.tmuxAlive === undefined ? (agent.tmuxAlive === undefined ? true : Boolean(agent.tmuxAlive)) : ctx.tmuxAlive;
+	const hbMs = agent.lastHeartbeatAt ? new Date(agent.lastHeartbeatAt).getTime() : 0;
+	if (tmuxAlive === false) return "dead";
+	if (hbMs && nowMs - hbMs > DEAD_HEARTBEAT_MS) return "dead";
+
+	// 2) idle_blocked: responseMissing > 0 OR ackMissing > 0 OR deadLetters > 0
+	const messages = Object.values(st.messages || {}).filter((m) => m.to === agent.id);
+	let responseMissing = 0;
+	let ackMissing = 0;
+	let deadLetters = 0;
+	for (const m of messages) {
+		const responseTrackingActive =
+			m.requiresResponse &&
+			m.status !== "dead_letter" &&
+			m.status !== "queued" &&
+			(m.status !== "failed" || Boolean(m.lastAck));
+		if (responseTrackingActive && m.response?.status !== "verified" && m.response?.status !== "waived") {
+			responseMissing++;
+		}
+		if (m.requiresAck && Boolean(m.ackMissingAt) && !m.ackedAt) ackMissing++;
+		if (m.status === "dead_letter") deadLetters++;
+	}
+	if (responseMissing > 0 || ackMissing > 0 || deadLetters > 0) return "idle_blocked";
+
+	// 3) completed_unverified: artifact mtime in last 5 min AND activeTaskIds.length > 0 AND verifiedResultMsgId === null
+	const artifactMs = ctx.artifactMtimeMs;
+	const activeTaskCount = agent.activeTaskIds?.length ?? 0;
+	const lastToolMs = agent.lastToolAt ? new Date(agent.lastToolAt).getTime() : 0;
+	const verifiedResultMsgId = messages.some((m) => m.requiresResponse && m.response?.status === "verified");
+	if (typeof artifactMs === "number" && nowMs - artifactMs <= ARTIFACT_FRESH_MS && activeTaskCount > 0 && !verifiedResultMsgId) {
+		return "completed_unverified";
+	}
+
+	// 4) stalled: activeTaskIds.length > 0 AND lastToolAt > 10 min ago AND verifiedResultMsgId === null
+	if (activeTaskCount > 0 && lastToolMs && nowMs - lastToolMs > STALLED_LAST_TOOL_MS && !verifiedResultMsgId) {
+		return "stalled";
+	}
+
+	// 5) active: lastToolAt < 60s ago OR (artifact mtime < 5 min AND activeTaskIds.length > 0 AND not yet settled)
+	if (lastToolMs && nowMs - lastToolMs <= ACTIVE_LAST_TOOL_MS) return "active";
+	if (typeof artifactMs === "number" && nowMs - artifactMs <= ARTIFACT_FRESH_MS && activeTaskCount > 0) return "active";
+
+	// 6) awaiting_input: otherwise
+	return "awaiting_input";
+}

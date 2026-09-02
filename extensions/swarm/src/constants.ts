@@ -573,3 +573,45 @@ export function formatNotifyKey(template: string, params: Record<string, string>
 	if (out.includes("{")) throw new Error(`UNRESOLVED_NOTIFY_KEY_PARAM: ${out}`);
 	return out;
 }
+
+// === R20 — artifact-progress self-nudge (Issue: "settled idle with open assignment") ===
+// Worker wrote an artifact (fs.stat mtime > node.lastProgressAt) but the node is still open.
+// The pump-tick deliver-and-trace function evaluateArtifactProgressNudgeLocked fires an
+// action-oriented nudge to the agent itself (not the orchestrator) before it settles, naming
+// the exact close-action triple: swarm_update_task + swarm_send_message replyTo + swarm_ack_message.
+// Tunables:
+//   - ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS: dedupe gate between consecutive nudges on the same node.
+//   - ARTIFACT_PROGRESS_NUDGE_CAP:        per-node counter; once exceeded we emit cap_exceeded + one-line orchestrator escalation instead.
+//   - ARTIFACT_PROGRESS_GRACE_MS:         mtime must exceed lastProgressAt by at least this much.
+//   - ARTIFACT_PROGRESS_MAX_FILES:        hard cap on allowedFiles fs.stat calls per node per tick (cost bound).
+//   - ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS: skip when agent.lastToolAt is fresher than this (active worker, no noise).
+
+export const ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS =
+	Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS))
+		: 5 * 60_000;
+
+export const ARTIFACT_PROGRESS_NUDGE_CAP =
+	Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_NUDGE_CAP) > 0
+		? Math.floor(Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_NUDGE_CAP))
+		: 3;
+
+export const ARTIFACT_PROGRESS_GRACE_MS =
+	Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_GRACE_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_GRACE_MS))
+		: 60_000;
+
+export const ARTIFACT_PROGRESS_MAX_FILES =
+	Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_MAX_FILES) > 0
+		? Math.floor(Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_MAX_FILES))
+		: 50;
+
+export const ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS =
+	Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS))
+		: 60_000;
+
+// R20 trace event names. Stable so dashboards + tests import the same strings the engine emits.
+export const TRACE_ARTIFACT_PROGRESS_NUDGE = "worker.artifact_progress_no_status_update";
+export const TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED = "worker.artifact_progress_cap_exceeded";
+

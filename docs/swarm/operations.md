@@ -1280,3 +1280,77 @@ All six MUST be green in the post-fix shape. R19-S1 (orphan on `failed` task) is
 - `swarm_audit({mode:"events", since:..., until:..., event:"goal.nudge.deferred_by_actionable_graph"})` — inspect defer history.
 - `swarm_audit({mode:"events", since:..., until:..., event:"goal.nudge.suppressed_by_actionable_graph"})` — distinguish LIVE-task (expected) from terminal-task (post-R19 = 0) suppressions.
 - `/swarm trace` — view the live trace census.
+
+## Operator: R20 artifact-progress self-nudge + simplified swarm_agent_status (2026-09-02)
+
+### When this matters
+
+A worker writes real artifacts to disk (tests pass, files edited, `artifacts/<x>.md` produced), then `agent_settled` fires WITHOUT a call to `swarm_update_task` (close) + `swarm_send_message replyTo` (link the verified result) + `swarm_ack_message` (clear the assignment). Pre-R20 the orchestrator's recovery ladder was: probe pane → send directive → restart → force-close. Step 1 was unreliable — the worker had already settled and missed the directive.
+
+R20 adds a self-nudge that fires BEFORE the agent settles: every pump tick, the swarm scans `node.allowedFiles ?? task.allowedFiles` for fresh mtime, and when an artifact write has landed since the last `lastProgressAt`, delivers an action-oriented nudge to the agent itself (not the orchestrator) naming the exact close-action triple.
+
+A second, related improvement: `swarm_agent_status` now returns a single top-level `taskProgressState` field derived from the agent's runtime state + mailbox + artifact mtime. The orchestrator's "3 đường kiểm chứng" rule becomes "read taskProgressState, then cross-check against disk artifacts."
+
+### What R20 changed
+
+- `extensions/swarm/src/constants.ts` — `ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS` (default 5min), `ARTIFACT_PROGRESS_NUDGE_CAP` (default 3), `ARTIFACT_PROGRESS_GRACE_MS` (default 60s), `ARTIFACT_PROGRESS_MAX_FILES` (default 50), `ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS` (default 60s). Two new trace event names: `worker.artifact_progress_no_status_update` and `worker.artifact_progress_cap_exceeded`.
+- `extensions/swarm/src/types.ts` — `TaskNode.artifactProgressNudgeAt` (ISO; backoff gate), `TaskNode.artifactProgressNudgeCount` (per-node counter, reset on forward transitions), `TaskNode.artifactProgressCapSurfaced` (one-shot flag, reset on forward transitions).
+- `extensions/swarm/src/agents.ts` — new pure helper `deriveTaskProgressState(agent, st, ctx)` returning one of 6 mutually-exclusive states (`active | stalled | completed_unverified | awaiting_input | idle_blocked | dead`).
+- `extensions/swarm/src/tools/agents.ts` — `swarm_agent_status` rows now include top-level `taskProgressState`.
+- `extensions/swarm/src/tools/tasks.ts` — `swarm_update_task` forward transitions (assigned/in_progress/ready/done/failed/blocked) reset `artifactProgressNudgeAt`/`Count`/`CapSurfaced` (next to the existing `staleAt` reset).
+- `extensions/swarm/src/reconcile.ts` — new `evaluateArtifactProgressNudgeLocked` pump-tick phase wired alongside `evaluateIdleGoalNudgeLocked` and `evaluateTaskGraphStallNudgeLocked`.
+
+### Eight R10-1 boundary counters
+
+| # | Counter | Boundary | Verification |
+|---|---------|----------|--------------|
+| C-R20-1 | `worker.artifact_progress_no_status_update` trace count | real trace call | `extensions/swarm/r20-artifact-progress-nudge.test.mjs` R20-S1 |
+| C-R20-2 | `worker.artifact_progress_cap_exceeded` trace count | real trace call | R20-S4 |
+| C-R20-3 | `deliverMessageLocked` for `agent:<id>` keyed nudge | durable mailbox append | R20-S1 (mailbox count), R20-S3 (dedupe) |
+| C-R20-4 | `fs.stat` allowedFiles calls (capped at 50/node) | real fs call | R20-S4 (file mtime touch forced within cap) |
+| C-R20-5 | `node.artifactProgressNudgeAt` mutation | real state mutation | R20-S1 |
+| C-R20-6 | `node.artifactProgressNudgeCount` mutation + reset-to-0 on forward transition | real state mutation | R20-S1, R20-S4 (cap=3) |
+| C-R20-7 | `writeState` after each nudge | real persisted flag | R20-S1 |
+| C-R20-8 | Body contains exact close-action triple (update_task + send_message replyTo + ack_message) | string match | R20-S1 |
+
+### Diagnosing in the field
+
+- **Nudge fires repeatedly on a node with no real progress:** likely a worker that just touches files between nudges (e.g., autosave). Check `node.artifactProgressNudgeCount` — after cap (default 3), only `worker.artifact_progress_cap_exceeded` fires. Inspect `node.artifactProgressNudgeAt` vs the file mtime to confirm the worker is genuinely writing.
+- **`completed_unverified` agent state with no nudge firing:** check `agent.lastToolAt` — if it's < 60s ago, the active-agent skip suppresses the nudge. Look at `agent.lastToolAt` vs `node.lastProgressAt`: a worker actively stamping progress (via `ensureNodeActivityStamp`) is NOT a candidate.
+- **Cap-exceeded fires but the worker is still active:** the worker is ignoring nudges. Restart the agent (`swarm_restart_agent`) or force-close the node (`swarm_update_task force=true`).
+- **No nudge fires on a clearly-stuck node:** verify `node.allowedFiles` is non-empty. The predicate skips nodes with empty allowed-files (too noisy to track whole-project mtime).
+- **`taskProgressState` shows `awaiting_input` but the worker is clearly working:** stale `agent.lastToolAt`. The heartbeat hook (`tool_execution_end`) should keep it fresh; a worker stuck between tool calls may have a stale stamp. Cross-check with `swarm_audit({mode:"events", event:"tool_execution_end"})`.
+
+### Verify the fix locally
+
+```
+node extensions/swarm/r20-artifact-progress-nudge.test.mjs
+node extensions/swarm/agent-status-derive.test.mjs
+node extensions/swarm/r19-goal-graph-deadlock.test.mjs
+node extensions/swarm/r16-idle-goal-regression.test.mjs
+node extensions/swarm/r14-goal-empty-pool-escalation.test.mjs
+node extensions/swarm/idle-nudge.test.mjs
+node extensions/swarm/swarm-goal.test.mjs
+node extensions/swarm/task-liveness.test.mjs
+```
+
+All eight MUST be green. R20-S1 is load-bearing: pre-fix yields 0 nudges + 0 traces; post-fix yields 1 nudge + 1 trace + a mailbox delivery whose body contains the close-action triple.
+
+### Trace census (post-fix)
+
+```
+worker.artifact_progress_no_status_update   # per nudge (until cap)
+worker.artifact_progress_cap_exceeded       # once per cap-reached cycle
+worker.artifact_progress_nudge_failed       # only on deliverMessageLocked throw
+task.artifact_progress_nudge_count_reset    # forward-transition reset
+```
+
+### Related tools / commands
+
+- `swarm_agent_status({agentId:"..."})` — observe the new top-level `taskProgressState`. `completed_unverified` is the R20 nudge target.
+- `swarm_update_task({status:"done|failed|blocked"})` — closes the node and resets the R20 nudge cycle for future re-opens.
+- `swarm_send_message({to:"orchestrator", replyTo:"<assignment msg id>", ...})` — links the verified result to the assignment.
+- `swarm_ack_message({messageId:"<assignment msg id>", status:"done", resultMessageId:"..."})` — the third leg of the close-action triple.
+- `swarm_audit({mode:"events", event:"worker.artifact_progress_no_status_update"})` — inspect nudge history.
+- `swarm_audit({mode:"events", event:"worker.artifact_progress_cap_exceeded"})` — inspect cap escalations.
+- `/swarm trace` — view the live trace census.

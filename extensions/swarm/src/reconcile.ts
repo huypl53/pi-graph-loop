@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { IndexedTask, MessageResponseStatus, OrchestratorReceiptEntry, Paths, ReconcileAction, SwarmAgent, SwarmIdleNudgeState, SwarmMessage, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LATE_RESULT_REJECTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED, TRACE_STALE_OPEN_SURFACED } from "./constants.ts";
+import { ACK_MISSING_MS, ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS, ARTIFACT_PROGRESS_GRACE_MS, ARTIFACT_PROGRESS_MAX_FILES, ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS, ARTIFACT_PROGRESS_NUDGE_CAP, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED, TRACE_ARTIFACT_PROGRESS_NUDGE, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LATE_RESULT_REJECTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED, TRACE_STALE_OPEN_SURFACED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, humanAge, inferRoleKind, now, safeId } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention, proxyMetricEmitLocked, staleOpenAssignmentScanLocked, staleOpenNudgeLocked } from "./taskgraph.ts";
 
@@ -1058,6 +1058,175 @@ export async function evaluateTaskGraphStallNudgeLocked(
 //   - swarm_update_task claim branch (Issue 24.a) — same; a worker claimed an unassigned node.
 //   - applyTaskStatus terminal-transition sites (Issue 23 B3 placement) — resolves because the
 //     task left in_progress.
+// === R20 — artifact-progress self-nudge (Issue: "settled idle with open assignment") ===
+// Pump-tick phase. Detects when an agent has written an artifact (fs.stat mtime > baseline +
+// grace) but the task node is still open (status in {assigned, in_progress}). Delivers a high-
+// priority, action-oriented nudge to the agent itself (NOT the orchestrator) BEFORE it can
+// settle, naming the exact close-action triple:
+//
+//   swarm_update_task(taskId=..., nodeId=..., status=done|failed|blocked, outcome=...)
+//   swarm_send_message(to="orchestrator", replyTo="<assignment msg id>", subject=..., body=...)
+//   swarm_ack_message(messageId="<assignment msg id>", status=done, resultMessageId=...)
+//
+// The triple is the canonical R16/R19 lesson: the failure mode that R20 fixes is the worker
+// completing real work but never issuing close calls. The body tells the agent, step by step,
+// what to call — with explicit `<assignment msg id>` placeholders the worker can substitute
+// from its own mailbox.
+//
+// Tunables (env-overridable via constants.ts):
+//   - ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS (default 5min): dedupe gate between consecutive nudges.
+//   - ARTIFACT_PROGRESS_NUDGE_CAP (default 3): per-node counter; once exceeded, escalate to the
+//     orchestrator (one-line `worker.artifact_progress_cap_exceeded` trace + stop nudging).
+//   - ARTIFACT_PROGRESS_GRACE_MS (default 60s): mtime must exceed baseline by at least this.
+//   - ARTIFACT_PROGRESS_MAX_FILES (default 50): hard cap on allowedFiles fs.stat calls per node.
+//   - ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS (default 60s): skip when agent.lastToolAt is fresh.
+//
+// Baseline: reuses node.lastProgressAt (Issue 83a) — the existing forward-progress stamp. The
+// trigger predicate is: maxMtimeMs > max(lastProgressAt, artifactProgressNudgeAt ?? 0) +
+// ARTIFACT_PROGRESS_GRACE_MS. This anchors on real agent activity; a worker that just stamped
+// lastProgressAt is NOT eligible until a NEW write lands.
+//
+// Output: returns an inspectable summary `{ inspected, nudged, escalated, scannedFiles }` so the
+// pump loop + tests can verify behavior without poking into private state.
+export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<{ inspected: number; nudged: number; escalated: number; scannedFiles: number }> {
+	let inspected = 0, nudged = 0, escalated = 0, scannedFiles = 0;
+	if (!existsSync(p.tasksDir)) return { inspected, nudged, escalated, scannedFiles };
+	let taskDirs: string[] = [];
+	try { taskDirs = await readdir(p.tasksDir); } catch { return { inspected, nudged, escalated, scannedFiles }; }
+	const dirtyTaskPaths = new Set<TaskPaths>();
+	const tpToTask = new Map<TaskPaths, TaskState>();
+	for (const taskDir of taskDirs) {
+		const tp = taskPaths(p, taskDir);
+		if (!existsSync(tp.taskJson)) continue;
+		let task: TaskState;
+		try { task = await readTaskState(tp.taskJson); } catch { continue; }
+		tpToTask.set(tp, task);
+		for (const [nodeId, node] of Object.entries(task.nodes)) {
+			if (!node) continue;
+			if (node.status !== "assigned" && node.status !== "in_progress") continue;
+			// Orchestrator self-nudge suppression (OQ2): skip when the assignee is the orchestrator
+			// pseudo-agent (no real worker pane to nudge; the orchestrator drives its own work).
+			if (!node.assignee || node.assignee === "orchestrator") continue;
+			// Skip when the node has no allowedFiles (OQ3 default: too noisy to track whole-project mtime).
+			const effectiveAllowed: string[] = node.allowedFiles && node.allowedFiles.length > 0 ? node.allowedFiles : (task.allowedFiles && task.allowedFiles.length > 0 ? task.allowedFiles : []);
+			if (effectiveAllowed.length === 0) continue;
+			inspected++;
+			// fs.stat each allowed file; cap at ARTIFACT_PROGRESS_MAX_FILES. The "max mtime across
+			// the node's allowed scope" is the artifact-progress signal.
+			let maxMtimeMs = 0;
+			let contributingFile: string | null = null;
+			const files = effectiveAllowed.slice(0, ARTIFACT_PROGRESS_MAX_FILES);
+			scannedFiles += files.length;
+			for (const rel of files) {
+				try {
+					const s = await stat(join(cwd, rel));
+					const mt = s.mtimeMs || (s.mtime ? s.mtime.getTime() : 0);
+					if (mt > maxMtimeMs) { maxMtimeMs = mt; contributingFile = rel; }
+				} catch { /* file not on disk yet (worker hasn't created it) — skip */ }
+			}
+			if (!contributingFile) continue;
+			// Baseline: max(lastProgressAt, artifactProgressNudgeAt). A worker that just got nudged
+			// is NOT eligible for another nudge unless NEW progress lands (the backoff gate).
+			const baselineMs = Math.max(
+				node.lastProgressAt ? new Date(node.lastProgressAt).getTime() : 0,
+				node.artifactProgressNudgeAt ? new Date(node.artifactProgressNudgeAt).getTime() : 0,
+			);
+			if (maxMtimeMs <= baselineMs + ARTIFACT_PROGRESS_GRACE_MS) continue;
+			// Active-agent skip (R20-S5): if the worker is still making tool calls, no nudge.
+			const agent = st.agents[node.assignee];
+			if (!agent) continue;
+			const lastToolMs = agent.lastToolAt ? new Date(agent.lastToolAt).getTime() : 0;
+			if (lastToolMs && nowMs - lastToolMs <= ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS) continue;
+			// Cap exceeded: emit one-line orchestrator escalation + dedupe-gated trace.
+			// Cap-exceeded fires AT MOST ONCE per node per forward-progress cycle (the
+			// forward-transition reset in tools/tasks.ts clears artifactProgressNudgeAt). This
+			// keeps the orchestrator's mailbox uncluttered while still surfacing the cap breach.
+			const priorCount = node.artifactProgressNudgeCount ?? 0;
+			if (priorCount >= ARTIFACT_PROGRESS_NUDGE_CAP) {
+				// Idempotent dedupe via a dedicated flag: only emit the cap-exceeded trace once per
+				// cycle. Subsequent ticks within the same stalled cycle stay silent — the
+				// orchestrator already has the escalation; more repeats would just clutter traces.
+				if (!node.artifactProgressCapSurfaced) {
+					await trace(p, TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED, { taskId: task.taskId, nodeId, assignee: node.assignee, nudgeCount: priorCount, cap: ARTIFACT_PROGRESS_NUDGE_CAP, contributingFile, maxMtimeMs, lastProgressAt: node.lastProgressAt ?? null, lastToolAt: agent.lastToolAt ?? null }).catch(() => {});
+					// Lightweight orchestrator escalation: durable mailbox delivery so the orchestrator
+					// sees the "node stalled with N ignored nudges" line on its next pump tick.
+					try {
+						await deliverMessageLocked(pi, cwd, p, st, {
+							to: "orchestrator",
+							priority: "high",
+							subject: `ARTIFACT-PROGRESS CAP: node ${nodeId} of ${task.taskId} stalled after ${priorCount} nudges`,
+							body: `Node \`${nodeId}\` of task \`${task.taskId}\` has artifact progress on disk (${contributingFile}, mtime ${new Date(maxMtimeMs).toISOString()}) but the worker has ignored ${priorCount} artifact-progress nudges (cap ${ARTIFACT_PROGRESS_NUDGE_CAP}). Worker \`${node.assignee}\` is still assigned. Recommend: restart the agent or force-close the node (swarm_update_task force=true).`,
+							requiresAck: false,
+							requiresResponse: false,
+							idempotencyKey: `r20:cap:${task.taskId}:${nodeId}`,
+						});
+					} catch { /* escalation is informational; never throw out of the tick */ }
+					node.artifactProgressNudgeAt = new Date(nowMs).toISOString();
+					node.artifactProgressCapSurfaced = true;
+					escalated++;
+					dirtyTaskPaths.add(tp);
+				}
+				continue;
+			}
+			// Compose the action-oriented nudge body. The exact close-action triple is the payload.
+			const lastProgressIso = node.lastProgressAt ?? "never";
+			const fileMtimeIso = new Date(maxMtimeMs).toISOString();
+			const assignmentMsgId = node.assignmentMessageId ?? `<assignment msg id for ${task.taskId}:${nodeId}>`;
+			const body = [
+				`[PI-SWARM ARTIFACT-PROGRESS NUDGE] (high-priority)`,
+				`File detected: ${contributingFile} (mtime ${fileMtimeIso})`,
+				`Node ${nodeId} still ${node.status}. Last update: ${lastProgressIso}.`,
+				``,
+				`You are 1 step from closing the task. To finish:`,
+				``,
+				`  swarm_update_task(taskId="${task.taskId}", nodeId="${nodeId}", status=done|failed|blocked, outcome=<one of: planned|implemented|tested|reviewed|approved|rejected|failed>)`,
+				``,
+				`  swarm_send_message(`,
+				`    to="orchestrator",`,
+				`    replyTo="${assignmentMsgId}",`,
+				`    subject="${task.taskId}:${nodeId} done",`,
+				`    body="<1-line summary>"`,
+				`  )`,
+				``,
+				`  swarm_ack_message(messageId="${assignmentMsgId}", status=done, resultMessageId="<result msg id>")`,
+				``,
+				`If the work is genuinely incomplete, call swarm_update_task(status=blocked, note=<reason>) instead.`,
+				`(Auto-backoff: ${Math.round(ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS / 60000)} min between nudges; cap ${ARTIFACT_PROGRESS_NUDGE_CAP} then escalate to orchestrator.)`,
+			].join("\n");
+			try {
+				await deliverMessageLocked(pi, cwd, p, st, {
+					to: node.assignee,
+					priority: "high",
+					subject: `ARTIFACT-PROGRESS: close ${task.taskId}:${nodeId} now`,
+					body,
+					conversationId: `task:${task.taskId}:${nodeId}`,
+					replyTo: node.assignmentMessageId,
+					requiresAck: true,
+					requiresResponse: true,
+					idempotencyKey: `r20:nudge:${task.taskId}:${nodeId}:${priorCount + 1}`,
+				});
+				node.artifactProgressNudgeAt = new Date(nowMs).toISOString();
+				node.artifactProgressNudgeCount = priorCount + 1;
+				await trace(p, TRACE_ARTIFACT_PROGRESS_NUDGE, { taskId: task.taskId, nodeId, assignee: node.assignee, contributingFile, maxMtimeMs, baselineMs, lastProgressAt: node.lastProgressAt ?? null, lastToolAt: agent.lastToolAt ?? null, nudgeCount: node.artifactProgressNudgeCount, cap: ARTIFACT_PROGRESS_NUDGE_CAP, backoffMs: ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS, gracefulMs: ARTIFACT_PROGRESS_GRACE_MS }).catch(() => {});
+				nudged++;
+				dirtyTaskPaths.add(tp);
+			} catch (err: any) {
+				await trace(p, "worker.artifact_progress_nudge_failed", { taskId: task.taskId, nodeId, assignee: node.assignee, error: String((err as Error)?.message || err) }).catch(() => {});
+			}
+		}
+	}
+	// Persist any task.json mutations (node.artifactProgressNudgeAt / Count). The in-memory
+	// `task` reference holds our mutations; writeTaskState serializes the LIVE object (no
+	// fresh re-read, which would lose the in-memory mutations because readTaskState deserializes
+	// a new copy). Updated updatedAt is stamped inside writeTaskState.
+	for (const tp of Array.from(dirtyTaskPaths)) {
+		try { await writeTaskState(tp, tpToTask.get(tp)!); } catch { /* best-effort */ }
+	}
+	if (nudged || escalated || inspected) {
+		await writeState(p, st).catch(() => {});
+	}
+	return { inspected, nudged, escalated, scannedFiles };
+}
 // === Issue 82: heartbeat-driven agent GC pass (P0, R9 a3 graveyard) ===
 // Runs once per pump tick under the existing withLock. Bounded cost:
 //   - O(N) over agents for the cheap heartbeat gate (no I/O).
@@ -1671,6 +1840,12 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// agent has been continuously idle for the full interval, emit the goal fallback nudge. Anti-loop
 		// counter + back-off handled inside the function.
 		try { await evaluateIdleGoalNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "goal.nudge.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		// === R20: artifact-progress self-nudge (Issue: settled idle with open assignment) ===
+		// Pump-tick phase. Fires an action-oriented nudge to the AGENT itself (not the orchestrator)
+		// when fs.stat detects a fresh write to a node's allowedFiles but the node is still open.
+		// Companion to the existing orchestrator-facing stale-open nudge (which targets the PM,
+		// not the worker). Wrapped in try/catch so a single tick failure never kills the pump.
+		try { await evaluateArtifactProgressNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "worker.artifact_progress_nudge_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// === Issue 21: slot recovery scan ===
 		// When a slot's bench naturally expires AND lastBenchReason === "quota" AND the agent on
 		// that slot still has active task assignments, emit pool.slot_recovered. NO auto-resume;

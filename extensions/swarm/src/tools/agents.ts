@@ -12,7 +12,7 @@ import { classifyGoalClearAuthority, GOAL_ORIGIN_ORCHESTRATOR, GOAL_ORIGIN_VALUE
 import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
 import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority, writeEffectiveIdentity } from "../identity.ts";
-import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
+import { attachTarget, deriveTaskProgressState, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
 import { ERR_ORCHESTRATOR_PANE_REJECTED } from "../constants.ts";import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
 import { resolveGoalNudgeIntervalMs } from "../reconcile.ts";
@@ -47,8 +47,12 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				const responsesVerified = verifiedResponseCount(st, agent.id);
 				const blockedFromReuse = responseMissing > 0;
 				const lastHeartbeatAgeSec = agent.lastHeartbeatAt ? Math.round((Date.now() - new Date(agent.lastHeartbeatAt).getTime()) / 1000) : undefined;
+				// R20: derive the single mutually-exclusive taskProgressState at the top level.
+				// tmuxAlive is freshly probed here so the live pane state beats any stale cached value.
+				const taskProgressState = deriveTaskProgressState(agent, st, { nowMs: Date.now(), tmuxAlive });
 				rows.push({
 					agentId: agent.id,
+					taskProgressState,
 					status: agent.status,
 					runtimeStatus: agent.runtimeStatus || "idle",
 					health: agent.health || (tmuxAlive ? "healthy" : "degraded"),

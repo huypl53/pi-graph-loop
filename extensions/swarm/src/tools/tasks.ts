@@ -955,6 +955,16 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// Validation complete; apply (no earlier writes occurred).
 				node.status = newStatus;
 				if ((newStatus === "assigned" || newStatus === "in_progress" || newStatus === "ready") && node.staleAt) { delete node.staleAt; }
+				// === R20: forward-transition resets the artifact-progress nudge cycle ===
+				// Any forward progress stamp (assigned/in_progress/ready) OR a terminal transition
+				// (done/failed/blocked) signals fresh agent activity; clear the nudge bookkeeping so
+				// a future re-open of the node starts from a clean counter. This mirrors the existing
+				// `staleOpenSurfacedAt` clearing pattern (above) and the Issue 83a lastProgressAt stamp.
+				if (newStatus === "assigned" || newStatus === "in_progress" || newStatus === "ready" || newStatus === "done" || newStatus === "failed" || newStatus === "blocked") {
+					if (node.artifactProgressNudgeAt) { delete node.artifactProgressNudgeAt; await traceTask(tp, "task.artifact_progress_nudge_count_reset", { taskId, nodeId: params.nodeId, reason: "forward_transition", by: me }); }
+					if (node.artifactProgressNudgeCount) { node.artifactProgressNudgeCount = 0; }
+					if (node.artifactProgressCapSurfaced) { delete node.artifactProgressCapSurfaced; }
+				}
 				if (params.outcome !== undefined) node.outcome = params.outcome;
 				node.lastActivityAt = now();
 
