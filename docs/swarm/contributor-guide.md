@@ -28,6 +28,37 @@ Implementation modules:
 - `extensions/swarm/src/command.ts` — `/swarm` command surface
 - `extensions/swarm/src/tools/` — tool registrations grouped by domain
 
+
+## Test layout
+
+All test suites live under `extensions/swarm/tests/` (not the repo root) and
+`extensions/mock-llm/tests/` for mock-llm-specific suites. The git mv preserved
+the original history. Imports of `./src/...` were rewritten to `../src/...`.
+
+- Run a single suite: `node extensions/swarm/tests/<name>.test.mjs`
+- Run the swarm inventory: `npm run test:swarm` (sets
+  `PI_SWARM_AGENT_ID=orchestrator PI_SWARM_IS_ORCHESTRATOR=1` so the
+  authority-gated suites do not crash)
+- Run the mock-llm inventory: `npm run test:mockllm`
+
+Pre-existing failures (kept byte-identical by this refactor — do NOT fix in this
+refactor; record new R-rows for fixes):
+
+```text
+ct-contract-probes.test.mjs         19 passed / 4 failed       (CT-2.B/C known)
+minimal-protocol-authoritative      29 pass / 18 fail
+model-routing.test.mjs              4 passed / 1 failed
+orchestrator-wake.test.mjs          31 passed / 3 failed
+functional.test.mjs                 env-crash (caller=implementer-01)
+pool-config.test.mjs                TypeError (provider-config-dependent)
+row75-graph-guardrails.test.mjs     assertion crash
+supersession-fencing.test.mjs       17 pass / 3 fail
+```
+
+Baseline inventory script: `.pi/swarm/tasks/task-20260903-structure-refactor/artifacts/baseline-inventory.sh`.
+This IS the refactor gate — diff the new run's `baseline-inventory.txt` line-by-line
+against the committed baseline to detect drift.
+
 ## Change discipline
 
 ### If you add a new tool

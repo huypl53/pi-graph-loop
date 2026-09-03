@@ -24,7 +24,13 @@ orchestrator pi session
        ├─ src/mailbox.ts     durable mailbox append/read/delivery helpers
        ├─ src/delivery.ts    lifecycle semantics, retryability, parsing
        ├─ src/taskgraph.ts   graph rules, transitions, closure derivation
-       ├─ src/reconcile.ts   repair sweeps, stale signals, PM nudges
+       ├─ src/reconcile.ts   **barrel re-export** of the post-split modules below
+       ├─ src/nudges/goal-epoch.ts       swarm-level idle epoch + goal-floor emission
+       ├─ src/nudges/graph-advance.ts    graph-advance / stall / artifact / heartbeat GC nudges
+       ├─ src/nudges/status-predicates.ts pure predicates over TaskState["status"]
+       ├─ src/surface.ts                 orchestrator-facing message surface machinery
+       ├─ src/tasks-index.ts             PM-facing rollup + task indexer
+       └─ src/reconcile-core.ts          reconcile runner (entry points)
        ├─ src/tmux.ts        tmux wrappers and pane capture/injection
        ├─ src/state.ts       paths, locks, JSON/JSONL writes, traces
        └─ src/hooks.ts       lifecycle hooks and orchestrator mailbox pump

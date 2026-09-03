@@ -1,3 +1,25 @@
+
+## Surface / pump — src/surface.ts
+
+The orchestrator-facing message surface machinery lives in
+`extensions/swarm/src/surface.ts`. It owns:
+
+- `orchSession` — per-process session gate + retrigger counter source-of-truth
+- `runtimeTaskWarnings` — task.json closure/warning extractor
+- `isActionableOrchestratorMessage` — predicate gating orchestrator-visible PM surfacing
+- `staleSurfaceReason` — actionable→stale edge reasoning (fingerprint + reason code)
+- `pumpOrchestratorMailbox` — **the per-tick surface pump (R10-1 boundary)** — the
+  one place where the orchestrator's mailbox is consulted, deduplicated against the
+  per-pid surfaced set + durable consumerReceipts, and (if idle) flushed to the
+  real `pi.sendMessage` boundary
+- `traceStaleSuppressedOnce` — dedupe helper for the stale→suppressed transition
+
+This module is the seam between the swarm state (mailbox + tasks) and the
+Pi-runtime engine boundary. Everything that crosses the "visible surface" goes
+through `pumpOrchestratorMailbox`; the R10-1 counting assertion in
+`idle-nudge.test.mjs` measures calls at that boundary, not at internal helpers.
+
+
 # Swarm tooling reference
 
 This is the public reference for the swarm extension's **31 registered `swarm_*`

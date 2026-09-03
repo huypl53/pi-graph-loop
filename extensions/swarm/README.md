@@ -25,10 +25,20 @@ src/identity.ts      identity markdown generation + write
 src/tmux.ts          tmux wrappers
 src/mailbox.ts       mailbox read/deliver helpers
 src/agents.ts        spawn/reuse/reload
-src/reconcile.ts     mail + task sweep, status summary, orchestrator pump
+src/nudges/goal-epoch.ts       swarm-level idle epoch + goal-floor emission
+src/nudges/graph-advance.ts    graph-advance / stall / artifact / heartbeat GC nudges
+src/nudges/status-predicates.ts pure predicates over TaskState["status"]
+src/surface.ts                 orchestrator-facing message surface machinery
+src/tasks-index.ts             PM-facing rollup + task indexer
+src/reconcile-core.ts          reconcile runner (entry points)
+src/reconcile.ts               **barrel re-export** — backward-compat surface for hooks/command/tools/tests
 src/hooks.ts         event hooks + orchestrator mailbox pump
 src/command.ts       /swarm slash command
 src/tools/*.ts       the tool registrations, grouped by domain
+src/pool.ts          model slot picker + quota bench
+src/pool-scaffold.ts pool CLI scaffolding
+src/goals.ts         goal CRUD helpers
+src/gc.ts            mailbox GC for terminal message records
                      (agents / messages / tasks / gc)
 ```
 
@@ -55,7 +65,8 @@ docs/swarm.md                       # compact legacy landing/reference
 
 Swarm's assumptions about Pi runtime semantics are documented in
 [`../docs/swarm/pi-runtime-contract.md`](../docs/swarm/pi-runtime-contract.md). Contributors
-changing `src/hooks.ts`, `src/reconcile.ts`, `src/tools/messages.ts`, or `src/mailbox.ts`
+changing `src/hooks.ts`, `src/reconcile.ts` (or any barrel-exported module under `src/nudges/`,
+`src/surface.ts`, `src/tasks-index.ts`, `src/reconcile-core.ts`), `src/tools/messages.ts`, or `src/mailbox.ts`
 MUST consult that contract first. See also the citation artifact
 [`../docs/swarm/pi-runtime-evidence.md`](../docs/swarm/pi-runtime-evidence.md) and the
 standing rule in [`../../AGENTS.md`](../../AGENTS.md#pi-runtime-contract-mandatory-consultation).
