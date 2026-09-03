@@ -234,6 +234,7 @@ export type SwarmAgent = {
 	lastAgentStartAt?: string;
 	lastAgentSettledAt?: string;
 	lastSettleNotifyAt?: string; // persisted cooldown for agent_settled->orchestrator idle/open-work notify
+	lastAckDebtNotifyAt?: string; // R25: persisted cooldown for agent_settled/stopAgent→orchestrator ack-debt notify
 	// === Issue 86: priority-high interrupt-on-delivery (recipient-side rate-limit ledger) ===
 	// Last timestamp a `ctx.abort()` was invoked by the recipient's input hook in response to a
 	// priority:"high" swarm message. Persisted on the recipient agent record; orchestrator pseudo-

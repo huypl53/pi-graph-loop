@@ -236,7 +236,7 @@ console.log("\n[5] Cancel via stop_agent: spawn then stop -> cleared, NO orphan_
 	// Stop the agent. stopAgent core runs clearOrphanWatch BEFORE killAgentPane (B5 binding).
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
-		await stopAgent(pi, p, st, "stop-1");
+		await stopAgent(pi, cwd, p, st, "stop-1");
 		await writeState(p, st);
 	});
 	ok("stop-1 removed from recentSpawns after stop", recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);

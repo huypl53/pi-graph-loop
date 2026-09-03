@@ -57,6 +57,21 @@ export function responseMissingRecords(st: SwarmState, agentId: string) {
 	);
 }
 
+// R25: live, non-superseded requiresAck debt owed by a recipient agent. Mirrors the existing
+// counting predicate in tools/agents.ts:43 (unackedMessages) but lives here in the allowed file.
+// `ackedAt` unset + `superseded` unset + `requiresAck: true` + status in {mailbox_delivered,
+// injected, intercepted, queued} are all debt. Returns ids + the live records for the caller to
+// build the notify body / idempotency key.
+export function unackedRequiresAckRecords(st: SwarmState, agentId: string) {
+	return Object.values(st.messages || {}).filter((m) =>
+		m.to === agentId &&
+		m.requiresAck === true &&
+		!m.ackedAt &&
+		!m.superseded &&
+		(m.status === "mailbox_delivered" || m.status === "injected" || m.status === "intercepted" || m.status === "queued")
+	);
+}
+
 export function verifiedResponseCount(st: SwarmState, agentId: string) {
 	return Object.values(st.messages || {}).filter((m) => m.to === agentId && m.requiresResponse && m.response?.status === "verified").length;
 }

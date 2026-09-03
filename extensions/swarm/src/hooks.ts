@@ -2,13 +2,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname, relative, sep } from "node:path";
 import { existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type { MessageResponseStatus, Paths } from "./types.ts";
 import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_KEY_SETTLE_STALE, ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, formatNotifyKey } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
 import type { ModelSlot } from "./types.ts";
 import { classifyProviderError, scrubErrorIdentity, type EngineRetryIncident } from "./types.ts";
 import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "./pool.ts";
-import { deliverMessageLocked, findIdempotentMessage, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
+import { deliverMessageLocked, findIdempotentMessage, readMailbox, responseMissingRecords, unackedRequiresAckRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "./state.ts";
 import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader } from "./identity.ts";
@@ -870,6 +871,40 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 					} catch (err: any) {
 						await trace(p, "message.response_missing.notify_failed", { agentId, error: String(err?.message || err) });
 					}
+				}
+			}
+			// R25 — PM auto-notify for ack-debt (separate from response-missing + open-assignment
+			// cases). A worker that settles owing live, non-superseded requiresAck messages is
+			// invisible to the orchestrator today; this closes that gap. Storm guards mirror the
+			// response-missing branch: per-agent cooldown (`lastAckDebtNotifyAt`, distinct from
+			// `lastSettleNotifyAt` so the open-assignment cooldown is not coupled) +
+			// idempotencyKey=r25:ackdebt:<agent>:<sha8(sorted ids)> reused across settles.
+			// requiresAck=false (informational). deliverMessageLocked derives from=currentAgentId()
+			// which is the worker in this hook context — the correct author for the notify.
+			const ackDebt = unackedRequiresAckRecords(st, agentId);
+			if (ackDebt.length) {
+				const sinceAckDebt = agent.lastAckDebtNotifyAt ? Date.now() - new Date(agent.lastAckDebtNotifyAt).getTime() : Number.POSITIVE_INFINITY;
+				if (sinceAckDebt > SETTLE_NOTIFY_COOLDOWN_MS) {
+					const sortedIds = [...ackDebt.map((r) => r.id)].sort();
+					const hash = createHash("sha1").update(sortedIds.join("|")).digest("hex").slice(0, 8);
+					const idempotencyKey = `r25:ackdebt:${agentId}:${hash}`;
+					agent.lastAckDebtNotifyAt = ts;
+					const subjectList = ackDebt.map((r) => r.subject || "(no subject)").join("; ");
+					const idList = sortedIds.join(", ");
+					try {
+						await deliverMessageLocked(pi, ctx.cwd, p, st, {
+							to: "orchestrator",
+							subject: `agent ${agentId} settled owing ${ackDebt.length} unacked ack(s)`,
+							body: `Agent ${agentId} settled (agent_settled) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
+							requiresAck: false,
+							idempotencyKey,
+						});
+						await trace(p, "message.ack_debt.settled.notify", { agentId, messageIds: sortedIds });
+					} catch (err: any) {
+						await trace(p, "message.ack_debt.notify_failed", { agentId, error: String(err?.message || err) });
+					}
+				} else {
+					await trace(p, "message.ack_debt.settled.notify_cooldown", { agentId, cooldownMs: SETTLE_NOTIFY_COOLDOWN_MS });
 				}
 			}
 			// PM auto-notify (engine behavior): a settle while still holding open assignments is a

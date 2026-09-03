@@ -356,7 +356,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				const result = await withLock(p, async () => {
 					const st = await readState(p, ctx.cwd);
 					heartbeatOrchestratorLeader(st, Date.now(), process.pid, "stop_agent");
-					const r = await stopAgent(pi, p, st, safeId(params.agentId), { force: params.force, killPane: params.killPane });
+					const r = await stopAgent(pi, ctx.cwd, p, st, safeId(params.agentId), { force: params.force, killPane: params.killPane });
 					await writeState(p, st);
 					return r;
 				});

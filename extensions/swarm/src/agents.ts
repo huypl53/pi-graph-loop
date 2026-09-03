@@ -4,14 +4,14 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Paths, PreflightError, RecentSpawn, ReusableAgentMatch, SwarmAgent, SwarmState } from "./types.ts";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, ORPHAN_SPAWN_WARNING_TIMEOUT_MS, SPAWN_SETTLE_MS } from "./constants.ts";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, ORPHAN_SPAWN_WARNING_TIMEOUT_MS, SETTLE_NOTIFY_COOLDOWN_MS, SPAWN_SETTLE_MS } from "./constants.ts";
 import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux } from "./tmux.ts";
 import { childPiArgs, currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { pickSlot, poolStatus, preflightSpawn, formatPreflightError } from "./pool.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, shellQuote, sleep } from "./utils.ts";
 import { identityPath, mailboxPath, paths, readState, trace, withLock, writeState } from "./state.ts";
 import { identityPrompt, writeEffectiveIdentity } from "./identity.ts";
-import { responseMissingRecords } from "./mailbox.ts";
+import { responseMissingRecords, unackedRequiresAckRecords, deliverMessageLocked } from "./mailbox.ts";
 
 // Orphan-spawn watchdog (Issue 14): in-process timer handles keyed by agentId. Not serialized into
 // swarm-state.json because NodeJS.Timeout references cannot survive JSON.stringify (and a process
@@ -435,7 +435,7 @@ export async function killAgentPane(pi: ExtensionAPI, p: Paths, agent: SwarmAgen
 
 // Stop a long-lived or ephemeral agent. Refuses active tasks unless force. Kills the pane and marks the
 // agent stopped (mailbox/identity/history persist via the stable id). Lock-free core (caller holds lock).
-export async function stopAgent(pi: ExtensionAPI, p: Paths, state: SwarmState, agentId: string, opts: { force?: boolean; killPane?: boolean } = {}) {
+export async function stopAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: SwarmState, agentId: string, opts: { force?: boolean; killPane?: boolean } = {}) {
 	const agent = state.agents[agentId];
 	if (!agent) throw new Error(`Unknown swarm agent: ${agentId}`);
 	ensureAgentDefaults(agent);
@@ -447,6 +447,35 @@ export async function stopAgent(pi: ExtensionAPI, p: Paths, state: SwarmState, a
 	// terminated. clearOrphanWatch is a no-op when the agent has no entry (e.g. reuse path).
 	const ts = now();
 	await clearOrphanWatch(p, state, agentId, "swarm_stop_agent").catch(() => {});
+	// R25 — PM ack-debt notify BEFORE pane kill (best-effort, must never block a stop). Mirror the
+	// hooks.ts settle branch: per-agent cooldown (`lastAckDebtNotifyAt`) + idempotency key from
+	// sorted unacked ids so re-stops within the cooldown are silently deduped. The agent record
+	// persists across the stop (mailbox/identity/history live by stable id), so the cooldown stamp
+	// survives and prevents storm.
+	const ackDebt = unackedRequiresAckRecords(state, agentId);
+	if (ackDebt.length) {
+		const sinceAckDebt = agent.lastAckDebtNotifyAt ? Date.now() - new Date(agent.lastAckDebtNotifyAt).getTime() : Number.POSITIVE_INFINITY;
+		if (sinceAckDebt > SETTLE_NOTIFY_COOLDOWN_MS) { // mirror the hooks.ts settle branch
+			const sortedIds = [...ackDebt.map((r) => r.id)].sort();
+			const hash = createHash("sha1").update(sortedIds.join("|")).digest("hex").slice(0, 8);
+			const idempotencyKey = `r25:ackdebt:${agentId}:${hash}`;
+			agent.lastAckDebtNotifyAt = ts;
+			const subjectList = ackDebt.map((r) => r.subject || "(no subject)").join("; ");
+			const idList = sortedIds.join(", ");
+			try {
+				await deliverMessageLocked(pi, cwd, p, state, {
+					to: "orchestrator",
+					subject: `agent ${agentId} stopped owing ${ackDebt.length} unacked ack(s)`,
+					body: `Agent ${agentId} stopped (swarm_stop_agent) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
+					requiresAck: false,
+					idempotencyKey,
+				});
+				await trace(p, "message.ack_debt.stop.notify", { agentId, messageIds: sortedIds });
+			} catch (err: any) {
+				await trace(p, "message.ack_debt.stop.notify_failed", { agentId, error: String(err?.message || err) });
+			}
+		}
+	}
 	let kill = { killed: false, method: "skipped" as string };
 	if (opts.killPane !== false) kill = await killAgentPane(pi, p, agent);
 	agent.status = "stopped";

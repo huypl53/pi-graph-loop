@@ -915,6 +915,53 @@ semantic evidence of completion or failure.
   4. the attempt is the current active attempt (reassign/rework/cancel fences obsolete reminders);
   5. the node is `assigned`/`in_progress` on a non-cancelled task;
 
+
+### Ack-debt notify (R25): PM surfaces when a worker settles/stops owing unacked requiresAck
+
+R25 closes a visibility gap: a worker that settles (engine `agent_settled` event) or is stopped
+via `swarm_stop_agent` while still holding **live, non-superseded `requiresAck` messages** now
+emits an informational mailbox notify to the orchestrator. Previously this debt was invisible to
+the PM except by polling.
+
+**Notify shape** (read-only, `requiresAck:false` so the orchestrator pump surfaces it without
+creating a new ack-debt loop):
+
+- Subject: `agent <id> settled owing N unacked ack(s)` (or `stopped owing …` for `swarm_stop_agent`).
+- Body lists the message ids, subjects, and the close-action `swarm_ack_message`.
+- `from` derives from `currentAgentId()` — the worker in settle path; the orchestrator in the stop
+  path (since stop is invoked by the orchestrator). Both are correct per the deliver path.
+
+**Storm guards** (mirror the response-missing + open-assignment settle-notify patterns):
+
+- Per-agent persisted cooldown field `lastAckDebtNotifyAt` (separate from `lastSettleNotifyAt`
+  so the open-assignment cooldown is not coupled). Reuses `SETTLE_NOTIFY_COOLDOWN_MS` (2 min).
+- Idempotency key derived from the SET of unacked ids:
+  `r25:ackdebt:<agent>:<sha1(sorted-ids)[:8]>` — reused across settles, so the durable mailbox
+  dedupes identical notifications across process restarts.
+- Failure paths (`pane kill`, orchestrator deliver error) emit a `message.ack_debt.notify_failed`
+  trace with `error`; the stop path's notify is wrapped in a `try/catch` and **never** blocks the
+  underlying stop.
+
+**By-design exclusions** (these do NOT produce an ack-debt notify):
+
+- Spawn-kickoff messages (`mailboxKickoffPrompt`, raw `sendToPane`) — by construction these are
+  not mailbox records and carry no ack debt.
+- `requiresAck:false` messages — the predicate `unackedRequiresAckRecords` requires
+  `requiresAck === true`; informational messages stay out of the debt count.
+- `requiresResponse` debt — already covered by the existing L868 notify (`response_missing`),
+  untouched by R25.
+- Acks that are already in flight (`status: queued` for the same idempotency key within a
+  cooldown) — suppressed by `findIdempotentMessage` on the same `from+to+key`.
+
+**R10-1 boundary counter** (corrected per R25 fix round): real `pi.sendMessage` call count
+at the `pumpOrchestratorMailbox` boundary — ≥1 ack-debt send (subject matching
+`/owing.*unacked ack/`) on first settle AND on the stop path; 0 NEW sends on re-settle within
+cooldown (the consumer-receipts ledger dedupes by idempotencyKey). Asserted in
+`extensions/swarm/tests/r25-unacked-notify.test.mjs` R10-1 section (3 pump-based
+assertions + 1 RED-control proof via `git stash` round-trip). The original line at L265 was
+a vacuous `ok(...true)` constant (test-report blocker); it has been replaced with a real
+pump-driven counter that fails RED when production code is absent (verified: 4/10 failures
+with hooks.ts/agents.ts/mailbox.ts/types.ts reverted via `git stash`).
 ### Interpreting `notification.stale.suppressed` traces (roadmap issue 9)
 
 Every emit-time lifecycle-notification site runs a durable-state predicate before delivery; if the

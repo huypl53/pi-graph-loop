@@ -654,7 +654,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("stop is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
 					const flags = parseFlags(rest);
 					try {
-						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await stopAgent(pi, p, st, safeId(id), { force: flags.force, killPane: flags.kill }); await writeState(p, st); return r; });
+						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await stopAgent(pi, ctx.cwd, p, st, safeId(id), { force: flags.force, killPane: flags.kill }); await writeState(p, st); return r; });
 						ctx.ui.notify(`Stopped ${result.agent.id}: killed=${result.killed} method=${result.method}`, "info");
 					} catch (err: any) { ctx.ui.notify(`Stop failed: ${err?.message || err}`, "warning"); }
 					return;

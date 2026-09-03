@@ -1226,7 +1226,7 @@ export async function sweepTaskWorkersLocked(
 		// Stop via the lock-free core (no nested withLock). force:true so the empty-set check stays
 		// authoritative even if activeTaskIds had a stale pointer.
 		try {
-			const res = await stopAgent(pi, paths(cwd), st, agent.id, { force: true, killPane: true });
+			const res = await stopAgent(pi, cwd, paths(cwd), st, agent.id, { force: true, killPane: true });
 			stopped.push(agent.id);
 			await trace(paths(cwd), TRACE_AGENT_TASK_SWEEP_STOPPED, {
 				agentId: agent.id,
