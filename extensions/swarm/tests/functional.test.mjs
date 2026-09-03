@@ -7,10 +7,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
-// Pin a deterministic non-orchestrator identity BEFORE importing the extension so currentAgentId()
+// Pin a deterministic non-root identity BEFORE importing the extension so currentAgentId()
 // never depends on the ambient swarm environment (the test may run inside any agent's shell).
 process.env.PI_SWARM_AGENT_ID = "implementer-01";
-process.env.PI_SWARM_IS_ORCHESTRATOR = "";
+process.env.PI_SWARM_IS_ROOT = "";
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 const scratch = join(tmpdir(), `swarm-func-${process.pid}-${Date.now()}`);
@@ -42,7 +42,7 @@ const m = ct.content[0].text.match(/task-[A-Za-z0-9-]+/); const taskId = m[0];
 ok("taskId parsed", !!taskId);
 
 const taskPath = join(cwd, `.pi/swarm/tasks/${taskId}/task.json`);
-// Reliability Phase 1: only orchestrator may set force=true. The functional test runs as a regular
+// Reliability Phase 1: only root may set force=true. The functional test runs as a regular
 // agent, so we drive the graph by stamping the node's assignee to the current agent between updates
 // (mirroring how swarm_assign_task would, without depending on the agent pool).
 // Drive the graph by stamping the node's assignee to the pinned test agent between updates
@@ -62,7 +62,7 @@ const stampOutcome = (nodeId, status, outcome) => {
 	if (outcome !== undefined) j.nodes[nodeId].outcome = outcome;
 	writeFileSync(taskPath, JSON.stringify(j, null, 2));
 };
-// Pretend each prior node has been assigned to "orchestrator" so a normal-call update is accepted via
+// Pretend each prior node has been assigned to "root" so a normal-call update is accepted via
 // assignee authority. The agent pool lookup is irrelevant for this regression scenario.
 stamp("plan", "assigned");
 await call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", cwd });
@@ -90,7 +90,7 @@ ok("print_graph text", !!pg?.content?.[0]?.text);
 const nn = await call("swarm_next_nodes", { taskId, cwd });
 ok("next_nodes text", !!nn?.content?.[0]?.text);
 
-await call("swarm_task_message", { taskId, fromNode: "plan", to: "orchestrator", body: "hi", cwd });
+await call("swarm_task_message", { taskId, fromNode: "plan", to: "root", body: "hi", cwd });
 const rec = await call("swarm_reconcile", { cwd });
 ok("reconcile text", !!rec?.content?.[0]?.text);
 

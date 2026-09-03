@@ -200,21 +200,21 @@ function receiptConfirmed(msg: MessageRecord | undefined): boolean {
 
 export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: string, nowMs: number): NodeAttention {
 	const node = task.nodes[nodeId];
-	if (!node) return { category: "none", evidence: ["node does not exist"], workerReminderEligible: false, orchestratorDecision: false };
+	if (!node) return { category: "none", evidence: ["node does not exist"], workerReminderEligible: false, rootDecision: false };
 	const evidence: string[] = [];
 
 	// 1. Cancellation/terminal guards — no reminder for dead work.
 	if (task.status === "cancelled") {
 		evidence.push(`task_cancelled: task ${task.taskId}`);
-		return { category: "cancelled", evidence, workerReminderEligible: false, orchestratorDecision: false };
+		return { category: "cancelled", evidence, workerReminderEligible: false, rootDecision: false };
 	}
 	if (node.status === "cancelled") {
 		evidence.push(`node_cancelled: node ${nodeId}`);
-		return { category: "cancelled", evidence, workerReminderEligible: false, orchestratorDecision: false };
+		return { category: "cancelled", evidence, workerReminderEligible: false, rootDecision: false };
 	}
 	if (TERMINAL_NODE_STATUSES.has(node.status)) {
 		evidence.push(`terminal: node is ${node.status}`);
-		return { category: "terminal", evidence, workerReminderEligible: false, orchestratorDecision: false };
+		return { category: "terminal", evidence, workerReminderEligible: false, rootDecision: false };
 	}
 
 	// Attempt + canonical assignment message (persisted sources only).
@@ -226,32 +226,32 @@ export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: str
 	// 2. Supersession guard: obsolete assignments are never actionable.
 	if (msg?.superseded) {
 		evidence.push(`superseded: assignment ${msg.id} superseded by ${msg.superseded.supersededBy} at ${msg.superseded.at}`);
-		return { category: "superseded", evidence, workerReminderEligible: false, orchestratorDecision: false };
+		return { category: "superseded", evidence, workerReminderEligible: false, rootDecision: false };
 	}
 	if (node.activeAttemptId && attempt && attempt.status !== "active") {
 		evidence.push(`superseded: attempt ${attempt.attemptId} status is ${attempt.status}`);
-		return { category: "superseded", evidence, workerReminderEligible: false, orchestratorDecision: false };
+		return { category: "superseded", evidence, workerReminderEligible: false, rootDecision: false };
 	}
 
-	// 3. Ready-but-unassigned: orchestrator decision to assign.
+	// 3. Ready-but-unassigned: root decision to assign.
 	if (node.status === "ready" && !node.assignee) {
 		evidence.push(`unassigned_ready: node ${nodeId} (${node.role}) is ready with no assignee`);
-		return { category: "unassigned_ready", evidence, workerReminderEligible: false, orchestratorDecision: true };
+		return { category: "unassigned_ready", evidence, workerReminderEligible: false, rootDecision: true };
 	}
 
 	// 4. Transport problems (advisory display; never completion evidence).
 	const agent: SwarmAgent | undefined = node.assignee ? st.agents[node.assignee] : undefined;
 	if (msg && msg.status === "dead_letter") {
 		evidence.push(`dead_letter: assignment ${msg.id} (${msg.lastError || "unknown"})`);
-		return { category: "dead_letter", evidence, workerReminderEligible: false, orchestratorDecision: true };
+		return { category: "dead_letter", evidence, workerReminderEligible: false, rootDecision: true };
 	}
 	if (msg && msg.status === "failed" && !msg.lastAck) {
 		evidence.push(`delivery_failed: assignment ${msg.id} (${msg.lastError || "unknown"})`);
-		return { category: "delivery_failed", evidence, workerReminderEligible: false, orchestratorDecision: true };
+		return { category: "delivery_failed", evidence, workerReminderEligible: false, rootDecision: true };
 	}
 	if (agent && agent.status === "stopped") {
 		evidence.push(`transport_unavailable: assignee ${agent.id} is stopped (advisory; not completion evidence)`);
-		return { category: "transport_unavailable", evidence, workerReminderEligible: false, orchestratorDecision: true };
+		return { category: "transport_unavailable", evidence, workerReminderEligible: false, rootDecision: true };
 	}
 
 	// 5/6. Protocol problems.
@@ -260,14 +260,14 @@ export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: str
 		const age = nowMs - since;
 		if (age > ACK_MISSING_MS) {
 			evidence.push(`ack_missing: assignment ${msg.id} delivered ${Math.round(age / 60000)}m ago (${msg.status}), no durable ack`);
-			return { category: "ack_missing", evidence, workerReminderEligible: false, orchestratorDecision: false };
+			return { category: "ack_missing", evidence, workerReminderEligible: false, rootDecision: false };
 		}
 	}
 	// 6. Protocol problem: completion claimed but result unverified (worker acked done/failed without
 	// a verified response). An in-flight assignment acked seen/processing is work, not response debt.
 	if (msg && msg.requiresResponse && (msg.lastAck?.status === "done" || msg.lastAck?.status === "failed") && !(msg.response?.status === "verified" || msg.response?.status === "waived")) {
 		evidence.push(`response_missing: assignment ${msg.id} acked ${msg.lastAck!.status} but response is ${msg.response?.status || "missing"}`);
-		return { category: "response_missing", evidence, workerReminderEligible: false, orchestratorDecision: true };
+		return { category: "response_missing", evidence, workerReminderEligible: false, rootDecision: true };
 	}
 
 	// 7/8. Work-progress + reminder eligibility for open assignments.
@@ -283,39 +283,39 @@ export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: str
 			if (reminder) {
 				evidence.push(`reminder_sent: ${reminder.messageId} at ${reminder.sentAt} (anchor ${reminder.noProgressSince}); one-per-attempt budget consumed`);
 				if (age > TASK_NUDGE_MS) evidence.push(`no_progress: anchor is ${Math.round(age / 60000)}m old (> ${Math.round(TASK_NUDGE_MS / 60000)}m TASK_NUDGE_MS)`);
-				return { category: "reminder_sent", evidence, workerReminderEligible: false, orchestratorDecision: age > TASK_STALE_MS };
+				return { category: "reminder_sent", evidence, workerReminderEligible: false, rootDecision: age > TASK_STALE_MS };
 			}
 			if (receipt && age > REMINDER_NO_PROGRESS_MS) {
 				evidence.push(`receipt confirmed: lastAck ${msg!.lastAck!.status} at ${msg!.lastAck!.at}`);
 				evidence.push(`no_progress: anchor ${Math.round(age / 60000)}m ago (> ${Math.round(REMINDER_NO_PROGRESS_MS / 60000)}m REMINDER_NO_PROGRESS_MS)`);
-				return { category: "reminder_eligible", evidence, workerReminderEligible: true, orchestratorDecision: false };
+				return { category: "reminder_eligible", evidence, workerReminderEligible: true, rootDecision: false };
 			}
 			if (receipt && age > TASK_NUDGE_MS) {
 				evidence.push(`no_progress: anchor ${Math.round(age / 60000)}m ago (> ${Math.round(TASK_NUDGE_MS / 60000)}m TASK_NUDGE_MS), receipt confirmed`);
-				return { category: "no_progress", evidence, workerReminderEligible: false, orchestratorDecision: false };
+				return { category: "no_progress", evidence, workerReminderEligible: false, rootDecision: false };
 			}
 			if (!receipt) evidence.push(`receipt not confirmed: assignment ${msg!.id} status=${msg!.status} ackedAt=${msg!.ackedAt || "none"} lastAck=${msg!.lastAck?.status || "none"}`);
 			else evidence.push(`receipt confirmed (${msg!.lastAck!.status}), within no-progress window`);
-			return { category: "none", evidence, workerReminderEligible: false, orchestratorDecision: false };
+			return { category: "none", evidence, workerReminderEligible: false, rootDecision: false };
 		}
 		// Legacy/open assignment without attempt metadata: readable, advisory staleness only.
 		const nodeAge = nowMs - Math.max(isoMs(node.lastActivityAt), isoMs(node.assignmentMessageId ? msg?.lastAck?.at : undefined), isoMs(attempt?.assignedAt));
 		if (nodeAge > TASK_NUDGE_MS) evidence.push(`no_progress: legacy/unfenced assignment, ~${Math.round(nodeAge / 60000)}m since last durable activity (no attempt metadata; reminder requires a fenced attempt)`);
-		return { category: nodeAge > TASK_NUDGE_MS ? "no_progress" : "none", evidence, workerReminderEligible: false, orchestratorDecision: false };
+		return { category: nodeAge > TASK_NUDGE_MS ? "no_progress" : "none", evidence, workerReminderEligible: false, rootDecision: false };
 	}
 
 	// Blocked/other open states.
 	if (node.status === "blocked") {
-		evidence.push(`blocked: node is blocked; awaiting dependency or orchestrator decision`);
-		return { category: "none", evidence, workerReminderEligible: false, orchestratorDecision: false };
+		evidence.push(`blocked: node is blocked; awaiting dependency or root decision`);
+		return { category: "none", evidence, workerReminderEligible: false, rootDecision: false };
 	}
 	evidence.push(`pending: node is ${node.status}, waiting on dependencies`);
-	return { category: "none", evidence, workerReminderEligible: false, orchestratorDecision: false };
+	return { category: "none", evidence, workerReminderEligible: false, rootDecision: false };
 }
 
 // ---- Lifecycle notification fencing (reliability roadmap issue 9) ----
 // Two-mode staleness predicates for emit-time fencing of lifecycle notifications:
-//   * checkStallNotificationStale: stall/orchestrator-safety-net notifies (sites 1-5, 8, 9)
+//   * checkStallNotificationStale: stall/root-safety-net notifies (sites 1-5, 8, 9)
 //   * checkClosureNotificationStale: closure/cancellation notifies (sites 6, 7)
 // Both are pure, read-only derivations of stale events from durable state already loaded by the
 // emitter (task.json node/attempt + swarm-state messages/agents). No tmux/process inspection, no
@@ -324,7 +324,7 @@ export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: str
 
 export type NotificationStaleness = { stale: boolean; reason: string | null; evidence: string[] };
 
-// checkStallNotificationStale — used by sites that emit STALL or ORCHESTRATOR-SAFETY-NET notifies
+// checkStallNotificationStale — used by sites that emit STALL or ROOT-SAFETY-NET notifies
 // (response_missing on settle, open-assignment on settle, session_shutdown with open nodes,
 // graph-advance nudge, initial-ready nudge, assignment itself, /swarm remind). Stale iff:
 //   1) task closed (done/failed/cancelled)
@@ -393,9 +393,9 @@ export function checkStallNotificationStale(
 		}
 	}
 
-	// (5) Assignee drift — the "orchestrator" agentId is a placeholder used by watchers that nudge the
+	// (5) Assignee drift — the "root" agentId is a placeholder used by watchers that nudge the
 	// PM about an UNASSIGNED node (initial-ready, graph-advance); there is no assignee to drift from.
-	if (node.assignee !== agentId && agentId !== "orchestrator") {
+	if (node.assignee !== agentId && agentId !== "root") {
 		evidence.push(`assignee_drift: node assignee=${node.assignee || "(unassigned)"} but notifying agent=${agentId}`);
 		return { stale: true, reason: "assignee_drift", evidence };
 	}
@@ -405,7 +405,7 @@ export function checkStallNotificationStale(
 	// an agent being `stopped` at assign time is the normal restart-the-pane flow; fencing the
 	// brand-new canonical assignment because the OLD canonId is old deadlocks the worker
 	// (live incident 2026-09-01 08:25: task.assign.fenced agent_stopped → worker self-assign
-	// attempt → ORCHESTRATOR_AUTHORITY_REQUIRED → settled idle with the node open).
+	// attempt → ROOT_AUTHORITY_REQUIRED → settled idle with the node open).
 	if (opts?.freshAssignment) {
 		evidence.push("fresh_assignment: skipping agent-stopped staleness (assign path)");
 		return { stale: false, reason: null, evidence };
@@ -465,7 +465,7 @@ export function buildDefaultGraph(allowedFiles: string[]): { start: string; node
 			test: { status: "pending", role: "tester", dependsOn: ["implement"], readArtifacts: ["artifacts/implementation-report.md"], writeArtifacts: ["artifacts/test-report.md"], messageIds: [], attempts: 0, maxAttempts: 3 },
 			fix: { status: "pending", role: "implementer", dependsOn: ["test"], allowedFilesFrom: "implement", readArtifacts: ["artifacts/test-report.md"], writeArtifacts: ["artifacts/fix-report.md"], messageIds: [], attempts: 0, maxAttempts: 3 },
 			review: { status: "pending", role: "reviewer", dependsOn: ["test"], readArtifacts: ["artifacts/implementation-report.md", "artifacts/test-report.md"], writeArtifacts: ["artifacts/review.md"], messageIds: [], attempts: 0, maxAttempts: 2 },
-			commit: { status: "pending", role: "orchestrator", dependsOn: ["review"], writeArtifacts: ["artifacts/final-summary.md"], messageIds: [], attempts: 0, terminal: true },
+			commit: { status: "pending", role: "root", dependsOn: ["review"], writeArtifacts: ["artifacts/final-summary.md"], messageIds: [], attempts: 0, terminal: true },
 		},
 		edges: [
 			{ from: "plan", to: "implement", when: "planned" },
@@ -603,7 +603,7 @@ export function activateReworkNodes(task: TaskState, tp?: TaskPaths) {
 }
 
 // === Issue 29 — force-reopen attempt suppression helper ===
-// On orchestrator force-reopen from a terminal state, the prior attempt must be marked superseded
+// On root force-reopen from a terminal state, the prior attempt must be marked superseded
 // and `node.activeAttemptId` must be cleared so the next claim/assign mints a fresh attempt.
 export function suppressPriorAttemptForForceReopen(node: TaskNode): { priorAttemptId: string | undefined } {
 	const priorActiveAttemptId = node.activeAttemptId;
@@ -875,7 +875,7 @@ export function printGraphText(task: TaskState, ready: string[], current: string
 		lines.push(`Commit evidence: ${commitEvidence.status}${commitEvidence.reason ? ` (${commitEvidence.reason})` : ""}${commitEvidence.baseline ? ` baseline=${commitEvidence.baseline}` : ""}${commitEvidence.head ? ` head=${commitEvidence.head}` : ""}${commitEvidence.nodeId && commitEvidence.nodeId !== "commit" ? ` node=${commitEvidence.nodeId}` : ""}`);
 	}
 	// Row 75 (fix): surface evidence for other commit-like terminal nodes (finalize, ship, ...)
-	// using the read-compat legacy `.commit` alias so orchestrators don't have to query the task JSON.
+	// using the read-compat legacy `.commit` alias so roots don't have to query the task JSON.
 	for (const [nodeId, ev] of Object.entries(task.evidence as Record<string, any> || {})) {
 		if (nodeId === "commit") continue;
 		if (!ev || typeof ev !== "object") continue;
@@ -934,10 +934,10 @@ export function releaseNodeAssignment(st: SwarmState, task: TaskState, nodeId: s
 	}
 }
 
-// True iff the task OR the named node is in the orchestrator-explicit cancelled state. Read-only;
+// True iff the task OR the named node is in the root-explicit cancelled state. Read-only;
 // used by `swarm_update_task` and `swarm_send_message` to reject late mutations at the handler
 // boundary before any state is touched. `nodeId` is optional; when omitted the task-level check runs.
-// A cancelled task remains cancelled forever unless an orchestrator re-opens it (no automatic reopen
+// A cancelled task remains cancelled forever unless an root re-opens it (no automatic reopen
 // path — re-open requires a deliberate swarm_update_task(force=true) + a separately-designed policy
 // not in this PR).
 export function isTaskOrNodeCancelled(task: TaskState, nodeId?: string): boolean {
@@ -950,7 +950,7 @@ export function isTaskOrNodeCancelled(task: TaskState, nodeId?: string): boolean
 // Derive the authoritative task status from node states. Closure is a deterministic consequence of
 // the last node transition: failed if any node failed; done iff every graph-terminal node is
 // done/skipped (and none failed); blocked if every active node is blocked; in_progress once any node
-// has started; ready before that. `cancelled` is orchestrator-explicit and never auto-derived here;
+// has started; ready before that. `cancelled` is root-explicit and never auto-derived here;
 // `cancelled` nodes are skipped from failed/done/blocked aggregations so cancellation does not infer
 // semantic completion of the underlying work.
 // Precedence matters: failed and done win over blocked (a task with a failed node reads "failed").
@@ -973,7 +973,7 @@ export function computeTaskStatus(task: TaskState): TaskStatus {
 	return started ? "in_progress" : "ready";
 }
 
-// Set task.status from node states unless the orchestrator explicitly cancelled it.
+// Set task.status from node states unless the root explicitly cancelled it.
 export function applyTaskStatus(task: TaskState): { changed: boolean; terminal: boolean } {
 	if (task.status === "cancelled") return { changed: false, terminal: true };
 	const prev = task.status;
@@ -1071,7 +1071,7 @@ export function releaseTaskFromAllAgents(st: SwarmState, taskId: string) {
 
 // === Issue 26 — task-close worker sweep (auto-stop task-scoped workers) ===
 // Stops every worker agent whose ONLY active assignment was the closing task, leaving the
-// orchestrator, agents with other active tasks, paused agents, and `PI_SWARM_KEEP_TASK_WORKERS=1`
+// root, agents with other active tasks, paused agents, and `PI_SWARM_KEEP_TASK_WORKERS=1`
 // opt-out untouched. Idempotent: a second invocation under the same withLock computes eligibility
 // from current state, so a stale sweep finds nothing to do and emits ZERO per-agent traces.
 //
@@ -1080,7 +1080,7 @@ export function releaseTaskFromAllAgents(st: SwarmState, taskId: string) {
 //      lock from inside — the mkdir lock is non-reentrant and would deadlock.
 //   2. NEVER stops an agent whose `activeTaskIds` includes a task other than the closing one.
 //      Release evidence (the prior activeTaskIds) is stamped on the per-agent trace.
-//   3. NEVER stops the orchestrator pseudo-agent (id === "orchestrator").
+//   3. NEVER stops the root pseudo-agent (id === "root").
 //   4. NEVER stops a paused agent (`agent.paused === true`).
 //   5. Honored opt-out: `PI_SWARM_KEEP_TASK_WORKERS=1` short-circuits the whole sweep (no traces).
 //   6. `spawnedForTaskId` link: if set to the closing taskId, the agent is swept even when it
@@ -1163,7 +1163,7 @@ export async function sweepTaskWorkersLocked(
 	const stopped: string[] = [];
 	const skipped: { agentId: string; reason: string }[] = [];
 	for (const agent of Object.values(st.agents)) {
-		if (agent.id === "orchestrator") { skipped.push({ agentId: agent.id, reason: "orchestrator" }); continue; }
+		if (agent.id === "root") { skipped.push({ agentId: agent.id, reason: "root" }); continue; }
 		ensureAgentDefaults(agent);
 		if (agent.paused) { skipped.push({ agentId: agent.id, reason: "paused" }); continue; }
 		// Already stopped — skip (idempotent re-invocation).
@@ -1196,7 +1196,7 @@ export async function sweepTaskWorkersLocked(
 			}
 		}
 		// === Issue 82: lease-aware park-or-stop (precedes stop) ===
-		// When the orchestrator stamped an explicit lease on the agent, honor it BEFORE stopping.
+		// When the root stamped an explicit lease on the agent, honor it BEFORE stopping.
 		//   - reuse: skip the sweep entirely (worker stays alive for cross-task reuse).
 		//   - park:  pause instead of stop (pane preserved for inspection / revival).
 		// Both leases auto-expire at `leaseUntil`; an expired lease falls through to default.
@@ -1258,8 +1258,8 @@ export async function sweepTaskWorkersLocked(
 	});
 
 	// === R12 P0 — pool-depletion nudge ===
-	// When a task close transitions the effective live non-orchestrator agent pool from ≥1 to 0,
-	// wake the orchestrator with a high-priority nudge (mailbox + Issue 86 interrupt machinery)
+	// When a task close transitions the effective live non-root agent pool from ≥1 to 0,
+	// wake the root with a high-priority nudge (mailbox + Issue 86 interrupt machinery)
 	// so it can either re-spawn workers or downgrade the goal. The transition is computed at
 	// sweep time: we know exactly which agent ids were stopped/parked in this call (the `stopped`
 	// list); the live count is taken from `st.agents` AFTER the loop, so any just-stopped agent
@@ -1268,49 +1268,49 @@ export async function sweepTaskWorkersLocked(
 	// Transitions that DO NOT nudge:
 	//   - 0 → 0 (pool was already empty before this close — nothing to convey; also covers
 	//          idempotent re-invocations on a closed task where stopped.length === 0 anyway).
-	//   - ≥1 → ≥1 (sweep stopped some, but ≥1 non-orchestrator still running afterwards).
+	//   - ≥1 → ≥1 (sweep stopped some, but ≥1 non-root still running afterwards).
 	//
 	// Idempotency: a re-invoked sweep sees stopped=[] and returns at the guard above without
 	// nudging. The threshold is "≥1 → 0" only, so any single close call emits at most one nudge.
 	try {
-		const liveNonOrchestrator = Object.values(st.agents).filter(
-			(a) => a.id !== "orchestrator" && a.status !== "stopped" && !a.paused,
+		const liveNonRoot = Object.values(st.agents).filter(
+			(a) => a.id !== "root" && a.status !== "stopped" && !a.paused,
 		).length;
-		if (liveNonOrchestrator === 0) {
+		if (liveNonRoot === 0) {
 			const key = `pool_depleted:${taskId}`;
 			// Compute pre-sweep live count by adding back the just-stopped set (stopped[] includes
 			// both freshly-stopped agents and lease_parked agents; both were 'running' pre-sweep).
 			const stoppedSet = new Set(stopped);
 			const preSweepLive = Object.values(st.agents).filter(
-				(a) => a.id !== "orchestrator" && a.status !== "stopped" && !a.paused,
+				(a) => a.id !== "root" && a.status !== "stopped" && !a.paused,
 			).length + (Array.from(stoppedSet).filter((id) => {
 				const ag = st.agents[id];
-				return ag && ag.id !== "orchestrator";
+				return ag && ag.id !== "root";
 			}).length);
 			const stoppedForReport = Array.from(stoppedSet);
 			const p = paths(cwd);
 			await trace(p, TRACE_POOL_DEPLETED_NUDGE, {
 				taskId,
 				preSweepLive,
-				postSweepLive: liveNonOrchestrator,
+				postSweepLive: liveNonRoot,
 				stoppedAgentIds: stoppedForReport,
 				by: "sweepTaskWorkersLocked",
 			});
-			// Only emit the orchestrator nudge when there was actually a ≥1 → 0 transition
+			// Only emit the root nudge when there was actually a ≥1 → 0 transition
 			// (the pre-sweep live count was ≥1, the post-sweep is 0). A close that doesn't
-			// change the live count never reaches this branch because liveNonOrchestrator would
-			// still be ≥1 here. The 0 → 0 case is naturally suppressed by the liveNonOrchestrator
+			// change the live count never reaches this branch because liveNonRoot would
+			// still be ≥1 here. The 0 → 0 case is naturally suppressed by the liveNonRoot
 			// === 0 guard combined with the preSweepLive check below.
 			if (preSweepLive >= 1) {
 				const { deliverMessageLocked } = await import("./mailbox.ts");
 				await deliverMessageLocked(pi, cwd, p, st, {
-					to: "orchestrator",
+					to: "root",
 					priority: "high",
 					subject: "swarm pool depleted",
-					body: `Task \`${taskId}\` closed and the task-close sweep drained the live non-orchestrator agent pool to 0.
+					body: `Task \`${taskId}\` closed and the task-close sweep drained the live non-root agent pool to 0.
 
 Stopped in this call: ${JSON.stringify(stoppedForReport)}.
-Live non-orchestrator agents remaining: ${liveNonOrchestrator}.
+Live non-root agents remaining: ${liveNonRoot}.
 
 R12 P0 contract: the sweep no longer force-kills shared-pool workers, but a task-scoped worker drain can still empty the pool. Decide now in this turn:
   1. Re-spawn the role workers needed for the next task (swarm_spawn_agent for each missing role, or rely on swarm_assign_task autoSpawn).
@@ -1462,7 +1462,7 @@ export async function staleOpenAssignmentScanLocked(p: Paths, st: SwarmState, no
 
 // === R11-1 completion — stale-open assignment NUDGE (surfacing alone was a radar without a bell) ===
 // Called by the pump right after staleOpenAssignmentScanLocked surfaces nodes. Delivers ONE
-// high-priority orchestrator nudge per surfaced (task, node), idempotent within the surfacing
+// high-priority root nudge per surfaced (task, node), idempotent within the surfacing
 // window (the scan's staleOpenSurfacedAt stamp), capped + cooled down like the graph-advance
 // nudge. Returns true when a nudge was emitted.
 export async function staleOpenNudgeLocked(
@@ -1486,16 +1486,16 @@ export async function staleOpenNudgeLocked(
 		const surfacedMs = n?.staleOpenSurfacedAt ? new Date(n.staleOpenSurfacedAt).getTime() : 0;
 		if (!surfacedMs || Date.now() - surfacedMs > thresholdMs) return false;
 	} catch { return false; }
-	const prior = Object.values(st.messages || {}).filter((r: any) => r.to === "orchestrator" && (r.idempotencyKey?.startsWith(keyPrefix) ?? false));
+	const prior = Object.values(st.messages || {}).filter((r: any) => r.to === "root" && (r.idempotencyKey?.startsWith(keyPrefix) ?? false));
 	if (prior.length >= NOTIFY_DEFAULT_MAX_NUDGES) return false; // cap
 	const seq = prior.length + 1;
 	const key = formatNotifyKey(NOTIFY_KEY_STALE_OPEN, { taskId, nodeId, seq: String(seq) });
 	const lastSent = prior.map((r: any) => r.createdAt || "").sort().pop() || "";
 	if (lastSent && Date.now() - new Date(lastSent).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) return false; // cooldown
-	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key) && !prior.some((r: any) => r.ackedAt)) return false; // in-flight
+	if (findIdempotentMessage(st, "root", "root", key) && !prior.some((r: any) => r.ackedAt)) return false; // in-flight
 	try {
 		await deliverMessageLocked(pi, cwd, p, st, {
-			to: "orchestrator",
+			to: "root",
 			priority: "high",
 			subject: `STALE OPEN: node ${nodeId} of ${taskId} assigned but no progress — worker may have settled idle`,
 			body: `Node \`${nodeId}\` of task ${taskId} is assigned but has shown NO progress past the stale threshold (see trace stale_open_surfaced). The assignee may have settled idle with the node open (idle-lock pattern, 5 live incidents on 2026-09-1).
@@ -1632,12 +1632,12 @@ export async function resolveCommitNodeEvidence(pi: { exec: (cmd: string, args: 
 }
 
 // Build the assignment message body. Carries task/node pointers, scope, artifacts, and reply target
-// so the assignee discovers the rest from durable files instead of a long orchestrator prompt.
+// so the assignee discovers the rest from durable files instead of a long root prompt.
 export function readCommitEvidence(task: TaskState) {
 	const evidence = task.evidence as Record<string, any> | undefined;
 	if (!evidence) return undefined;
 	for (const [nodeId, node] of Object.entries(task.nodes || {})) {
-		if (inferRoleKind(nodeId, node.role) === "orchestrator" && isGraphTerminalNode(task, nodeId)) {
+		if (inferRoleKind(nodeId, node.role) === "root" && isGraphTerminalNode(task, nodeId)) {
 			const ev = evidence[nodeId];
 			if (ev && typeof ev === "object") return ev;
 		}
@@ -1646,33 +1646,33 @@ export function readCommitEvidence(task: TaskState) {
 	return undefined;
 }
 
-export async function autoCloseOrchestratorTerminalNodes(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths, task: TaskState) {
+export async function autoCloseRootTerminalNodes(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths, task: TaskState) {
 	const closed: string[] = [];
 	for (;;) {
 		const { ready } = computeReadyNodes(task);
 		const candidate = ready.find((nodeId) => {
 			const node = task.nodes[nodeId];
-			return node && node.status === "pending" && inferRoleKind(nodeId, node.role) === "orchestrator" && isGraphTerminalNode(task, nodeId);
+			return node && node.status === "pending" && inferRoleKind(nodeId, node.role) === "root" && isGraphTerminalNode(task, nodeId);
 		});
 		if (!candidate) break;
 		const node = task.nodes[candidate];
-		// Row 75 (fix): gate ANY terminal orchestrator-kind node (role text matching orchestrator
+		// Row 75 (fix): gate ANY terminal root-kind node (role text matching root
 		// OR id prefixed with commit/finalize/ship/etc.) on real git evidence, not just id === "commit".
 		// Otherwise custom graphs whose commit-step is named "finalize" / "commit-changes" / "ship"
 		// bypass the evidence check and auto-close without verification — the same defect AC4 was
 		// meant to kill, resurfacing through the naming door. Evidence is keyed by node id only;
 		// the legacy `.commit` surface reads through the per-node key for back-compat.
-		const isCommitLike = inferRoleKind(candidate, node.role) === "orchestrator" && isGraphTerminalNode(task, candidate);
+		const isCommitLike = inferRoleKind(candidate, node.role) === "root" && isGraphTerminalNode(task, candidate);
 		if (isCommitLike) {
 			const evidence = await resolveCommitNodeEvidence(pi, tp);
 			const record = { status: evidence.verified ? "verified" : "unverified", reason: evidence.reason, baseline: evidence.baseline, head: evidence.head, at: now(), nodeId: candidate };
 			task.evidence[candidate] = record;
 			if (!evidence.verified) {
-				// Leave the node pending for the orchestrator to close deliberately after running git itself.
+				// Leave the node pending for the root to close deliberately after running git itself.
 				break;
 			}
 		}
-		node.assignee ||= "orchestrator";
+		node.assignee ||= "root";
 		node.status = "done";
 		node.lastActivityAt = now();
 		closed.push(candidate);

@@ -7,7 +7,7 @@ Validate a fresh swarm-graph run from clean state, covering both the happy path 
 - Old swarm tmux sessions killed.
 - Old swarm agent records removed.
 - `.pi/swarm/` and `.pi/swarm-uat/` reset.
-- A new orchestrator-led swarm will be spawned from this clean baseline.
+- A new root-led swarm will be spawned from this clean baseline.
 
 ## Agent set
 - `planner-new`: plans scenario execution and drives graph-shape sanity.
@@ -16,12 +16,12 @@ Validate a fresh swarm-graph run from clean state, covering both the happy path 
 - `reviewer-new`: reviews outcomes and checks graph/runtime semantics.
 
 ## Primary conversation flow
-1. Orchestrator creates the UAT task graph.
+1. Root creates the UAT task graph.
 2. `planner-new` completes `plan` with the intended path + edge coverage map.
 3. `implementer-new` completes `implement`.
 4. `tester-new` completes `test` on the happy path.
 5. `reviewer-new` completes `review`.
-6. Orchestrator completes `commit`.
+6. Root completes `commit`.
 7. Separate scenario nodes exercise failure/recovery branches below.
 
 ## Edge cases to verify
@@ -46,14 +46,14 @@ Validate a fresh swarm-graph run from clean state, covering both the happy path 
 11. `swarm_next_nodes` readiness must depend on task state, not mailbox state.
 
 ### E. Agent death / stale handling
-12. Assigned agent shuts down mid-node -> node gets `staleAt`, task stays open, orchestrator gets a nudge.
+12. Assigned agent shuts down mid-node -> node gets `staleAt`, task stays open, root gets a nudge.
 13. Agent settles idle while still holding an open node -> nudge/reconcile path is visible.
 14. Reassigning a stale node works and preserves graph correctness.
-15. **New required case:** graph is NOT done but all assigned agents are stopped -> task must NOT auto-close; stale nodes must be surfaced; orchestrator must get nudges for the nodes whose agents stopped before updating graph state.
+15. **New required case:** graph is NOT done but all assigned agents are stopped -> task must NOT auto-close; stale nodes must be surfaced; root must get nudges for the nodes whose agents stopped before updating graph state.
 
 ### F. Session/read safety
-16. Guest session without explicit orchestrator opt-in must NOT consume/surface orchestrator traffic.
-17. `swarm_check_mailbox(markDelivered:true)` must NOT suppress orchestrator surfacing for the live PM session.
+16. Guest session without explicit root opt-in must NOT consume/surface root traffic.
+17. `swarm_check_mailbox(markDelivered:true)` must NOT suppress root surfacing for the live PM session.
 18. PM reload/restart must restore fresh-code pump behavior and preserve surfacing.
 
 ### G. Agent routing / role behavior
@@ -65,7 +65,7 @@ Validate a fresh swarm-graph run from clean state, covering both the happy path 
 - No false graph advancement from mailbox-only activity.
 - No false task closure while non-terminal nodes remain.
 - All recovery cases produce explicit stale/nudge/reassign signals.
-- Fresh PM session surfaces orchestrator-directed notifications correctly.
+- Fresh PM session surfaces root-directed notifications correctly.
 - Final success path closes the task with `storedStatus == derivedStatus == done`.
 
 ## Execution order

@@ -258,7 +258,7 @@ function buildNodeDetail(task: TaskState, st: SwarmState, entry: GraphTreeEntry,
 	// Messages: msg with partner + delivered/ack/response
 	const h = latestNonSupersededMessage(task, st, entry.nodeId);
 	if (h.rec) {
-		const partner = h.rec.from === "orchestrator" ? "orchestrator" : h.rec.from;
+		const partner = h.rec.from === "root" ? "root" : h.rec.from;
 		const delivered = h.rec.status === "delivered" || h.rec.status === "injected" || h.rec.status === "intercepted";
 		const acked = h.rec.ackedAt !== undefined;
 		const responded = h.rec.response && h.rec.response.status !== "missing";

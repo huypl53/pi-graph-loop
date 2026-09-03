@@ -38,9 +38,9 @@ const readGlobalEvents = async () => {
 	return raw.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
 };
 
-async function loadExtension({ agentId, isOrchestrator = false } = {}) {
+async function loadExtension({ agentId, isRoot = false } = {}) {
 	if (agentId) process.env.PI_SWARM_AGENT_ID = agentId; else delete process.env.PI_SWARM_AGENT_ID;
-	if (isOrchestrator) process.env.PI_SWARM_IS_ORCHESTRATOR = "1"; else delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+	if (isRoot) process.env.PI_SWARM_IS_ROOT = "1"; else delete process.env.PI_SWARM_IS_ROOT;
 	const tools = {};
 	const handlers = {};
 	const activeTools = new Set();
@@ -66,15 +66,15 @@ async function loadExtension({ agentId, isOrchestrator = false } = {}) {
 	return { tools };
 }
 const call = (tools, name, params) => tools[name].execute("call", params, undefined, undefined, { cwd: scratch });
-const updateAs = async (tools, agentId, isOrchestrator, params) => {
+const updateAs = async (tools, agentId, isRoot, params) => {
 	const prevId = process.env.PI_SWARM_AGENT_ID;
-	const prevOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+	const prevOrch = process.env.PI_SWARM_IS_ROOT;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	if (isOrchestrator) process.env.PI_SWARM_IS_ORCHESTRATOR = "1"; else delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+	if (isRoot) process.env.PI_SWARM_IS_ROOT = "1"; else delete process.env.PI_SWARM_IS_ROOT;
 	try { return await call(tools, "swarm_update_task", { ...params, cwd: scratch }); }
 	finally {
 		if (prevId === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = prevId;
-		if (prevOrch === undefined) delete process.env.PI_SWARM_IS_ORCHESTRATOR; else process.env.PI_SWARM_IS_ORCHESTRATOR = prevOrch;
+		if (prevOrch === undefined) delete process.env.PI_SWARM_IS_ROOT; else process.env.PI_SWARM_IS_ROOT = prevOrch;
 	}
 };
 const assign = async (tools, taskId, nodeId, agentId) => call(tools, "swarm_assign_task", { taskId, nodeId, agentId, cwd: scratch });
@@ -85,7 +85,7 @@ const registerAgent = async (tools, id, roleKind) => call(tools, "swarm_register
 	console.log("\n--- Scenario 1: force reopen clears stale attempt ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "worker-a", "implementer");
 	const taskId = "task-force-reopen-s1";
 	await call(tools, "swarm_create_task", { taskId, title: "force reopen", goal: "force reopen stale attempt", priority: "normal", cwd: scratch, nodes: { plan: { role: "planner" }, "done-node": { role: "implementer", dependsOn: ["plan"] } }, edges: [{ from: "plan", to: "done-node", when: "planned" }] });
@@ -99,7 +99,7 @@ const registerAgent = async (tools, id, roleKind) => call(tools, "swarm_register
 	task = await readTask(taskId);
 	ok("node completed before force reopen", task.nodes["done-node"].status === "done");
 	ok("active attempt exists before force reopen", Boolean(task.nodes["done-node"].activeAttemptId));
-	await updateAs(tools, "orchestrator", true, { taskId, nodeId: "done-node", status: "ready", force: true });
+	await updateAs(tools, "root", true, { taskId, nodeId: "done-node", status: "ready", force: true });
 	task = await readTask(taskId);
 	ok("force reopen clears activeAttemptId", task.nodes["done-node"].activeAttemptId === undefined);
 	ok("force reopen clears assignee", task.nodes["done-node"].assignee === undefined);
@@ -126,12 +126,12 @@ const registerAgent = async (tools, id, roleKind) => call(tools, "swarm_register
 	ok("same assignee can continue with fresh attempt", task.nodes["done-node"].status === "in_progress");
 }
 
-// Scenario 2: non-orchestrator force=false still rejected on terminal->non-terminal
+// Scenario 2: non-root force=false still rejected on terminal->non-terminal
 {
-	console.log("\n--- Scenario 2: non-orchestrator force=false rejected ---");
+	console.log("\n--- Scenario 2: non-root force=false rejected ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "worker-b", "implementer");
 	const taskId = "task-force-reopen-s2";
 	await call(tools, "swarm_create_task", { taskId, title: "force reopen 2", goal: "guard check", priority: "normal", cwd: scratch, nodes: { only: { role: "implementer", terminal: true } }, edges: [] });
@@ -147,7 +147,7 @@ const registerAgent = async (tools, id, roleKind) => call(tools, "swarm_register
 	console.log("\n--- Scenario 3: terminal->terminal regression check ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "worker-c", "implementer");
 	const taskId = "task-force-reopen-s3";
 	await call(tools, "swarm_create_task", { taskId, title: "force reopen 3", goal: "terminal regression", priority: "normal", cwd: scratch, nodes: { only: { role: "implementer", terminal: true } }, edges: [] });
@@ -164,7 +164,7 @@ const registerAgent = async (tools, id, roleKind) => call(tools, "swarm_register
 	console.log("\n--- Scenario 4: Issue 28 rework path remains distinct ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "planner-a", "planner");
 	await registerAgent(tools, "implementer-a", "implementer");
 	await registerAgent(tools, "tester-a", "tester");
@@ -179,7 +179,7 @@ const registerAgent = async (tools, id, roleKind) => call(tools, "swarm_register
 	await assign(tools, taskId, "test", "tester-a");
 	task = await readTask(taskId);
 	await updateAs(tools, "tester-a", false, { taskId, nodeId: "test", status: "done", outcome: "passed", attemptId: task.nodes.test.activeAttemptId });
-	await updateAs(tools, "orchestrator", true, { taskId, nodeId: "fix", status: "done", outcome: "implemented", force: true });
+	await updateAs(tools, "root", true, { taskId, nodeId: "fix", status: "done", outcome: "implemented", force: true });
 	const events = await readGlobalEvents();
 	ok("rework path emits rework reopen trace", events.some((e) => e.event === "task.attempt.reopened_by_rework" && e.taskId === taskId));
 	ok("rework path does not emit force reopen trace", !events.some((e) => e.event === "task.attempt.force_reopen" && e.taskId === taskId));

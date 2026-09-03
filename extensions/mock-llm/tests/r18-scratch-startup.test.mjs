@@ -78,7 +78,7 @@ async function runCell({ id, argv, cwd, env, teeWrap }) {
 		...env,
 	};
 	delete baseEnv.PI_SWARM_AGENT_ID;
-	delete baseEnv.PI_SWARM_IS_ORCHESTRATOR;
+	delete baseEnv.PI_SWARM_IS_ROOT;
 	for (const [k, v] of Object.entries(env ?? {})) baseEnv[k] = v;
 
 	let stdoutFd = null;
@@ -253,8 +253,8 @@ for (let i = 0; i < CELLS.length; i++) {
 	const argv = buildArgv({ useNe: cell.useNe, useP: cell.useP, useTee: cell.teeWrap });
 	const env = {};
 	if (cell.cwdKind === "scratch") {
-		env.PI_SWARM_AGENT_ID = "orchestrator";
-		env.PI_SWARM_IS_ORCHESTRATOR = "1";
+		env.PI_SWARM_AGENT_ID = "root";
+		env.PI_SWARM_IS_ROOT = "1";
 	}
 	process.stdout.write(`[r18] ${label} ... `);
 	const result = await runCell({ id, argv, cwd, env, teeWrap: cell.teeWrap });

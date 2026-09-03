@@ -1,20 +1,20 @@
-// === swarm/hooks.ts — event hooks + orchestrator mailbox pump (verbatim from index.ts) ===
+// === swarm/hooks.ts — event hooks + root mailbox pump (verbatim from index.ts) ===
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname, relative, sep } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import type { MessageResponseStatus, Paths } from "./types.ts";
 import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_KEY_SETTLE_STALE, ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, formatNotifyKey } from "./constants.ts";
-import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
+import { currentAgentId, currentModel, currentProvider, isRootSession } from "./session.ts";
 import type { ModelSlot } from "./types.ts";
 import { classifyProviderError, scrubErrorIdentity, type EngineRetryIncident } from "./types.ts";
 import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "./pool.ts";
 import { deliverMessageLocked, findIdempotentMessage, readMailbox, responseMissingRecords, unackedRequiresAckRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "./state.ts";
-import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader } from "./identity.ts";
+import { ensureRoot, heartbeatRootLeader, readRootLeader } from "./identity.ts";
 import { formatSwarmMessageContent, parseSystemDelivery } from "./delivery.ts";
-import { pumpOrchestratorMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
+import { pumpRootMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
 import { ensureNodeActivityStamp, scanAgentOpenAssignments, checkStallNotificationStale } from "./taskgraph.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { tmux } from "./tmux.ts";
@@ -23,7 +23,7 @@ import { maybeRotateTraces } from "./tools/audit.ts";
 import { DEFAULT_TRACE_ROTATE_BYTES } from "./constants.ts";
 
 // === R16 (2026-09-02): turn-end resolve-action detector (module-scope export) ===
-// A turn_end{stop, role=assistant} is a RESOLVE only if the orchestrator ADVANCED the goal
+// A turn_end{stop, role=assistant} is a RESOLVE only if the root ADVANCED the goal
 // in that turn — i.e., the message contains a swarm tool call (swarm_spawn_agent /
 // swarm_assign_task / swarm_mark_goal_done / swarm_set_goal / swarm_restart_agent /
 // swarm_send_message / swarm_reconcile / swarm_update_task / swarm_create_task /
@@ -69,9 +69,9 @@ export function turnEndIsResolveAction(event: any): { resolve: boolean; reason: 
 	return { resolve: false, reason: "no_resolve_action" };
 }
 
-// Orchestrator mailbox pump state. Module-level so the PM pump can be (re)started from outside the
-// session_start hook — notably by `/swarm register here orchestrator`, which opts a running session in
-// as the orchestrator after startup. `swarmPi` is captured once in registerSwarmHooks (always called
+// Root mailbox pump state. Module-level so the PM pump can be (re)started from outside the
+// session_start hook — notably by `/swarm register here root`, which opts a running session in
+// as the root after startup. `swarmPi` is captured once in registerSwarmHooks (always called
 // first by index.ts) and reused so there is a single pump per extension load.
 //
 // === Issue 11 (rework): self-rescheduling watchdog chain ===
@@ -81,24 +81,24 @@ export function turnEndIsResolveAction(event: any): { resolve: boolean; reason: 
 // is the exact root cause of the 04:09–04:45 UTC outage documented in the rejection review.
 // Replace the `setInterval` with a self-rescheduling `setTimeout` watchdog:
 //   - Each tick re-arms the next timeout from inside the run-completion path (single-flight via
-//     `orchestratorMailboxPumpRunning`), so the chain survives even if a single `setTimeout` is lost.
-//   - `heartbeatOrchestratorLeader` is called from inside every tick so the leader lease stays alive
+//     `rootMailboxPumpRunning`), so the chain survives even if a single `setTimeout` is lost.
+//   - `heartbeatRootLeader` is called from inside every tick so the leader lease stays alive
 //     without requiring a `session_start`.
 //   - Stale-ctx errors stop the chain (the only correct recovery is a fresh session_start on a new ctx).
 //   - IO / leader-denied errors keep the chain running.
 //   - A captured `pumpCtx` is checked for freshness on every tick; a stale `ctx.isIdle()` / `pi.sendMessage`
 //     reference stops the chain (cannot be safely re-armed against the same ctx).
-// `orchestratorMailboxTimer` now holds the `setTimeout` handle (or undefined when stopped).
+// `rootMailboxTimer` now holds the `setTimeout` handle (or undefined when stopped).
 let swarmPi: ExtensionAPI | undefined;
-let orchestratorMailboxTimer: NodeJS.Timeout | undefined;
-let orchestratorMailboxPumpRunning = false;
-let orchestratorPumpCtx: any = undefined;
-let orchestratorPumpCtxFresh: boolean = false;
+let rootMailboxTimer: NodeJS.Timeout | undefined;
+let rootMailboxPumpRunning = false;
+let rootPumpCtx: any = undefined;
+let rootPumpCtxFresh: boolean = false;
 let traceRotationInFlight = false;
 
 // Pump tick interval (kept identical to the previous `setInterval` cadence so dashboards/expectations
 // don't shift). Exposed as a constant so tests can shorten the wait for the watchdog test.
-const ORCHESTRATOR_PUMP_INTERVAL_MS = 5_000;
+const ROOT_PUMP_INTERVAL_MS = 5_000;
 
 // Swap-chain throttle for the turn_end auto-swap: agentId -> { count of consecutive swaps, last at }.
 // Caps the fail->swap->retry->fail cascade so a fully-dead pool cannot burn a turn per slot.
@@ -131,7 +131,7 @@ export function getSwapChainCount(agentId: string, nowMs = Date.now()): number {
 
 // Exposed for tests only — clears the swap-chain entry for a given agent so each fixture can
 // start with a clean chain count. NOT used in production (the in-process chain is intentionally
-// persistent across orchestrator turns within a single session).
+// persistent across root turns within a single session).
 export function _resetSwapChainForTests(agentId: string) {
 	swapChain.delete(agentId);
 }
@@ -171,79 +171,79 @@ export function getEngineRetryIncident(agentId: string) {
 	};
 }
 
-export function stopOrchestratorPump() {
-	if (orchestratorMailboxTimer) clearTimeout(orchestratorMailboxTimer);
-	orchestratorMailboxTimer = undefined;
+export function stopRootPump() {
+	if (rootMailboxTimer) clearTimeout(rootMailboxTimer);
+	rootMailboxTimer = undefined;
 	// Drop the captured ctx so a stale-ctx cannot silently re-arm against a dead session. The watchdog
-	// re-install path can only resume by `startOrchestratorPump` with a fresh ctx.
-	orchestratorPumpCtx = undefined;
-	orchestratorPumpCtxFresh = false;
+	// re-install path can only resume by `startRootPump` with a fresh ctx.
+	rootPumpCtx = undefined;
+	rootPumpCtxFresh = false;
 }
 
 // Re-arm the watchdog against a fresh ctx. The previous ctx is dropped (so a stale-ctx from a prior
 // session cannot keep the chain alive). Idempotent: if the chain is already armed, it is replaced with
 // a fresh tick scheduled from now; the old `setTimeout` is cleared.
-function armOrchestratorPumpWatchdog(ctx: any) {
-	if (orchestratorMailboxTimer) clearTimeout(orchestratorMailboxTimer);
-	orchestratorPumpCtx = ctx;
-	orchestratorPumpCtxFresh = true;
+function armRootPumpWatchdog(ctx: any) {
+	if (rootMailboxTimer) clearTimeout(rootMailboxTimer);
+	rootPumpCtx = ctx;
+	rootPumpCtxFresh = true;
 	const tick = async () => {
 		// Clear the handle that fired this tick — we are about to schedule the next one.
-		orchestratorMailboxTimer = undefined;
-		if (!orchestratorPumpCtxFresh) return; // stop() or stale-ctx already disabled us
-		if (currentAgentId() !== "orchestrator") { orchestratorPumpCtxFresh = false; return; }
-		const myCtx = orchestratorPumpCtx;
-		if (!myCtx) { orchestratorPumpCtxFresh = false; return; }
-		if (orchestratorMailboxPumpRunning) {
+		rootMailboxTimer = undefined;
+		if (!rootPumpCtxFresh) return; // stop() or stale-ctx already disabled us
+		if (currentAgentId() !== "root") { rootPumpCtxFresh = false; return; }
+		const myCtx = rootPumpCtx;
+		if (!myCtx) { rootPumpCtxFresh = false; return; }
+		if (rootMailboxPumpRunning) {
 			// Re-arm even if a tick is already running (do not stall the chain).
-			orchestratorMailboxTimer = setTimeout(tick, ORCHESTRATOR_PUMP_INTERVAL_MS);
+			rootMailboxTimer = setTimeout(tick, ROOT_PUMP_INTERVAL_MS);
 			return;
 		}
-		orchestratorMailboxPumpRunning = true;
+		rootMailboxPumpRunning = true;
 		try {
-			await pumpOrchestratorMailbox(swarmPi!, myCtx, paths((myCtx as any).cwd), "watchdog");
+			await pumpRootMailbox(swarmPi!, myCtx, paths((myCtx as any).cwd), "watchdog");
 		} catch (err: any) {
 			// === Issue 11 (rework): error classification with watchdog self-heal ===
 			// The watchdog must NEVER permanently disable itself for a transient error. Distinguish:
 			//   - stale-ctx: the captured ctx was invalidated by session replacement/reload. We cannot
 			//     safely re-arm against the SAME ctx (would busy-loop with a thrown ctx.isIdle()). Stop
-			//     the chain; the next session_start will call startOrchestratorPump with a fresh ctx.
+			//     the chain; the next session_start will call startRootPump with a fresh ctx.
 			//   - IO transient (EACCES/ENOSPC/EROFS/EAGAIN/EBUSY/ENFILE/EMFILE) or leader-denied: keep
 			//     the chain running — the next tick retries with file IO that will recover.
 			//   - unknown error class: stop (safe default), trace the error so it surfaces.
 			const msg = String((err && err.message) || err);
 			const code = String((err && err.code) || "");
 			const isStaleCtx = /stale after session/i.test(msg);
-			const isLeaderDenied = msg.startsWith("ORCHESTRATOR_LEADER_DENIED");
+			const isLeaderDenied = msg.startsWith("ROOT_LEADER_DENIED");
 			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) ||
 							  /EACCES|ENOSPC|EROFS/.test(msg);
 			if (isStaleCtx) {
-				stopOrchestratorPump();
-				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.orchestrator_pump_stale_stopped", { reason: "watchdog", error: msg }).catch(() => {});
+				stopRootPump();
+				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.root_pump_stale_stopped", { reason: "watchdog", error: msg }).catch(() => {});
 			} else if (isLeaderDenied || isIoTransient) {
-				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.orchestrator_pump_transient", { reason: "watchdog", kind: isLeaderDenied ? "leader_denied" : "io", code, error: msg }).catch(() => {});
+				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.root_pump_transient", { reason: "watchdog", kind: isLeaderDenied ? "leader_denied" : "io", code, error: msg }).catch(() => {});
 				// keep the chain alive — schedule the next tick
 			} else {
-				stopOrchestratorPump();
-				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.orchestrator_pump_error", { reason: "watchdog", error: msg, stale: false }).catch(() => {});
+				stopRootPump();
+				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.root_pump_error", { reason: "watchdog", error: msg, stale: false }).catch(() => {});
 			}
 		} finally {
-			orchestratorMailboxPumpRunning = false;
-			// Re-arm the next watchdog tick ONLY if we are still fresh + still the orchestrator + the
+			rootMailboxPumpRunning = false;
+			// Re-arm the next watchdog tick ONLY if we are still fresh + still the root + the
 			// previous tick didn't stop us. This is the single-flight self-heal: a single tick failure
 			// (transient IO) keeps the chain; a stop() drops it.
-			if (orchestratorPumpCtxFresh && orchestratorPumpCtx && currentAgentId() === "orchestrator") {
-				orchestratorMailboxTimer = setTimeout(tick, ORCHESTRATOR_PUMP_INTERVAL_MS);
+			if (rootPumpCtxFresh && rootPumpCtx && currentAgentId() === "root") {
+				rootMailboxTimer = setTimeout(tick, ROOT_PUMP_INTERVAL_MS);
 			}
 		}
 	};
-	orchestratorMailboxTimer = setTimeout(tick, ORCHESTRATOR_PUMP_INTERVAL_MS);
+	rootMailboxTimer = setTimeout(tick, ROOT_PUMP_INTERVAL_MS);
 }
 
 // Pull-based worker delivery: surface unacked messages addressed to this agent into its own TUI
 // conversation via pi.sendMessage (no tmux). Idempotent per message via the shared agentSurfaced ledger
-// (per-agent, capped), so restarts re-surface only what is still unacked. Never targets the orchestrator
-// (that is pumpOrchestratorMailbox's job) and never surfaces dead-lettered or superseded messages.
+// (per-agent, capped), so restarts re-surface only what is still unacked. Never targets the root
+// (that is pumpRootMailbox's job) and never surfaces dead-lettered or superseded messages.
 export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, agentId: string, reason: string) {
 	if (currentAgentId() !== agentId) return { surfaced: 0, ids: [] as string[] };
 	const idleAtStart = ctx.mode === "tui" ? ctx.isIdle() : false;
@@ -293,57 +293,57 @@ export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, 
 	return { surfaced: delivered, ids: result.ids };
 }
 
-// (Re)start the orchestrator mailbox pump for this session: one immediate surface + a self-rescheduling
+// (Re)start the root mailbox pump for this session: one immediate surface + a self-rescheduling
 // setTimeout watchdog (NOT setInterval — see module-level comment). No-op unless this session resolves
-// to the orchestrator. Safe to call from session_start or from the `/swarm register here orchestrator`
+// to the root. Safe to call from session_start or from the `/swarm register here root`
 // opt-in path. The captured ctx is session-bound; on stale-ctx errors the watchdog stops and the next
-// orchestrator session_start restarts it with a fresh ctx.
+// root session_start restarts it with a fresh ctx.
 //
-// Multi-orchestrator policy (issue 8, strict-reject): a preflight `withLock` runs
-// heartbeatOrchestratorLeader so a non-leader pane cannot install the pump. On deny we trace
-// `orchestrator.pump.denied` and return without installing the interval. A second-line defense
-// inside pumpOrchestratorMailbox re-checks the leader pid on each tick.
-export async function startOrchestratorPump(ctx: any, reason = "session_start") {
+// Multi-root policy (issue 8, strict-reject): a preflight `withLock` runs
+// heartbeatRootLeader so a non-leader pane cannot install the pump. On deny we trace
+// `root.pump.denied` and return without installing the interval. A second-line defense
+// inside pumpRootMailbox re-checks the leader pid on each tick.
+export async function startRootPump(ctx: any, reason = "session_start") {
 	const pi = swarmPi;
 	if (!pi) return;
-	stopOrchestratorPump(); // clear any prior watchdog + ctx
+	stopRootPump(); // clear any prior watchdog + ctx
 	// Preflight gate (Category A, plan §4.4.1): claim/refresh the leader; on denial, do NOT install
 	// the watchdog. The throw is converted to a trace + early-return so a guest pane doesn't crash.
-	if (currentAgentId() === "orchestrator") {
+	if (currentAgentId() === "root") {
 		const p = paths(ctx.cwd);
 		try {
 			await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "pump_install");
+				heartbeatRootLeader(st, Date.now(), process.pid, "pump_install");
 				await writeState(p, st);
 			});
 		} catch (err: any) {
 			const msg = String((err as Error)?.message || err);
-			if (msg.startsWith("ORCHESTRATOR_LEADER_DENIED")) {
-				await trace(p, "orchestrator.pump.denied", { reason, error: msg }).catch(() => {});
+			if (msg.startsWith("ROOT_LEADER_DENIED")) {
+				await trace(p, "root.pump.denied", { reason, error: msg }).catch(() => {});
 				return;
 			}
 			throw err;
 		}
 	}
-	// The auto-pump records a surfacing DECISION (per-pid set + writeState) in every orchestrator session,
-	// including explicit orchestrator opt-in runs (PI_SWARM_IS_ORCHESTRATOR=1 or PI_SWARM_AGENT_ID=orchestrator).
-	// The decision block is ctx-free file IO (see pumpOrchestratorMailbox), so it cannot hit
+	// The auto-pump records a surfacing DECISION (per-pid set + writeState) in every root session,
+	// including explicit root opt-in runs (PI_SWARM_IS_ROOT=1 or PI_SWARM_AGENT_ID=root).
+	// The decision block is ctx-free file IO (see pumpRootMailbox), so it cannot hit
 	// the "This extension ctx is stale after session replacement or reload" error. The delivery loop
 	// (sendMessage/isIdle) and the trace that uses ctx.isIdle are now mode-gated to TUI only inside
-	// pumpOrchestratorMailbox, so non-TUI sessions (print/rpc/json) never make ctx-bound calls.
+	// pumpRootMailbox, so non-TUI sessions (print/rpc/json) never make ctx-bound calls.
 	// The watchdog tick is TUI-only (print sessions exit immediately after one turn); non-TUI
 	// callers read mailboxes via swarm_check_mailbox, which never touches a captured ctx.
-	if (currentAgentId() !== "orchestrator") return;
+	if (currentAgentId() !== "root") return;
 	const p = paths(ctx.cwd);
 	// The one-shot below is awaited (not fire-and-forget) so that a pi -p / print session — which
 	// exits immediately after its single turn — actually completes the surfacing decision (writeState +
 	// trace) before teardown. The watchdog remains fire-and-forget.
 	const run = async (reason: string) => {
-		if (orchestratorMailboxPumpRunning) return;
-		orchestratorMailboxPumpRunning = true;
+		if (rootMailboxPumpRunning) return;
+		rootMailboxPumpRunning = true;
 		try {
-			await pumpOrchestratorMailbox(pi, ctx, p, reason);
+			await pumpRootMailbox(pi, ctx, p, reason);
 		} catch (err: any) {
 			// === Issue 11: Error classification (binding C2 + C7) ===
 			// Classify the error and respond correctly: stale-ctx stops (next session_start re-arms), IO
@@ -351,26 +351,26 @@ export async function startOrchestratorPump(ctx: any, reason = "session_start") 
 			const msg = String((err && err.message) || err);
 			const code = String((err && err.code) || "");
 			const isStaleCtx = /stale after session/i.test(msg);
-			const isLeaderDenied = msg.startsWith("ORCHESTRATOR_LEADER_DENIED");
+			const isLeaderDenied = msg.startsWith("ROOT_LEADER_DENIED");
 			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) ||
 							  /EACCES|ENOSPC|EROFS/.test(msg);
 			if (isStaleCtx) {
 				// SAME ctx caused the throw; re-arming would busy-loop. The ONLY correct recovery is the
 				// next session_start (which fires per hooks.ts) with a fresh ctx. Stop and wait.
-				stopOrchestratorPump();
-				await trace(p, "mailbox.orchestrator_pump_stale_stopped", { reason, error: msg }).catch(() => {});
+				stopRootPump();
+				await trace(p, "mailbox.root_pump_stale_stopped", { reason, error: msg }).catch(() => {});
 			} else if (isLeaderDenied || isIoTransient) {
 				// Don't stop the timer: the next watchdog tick retries. Trace for visibility.
-				await trace(p, "mailbox.orchestrator_pump_transient", { reason, kind: isLeaderDenied ? "leader_denied" : "io", code, error: msg }).catch(() => {});
+				await trace(p, "mailbox.root_pump_transient", { reason, kind: isLeaderDenied ? "leader_denied" : "io", code, error: msg }).catch(() => {});
 			} else {
 				// Unknown error class: stop (preserved safe default).
-				stopOrchestratorPump();
-				await trace(p, "mailbox.orchestrator_pump_error", { reason, error: msg, stale: false }).catch(() => {});
+				stopRootPump();
+				await trace(p, "mailbox.root_pump_error", { reason, error: msg, stale: false }).catch(() => {});
 			}
-		} finally { orchestratorMailboxPumpRunning = false; }
+		} finally { rootMailboxPumpRunning = false; }
 	};
 	await run(reason);
-	if (ctx.mode === "tui") armOrchestratorPumpWatchdog(ctx);
+	if (ctx.mode === "tui") armRootPumpWatchdog(ctx);
 }
 
 export function registerSwarmHooks(pi: ExtensionAPI) {
@@ -537,17 +537,17 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		}
 	});
 
-	// === Orchestrator-busy resets the shared idle epoch (Row 68 semantics fix, 2026-08-31) ===
-	// The idle-streak nudge measures "all agents + ORCHESTRATOR idle for a full interval". Workers
-	// are covered by updateIdleEpochLocked (runtimeStatus busy/idle edges), but the ORCHESTRATOR's
+	// === Root-busy resets the shared idle epoch (Row 68 semantics fix, 2026-08-31) ===
+	// The idle-streak nudge measures "all agents + ROOT idle for a full interval". Workers
+	// are covered by updateIdleEpochLocked (runtimeStatus busy/idle edges), but the ROOT's
 	// own activity was invisible to it: while the PM was busy answering the human (turns running),
 	// the epoch stayed anchored at the old all-idle edge, so a 30s interval elapsed "during" the
 	// PM's work and the nudge fired ~30s after every turn end (live: nudge 1/3 following each reply
-	// even though the PM had been busy the whole time). turn_start = busy edge for the orchestrator:
+	// even though the PM had been busy the whole time). turn_start = busy edge for the root:
 	// drop the epoch (and pending boundary); turn_end (below) re-arms it via the next pump tick's
-	// fresh allIdleSinceAt, so the interval is measured from the END of the orchestrator's work.
+	// fresh allIdleSinceAt, so the interval is measured from the END of the root's work.
 	pi.on("turn_start", async (_event, ctx) => {
-		if (currentAgentId() !== "orchestrator") return;
+		if (currentAgentId() !== "root") return;
 		const p = paths(ctx.cwd);
 		try {
 			await withLock(p, async () => {
@@ -555,20 +555,20 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				const idleState = st.idleNudgeState;
 				if (!idleState?.allIdleSinceAt && !idleState?.nextGoalNudgeAt && !idleState?.lastGoalNudgeAt) return;
 				const prev = idleState.allIdleSinceAt ?? null;
-				// === R23C (2026-09-03) — stamp orchestrator provenance at the turn_start clear site ===
-				// turn_start is the orchestrator's busy edge (the live R23 storm source — `agent_settled`
-				// fires at every orchestrator turn boundary, briefly marking the orchestrator busy/idle).
+				// === R23C (2026-09-03) — stamp root provenance at the turn_start clear site ===
+				// turn_start is the root's busy edge (the live R23 storm source — `agent_settled`
+				// fires at every root turn boundary, briefly marking the root busy/idle).
 				// The cap branch's worker-breaker guard reads `lastEpochBusyAgents` to distinguish a
-				// worker-driven fresh epoch (qualifies for reset) from orchestrator-turn churn (must
+				// worker-driven fresh epoch (qualifies for reset) from root-turn churn (must
 				// NOT qualify). Without this stamp, every turn_start-cleared anchor reaches the cap
 				// branch with breaker=undefined → absent→reset legacy default → STORM. Stamping
-				// `["orchestrator"]` here lets the breaker reject orchestrator-churn anchors. Live
+				// `["root"]` here lets the breaker reject root-churn anchors. Live
 				// evidence: tester-turnstart-probe.mjs (R23C artifacts; pre-fix RED 2 resets/4 emissions
 				// seq 4→7, post-fix GREEN ≤1 emission).
-				idleState.lastEpochBusyAgents = ["orchestrator"];
+				idleState.lastEpochBusyAgents = ["root"];
 				delete idleState.allIdleSinceAt;
 				delete idleState.nextGoalNudgeAt;
-				await trace(p, "idle.epoch.reset", { reason: "orchestrator_busy", previousAllIdleSinceAt: prev, busyAgents: ["orchestrator"] }).catch(() => {});
+				await trace(p, "idle.epoch.reset", { reason: "root_busy", previousAllIdleSinceAt: prev, busyAgents: ["root"] }).catch(() => {});
 				await writeState(p, st);
 			});
 		} catch (err: any) {
@@ -582,7 +582,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 	// same withLock independently, so they serialise; source order ensures the resolve observes the
 	// post-swap state.
 	//
-	// R16 fix: a turn_end{stop, role=assistant} is a RESOLVE only if the orchestrator actually
+	// R16 fix: a turn_end{stop, role=assistant} is a RESOLVE only if the root actually
 	// ADVANCED the goal in that turn — i.e., the message contains a swarm tool call
 	// (swarm_spawn_agent / swarm_assign_task / swarm_mark_goal_done / swarm_set_goal /
 	// swarm_restart_agent / swarm_send_message / swarm_reconcile / swarm_update_task /
@@ -590,13 +590,13 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 	// direction message was sent via a tool call in the same turn.
 	//
 	// Pure ack text ("Got it, will continue", "Acknowledged", "Will keep going") does NOT count:
-	// it would let an idle orchestrator reset the counter forever on the same template, never
+	// it would let an idle root reset the counter forever on the same template, never
 	// reaching MAX_CONSECUTIVE_NUDGES_DEFAULT, never engaging back-off, never surfacing the
 	// bounded escalation chain. Live incident 2026-09-02: 47 idle_nudge / 36 resolved in 10 min
 	// for goal-1788266039522-6eae40.
 	//
 	// A turn_end {error} is intentionally NOT a resolve: tool/model failures are not "I addressed
-	// the goal". A non-orchestrator turn_end is also NOT a resolve: workers don't decide the goal.
+	// the goal". A non-root turn_end is also NOT a resolve: workers don't decide the goal.
 	// An empty-message turn_end (silent) is NOT a resolve either — unchanged from pre-fix.
 	//
 	// The action detector is exported at module scope (SWARM_RESOLVE_TOOLS + turnEndIsResolveAction)
@@ -605,7 +605,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 	pi.on("turn_end", async (event, ctx) => {
 		const msg: any = (event as any)?.message;
 		if (!msg || msg.role !== "assistant" || msg.stopReason !== "stop") return;
-		if (currentAgentId() !== "orchestrator") return;
+		if (currentAgentId() !== "root") return;
 		const action = turnEndIsResolveAction(event);
 		const p = paths(ctx.cwd);
 		try {
@@ -651,7 +651,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		// Issue 16 (C2 + B1 fix): stamp the session's start time as a process-wide env var so
-		// RecentSpawn stamps + isSameOrchestratorLeader comparisons can detect pid recycling under a
+		// RecentSpawn stamps + isSameRootLeader comparisons can detect pid recycling under a
 		// different session. Guarded so a second session_start in the same process (e.g. after
 		// /reload) doesn't churn the value mid-flight. Lives at the top of registerSwarmHooks's
 		// session_start handler (NOT index.ts, which has no pi.on(...) and would create
@@ -671,17 +671,17 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		const agentId = agentIdEarly;
 		const guest = agentId === SWARM_GUEST_ID;
 		// Identity-gated tool visibility: a guest session loses the swarm tool surface (it is a plain coding
-		// session, not a swarm participant); registered agents and the orchestrator keep it. The /swarm slash
+		// session, not a swarm participant); registered agents and the root keep it. The /swarm slash
 		// command is unaffected, so a guest can still opt in via `/swarm register here <role>`. Re-applied on
 		// opt-in (command.ts) so an in-session identity change re-enables the swarm tools immediately.
 		applySwarmToolGating(pi);
-		// === Issue 20: pool-scaffold on orchestrator session_start ===
-		// Runs ONLY for the orchestrator identity (PM). The durable `poolScaffoldNotifiedAt` flag on
+		// === Issue 20: pool-scaffold on root session_start ===
+		// Runs ONLY for the root identity (PM). The durable `poolScaffoldNotifiedAt` flag on
 		// SwarmState makes the notify write-once-per-swarm: subsequent session_starts (and /reload
 		// invocations) suppress the notify but the scaffold itself remains idempotent (writes the same
 		// payload if `modelPool` is still absent, no-ops if present). Errors are swallowed + traced so a
 		// scaffold failure never blocks session_start.
-		if (agentId === "orchestrator") {
+		if (agentId === "root") {
 			try {
 				const result = await ensurePoolScaffold(ctx.cwd, {});
 				if (result.wrote) {
@@ -710,27 +710,27 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			const st = await readState(p, ctx.cwd);
 			await trace(p, "session.start", { agentId, guest, mode: ctx.mode, state: relative(ctx.cwd, p.state) });
 			if (guest) {
-				// Anonymous swarm session (no PI_SWARM_AGENT_ID and no explicit orchestrator opt-in): stay
-				// inert. Do NOT register an agent record, do NOT call ensureOrchestrator (which would refresh
-				// the orchestrator pseudo-agent heartbeat and mask a dead/stalled PM), and do NOT start the
-				// orchestrator mailbox pump (which would surface orchestrator mail here). The swarm tool surface
+				// Anonymous swarm session (no PI_SWARM_AGENT_ID and no explicit root opt-in): stay
+				// inert. Do NOT register an agent record, do NOT call ensureRoot (which would refresh
+				// the root pseudo-agent heartbeat and mask a dead/stalled PM), and do NOT start the
+				// root mailbox pump (which would surface root mail here). The swarm tool surface
 				// is gated off (see applySwarmToolGating above) — this session cannot act as or consume the
-				// orchestrator. It can still opt in via `/swarm register here <role>` (the slash command is
+				// root. It can still opt in via `/swarm register here <role>` (the slash command is
 				// unaffected by tool gating), which re-applies gating to re-enable the swarm tools. See
-				// isOrchestratorSession() for the explicit opt-in path.
+				// isRootSession() for the explicit opt-in path.
 				return;
 			}
-			if (agentId === "orchestrator") {
-				ensureOrchestrator(st, ctx.cwd, p);
-				// Multi-orchestrator policy (issue 8): the heartbeat is now driven by the gate, not by
-				// ensureOrchestrator. Layer the heartbeatOrchestratorLeader call here so an orchestrator
+			if (agentId === "root") {
+				ensureRoot(st, ctx.cwd, p);
+				// Multi-root policy (issue 8): the heartbeat is now driven by the gate, not by
+				// ensureRoot. Layer the heartbeatRootLeader call here so an root
 				// session_start both materialises the record and refreshes the leader lease.
 				try {
-					heartbeatOrchestratorLeader(st, Date.now(), process.pid, "session_start");
+					heartbeatRootLeader(st, Date.now(), process.pid, "session_start");
 				} catch (err: any) {
-					// A non-leader orchestrator session_start must NOT crash the session; trace + skip the
-					// pump install (handled at startOrchestratorPump preflight below).
-					await trace(p, "session.orchestrator_denied", { agentId, callerPid: process.pid, error: String((err as Error)?.message || err) }).catch(() => {});
+					// A non-leader root session_start must NOT crash the session; trace + skip the
+					// pump install (handled at startRootPump preflight below).
+					await trace(p, "session.root_denied", { agentId, callerPid: process.pid, error: String((err as Error)?.message || err) }).catch(() => {});
 				}
 				await writeState(p, st);
 			} else if (!st.agents[agentId]) {
@@ -757,12 +757,12 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			}
 		});
 		if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${agentId}`);
-		if (agentId === "orchestrator") {
-			await startOrchestratorPump(ctx);
+		if (agentId === "root") {
+			await startRootPump(ctx);
 		} else if (ctx.mode === "tui") {
 			// Pull-based delivery for workers (root fix for the restart/injection-loss class): on session
 			// start, surface any unacked, non-dead-letter, non-superseded messages addressed to THIS agent
-			// directly into its conversation — no tmux injection, no reconcile, no orchestrator involvement.
+			// directly into its conversation — no tmux injection, no reconcile, no root involvement.
 			// Mailbox is the source of truth; tmux injection stays as an opportunistic fast-path.
 			try {
 				await surfaceAgentPending(pi, ctx, p, agentId, "session_start");
@@ -775,7 +775,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		const agentId = currentAgentId();
-		if (agentId === "orchestrator") return;
+		if (agentId === "root") return;
 		const p = paths(ctx.cwd);
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
@@ -798,7 +798,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 
 	pi.on("agent_start", async (_event, ctx) => {
 		const agentId = currentAgentId();
-		if (agentId === "orchestrator") return;
+		if (agentId === "root") return;
 		const p = paths(ctx.cwd);
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
@@ -825,15 +825,15 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		// window (the engine either resolved the last turn or gave up before settling). Stale incidents
 		// from a burst that ended mid-settle must not leak forward into the next failure.
 		engineRetryIncidents.delete(agentId);
-		if (agentId === "orchestrator") {
+		if (agentId === "root") {
 			const p = paths(ctx.cwd);
-			await pumpOrchestratorMailbox(pi, ctx, p, "agent_settled");
+			await pumpRootMailbox(pi, ctx, p, "agent_settled");
 			// === Issue 11 (rework) watchdog self-heal ===
 			// If the watchdog tick has been lost (timer GC'd, single-tick throw that called stop, etc.),
 			// re-install it from this hook so the chain stays alive without requiring session_start.
 			// Guard: only re-arm when ctx.mode is TUI (print/rpc/json sessions don't need the watchdog).
-			if (ctx.mode === "tui" && !orchestratorMailboxTimer && orchestratorPumpCtxFresh) {
-				armOrchestratorPumpWatchdog(ctx);
+			if (ctx.mode === "tui" && !rootMailboxTimer && rootPumpCtxFresh) {
+				armRootPumpWatchdog(ctx);
 			}
 			return;
 		}
@@ -866,7 +866,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 						rec.updatedAt = ts;
 					}
 					try {
-						await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject: `agent ${agentId} settled with missing response(s)`, body: `Agent ${agentId} settled while ${liveMissing.length} requiresResponse message(s) are still missing verified result messages: ${liveMissing.map((m) => m.id).join(", ")}. The agent is marked response_missing and is blocked from reuse until it sends replies and ack done with resultMessageId.`, requiresAck: false });
+						await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "root", subject: `agent ${agentId} settled with missing response(s)`, body: `Agent ${agentId} settled while ${liveMissing.length} requiresResponse message(s) are still missing verified result messages: ${liveMissing.map((m) => m.id).join(", ")}. The agent is marked response_missing and is blocked from reuse until it sends replies and ack done with resultMessageId.`, requiresAck: false });
 						await trace(p, "message.response_missing.settled.notify", { agentId, messageIds: liveMissing.map((m) => m.id) });
 					} catch (err: any) {
 						await trace(p, "message.response_missing.notify_failed", { agentId, error: String(err?.message || err) });
@@ -875,7 +875,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			}
 			// R25 — PM auto-notify for ack-debt (separate from response-missing + open-assignment
 			// cases). A worker that settles owing live, non-superseded requiresAck messages is
-			// invisible to the orchestrator today; this closes that gap. Storm guards mirror the
+			// invisible to the root today; this closes that gap. Storm guards mirror the
 			// response-missing branch: per-agent cooldown (`lastAckDebtNotifyAt`, distinct from
 			// `lastSettleNotifyAt` so the open-assignment cooldown is not coupled) +
 			// idempotencyKey=r25:ackdebt:<agent>:<sha8(sorted ids)> reused across settles.
@@ -893,7 +893,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 					const idList = sortedIds.join(", ");
 					try {
 						await deliverMessageLocked(pi, ctx.cwd, p, st, {
-							to: "orchestrator",
+							to: "root",
 							subject: `agent ${agentId} settled owing ${ackDebt.length} unacked ack(s)`,
 							body: `Agent ${agentId} settled (agent_settled) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
 							requiresAck: false,
@@ -908,11 +908,11 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				}
 			}
 			// PM auto-notify (engine behavior): a settle while still holding open assignments is a
-			// stall/idle signal the orchestrator should not have to poll for. Enqueue a mailbox notify to
-			// the mailbox-only orchestrator. Loop-safe: (a) it targets the orchestrator, never the worker
+			// stall/idle signal the root should not have to poll for. Enqueue a mailbox notify to
+			// the mailbox-only root. Loop-safe: (a) it targets the root, never the worker
 			// (no self-re-trigger); (b) cooldown-guarded per agent via persisted lastSettleNotifyAt so
 			// repeated settles in a window don't storm; (c) mailbox-only (no tmux inject); (d) no node
-			// mutation. requiresAck=false (informational; orchestrator pump surfaces it). Done before
+			// mutation. requiresAck=false (informational; root pump surfaces it). Done before
 			// writeState so the notify record persists atomically with the settle metadata.
 			if (agent.activeTaskIds.length) {
 				const sinceNotify = agent.lastSettleNotifyAt ? Date.now() - new Date(agent.lastSettleNotifyAt).getTime() : Number.POSITIVE_INFINITY;
@@ -936,7 +936,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 							continue;
 						}
 						const key = formatNotifyKey(NOTIFY_KEY_SETTLE_STALE, { taskId: entry.task.taskId, agentId });
-						if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) {
+						if (findIdempotentMessage(st, "root", "root", key)) {
 							await trace(p, "task.stale.settled.notify_cooldown", { agentId, taskId: entry.task.taskId, cooldownMs: SETTLE_NOTIFY_COOLDOWN_MS, key });
 							continue;
 						}
@@ -951,7 +951,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 						const list2 = liveOpen.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
 						const openCount2 = liveOpen.length;
 						try {
-							await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject: `agent ${agentId} settled idle with open assignment(s)`, body: `Agent ${agentId} settled (agent_settled) while still holding ${openCount2} open assignment(s): ${list2}. It may be idle or stalled; advance via swarm_next_nodes/swarm_update_task, reassign, or reconcile as needed.`, requiresAck: false });
+							await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "root", subject: `agent ${agentId} settled idle with open assignment(s)`, body: `Agent ${agentId} settled (agent_settled) while still holding ${openCount2} open assignment(s): ${list2}. It may be idle or stalled; advance via swarm_next_nodes/swarm_update_task, reassign, or reconcile as needed.`, requiresAck: false });
 							await trace(p, "task.stale.settled.notify", { agentId, open: openCount2 });
 						} catch (err: any) {
 							await trace(p, "task.stale.settled.notify_failed", { agentId, error: String(err?.message || err) });
@@ -971,7 +971,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 
 	pi.on("tool_execution_start", async (_event, ctx) => {
 		const agentId = currentAgentId();
-		if (agentId === "orchestrator") return;
+		if (agentId === "root") return;
 		const p = paths(ctx.cwd);
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
@@ -993,7 +993,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 
 	pi.on("tool_execution_end", async (_event, ctx) => {
 		const agentId = currentAgentId();
-		if (agentId === "orchestrator") return;
+		if (agentId === "root") return;
 		const p = paths(ctx.cwd);
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
@@ -1038,10 +1038,10 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		const agentId = currentAgentId();
-		if (agentId === "orchestrator") {
-			stopOrchestratorPump();
+		if (agentId === "root") {
+			stopRootPump();
 			// Issue 17 (binding C1 — symmetry with session_start): clear any open incident for the
-			// orchestrator on shutdown. Defense-in-depth — the process is going away anyway, but
+			// root on shutdown. Defense-in-depth — the process is going away anyway, but
 			// explicit symmetry keeps the invariant visible to readers.
 			engineRetryIncidents.delete(agentId);
 			return;
@@ -1065,7 +1065,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			agent.status = "stopped";
 			agent.updatedAt = ts;
 			// Engine-enforced closure: if this agent is dying while it still owns open assigned/in_progress
-			// nodes, mark them stale and nudge the orchestrator (mailbox-only) instead of orphaning them.
+			// nodes, mark them stale and nudge the root (mailbox-only) instead of orphaning them.
 			ensureAgentDefaults(agent);
 			if (agent.activeTaskIds.length) {
 				const open = await scanAgentOpenAssignments(p, st, agentId, agent.activeTaskIds);
@@ -1087,13 +1087,13 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 					await trace(p, "task.stale.shutdown", { agentId, open: liveOpen.map((o) => ({ taskId: o.task.taskId, nodeId: o.nodeId })) });
 					const list = liveOpen.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
 					// Nudge the reassignment authority: prefer each open node's assigner (replyTarget, from its
-					// latest `assign` handoff `by`) when registered and not this dying agent; else orchestrator
+					// latest `assign` handoff `by`) when registered and not this dying agent; else root
 					// (mailbox-only). Stamps node.lastActivityAt so the shutdown itself is recorded as activity.
 					const nudgeTargets = new Set<string>();
 					for (const { task, nodeId } of liveOpen) {
 						const assigner = [...task.handoffs].reverse().find((h: any) => h?.toNode === nodeId && h?.kind === "assign")?.by as string | undefined;
 						if (assigner && assigner !== agentId && st.agents[assigner]) nudgeTargets.add(assigner);
-						else nudgeTargets.add("orchestrator");
+						else nudgeTargets.add("root");
 					}
 					for (const target of nudgeTargets) {
 						try { await deliverMessageLocked(pi, ctx.cwd, p, st, { to: target, subject: `agent ${agentId} shut down with open task node(s)`, body: `Agent ${agentId} shut down (session_shutdown) while still assigned ${liveOpen.length} non-terminal node(s): ${list}. Those nodes were marked stale (staleAt) and lastActivityAt stamped. Reassign via swarm_assign_task or reconcile as needed.`, requiresAck: false }); }
@@ -1125,7 +1125,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		// When a high-priority swarm message is intercepted mid-turn, call ctx.abort() (TUI-level
 		// interrupt, same channel as manual Escape) so urgent directives are consumed at the next-turn
 		// boundary instead of sitting intercepted for 20+ minutes (live incident 2026-08-31: STOP sat
-		// 23 min). Rate-limited per agent (~1/30s default) so a chatty orchestrator cannot livelock
+		// 23 min). Rate-limited per agent (~1/30s default) so a chatty root cannot livelock
 		// a worker. Graceful degrade on ctx.abort() failure: still queue the message as followUp so it
 		// lands at the next-turn boundary regardless.
 		if (isHigh && midTurn) {
@@ -1135,9 +1135,9 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			let lastInterruptAt: string | undefined;
 			await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				// Orchestrator pseudo-agent is exempt from the ledger; the orchestrator has no in-flight
+				// Root pseudo-agent is exempt from the ledger; the root has no in-flight
 				// turn in the TUI sense, and rate-limiting would block legitimate nudges.
-				const self = me === "orchestrator" ? undefined : st.agents[me];
+				const self = me === "root" ? undefined : st.agents[me];
 				lastInterruptAt = self?.lastHighInterruptAt;
 				if (lastInterruptAt && (Date.now() - new Date(lastInterruptAt).getTime()) < WINDOW_MS) {
 					allowed = false;

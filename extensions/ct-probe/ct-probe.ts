@@ -22,7 +22,7 @@
  * `.pi/swarm/tasks/task-202609021900-ct-phase2b-real-lanes/artifacts/lanes/<probe>/launch.sh`.
  *
  * CT-8 is NOT implemented here — it is a source-import unit (identity.ts
- * `ensureOrchestrator`); see `extensions/swarm/ct-phase2-probes.test.mjs` §CT-8.
+ * `ensureRoot`); see `extensions/swarm/ct-phase2-probes.test.mjs` §CT-8.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

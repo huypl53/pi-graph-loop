@@ -47,7 +47,7 @@ function baseTask(taskId, title, overrides = {}) {
 		priority: "high",
 		createdAt: iso(-10_000),
 		updatedAt: iso(overrides.updatedDelta ?? 0),
-		owner: "orchestrator",
+		owner: "root",
 		workflow: "feature-dev",
 		allowedFiles: overrides.allowedFiles || [],
 		acceptanceCriteria: overrides.acceptanceCriteria || [],
@@ -100,7 +100,7 @@ const branchTask = baseTask(branchTaskId, "Branch + rework flow", {
 		review: { status: "assigned", role: "reviewer", assignee: "obs-reviewer", dependsOn: ["implement"], messageIds: ["msg-review"], assignmentMessageId: "msg-review", attempts: 1, lastActivityAt: iso(-6_000) },
 		fix: { status: "blocked", role: "implementer", assignee: "obs-implementer", dependsOn: ["review"], messageIds: ["msg-fix"], assignmentMessageId: "msg-fix", attempts: 2, staleAt: iso(-50_000), lastActivityAt: iso(-5_500) },
 		validate: { status: "ready", role: "tester", dependsOn: ["review"], messageIds: [], attempts: 0, lastActivityAt: iso(-4_000) },
-		close: { status: "pending", role: "orchestrator", dependsOn: ["validate"], messageIds: [], attempts: 0, lastActivityAt: iso(-3_000), terminal: true },
+		close: { status: "pending", role: "root", dependsOn: ["validate"], messageIds: [], attempts: 0, lastActivityAt: iso(-3_000), terminal: true },
 	},
 	edges: [
 		{ from: "plan", to: "implement", when: "planned" },
@@ -176,7 +176,7 @@ st.agents["blocked-agent"].activeTaskIds = [blockedTaskId];
 st.messages = {
 	"msg-impl": {
 		id: "msg-impl",
-		from: "orchestrator",
+		from: "root",
 		to: "obs-implementer",
 		status: "acked",
 		createdAt: iso(-9_000),
@@ -190,7 +190,7 @@ st.messages = {
 	},
 	"msg-review": {
 		id: "msg-review",
-		from: "orchestrator",
+		from: "root",
 		to: "obs-reviewer",
 		status: "acked",
 		createdAt: iso(-7_000),
@@ -204,7 +204,7 @@ st.messages = {
 	},
 	"msg-fix": {
 		id: "msg-fix",
-		from: "orchestrator",
+		from: "root",
 		to: "obs-implementer",
 		status: "dead_letter",
 		createdAt: iso(-6_000),
@@ -217,7 +217,7 @@ st.messages = {
 	},
 	"msg-block": {
 		id: "msg-block",
-		from: "orchestrator",
+		from: "root",
 		to: "blocked-agent",
 		status: "intercepted",
 		createdAt: iso(-4_000),

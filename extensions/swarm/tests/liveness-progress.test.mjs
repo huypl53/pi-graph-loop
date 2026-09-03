@@ -95,7 +95,7 @@ function makeTask(taskId, nodes) {
 	return {
 		version: 1, taskId, title: taskId, goal: taskId, status: "in_progress", priority: "normal",
 		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		owner: "orchestrator", workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [],
+		owner: "root", workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [],
 		validationCommands: [], start: "n1", currentNodes: Object.keys(nodes),
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes, edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
@@ -104,7 +104,7 @@ function makeTask(taskId, nodes) {
 function makeState(scratch, tasks) {
 	return {
 		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "s",
-		agents: { orchestrator: { id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", capabilities: [], activeTaskIds: tasks, maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", lastHeartbeatAt: new Date().toISOString(), pid: 1, tmuxSession: "s", tmuxWindow: "w", tmuxTarget: "s:w.0", model: "m", provider: "p", cwd: scratch, mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } },
+		agents: { root: { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: tasks, maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", lastHeartbeatAt: new Date().toISOString(), pid: 1, tmuxSession: "s", tmuxWindow: "w", tmuxTarget: "s:w.0", model: "m", provider: "p", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } },
 		delivered: {}, messages: {},
 		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 	};

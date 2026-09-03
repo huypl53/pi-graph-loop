@@ -161,12 +161,12 @@ console.log("\nF3/F4: drive real fence + assert no-mutation + counter stamping")
 		agents: {
 			"worker-old": { id: "worker-old", role: "implementer", status: "idle", activeTaskIds: [], lastSeenAt: ts, currentModel: "x", provider: "y" },
 			"worker-new": { id: "worker-new", role: "implementer", status: "busy", activeTaskIds: [lateResultTaskId], lastSeenAt: ts, currentModel: "x", provider: "y" },
-			"orchestrator": { id: "orchestrator", role: "orchestrator", status: "idle", activeTaskIds: [], lastSeenAt: ts, currentModel: "x", provider: "y" },
+			"root": { id: "root", role: "root", status: "idle", activeTaskIds: [], lastSeenAt: ts, currentModel: "x", provider: "y" },
 		},
 		tasks: {},
 		messages: {
-			[inboundMsgId]: { id: inboundMsgId, to: "worker-old", from: "orchestrator", subject: "assign", body: "old", conversationId: `task:${lateResultTaskId}:${lateResultNodeId}`, requiresAck: true, status: "superseded", superseded: { at: ts, by: newMsgId, supersededBy: "attempt-new" }, idempotencyKey: "key-old" },
-			[newMsgId]: { id: newMsgId, to: "worker-new", from: "orchestrator", subject: "assign", body: "new", conversationId: `task:${lateResultTaskId}:${lateResultNodeId}`, requiresAck: true, status: "injected", idempotencyKey: "key-new" },
+			[inboundMsgId]: { id: inboundMsgId, to: "worker-old", from: "root", subject: "assign", body: "old", conversationId: `task:${lateResultTaskId}:${lateResultNodeId}`, requiresAck: true, status: "superseded", superseded: { at: ts, by: newMsgId, supersededBy: "attempt-new" }, idempotencyKey: "key-old" },
+			[newMsgId]: { id: newMsgId, to: "worker-new", from: "root", subject: "assign", body: "new", conversationId: `task:${lateResultTaskId}:${lateResultNodeId}`, requiresAck: true, status: "injected", idempotencyKey: "key-new" },
 		},
 	}, null, 2));
 
@@ -243,7 +243,7 @@ const fp2 = JSON.stringify(eventFingerprint(events2));
 ok("F5.a: event sequence byte-identical across two runs (cursor reset between runs)", fp1 === fp2, `len1=${fp1.length} len2=${fp2.length}`);
 
 // Deterministic replay creates a SECOND transcript file. Keep both for byte-identical comparison.
-// Do NOT clean up — orchestrator reviews `.pi/mock-llm/transcripts/supersession-late-result/`.
+// Do NOT clean up — root reviews `.pi/mock-llm/transcripts/supersession-late-result/`.
 if (process.env.PI_MOCK_LLM_SUPERSESSION_LATE_RESULT_CLEANUP === "1") {
 	await rm(join(TRANSCRIPT_ROOT, "supersession-late-result"), { recursive: true, force: true }).catch(() => {});
 }

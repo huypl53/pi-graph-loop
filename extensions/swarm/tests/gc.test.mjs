@@ -23,7 +23,7 @@ const ts = (i) => new Date(EPOCH + i * 1000).toISOString();
 
 function mkMsg(id, overrides = {}) {
 	return {
-		id, from: "orchestrator", to: "worker",
+		id, from: "root", to: "worker",
 		status: "queued",
 		createdAt: ts(0), updatedAt: ts(0),
 		attempts: 0, requiresAck: true,

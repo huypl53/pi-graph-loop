@@ -135,7 +135,7 @@ Swarm's mailbox → session bridge must:
   if the swarm user message should appear as user role and always trigger a turn.
 - Use `pi.sendMessage({ customType, content, display, details }, { deliverAs: ...,
   triggerTurn: true })` if the message is structured swarm metadata that
-  should also reach the LLM as a custom message (e.g. orchestrator
+  should also reach the LLM as a custom message (e.g. root
   directives, system-level coordination).
 - **Never** expect `await pi.sendMessage(...)` to wait for delivery; it
   returns synchronously. `[INFERRED]`

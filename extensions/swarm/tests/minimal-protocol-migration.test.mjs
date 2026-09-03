@@ -33,7 +33,7 @@ async function readStateFile() {
 	const p = join(scratch, ".pi/swarm/swarm-state.json");
 	try { return JSON.parse(await readFile(p, "utf8")); } catch { return null; }
 }
-async function loadExtension({ identity = "orchestrator" } = {}) {
+async function loadExtension({ identity = "root" } = {}) {
 	process.env.PI_SWARM_AGENT_ID = identity;
 	const tools = {};
 	const commands = {};
@@ -66,7 +66,7 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 		const isTransportStamped = i % 2 === 0; // half have a delivered[to] entry
 		messages[id] = {
 			id,
-			from: "orchestrator",
+			from: "root",
 			to: "worker-a",
 			status: "injected",
 			createdAt: ts,
@@ -83,7 +83,7 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 	return {
 		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
 		agents: {
-			"orchestrator": { id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", createdAt: ts, updatedAt: ts },
+			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: ts, updatedAt: ts },
 			"worker-a": { id: "worker-a", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-a", tmuxTarget: "test:worker-a.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl", createdAt: ts, updatedAt: ts },
 		},
 		delivered,
@@ -101,7 +101,7 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(seedStateFixture(50, 10), null, 2), "utf8");
 	const beforeContent = await readFile(join(scratch, ".pi/swarm/swarm-state.json"), "utf8");
 
-	const { commands, notifies, ctxFactory } = await loadExtension({ identity: "orchestrator" });
+	const { commands, notifies, ctxFactory } = await loadExtension({ identity: "root" });
 	await commands.swarm.handler("protocol migrate --dry-run", ctxFactory());
 
 	const afterContent = await readFile(join(scratch, ".pi/swarm/swarm-state.json"), "utf8");
@@ -133,7 +133,7 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(seedStateFixture(50, 10), null, 2), "utf8");
 
-	const { commands, ctxFactory } = await loadExtension({ identity: "orchestrator" });
+	const { commands, ctxFactory } = await loadExtension({ identity: "root" });
 	await commands.swarm.handler("protocol migrate", ctxFactory());
 
 	const after = await readStateFile();
@@ -168,7 +168,7 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 // ============================================================
 {
 	console.log("\n--- Scenario 3: idempotence (second run -> migrated=0) ---");
-	const { commands, ctxFactory } = await loadExtension({ identity: "orchestrator" });
+	const { commands, ctxFactory } = await loadExtension({ identity: "root" });
 	await commands.swarm.handler("protocol migrate", ctxFactory());
 
 	const after = await readStateFile();
@@ -191,7 +191,7 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 // ============================================================
 {
 	console.log("\n--- Scenario 4: usage error paths ---");
-	const { commands, notifies, ctxFactory } = await loadExtension({ identity: "orchestrator" });
+	const { commands, notifies, ctxFactory } = await loadExtension({ identity: "root" });
 	await commands.swarm.handler("protocol foo", ctxFactory());
 	ok("unknown sub -> usage warning", notifies.some((n) => String(n.text).includes("Usage: /swarm protocol migrate")));
 	notifies.length = 0;

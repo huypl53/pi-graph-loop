@@ -19,9 +19,9 @@
     ]
   },
   "scripts": {
-    "test:swarm": "bash -c 'for f in extensions/swarm/tests/*.test.mjs extensions/swarm/tests/*.validate.mjs; do PI_SWARM_AGENT_ID=orchestrator PI_SWARM_IS_ORCHESTRATOR=1 timeout 300 node \"$f\" || true; done'",
+    "test:swarm": "bash -c 'for f in extensions/swarm/tests/*.test.mjs extensions/swarm/tests/*.validate.mjs; do PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1 timeout 300 node \"$f\" || true; done'",
     "test:mockllm": "bash -c 'for f in extensions/mock-llm/tests/*.test.mjs; do timeout 300 node \"$f\" || true; done'",
-    "test:swarm:one": "PI_SWARM_AGENT_ID=orchestrator PI_SWARM_IS_ORCHESTRATOR=1 node"
+    "test:swarm:one": "PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1 node"
   },
   "files": [
     "extensions/",

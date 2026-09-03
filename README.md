@@ -112,7 +112,7 @@ Short version:
 2. Record a baseline run with `swarm_run_record` and complete `evidenceRefs`; then create an iteration session with `swarm_iteration_create`.
 3. Choose `N`. For graph-driven loops, unroll the graph into `iter01_context → iter01_implement → iter01_metric_gate → iter01_memory_review → iter02_context ...`.
 4. For each candidate, give the agent `swarm_iteration_context` first, record the candidate with `swarm_run_record`, append it with `swarm_iteration_record`, then inspect `swarm_iteration_status` or the dashboard.
-5. Agents may propose memory only from passing/approved runs with file-backed evidence; reviewer/orchestrator must accept it. See [`docs/swarm-memory.md`](docs/swarm-memory.md) for read/propose/accept rules and anti-patterns.
+5. Agents may propose memory only from passing/approved runs with file-backed evidence; reviewer/root must accept it. See [`docs/swarm-memory.md`](docs/swarm-memory.md) for read/propose/accept rules and anti-patterns.
 
 V1 loops are explicit: repeat candidate run + `swarm_iteration_record` as many times as needed, or unroll exactly `N` graph iterations. There is no daemon or native graph-cycle runner.
 
@@ -142,7 +142,7 @@ bash scripts/swarm_iteration_demo.sh
 
 See [`docs/swarm-iteration-demo.md`](docs/swarm-iteration-demo.md) for the scenario, file-backed assertions, and review artifact paths.
 
-> This is the **metric-contract** iteration loop. For the separate **opt-in task-graph proposal loop (V1.5)** — post-task-close proposal collection + orchestrator plan synthesis — see [Task-graph iteration proposal loop (V1.5)](docs/swarm-task-graph.md#task-graph-iteration-proposal-loop-v15). It is exercised by the loop scenario in `scripts/swarm_task_uat.sh`.
+> This is the **metric-contract** iteration loop. For the separate **opt-in task-graph proposal loop (V1.5)** — post-task-close proposal collection + root plan synthesis — see [Task-graph iteration proposal loop (V1.5)](docs/swarm-task-graph.md#task-graph-iteration-proposal-loop-v15). It is exercised by the loop scenario in `scripts/swarm_task_uat.sh`.
 
 Review iteration state live **or** as a completed-task dashboard (read-only, dependency-free):
 

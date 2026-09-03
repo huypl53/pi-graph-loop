@@ -1,11 +1,11 @@
 // === swarm/src/reconcile-core.ts ===
 // Module boundary: the swarm-level reconcile runner (`reconcile` + `reconcileTasks`).
 //   - `reconcileTasks` — sweep task.json files for closure drift + stale/nudge signals
-//   - `reconcile`      — orchestrator-facing entry point: claim lock, read state, dispatch
+//   - `reconcile`      — root-facing entry point: claim lock, read state, dispatch
 //
 // Why co-located: both functions are the only two callers of `evaluateIdleGoalNudgeLocked`
 // + `evaluateTaskGraphStallNudgeLocked` + `agentHeartbeatGCLocked` (from nudges/*) and
-// `pumpOrchestratorMailbox` (from surface.ts) — they are the pump harness.
+// `pumpRootMailbox` (from surface.ts) — they are the pump harness.
 //
 // Moved verbatim from reconcile.ts (lines 2471-2788) as part of the R24 structure refactor.
 // No behavior change.
@@ -18,14 +18,14 @@ import type { Paths, ReconcileAction, SwarmState, TaskState } from "./types.ts";
 import { ACK_MISSING_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, REINJECT_AFTER_MS, TASK_NUDGE_MS, TASK_STALE_MS } from "./constants.ts";
 import { ensureAgentDefaults, humanAge, now } from "./utils.ts";
 import { computeTaskStatus } from "./taskgraph.ts";
-import { claimOrchestratorLeader, ensureOrchestrator, heartbeatOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
+import { claimRootLeader, ensureRoot, heartbeatRootLeader, requireRootAuthority } from "./identity.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { currentAgentId } from "./session.ts";
 import { deliver, deriveLifecycleFromTrigger, findIdempotentMessage, isResponseTrackingActive, readMailbox, upsertMessageRecord } from "./mailbox.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { deriveNodeAttention } from "./taskgraph.ts";
-import { pumpOrchestratorMailbox } from "./surface.ts";
+import { pumpRootMailbox } from "./surface.ts";
 
 
 export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState, options: { dryRun?: boolean; mark?: boolean; nowMs: number }): Promise<ReconcileAction[]> {
@@ -42,7 +42,7 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 		let dirty = false;
 		const storedClosed = task.status === "done" || task.status === "failed" || task.status === "cancelled";
 		const derived = computeTaskStatus(task);
-		// Drift detection. `cancelled` is orchestrator-explicit and sticky, so never overwrite it.
+		// Drift detection. `cancelled` is root-explicit and sticky, so never overwrite it.
 		if (!storedClosed && derived !== task.status && task.status !== "cancelled") {
 			if (options.mark && !options.dryRun) {
 				const prev = task.status;
@@ -80,7 +80,7 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 				ensureAgentDefaults(agent);
 				if (agent.status === "stopped" || agent.health === "unhealthy") staleReasons.push(`assignee ${agent.id} ${agent.status}/${agent.health}`);
 				else if (agent.tmuxTarget && agent.tmuxTarget !== "unknown" && !(await isTmuxRunning(pi, agent.tmuxTarget))) staleReasons.push(`assignee ${agent.id} tmux pane not alive`);
-			} else if (node.assignee && node.assignee !== "orchestrator") {
+			} else if (node.assignee && node.assignee !== "root") {
 				staleReasons.push(`assignee ${node.assignee} missing from state`);
 			}
 			if (node.status === "in_progress" && node.lastActivityAt) {
@@ -92,17 +92,17 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 				const rec = st.messages[msgId];
 				if (!rec) { staleReasons.push(`references missing message ${msgId}`); continue; }
 				if (rec.status === "dead_letter") staleReasons.push(`assignment message ${msgId} dead-lettered`);
-				else if (rec.requiresAck && !rec.ackedAt && !st.consumerReceipts?.orchestrator?.entries?.[msgId]) {
+				else if (rec.requiresAck && !rec.ackedAt && !st.consumerReceipts?.root?.entries?.[msgId]) {
 					const sinceMs = Math.max(rec.injectedAt ? new Date(rec.injectedAt).getTime() : 0, rec.interceptedAt ? new Date(rec.interceptedAt).getTime() : 0, rec.createdAt ? new Date(rec.createdAt).getTime() : 0);
 					if (options.nowMs - sinceMs > ACK_MISSING_MS) nudgeReasons.push(`assignment message ${msgId} ack_missing`);
 				}
 			}
 			if (!staleReasons.length && !nudgeReasons.length) {
 				// Attention derivation (issue 5): report-only reminder eligibility. Reconcile NEVER sends;
-				// the pointer names the one explicit orchestrator surface that can.
+				// the pointer names the one explicit root surface that can.
 				const att = deriveNodeAttention(st, task, nodeId, options.nowMs);
 				if (att.workerReminderEligible) {
-					actions.push({ messageId: `${taskId}/${nodeId}`, action: "reminder_eligible", reason: `${att.evidence.join("; ")}; one bounded reminder may be sent via /swarm remind ${taskId} ${nodeId} (orchestrator-only, informational)`, taskId, nodeId });
+					actions.push({ messageId: `${taskId}/${nodeId}`, action: "reminder_eligible", reason: `${att.evidence.join("; ")}; one bounded reminder may be sent via /swarm remind ${taskId} ${nodeId} (root-only, informational)`, taskId, nodeId });
 				}
 				continue;
 			}
@@ -122,7 +122,7 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { agentId?: string; dryRun?: boolean; mark?: boolean }) {
 	const result = await withLock(p, async () => {
 		const st = await readState(p, cwd);
-		if (options.mark) requireOrchestratorAuthority(currentAgentId(), "swarm_reconcile(mark=true)");
+		if (options.mark) requireRootAuthority(currentAgentId(), "swarm_reconcile(mark=true)");
 		const nowMs = Date.now();
 		const actions: Array<{ messageId: string; action: string; reason: string }> = [];
 		const targetAgentId = options.agentId ? safeId(options.agentId) : undefined;

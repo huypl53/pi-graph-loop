@@ -4,7 +4,7 @@ import type { TaskNodeStatus } from "./types.ts";
 
 export const EXT = "swarm";
 
-// Cancellation reason: stamped on supersession records + traces when an orchestrator cancels a task.
+// Cancellation reason: stamped on supersession records + traces when an root cancels a task.
 // Stable, never interpolated — used as a search key in audits.
 export const CANCELLATION_REASON = "task_cancellation";
 // Per-message supersession `by` value: also stable, search-friendly.
@@ -14,27 +14,27 @@ export const STATE_VERSION = 1;
 
 export const LOCK_STALE_MS = 60_000;
 
-// Multi-orchestrator leader staleness TTL (roadmap issue 8, strict-reject). A leader whose
+// Multi-root leader staleness TTL (roadmap issue 8, strict-reject). A leader whose
 // lastHeartbeatAt is older than this is considered dead and may be replaced by a fresh claim.
 // Defaults to LOCK_STALE_MS so the leader lease shares the lock-staleness contract; this is a
 // deliberate trade-off documented in operations.md (60s crash-recovery blind spot).
-export const ORCHESTRATOR_LEADER_STALE_MS = LOCK_STALE_MS;
+export const ROOT_LEADER_STALE_MS = LOCK_STALE_MS;
 
-// Stable error code for the orchestrator-leader gate. Surfaced verbatim by every category A/B
+// Stable error code for the root-leader gate. Surfaced verbatim by every category A/B
 // call site so callers / ops can act on it. NOT a new model-facing tool.
-export const ERR_ORCHESTRATOR_LEADER_DENIED = "ORCHESTRATOR_LEADER_DENIED";
+export const ERR_ROOT_LEADER_DENIED = "ROOT_LEADER_DENIED";
 
-// Stable error code for orchestrator-authority-required tools that today have no authority check.
-// Thrown by tools that this issue elevates to orchestrator-only (swarm_create_task,
+// Stable error code for root-authority-required tools that today have no authority check.
+// Thrown by tools that this issue elevates to root-only (swarm_create_task,
 // swarm_stop_agent, swarm_release_agent_task, swarm_reconcile(mark=true)). NOT a new tool.
-export const ERR_ORCHESTRATOR_AUTHORITY_REQUIRED = "ORCHESTRATOR_AUTHORITY_REQUIRED";
+export const ERR_ROOT_AUTHORITY_REQUIRED = "ROOT_AUTHORITY_REQUIRED";
 
-// Stable error code for the orchestrator-pane reject guard in swarm_send_keys (issue 12 C6 micro-fix).
-// Thrown when the resolved tmux target equals the orchestrator record's tmuxTarget (typically
-// "unknown"), so a future refactor cannot silently route raw keystrokes into the orchestrator host
+// Stable error code for the root-pane reject guard in swarm_send_keys (issue 12 C6 micro-fix).
+// Thrown when the resolved tmux target equals the root record's tmuxTarget (typically
+// "unknown"), so a future refactor cannot silently route raw keystrokes into the root host
 // pane. Principle-based: fires on target equality, not on agentId, so ghost agents mis-stamped to
 // "unknown" are also rejected. NOT a new tool.
-export const ERR_ORCHESTRATOR_PANE_REJECTED = "ORCHESTRATOR_PANE_REJECTED";
+export const ERR_ROOT_PANE_REJECTED = "ROOT_PANE_REJECTED";
 
 export const SEND_SETTLE_MS = 700;
 
@@ -53,7 +53,7 @@ export const POOL_COOLDOWN_MS = 15 * 60 * 1000; // bench a failing slot for 15 m
 
 export const POOL_MAX_RETRIES = 2; // consecutive failures before cooldown
 
-// === Issue 20: pool-scaffold on orchestrator session_start ===
+// === Issue 20: pool-scaffold on root session_start ===
 // Placeholder written into `.pi/settings.json` when `swarm.modelPool` (or
 // `extensions.swarm.modelPool` — runtime precedence) is absent. Deliberately
 // `null` so validateSwarmSettings flags it (`slot_empty_model`) and the user
@@ -62,7 +62,7 @@ export const POOL_MAX_RETRIES = 2; // consecutive failures before cooldown
 // assertion narrows `null` past ModelSlot's `model: string` invariant.
 export const POOL_SCAFFOLD_PLACEHOLDER = [{ model: null as any, provider: null as any }];
 
-// One-shot notify text surfaced to the orchestrator TUI on first scaffold.
+// One-shot notify text surfaced to the root TUI on first scaffold.
 // Stable so tests + locale passes can match/swap it without touching hooks.ts.
 export const POOL_SCAFFOLD_NOTIFY_TEXT =
 	"Created swarm.modelPool placeholder in .pi/settings.json — fill in your model/provider. See docs/swarm/tools.md.";
@@ -80,9 +80,9 @@ export const ENGINE_MAX_RETRIES = 3;            // mirrors pi's default retry.ma
 export const ENGINE_RETRY_WINDOW_MS = 14_000;   // pi's retry budget = baseDelay * (2^N - 1) for N=maxRetries=3
 
 // Identity used for an anonymous swarm session that neither sets PI_SWARM_AGENT_ID nor opts in as the
-// orchestrator. Such a session is inert for swarm coordination (no agent record, no orchestrator pump,
-// no orchestrator heartbeat refresh); it is a stable, clearly-non-orchestrator id so tool defaults
-// (e.g. swarm_check_mailbox / swarm_send_message) cannot leak or impersonate orchestrator traffic.
+// root. Such a session is inert for swarm coordination (no agent record, no root pump,
+// no root heartbeat refresh); it is a stable, clearly-non-root id so tool defaults
+// (e.g. swarm_check_mailbox / swarm_send_message) cannot leak or impersonate root traffic.
 export const SWARM_GUEST_ID = "swarm-guest";
 
 export const NODE_ICON: Record<TaskNodeStatus, string> = {
@@ -91,10 +91,10 @@ export const NODE_ICON: Record<TaskNodeStatus, string> = {
 
 export const SAFE_ID_RE = /^[a-z0-9_-]+$/;
 
-// Allowed non-orchestrator node status transitions. Terminal states (done/failed/skipped/cancelled) cannot
-// regress without an orchestrator override. The orchestrator bypasses this map entirely.
-// `cancelled` is reachable from every non-terminal state by an orchestrator-explicit cancelTask
-// (a worker CANNOT cancel; cancelTask requires orchestrator authority + force). Workers attempting to
+// Allowed non-root node status transitions. Terminal states (done/failed/skipped/cancelled) cannot
+// regress without an root override. The root bypasses this map entirely.
+// `cancelled` is reachable from every non-terminal state by an root-explicit cancelTask
+// (a worker CANNOT cancel; cancelTask requires root authority + force). Workers attempting to
 // transition INTO cancelled are rejected with NODE_TRANSITION_FORBIDDEN.
 export const ALLOWED_NODE_TRANSITIONS: Record<string, Set<string>> = {
 	pending: new Set(["ready", "assigned", "blocked", "skipped", "failed", "cancelled"]),
@@ -102,7 +102,7 @@ export const ALLOWED_NODE_TRANSITIONS: Record<string, Set<string>> = {
 	assigned: new Set(["in_progress", "done", "failed", "blocked", "ready", "cancelled"]),
 	in_progress: new Set(["done", "failed", "blocked", "cancelled"]),
 	blocked: new Set(["assigned", "in_progress", "ready", "skipped", "cancelled"]),
-	// Issue 28: rework activation may reopen a previously-done node back to ready (orchestrator force
+	// Issue 28: rework activation may reopen a previously-done node back to ready (root force
 	// path / rework reopen path). No other terminal regressions are enabled here.
 	done: new Set(["ready"]),
 };
@@ -144,12 +144,12 @@ export const ACK_MISSING_MS = 300_000; // delivered-but-unacked assignment -> ac
 // only possible after a reassign/rework mints a new attempt. The reminder is informational only.
 export const REMINDER_NO_PROGRESS_MS = 60 * 60 * 1000;
 
-// Cooldown for the agent_settled->orchestrator "settled with open work" notify, so repeated settles in
+// Cooldown for the agent_settled->root "settled with open work" notify, so repeated settles in
 // a window don't multiply into a message storm. Loop-safe: notify targets the mailbox-only
-// orchestrator (never the worker), and is rate-limited per agent via persisted lastSettleNotifyAt.
+// root (never the worker), and is rate-limited per agent via persisted lastSettleNotifyAt.
 export const SETTLE_NOTIFY_COOLDOWN_MS = 2 * 60 * 1000;
 
-// Orchestrator auto-pump session-safety bounds. Each orchestrator-context session surfaces a message
+// Root auto-pump session-safety bounds. Each root-context session surfaces a message
 // at most once (per-session dedup); the scan window bounds work + re-surface blast radius, the id cap
 // bounds a long-lived session's ledger, and the TTL prunes dead validation-session pids.
 export const PUMP_SCAN_WINDOW = 50;
@@ -158,16 +158,16 @@ export const PUMP_SESSION_ID_CAP = 200;
 
 export const PUMP_SESSION_TTL_MS = 60 * 60 * 1000;
 
-// Bounded re-trigger of action-expected (requiresAck) orchestrator notifications. A message surfaced +
+// Bounded re-trigger of action-expected (requiresAck) root notifications. A message surfaced +
 // triggered once but still unacked is re-delivered with a fresh triggerTurn after this delay, up to MAX
-// times, so a nudge that landed while the orchestrator was busy (and thus only ever followUp-delivered,
+// times, so a nudge that landed while the root was busy (and thus only ever followUp-delivered,
 // or triggered once and then ignored) is not silently lost. Informational (requiresAck:false) messages
-// get exactly one triggered delivery — sufficient, since the orchestrator was already prompted. Caps
+// get exactly one triggered delivery — sufficient, since the root was already prompted. Caps
 // prevent spam; the per-tick pump + agent_settled hook supply the retry cadence.
 export const PUMP_RETRIGGER_DELAY_MS = 60 * 1000;
 
 // Stuck-busy escalation threshold: when ctx.isIdle() has been false (queued continuation /
-// auto-retry pending) but the oldest never-displayed orchestrator message has waited this long,
+// auto-retry pending) but the oldest never-displayed root message has waited this long,
 // the pump surfaces it with deliverAs "steer" (interrupting the stuck continuation) instead of
 // deferring forever. Override via PI_SWARM_STUCK_DEFER_ESCALATE_MS.
 export const PUMP_STUCK_DEFER_ESCALATE_MS = Number(process.env.PI_SWARM_STUCK_DEFER_ESCALATE_MS ?? 120 * 1000);
@@ -185,12 +185,12 @@ export const ORPHAN_SPAWN_WARNING_TIMEOUT_MS =
 	Number(process.env.PI_SWARM_ORPHAN_TIMEOUT_MS) > 0 ? Math.floor(Number(process.env.PI_SWARM_ORPHAN_TIMEOUT_MS)) : 30_000;
 
 // Pre-flight auto-clear window for Issue 16. When swarm_assign_task resolves to a fresh agentId AND
-// the same orchestrator session that armed the spawn entry calls swarm_assign_task within this
+// the same root session that armed the spawn entry calls swarm_assign_task within this
 // window, the orphan watch is pre-cleared and the timer is cancelled.
 //
 // Default relationship: PREFLIGHT_ASSIGN_GRACE_MS = max(5_000, ORPHAN_SPAWN_WARNING_TIMEOUT_MS - 1_000).
 //   - The 1_000 ms safety margin keeps the pre-clear strictly inside the warning window so the
-//     timer can never fire for a same-orchestrator flow under any test/env combination of the
+//     timer can never fire for a same-root flow under any test/env combination of the
 //     two env vars.
 //   - The 5_000 ms floor guarantees a useful grace even when an operator dials
 //     ORPHAN_SPAWN_WARNING_TIMEOUT_MS very low for testing (e.g. PI_SWARM_ORPHAN_TIMEOUT_MS=50).
@@ -208,7 +208,7 @@ export const PREFLIGHT_ASSIGN_GRACE_MS = RAW_PREFLIGHT_GRACE_MS;
 
 // === Recovery notification policy (reliability-roadmap Phase 1) ===
 // Unified, actually-enforced dedupe/cooldown/cap contract for recovery nudges sent to the
-// orchestrator. `sendNotifyLocked` in reconcile.ts is the single enforcement point: a nudge is only
+// root. `sendNotifyLocked` in reconcile.ts is the single enforcement point: a nudge is only
 // sent when (a) a message with the same semantic key is not already open, (b) the sender-level
 // cooldown for that key template has elapsed, and (c) the per-task nudge cap is not exceeded.
 
@@ -231,18 +231,18 @@ export const NOTIFY_KEY_INITIAL_READY = "task:{taskId}:nudge:initial-ready";
 // (same `{seq}` shape). `seq` is monotonic per (taskId, nodeId), stored in
 // SwarmGraphAdvanceNudgeState — see reconcile.ts:sendGraphAdvanceNudgeLocked.
 export const NOTIFY_KEY_GRAPH_ADVANCE = "task:{taskId}:node:{nodeId}:nudge:assign:seq:{seq}";
-// Lifecycle-fencing (issue 9): per-(task,agent) dedupe for the agent_settled -> orchestrator
+// Lifecycle-fencing (issue 9): per-(task,agent) dedupe for the agent_settled -> root
 // "settled with open assignment(s)" notify so repeated settles in a window don't storm. Reused by
 // the session_shutdown site too via the same predicate gating.
 export const NOTIFY_KEY_SETTLE_STALE = "task:{taskId}:agent:{agentId}:nudge:settle-stale";
 
-// R11-1 completion — stale-open assignment nudge (surfacing was trace-only; the orchestrator
+// R11-1 completion — stale-open assignment nudge (surfacing was trace-only; the root
 // had to poll proxyMetrics by hand, and the swarm idled for hours). Same template family as the
 // graph-advance nudge: idempotent by seq, capped, cooled down.
 export const NOTIFY_KEY_STALE_OPEN = "task:{taskId}:node:{nodeId}:nudge:stale-open:seq:{seq}";
 export const TRACE_STALE_OPEN_NUDGE_EMITTED = "stale_open.nudge_emitted";
 
-// Orchestrator pump per-tick batch suppression trace key (issue 11 / binding C6). Emitted on
+// Root pump per-tick batch suppression trace key (issue 11 / binding C6). Emitted on
 // EVERY pump tick including total===0 so dashboards counting silent-tick baselines render
 // correctly. The trace shape is { ts, cid, total, counts: { reason -> n, ... } }.
 export const NOTIFY_KEY_PUMP_BATCH_SUPPRESSED = "swarm.pump.batch_suppressed";
@@ -288,7 +288,7 @@ export const PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS =
 // === Issue 25 Phase 2: profile gating (proposal §E + §K.3) ===
 // Allow-lists consulted by applySwarmToolGating at runtime under PI_SWARM_MINIMAL_PROTOCOL=1. Tools
 // remain registered (UX §N5) so getAllTools() / smoke test stay stable; only the active set is
-// filtered. Execution-time authority checks (requireOrchestratorAuthority) remain authoritative —
+// filtered. Execution-time authority checks (requireRootAuthority) remain authoritative —
 // tier-gating is the first gate, authority is the second.
 export const WORKER_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
 	"swarm_check_mailbox",
@@ -298,7 +298,7 @@ export const WORKER_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
 	"swarm_reconcile", // worker surface limits this to dryRun:true + scope:"self" at execution time
 ]);
 
-export const ORCHESTRATOR_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
+export const ROOT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
 	// Worker surface (inherited):
 	"swarm_check_mailbox",
 	"swarm_send_message",
@@ -368,21 +368,21 @@ export const TRACE_AGENT_TASK_SWEEP_PARKED = "agent.task_sweep_parked";
 
 // === R12 P0: pool-depletion nudge (companion to task-close sweep) ===
 // Emitted from taskgraph.ts:sweepTaskWorkersLocked when a close CALL actually transitions the
-// effective live non-orchestrator agent pool from ≥1 to 0. Exactly one per depleting close call;
+// effective live non-root agent pool from ≥1 to 0. Exactly one per depleting close call;
 // not emitted on `0 → 0` or `≥1 → ≥1` transitions; not emitted on idempotent re-invocations
-// (`stopped.length === 0`). Companion message: a high-priority orchestrator nudge is delivered
+// (`stopped.length === 0`). Companion message: a high-priority root nudge is delivered
 // via deliverMessageLocked at the same call site so the Issue 86 interrupt machinery wakes the
-// orchestrator and either re-spawns workers or downgrades the goal.
+// root and either re-spawns workers or downgrades the goal.
 export const TRACE_POOL_DEPLETED_NUDGE = "pool.depleted_nudge";
 
 // === Issue 82: lease stamping trace (tools/tasks.ts:swarm_assign_task) ===
-// Emitted when the orchestrator passes a `lease` parameter to swarm_assign_task and the assignee's
+// Emitted when the root passes a `lease` parameter to swarm_assign_task and the assignee's
 // record is stamped with the lease fields. Carries the lease kind, until timestamp, and reason
 // so dashboards can chart which assignments carry an explicit reuse/park lease.
 export const TRACE_TASK_LEASE_STAMPED = "task.lease_stamped";
 
 // === Issue 82: lease set/clear via /swarm agent lease (command.ts) ===
-// Emitted when the orchestrator runs `/swarm agent lease <id> [--reuse|--park] ...`. Carries the
+// Emitted when the root runs `/swarm agent lease <id> [--reuse|--park] ...`. Carries the
 // kind/until/reason so the lease ledger is auditable end-to-end (assignment-tool stamps and
 // command-tool stamps are unified by both writing the same `agent.leaseKind/leaseUntil/leaseReason`
 // fields, but the trace event source differs).
@@ -397,7 +397,7 @@ export const DEFAULT_AGENT_HEARTBEAT_STALE_MS = 600_000; // 10 minutes
 
 // === Issue 83a — stale-open surfacing threshold ===
 // Window (ms) after which an `assigned`/`in_progress` node WITHOUT a `lastProgressAt` update
-// is surfaced to the orchestrator via `stale_open_surfaced` + an orchestrator mailbox nudge.
+// is surfaced to the root via `stale_open_surfaced` + an root mailbox nudge.
 // Mirrors the existing task-liveness 5-minute threshold; env override
 // PI_SWARM_STALE_OPEN_THRESHOLD_MS lets operators tighten / loosen. The scan is idempotent
 // within the window: re-running before threshold expiry produces 0 additional surfaces.
@@ -420,7 +420,7 @@ export const TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED = "agent.heartbeat_gc
 // === Issue 83a — stale-open surfacing trace ===
 // Emitted by the `staleOpenAssignmentScanLocked` pump-tick phase when an `assigned`/`in_progress`
 // node has not received a progress signal for >`PI_SWARM_STALE_OPEN_THRESHOLD_MS`. Carries the
-// taskId + nodeId + lastProgressAt + assignedAt so the orchestrator can decide whether to reassign,
+// taskId + nodeId + lastProgressAt + assignedAt so the root can decide whether to reassign,
 // escalate, or wait. Idempotent within the window (one surface per threshold window per node).
 export const TRACE_STALE_OPEN_SURFACED = "stale_open_surfaced";
 
@@ -438,7 +438,7 @@ export const REASSIGN_RATE_LIMITED = "REASSIGN_RATE_LIMITED";
 // override via PI_SWARM_REASSIGN_RATE_WINDOW_MS.
 export const DEFAULT_REASSIGN_RATE_WINDOW_MS = 60_000;
 
-// Maximum reassigns per node per window. Mirrors the orchestrator's tolerance for churn before
+// Maximum reassigns per node per window. Mirrors the root's tolerance for churn before
 // we suspect an automation loop; default 5/min per node. Operators can override via
 // PI_SWARM_REASSIGN_RATE_LIMIT. The gate is HARD: refusals do not queue — the caller must wait
 // for the window to expire.
@@ -505,7 +505,7 @@ export const TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK = "task.attempt.reopened_by_r
 
 // === Issue 29 — force reopen trace ===
 // Emitted when swarm_update_task(force=true) reopens a terminal node back to a non-terminal state.
-// Distinct from the rework reopen trace above: this path is orchestrator-explicit and does not
+// Distinct from the rework reopen trace above: this path is root-explicit and does not
 // flow through activateReworkNodes.
 export const TRACE_TASK_ATTEMPT_FORCE_REOPEN = "task.attempt.force_reopen";
 
@@ -559,7 +559,7 @@ export const TASK_STALL_NUDGE_IDLE_INTERVAL_MS =
 export const NOTIFY_KEY_TASK_GRAPH_STALL = "task:{taskId}:nudge:graph-stall:{seq}";
 
 // Semantic dedupe key template for the goal idle-streak nudge. One nudge per (goal, idle-streak)
-// so the orchestrator mailbox never sees duplicate nudges for the same goal emission. Validated via
+// so the root mailbox never sees duplicate nudges for the same goal emission. Validated via
 // SAFE_ID_RE inside formatNotifyKey; the `goalId` substitution must satisfy /^[a-z0-9_-]+$/.
 export const NOTIFY_KEY_GOAL_IDLE_NUDGE = "goal:{goalId}:nudge:idle-streak:{seq}";
 
@@ -577,11 +577,11 @@ export function formatNotifyKey(template: string, params: Record<string, string>
 // === R20 — artifact-progress self-nudge (Issue: "settled idle with open assignment") ===
 // Worker wrote an artifact (fs.stat mtime > node.lastProgressAt) but the node is still open.
 // The pump-tick deliver-and-trace function evaluateArtifactProgressNudgeLocked fires an
-// action-oriented nudge to the agent itself (not the orchestrator) before it settles, naming
+// action-oriented nudge to the agent itself (not the root) before it settles, naming
 // the exact close-action triple: swarm_update_task + swarm_send_message replyTo + swarm_ack_message.
 // Tunables:
 //   - ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS: dedupe gate between consecutive nudges on the same node.
-//   - ARTIFACT_PROGRESS_NUDGE_CAP:        per-node counter; once exceeded we emit cap_exceeded + one-line orchestrator escalation instead.
+//   - ARTIFACT_PROGRESS_NUDGE_CAP:        per-node counter; once exceeded we emit cap_exceeded + one-line root escalation instead.
 //   - ARTIFACT_PROGRESS_GRACE_MS:         mtime must exceed lastProgressAt by at least this much.
 //   - ARTIFACT_PROGRESS_MAX_FILES:        hard cap on allowedFiles fs.stat calls per node per tick (cost bound).
 //   - ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS: skip when agent.lastToolAt is fresher than this (active worker, no noise).

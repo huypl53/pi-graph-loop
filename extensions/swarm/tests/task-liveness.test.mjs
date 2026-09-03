@@ -37,7 +37,7 @@ process.env.PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs, trace } = await import(join(here, "..", "src", "state.ts"));
 const { evaluateTaskGraphStallNudgeLocked, evaluateIdleGoalNudgeLocked, resolveTaskStallLocked } = await import(join(here, "..", "src", "reconcile.ts"));
-const { ensureOrchestrator } = await import(join(here, "..", "src", "identity.ts"));
+const { ensureRoot } = await import(join(here, "..", "src", "identity.ts"));
 const { applyTaskStatus, computeReadyNodes, mintNodeAttempt, resolveNodeScope, computeTaskStatus } = await import(join(here, "..", "src", "taskgraph.ts"));
 
 const dir = await mkdtemp(join(tmpdir(), "task-liveness-"));
@@ -61,14 +61,14 @@ let pass = 0, fail = 0;
 const ok = (n, c, info) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL:", n, info ?? ""); } };
 
 const SAVED_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const SAVED_ORCH = process.env.PI_SWARM_IS_ORCHESTRATOR;
+const SAVED_ORCH = process.env.PI_SWARM_IS_ROOT;
 delete process.env.PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+process.env.PI_SWARM_IS_ROOT = "1";
 process.on("exit", () => {
 	if (SAVED_AGENT_ID === undefined) delete process.env.PI_SWARM_AGENT_ID;
 	else process.env.PI_SWARM_AGENT_ID = SAVED_AGENT_ID;
-	if (SAVED_ORCH === undefined) delete process.env.PI_SWARM_IS_ORCHESTRATOR;
-	else process.env.PI_SWARM_IS_ORCHESTRATOR = SAVED_ORCH;
+	if (SAVED_ORCH === undefined) delete process.env.PI_SWARM_IS_ROOT;
+	else process.env.PI_SWARM_IS_ROOT = SAVED_ORCH;
 });
 
 async function readEventsFile() {
@@ -84,7 +84,7 @@ async function countEvents(name) {
 
 async function setup({ taskId, withTask = true, ageMs = 0, allNodesDone = false } = {}) {
 	const st = await readState(p, dir);
-	ensureOrchestrator(st, dir, p);
+	ensureRoot(st, dir, p);
 	const ts = new Date().toISOString();
 	st.agents["worker-a"] = {
 		id: "worker-a", role: "worker-a role", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
@@ -130,7 +130,7 @@ async function seedTask(taskId, { ageMs = 0, allNodesDone = false } = {}) {
 		priority: "normal",
 		createdAt,
 		updatedAt: createdAt,
-		owner: "orchestrator",
+		owner: "root",
 		workflow: "feature-dev",
 		allowedFiles: [],
 		acceptanceCriteria: [],
@@ -154,7 +154,7 @@ async function tick(nowMs = Date.now()) {
 	let result;
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
-		ensureOrchestrator(st, dir, p);
+		ensureRoot(st, dir, p);
 		result = await evaluateTaskGraphStallNudgeLocked(pi, dir, p, st, nowMs);
 		await writeState(p, st);
 	});
@@ -239,7 +239,7 @@ console.log("\n[5] age > grace + all idle; first nudge emitted");
 	ok("counter=1 after first emit", slot?.consecutiveNoResolveNudges === 1);
 	ok("lastNudgeAt stamped", typeof slot?.lastNudgeAt === "string");
 	ok("notify key in trace", (await countEvents("task_stall.nudge_emitted")) >= 1);
-	ok("message persisted in mailbox", Boolean((await readFile(join(p.mailboxes, "orchestrator.jsonl"), "utf8").catch(() => "")).includes("graph-stall")));
+	ok("message persisted in mailbox", Boolean((await readFile(join(p.mailboxes, "root.jsonl"), "utf8").catch(() => "")).includes("graph-stall")));
 }
 
 // =============================================================
@@ -382,8 +382,8 @@ console.log("\n[12] goal set + task stalled -> goal fallback suppressed by actio
 	await setup({ taskId: "task-12", ageMs: 120_000 });
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		ensureOrchestrator(s, dir, p);
-		s.goal = { id: "goal-test", text: "Test goal", setAt: new Date().toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0 };
+		ensureRoot(s, dir, p);
+		s.goal = { id: "goal-test", text: "Test goal", setAt: new Date().toISOString(), setBy: "root", consecutiveNoResolveNudges: 0 };
 		await writeState(p, s);
 	});
 	await resetMessages();
@@ -456,7 +456,7 @@ console.log("\n[14] terminal=true -> trace task_stall.nudge.resolved emitted");
 	const task = {
 		taskId: "r112", title: "t", goal: "g", status: "in_progress",
 		nodes: {
-			commit: mkNode("done", "orchestrator"),
+			commit: mkNode("done", "root"),
 			test: mkNode("done", "r80-tester"),
 			implement: mkNode("assigned", "fs-implementer"),
 		},

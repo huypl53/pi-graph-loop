@@ -7,7 +7,7 @@
  *  - reopened done node is cleared and gets a fresh attempt on next assign
  *  - linear non-rework flow does NOT emit reopen traces
  *  - worker update without force still cannot reopen a done node
- *  - orchestrator force reopen from done -> ready succeeds
+ *  - root force reopen from done -> ready succeeds
  *  - failed->ready path remains functional
  *  - transiently non-reopenable rework targets do not consume the edge until reopen succeeds
  */
@@ -53,11 +53,11 @@ const readGlobalEvents = async () => {
 };
 
 const ORIG_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const ORIG_IS_ORCH = process.env.PI_SWARM_IS_ORCHESTRATOR;
+const ORIG_IS_ORCH = process.env.PI_SWARM_IS_ROOT;
 
-async function loadExtension({ agentId, isOrchestrator = false } = {}) {
+async function loadExtension({ agentId, isRoot = false } = {}) {
 	if (agentId) process.env.PI_SWARM_AGENT_ID = agentId; else delete process.env.PI_SWARM_AGENT_ID;
-	if (isOrchestrator) process.env.PI_SWARM_IS_ORCHESTRATOR = "1"; else delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+	if (isRoot) process.env.PI_SWARM_IS_ROOT = "1"; else delete process.env.PI_SWARM_IS_ROOT;
 	const tools = {};
 	const handlers = {};
 	const activeTools = new Set();
@@ -84,8 +84,8 @@ async function loadExtension({ agentId, isOrchestrator = false } = {}) {
 }
 
 const call = async (tools, name, params) => tools[name].execute("call", params, undefined, undefined, { cwd: scratch });
-const as = (agentId, isOrchestrator, fn) => async () => {
-	const tools = (await loadExtension({ agentId, isOrchestrator })).tools;
+const as = (agentId, isRoot, fn) => async () => {
+	const tools = (await loadExtension({ agentId, isRoot })).tools;
 	return fn(tools);
 };
 
@@ -113,16 +113,16 @@ async function assign(tools, taskId, nodeId, agentId) {
 	await call(tools, "swarm_assign_task", { taskId, nodeId, agentId, cwd: scratch });
 }
 
-async function updateAs(tools, agentId, isOrchestrator, params) {
+async function updateAs(tools, agentId, isRoot, params) {
 	const prevId = process.env.PI_SWARM_AGENT_ID;
-	const prevOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+	const prevOrch = process.env.PI_SWARM_IS_ROOT;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	if (isOrchestrator) process.env.PI_SWARM_IS_ORCHESTRATOR = "1"; else delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+	if (isRoot) process.env.PI_SWARM_IS_ROOT = "1"; else delete process.env.PI_SWARM_IS_ROOT;
 	try {
 		return await call(tools, "swarm_update_task", { ...params, cwd: scratch });
 	} finally {
 		if (prevId === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = prevId;
-		if (prevOrch === undefined) delete process.env.PI_SWARM_IS_ORCHESTRATOR; else process.env.PI_SWARM_IS_ORCHESTRATOR = prevOrch;
+		if (prevOrch === undefined) delete process.env.PI_SWARM_IS_ROOT; else process.env.PI_SWARM_IS_ROOT = prevOrch;
 	}
 }
 
@@ -133,7 +133,7 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	console.log("\n--- Scenario 1: default graph rework reopen ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "planner-a", "planner");
 	await registerAgent(tools, "implementer-a", "implementer");
 	await registerAgent(tools, "tester-a", "tester");
@@ -157,7 +157,7 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	ok("review becomes current from linear test->review", task.currentNodes.includes("review"));
 	ok("test stays done after first pass", task.nodes.test.status === "done");
 
-	await updateAs(tools, "orchestrator", true, { taskId, nodeId: "fix", status: "ready", force: true });
+	await updateAs(tools, "root", true, { taskId, nodeId: "fix", status: "ready", force: true });
 	await assign(tools, taskId, "fix", "implementer-a");
 	const fixAttempt = (await readTask(taskId)).nodes.fix.activeAttemptId;
 	await updateAs(tools, "implementer-a", false, { taskId, nodeId: "fix", status: "done", outcome: "implemented", attemptId: fixAttempt });
@@ -212,7 +212,7 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	ok("downstream review does not add consumption", task.reworkConsumption.length === 1);
 
 	// Fresh qualifying source attempt should be able to trigger a new cycle with a distinct identity.
-	await updateAs(tools, "orchestrator", true, { taskId, nodeId: "fix", status: "ready", force: true });
+	await updateAs(tools, "root", true, { taskId, nodeId: "fix", status: "ready", force: true });
 	await assign(tools, taskId, "fix", "implementer-a");
 	task = await readTask(taskId);
 	const fixAttempt2 = task.nodes.fix.activeAttemptId;
@@ -249,7 +249,7 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	console.log("\n--- Scenario 2: worker cannot reopen done node without force ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "worker-b", "tester");
 	const taskId = "task-rework-reopen-s2";
 	await createDefaultTask(tools, taskId);
@@ -265,22 +265,22 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 }
 
 // ============================================================
-// Scenario 3: orchestrator force reopen succeeds on done -> ready
+// Scenario 3: root force reopen succeeds on done -> ready
 // ============================================================
 {
-	console.log("\n--- Scenario 3: orchestrator force reopen succeeds ---");
+	console.log("\n--- Scenario 3: root force reopen succeeds ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "worker-c", "tester");
 	const taskId = "task-rework-reopen-s3";
 	await createDefaultTask(tools, taskId);
 	await assign(tools, taskId, "plan", "worker-c");
 	const planAttempt = (await readTask(taskId)).nodes.plan.activeAttemptId;
 	await updateAs(tools, "worker-c", false, { taskId, nodeId: "plan", status: "done", outcome: "planned", attemptId: planAttempt });
-	await updateAs(tools, "orchestrator", true, { taskId, nodeId: "plan", status: "ready", force: true });
+	await updateAs(tools, "root", true, { taskId, nodeId: "plan", status: "ready", force: true });
 	const task = await readTask(taskId);
-	ok("orchestrator force reopens done node to ready", task.nodes.plan.status === "ready");
+	ok("root force reopens done node to ready", task.nodes.plan.status === "ready");
 }
 
 // ============================================================
@@ -290,7 +290,7 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	console.log("\n--- Scenario 4: linear non-rework path does not emit reopen trace ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "worker-d", "implementer");
 	await registerAgent(tools, "worker-e", "reviewer");
 	const taskId = "task-rework-reopen-s4";
@@ -323,7 +323,7 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	console.log("\n--- Scenario 5: failed -> ready rework still works ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "worker-f", "tester");
 	await registerAgent(tools, "worker-g", "implementer");
 	const taskId = "task-rework-reopen-s5";
@@ -352,7 +352,7 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	console.log("\n--- Scenario 6: review rejection stays one-shot after fix completion ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "planner-b", "planner");
 	await registerAgent(tools, "implementer-b", "implementer");
 	await registerAgent(tools, "tester-b", "tester");
@@ -397,7 +397,7 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	console.log("\n--- Scenario 7: transient non-reopenable target keeps rework edge unconsumed ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { tools } = await loadExtension({ agentId: "orchestrator", isOrchestrator: true });
+	const { tools } = await loadExtension({ agentId: "root", isRoot: true });
 	await registerAgent(tools, "planner-c", "planner");
 	await registerAgent(tools, "implementer-c", "implementer");
 	await registerAgent(tools, "tester-c", "tester");
@@ -418,7 +418,7 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	const testAttempt = task.nodes.test.activeAttemptId;
 	await updateAs(tools, "tester-c", false, { taskId, nodeId: "test", status: "done", outcome: "passed", attemptId: testAttempt });
 	await assign(tools, taskId, "review", "reviewer-c");
-	await updateAs(tools, "orchestrator", true, { taskId, nodeId: "fix", status: "assigned", force: true });
+	await updateAs(tools, "root", true, { taskId, nodeId: "fix", status: "assigned", force: true });
 	task = await readTask(taskId);
 	ok("fix is assigned before review rejection", task.nodes.fix.status === "assigned");
 	const consumptionBefore = task.reworkConsumption?.length || 0;
@@ -428,7 +428,7 @@ async function updateAs(tools, agentId, isOrchestrator, params) {
 	ok("review rejection leaves assigned fix in place", task.nodes.fix.status === "assigned");
 	ok("review rejection does not consume rework yet", (task.reworkConsumption?.length || 0) === consumptionBefore);
 
-	await updateAs(tools, "orchestrator", true, { taskId, nodeId: "fix", status: "ready", force: true });
+	await updateAs(tools, "root", true, { taskId, nodeId: "fix", status: "ready", force: true });
 	await assign(tools, taskId, "fix", "implementer-c");
 	task = await readTask(taskId);
 	const fixAttempt2 = task.nodes.fix.activeAttemptId;

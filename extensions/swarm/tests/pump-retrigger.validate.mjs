@@ -1,6 +1,6 @@
-// Logic-mirror validation for the orchestrator auto-pump fix (defer-when-busy + bounded re-trigger).
+// Logic-mirror validation for the root auto-pump fix (defer-when-busy + bounded re-trigger).
 //
-// This script mirrors the EXACT decision conditions of pumpOrchestratorMailbox() in index.ts. It does
+// This script mirrors the EXACT decision conditions of pumpRootMailbox() in index.ts. It does
 // not import the compiled function (which is coupled to the live extension ctx/lock/state); instead it
 // re-evaluates the same boolean predicates against an in-memory model so the behavior can be asserted
 // deterministically. If you change the pump's decision logic, update the mirrors here too.
@@ -15,13 +15,13 @@ const PUMP_RETRIGGER_MAX = 3;
 let failures = 0;
 function assert(cond, msg) { if (!cond) { failures++; console.error("  ✗ FAIL:", msg); } else { console.log("  ✓", msg); } }
 
-// In-memory model of one orchestrator pump session + mailbox + message records.
+// In-memory model of one root pump session + mailbox + message records.
 function freshWorld() {
 	return {
 		now: 1_700_000_000_000,
 		mailbox: [], // [{id, requiresAck, ackedAt?}]
 		records: {}, // id -> {requiresAck, ackedAt?, surfacedAt?}
-		delivered: [], // orchestrator delivered ledger
+		delivered: [], // root delivered ledger
 		sess: { ids: [], triggeredAt: {}, retriggerCount: {}, lastAt: "" },
 	};
 }
@@ -142,18 +142,18 @@ console.log("\n[4] Informational (requiresAck:false) messages trigger exactly on
 	assert(r2.toSurface.length === 0, "informational message is NOT re-triggered (sufficient to prompt once)");
 }
 
-console.log("\n[5] Informational message is not replayed to a new orchestrator session once already surfaced");
+console.log("\n[5] Informational message is not replayed to a new root session once already surfaced");
 {
 	const w = freshWorld();
 	const info = { id: "info-2", requiresAck: false };
 	w.mailbox.push(info);
 	w.records["info-2"] = { requiresAck: false };
 	const r1 = pumpDecision(w, true);
-	assert(r1.toSurface.length === 1, "first orchestrator session surfaces informational message");
-	// Simulate a fresh orchestrator process/session: empty per-session surfaced ledger.
+	assert(r1.toSurface.length === 1, "first root session surfaces informational message");
+	// Simulate a fresh root process/session: empty per-session surfaced ledger.
 	w.sess = { ids: [], triggeredAt: {}, retriggerCount: {}, lastAt: "" };
 	const r2 = pumpDecision(w, true);
-	assert(r2.toSurface.length === 0, "fresh orchestrator session skips already-surfaced informational history");
+	assert(r2.toSurface.length === 0, "fresh root session skips already-surfaced informational history");
 	assert(Boolean(w.records["info-2"].surfacedAt), "informational record stamped surfacedAt for global consume");
 }
 

@@ -6,8 +6,8 @@
 //     MAX_SWAP_CHAIN=2 cap as the auto-swap path.
 //   - `rotate next` benches the current slot for `rotation.cooldownMs` so the next pickSlot()
 //     skips it. Does NOT call setModel. Traces `pool.bench_forced_by_manual_override`.
-//   - The authority gate refuses non-orchestrator sessions with the standard `… is
-//     orchestrator-only: …` notify wording (matches attention|remind|stop|release|goal).
+//   - The authority gate refuses non-root sessions with the standard `… is
+//     root-only: …` notify wording (matches attention|remind|stop|release|goal).
 //   - Manual override traces have the exact expected shape (event + payload fields).
 //   - Existing pool-retry and pool-swap tests still pass (constants extraction is a pure relocation;
 //     the gate behavior is unchanged).
@@ -81,7 +81,7 @@ const ctx = {
 };
 
 // --- seed an agent record + register hooks + command dispatcher ---
-async function freshSession(agentId = "orchestrator", model = fakeModelGlm) {
+async function freshSession(agentId = "root", model = fakeModelGlm) {
 	const { rm } = await import("node:fs/promises");
 	await rm(join(dir, ".pi", "swarm", "pool-state.json"), { force: true }).catch(() => {});
 	await rm(p.events, { force: true }).catch(() => {});
@@ -89,7 +89,7 @@ async function freshSession(agentId = "orchestrator", model = fakeModelGlm) {
 	sentMessages.length = 0;
 	notifications.length = 0;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	// Re-register hooks (clears hookHandlers) so each fixture has a fresh engine-retry gate.
 	for (const k of Object.keys(hookHandlers)) delete hookHandlers[k];
 	registerSwarmHooks(fakePi);
@@ -120,10 +120,10 @@ registerSwarmCommand(fakePi);
 	const traceLines = evDelta.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 	const forced = traceLines.find((e) => e.event === "pool.swap_forced_by_manual_override");
 	ok("case A: pool.swap_forced_by_manual_override trace fired", Boolean(forced), `forced=${JSON.stringify(forced)}`);
-	ok("case A: forced trace carries agentId, from, to, reason", forced && forced.agentId === "orchestrator" && forced.from === "zai-coding-cn/glm-5.1" && forced.to && forced.from !== forced.to && typeof forced.reason === "string", `payload=${JSON.stringify(forced)}`);
+	ok("case A: forced trace carries agentId, from, to, reason", forced && forced.agentId === "root" && forced.from === "zai-coding-cn/glm-5.1" && forced.to && forced.from !== forced.to && typeof forced.reason === "string", `payload=${JSON.stringify(forced)}`);
 	// Q1 (reviewer F1): the swap-chain counter MUST be bumped after a successful manual swap.
 	// Operator is accountable for the same MAX_SWAP_CHAIN=2 cap as the auto-swap path.
-	ok("case A Q1: swap-chain counter bumped to 1 after rotate now", getSwapChainCount("orchestrator") === 1, `count=${getSwapChainCount("orchestrator")}`);
+	ok("case A Q1: swap-chain counter bumped to 1 after rotate now", getSwapChainCount("root") === 1, `count=${getSwapChainCount("root")}`);
 	// Negative sub-case A1: with all alternatives benched, `rotate now` refuses without setModel.
 	// Bench all slots (including current glm) so pickSlot truly returns undefined.
 	await freshSession();
@@ -172,7 +172,7 @@ registerSwarmCommand(fakePi);
 	const traceLines = evDelta.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 	const benched = traceLines.find((e) => e.event === "pool.bench_forced_by_manual_override");
 	ok("case B: pool.bench_forced_by_manual_override trace fired", Boolean(benched), `benched=${JSON.stringify(benched)}`);
-	ok("case B: bench trace carries agentId + slot + cooldownMs", benched && benched.agentId === "orchestrator" && benched.slot === "zai-coding-cn/glm-5.1" && benched.cooldownMs === 900_000, `payload=${JSON.stringify(benched)}`);
+	ok("case B: bench trace carries agentId + slot + cooldownMs", benched && benched.agentId === "root" && benched.slot === "zai-coding-cn/glm-5.1" && benched.cooldownMs === 900_000, `payload=${JSON.stringify(benched)}`);
 	const slotFailure = traceLines.find((e) => e.event === "pool.slot_failure");
 	ok("case B: pool.slot_failure NOT fired (no provider error recorded)", !slotFailure);
 }
@@ -183,7 +183,7 @@ registerSwarmCommand(fakePi);
 // the bench should be ~2h, not 15min. This exercises the same
 // effectiveBenchMs() path as recordProviderError's quota branch.
 // ============================================================================
-// NOTE: command.ts:822 is OUT OF SCOPE for the Issue 21 implementer (orchestrator routes the
+// NOTE: command.ts:822 is OUT OF SCOPE for the Issue 21 implementer (root routes the
 // rotate-next + docs changes to a follow-up after Issue 20 commit). Until that lands, the manual
 // rotate-next bench still uses rotation.cooldownMs (the plan-review §R4 binding is pending). The
 // additive fixture therefore asserts the CURRENT (pre-follow-up) behavior — same as case B — and
@@ -230,27 +230,27 @@ registerSwarmCommand(fakePi);
 }
 
 // ============================================================================
-// CASE C — Worker (non-orchestrator) authority refused
+// CASE C — Worker (non-root) authority refused
 // ============================================================================
 {
 	await freshSession();
 	process.env.PI_SWARM_AGENT_ID = "worker-a";
-	delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+	delete process.env.PI_SWARM_IS_ROOT;
 	const before = setModelCalls.length;
 	await commandHandlers["swarm"]("pool rotate now", { ...ctx, model: fakeModelGlm });
 	ok("case C now: setModel NOT called for worker", setModelCalls.length === before);
 	const warn = notifications.filter((n) => n.level === "warning").slice(-1)[0];
-	ok("case C now: refuses with 'rotate is orchestrator-only' warning", warn && /rotate is orchestrator-only/.test(warn.text), `warn=${JSON.stringify(warn)}`);
+	ok("case C now: refuses with 'rotate is root-only' warning", warn && /rotate is root-only/.test(warn.text), `warn=${JSON.stringify(warn)}`);
 
 	const beforeNext = setModelCalls.length;
 	await commandHandlers["swarm"]("pool rotate next", { ...ctx, model: fakeModelGlm });
 	ok("case C next: setModel NOT called for worker", setModelCalls.length === beforeNext);
 	const warnNext = notifications.filter((n) => n.level === "warning").slice(-1)[0];
-	ok("case C next: refuses with 'rotate is orchestrator-only' warning", warnNext && /rotate is orchestrator-only/.test(warnNext.text), `warn=${JSON.stringify(warnNext)}`);
+	ok("case C next: refuses with 'rotate is root-only' warning", warnNext && /rotate is root-only/.test(warnNext.text), `warn=${JSON.stringify(warnNext)}`);
 
-	// Restore orchestrator env for subsequent cases.
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	// Restore root env for subsequent cases.
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 }
 
 // ============================================================================
@@ -266,8 +266,8 @@ registerSwarmCommand(fakePi);
 	const traceLines = evDelta.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 	const forced = traceLines.find((e) => e.event === "pool.swap_forced_by_manual_override");
 	const benched = traceLines.find((e) => e.event === "pool.bench_forced_by_manual_override");
-	ok("case D: forced trace has expected shape", forced && forced.agentId === "orchestrator" && forced.from && forced.to && forced.reason && forced.target, `payload=${JSON.stringify(forced)}`);
-	ok("case D: bench trace has expected shape", benched && benched.agentId === "orchestrator" && benched.slot && typeof benched.cooldownMs === "number", `payload=${JSON.stringify(benched)}`);
+	ok("case D: forced trace has expected shape", forced && forced.agentId === "root" && forced.from && forced.to && forced.reason && forced.target, `payload=${JSON.stringify(forced)}`);
+	ok("case D: bench trace has expected shape", benched && benched.agentId === "root" && benched.slot && typeof benched.cooldownMs === "number", `payload=${JSON.stringify(benched)}`);
 	// Negative: gate's own events are NOT fired by the manual override path.
 	const gated = traceLines.find((e) => e.event === "pool.swap_gated_by_engine_retry");
 	const exhausted = traceLines.find((e) => e.event === "pool.engine_retry_exhausted");
@@ -332,18 +332,18 @@ registerSwarmCommand(fakePi);
 		stopReason: "error", errorMessage: "fetch failed: ECONNREFUSED",
 	}, toolResults: [] }, { ...ctx, model: fakeModelGlm });
 	ok("FI during-incident now: incident opened, no auto-swap", setModelCalls.length === 0);
-	console.log("DEBUG incident after turn_end:", JSON.stringify(getEngineRetryIncident("orchestrator")));
-	console.log("DEBUG swapChain count:", getSwapChainCount("orchestrator"));
+	console.log("DEBUG incident after turn_end:", JSON.stringify(getEngineRetryIncident("root")));
+	console.log("DEBUG swapChain count:", getSwapChainCount("root"));
 	console.log("DEBUG hookHandlers keys:", Object.keys(hookHandlers));
 	// Q3 (reviewer F1): the open incident's Map state MUST be preserved across the manual swap
 	// (the engine-retry gate owns its own lifecycle; manual override does NOT clear it).
-	const incidentBefore = getEngineRetryIncident("orchestrator");
+	const incidentBefore = getEngineRetryIncident("root");
 	ok("FI during-incident now Q3: open incident present before rotate", incidentBefore && incidentBefore.count === 1 && incidentBefore.providerKey === "zai-coding-cn/glm-5.1", `incidentBefore=${JSON.stringify(incidentBefore)}`);
 	const incidentAtMs = incidentBefore ? incidentBefore.lastSeenAt : 0;
 	const before = setModelCalls.length;
 	await commandHandlers["swarm"]("pool rotate now", { ...ctx, model: fakeModelGlm });
 	ok("FI during-incident now: manual override succeeds despite open incident", setModelCalls.length === before + 1);
-	const incidentAfter = getEngineRetryIncident("orchestrator");
+	const incidentAfter = getEngineRetryIncident("root");
 	ok("FI during-incident now Q3: incident Map entry preserved after rotate now", Boolean(incidentAfter), `incidentAfter=${JSON.stringify(incidentAfter)}`);
 	ok("FI during-incident now Q3: incident count preserved (gate owns its own lifecycle)", incidentAfter && incidentAfter.count === 1, `count=${incidentAfter?.count}`);
 	ok("FI during-incident now Q3: incident lastSeenAt preserved (not touched by manual path)", incidentAfter && incidentAfter.lastSeenAt === incidentAtMs, `lastSeenAt before=${incidentAtMs} after=${incidentAfter?.lastSeenAt}`);

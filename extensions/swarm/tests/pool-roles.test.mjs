@@ -83,12 +83,12 @@ async function resetHealth() {
 		const s = await pickSlot(p, { roleKind: "implementer" });
 		ok(`strict ${i}: implementer picks only its tagged glm slot`, s && s.slot.model === "glm-5.1", JSON.stringify(s?.slot));
 	}
-	// Untagged roleKinds (reviewer/orchestrator) are unaffected — served by untagged slots.
-	const so = await pickSlot(p, { roleKind: "orchestrator" });
+	// Untagged roleKinds (reviewer/root) are unaffected — served by untagged slots.
+	const so = await pickSlot(p, { roleKind: "root" });
 	ok("strict: untagged roleKind served by untagged slot", so && so.slot.model === "gpt-5.4-mini", JSON.stringify(so?.slot));
 
 	// D + J: absent roles field / legacy undefined roleKind -> no filter.
-	const d = await pickSlot(p, { roleKind: "orchestrator" });
+	const d = await pickSlot(p, { roleKind: "root" });
 	ok("case D: absent-roles slot eligible for any role", Boolean(d)); // may pick glm or gpt; just no-undefined
 	const j = await pickSlot(p, {});
 	ok("case J: legacy callers (no roleKind) still pick", Boolean(j));
@@ -212,14 +212,14 @@ async function seedAgentRecord(agentId, roleKind) {
 	await writeState(p, st);
 }
 
-async function freshSession(agentId = "orchestrator") {
+async function freshSession(agentId = "root") {
 	await rm(join(dir, ".pi", "swarm", "pool-state.json"), { force: true }).catch(() => {});
 	await rm(p.events, { force: true }).catch(() => {});
 	setModelCalls.length = 0;
 	sentMessages.length = 0;
 	notifications.length = 0;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	for (const k of Object.keys(hookHandlers)) delete hookHandlers[k];
 	registerSwarmHooks(fakePi);
 	const ss = hookHandlers["session_start"][0];
@@ -237,7 +237,7 @@ registerSwarmCommand(fakePi);
 // --- CASE E: rotate now bypasses the role filter; trace carries rolesIgnored + agentRoleKind ---
 {
 	await freshSession();
-	await seedAgentRecord("orchestrator", "orchestrator");
+	await seedAgentRecord("root", "root");
 	await seedAgentRecord("worker-a", "reviewer"); // reviewer: glm slot excluded by roles filter
 	const evBefore = (await traceEvents()).length;
 	await commandHandlers["swarm"]("pool rotate now", { ...ctx, model: fakeModelGlm });

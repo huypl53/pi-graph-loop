@@ -125,7 +125,7 @@ try {
 	const msg = {
 		id: "msg-uat-1",
 		swarmId: "swarm-uat",
-		from: "orchestrator",
+		from: "root",
 		to: "test-agent",
 		priority: "normal",
 		type: "swarm.message",

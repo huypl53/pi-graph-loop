@@ -133,7 +133,7 @@ function probeP2(st: SwarmState) {
 }
 
 function probeP3(events: any[]) {
-	const hits = events.filter((e) => String(e.event || "") === "mailbox.orchestrator_pump_stuck_escalated").sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || "")));
+	const hits = events.filter((e) => String(e.event || "") === "mailbox.root_pump_stuck_escalated").sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || "")));
 	const epochs: any[] = [];
 	let current: any | undefined;
 	for (const e of hits) {

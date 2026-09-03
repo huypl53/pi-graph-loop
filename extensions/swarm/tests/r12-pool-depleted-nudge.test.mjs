@@ -2,8 +2,8 @@
 /**
  * R12 P0 — pool-depletion nudge tests (companion to r12-shared-pool-sweep.test.mjs).
  *
- * Contract (R12): a task close that transitions the effective live non-orchestrator agent pool
- * from ≥1 to 0 emits exactly ONE priority-high orchestrator nudge (mailbox record +
+ * Contract (R12): a task close that transitions the effective live non-root agent pool
+ * from ≥1 to 0 emits exactly ONE priority-high root nudge (mailbox record +
  * `pool.depleted_nudge` trace + `deliverMessageLocked(priority: "high")` for Issue 86 interrupt).
  * Transitions that DO NOT nudge: 0 → 0, ≥1 → ≥1. Idempotent within a single sweep call.
  *
@@ -49,8 +49,8 @@ async function readStateFile() {
 async function writeStateFile(state) {
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(state, null, 2));
 }
-async function readOrchestratorMailbox() {
-	const p = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
+async function readRootMailbox() {
+	const p = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
 	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
@@ -124,12 +124,12 @@ console.log("\n[N1] real depletion ≥1 → 0 → exactly 1 nudge");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl"), "", "utf8");
+	await writeFile(join(scratch, ".pi/swarm/mailboxes/root.jsonl"), "", "utf8");
 	await clearEvents();
 
 	const taskId = "task-r12-n1";
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { roleKind: "orchestrator", tmuxTarget: "r12:orchestrator.0" }),
+		root: makeAgent("root", { roleKind: "root", tmuxTarget: "r12:root.0" }),
 		"dedicated-n1": makeAgent("dedicated-n1", { roleKind: "worker", spawnedForTaskId: taskId, activeTaskIds: [], tmuxTarget: "r12:dedicated-n1.0" }),
 	});
 	const task = makeTask(taskId, { "node-n1": { id: "node-n1", assignee: "dedicated-n1", status: "done" } });
@@ -149,11 +149,11 @@ console.log("\n[N1] real depletion ≥1 → 0 → exactly 1 nudge");
 		ok("N1 trace.postSweepLive === 0", nudges[0].postSweepLive === 0);
 	}
 
-	const mailbox = await readOrchestratorMailbox();
+	const mailbox = await readRootMailbox();
 	const nudgeMsgs = findPoolDepletedMessages(mailbox);
-	ok("N1 exactly 1 high-priority orchestrator nudge in mailbox", nudgeMsgs.length === 1, `got ${nudgeMsgs.length}`);
+	ok("N1 exactly 1 high-priority root nudge in mailbox", nudgeMsgs.length === 1, `got ${nudgeMsgs.length}`);
 	if (nudgeMsgs.length === 1) {
-		ok("N1 nudge.to === 'orchestrator'", nudgeMsgs[0].to === "orchestrator");
+		ok("N1 nudge.to === 'root'", nudgeMsgs[0].to === "root");
 		ok("N1 nudge.priority === 'high'", nudgeMsgs[0].priority === "high");
 		ok("N1 nudge.subject === 'swarm pool depleted'", nudgeMsgs[0].subject === "swarm pool depleted");
 		ok("N1 nudge.idempotencyKey === 'pool_depleted:taskId'", nudgeMsgs[0].idempotencyKey === `pool_depleted:${taskId}`);
@@ -169,12 +169,12 @@ console.log("\n[N2] non-depleting ≥1 → ≥1 → 0 nudges");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl"), "", "utf8");
+	await writeFile(join(scratch, ".pi/swarm/mailboxes/root.jsonl"), "", "utf8");
 	await clearEvents();
 
 	const taskId = "task-r12-n2";
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { roleKind: "orchestrator", tmuxTarget: "r12:orchestrator.0" }),
+		root: makeAgent("root", { roleKind: "root", tmuxTarget: "r12:root.0" }),
 		"dedicated-n2": makeAgent("dedicated-n2", { roleKind: "worker", spawnedForTaskId: taskId, activeTaskIds: [], tmuxTarget: "r12:dedicated-n2.0" }),
 		"survivor-n2-a": makeAgent("survivor-n2-a", { roleKind: "worker", activeTaskIds: [], tmuxTarget: "r12:survivor-n2-a.0" }),
 		"survivor-n2-b": makeAgent("survivor-n2-b", { roleKind: "worker", activeTaskIds: [], tmuxTarget: "r12:survivor-n2-b.0" }),
@@ -191,9 +191,9 @@ console.log("\n[N2] non-depleting ≥1 → ≥1 → 0 nudges");
 	const nudges = countPoolDepletedTraces(events);
 	ok("N2 NO pool.depleted_nudge trace", nudges.length === 0, `got ${nudges.length}`);
 
-	const mailbox = await readOrchestratorMailbox();
+	const mailbox = await readRootMailbox();
 	const nudgeMsgs = findPoolDepletedMessages(mailbox);
-	ok("N2 NO high-priority orchestrator nudge", nudgeMsgs.length === 0, `got ${nudgeMsgs.length}`);
+	ok("N2 NO high-priority root nudge", nudgeMsgs.length === 0, `got ${nudgeMsgs.length}`);
 }
 
 // =============================================================================
@@ -204,13 +204,13 @@ console.log("\n[N3] 0 → 0 → 0 nudges (idempotent / already-empty pool)");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl"), "", "utf8");
+	await writeFile(join(scratch, ".pi/swarm/mailboxes/root.jsonl"), "", "utf8");
 	await clearEvents();
 
 	const taskId = "task-r12-n3";
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { roleKind: "orchestrator", tmuxTarget: "r12:orchestrator.0" }),
-		// No other workers — pool is effectively 0 non-orchestrator agents.
+		root: makeAgent("root", { roleKind: "root", tmuxTarget: "r12:root.0" }),
+		// No other workers — pool is effectively 0 non-root agents.
 	});
 	const task = makeTask(taskId, {});
 	await writeStateFile(state);
@@ -224,9 +224,9 @@ console.log("\n[N3] 0 → 0 → 0 nudges (idempotent / already-empty pool)");
 	const nudges = countPoolDepletedTraces(events);
 	ok("N3 NO pool.depleted_nudge trace (0 → 0)", nudges.length === 0, `got ${nudges.length}`);
 
-	const mailbox = await readOrchestratorMailbox();
+	const mailbox = await readRootMailbox();
 	const nudgeMsgs = findPoolDepletedMessages(mailbox);
-	ok("N3 NO high-priority orchestrator nudge", nudgeMsgs.length === 0);
+	ok("N3 NO high-priority root nudge", nudgeMsgs.length === 0);
 }
 
 // =============================================================================
@@ -237,7 +237,7 @@ console.log("\n[N4] two depleting closes → 2 nudges total");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl"), "", "utf8");
+	await writeFile(join(scratch, ".pi/swarm/mailboxes/root.jsonl"), "", "utf8");
 	await clearEvents();
 
 	const taskA = "task-r12-n4a";
@@ -245,7 +245,7 @@ console.log("\n[N4] two depleting closes → 2 nudges total");
 
 	// First close: dedicated-n4a is swept, pool ends at 0 → 1 nudge.
 	let state = makeState({
-		orchestrator: makeAgent("orchestrator", { roleKind: "orchestrator", tmuxTarget: "r12:orchestrator.0" }),
+		root: makeAgent("root", { roleKind: "root", tmuxTarget: "r12:root.0" }),
 		"dedicated-n4a": makeAgent("dedicated-n4a", { roleKind: "worker", spawnedForTaskId: taskA, activeTaskIds: [], tmuxTarget: "r12:dedicated-n4a.0" }),
 	});
 	const taskAObj = makeTask(taskA, { "node-a": { id: "node-a", assignee: "dedicated-n4a", status: "done" } });
@@ -268,9 +268,9 @@ console.log("\n[N4] two depleting closes → 2 nudges total");
 	const taskIds = nudges.map((n) => n.taskId).sort();
 	ok("N4 traces cover both taskIds", JSON.stringify(taskIds) === JSON.stringify([taskA, taskB].sort()), `got ${JSON.stringify(taskIds)}`);
 
-	const mailbox = await readOrchestratorMailbox();
+	const mailbox = await readRootMailbox();
 	const nudgeMsgs = findPoolDepletedMessages(mailbox);
-	ok("N4 exactly 2 high-priority orchestrator nudges", nudgeMsgs.length === 2, `got ${nudgeMsgs.length}`);
+	ok("N4 exactly 2 high-priority root nudges", nudgeMsgs.length === 2, `got ${nudgeMsgs.length}`);
 	const msgTaskIds = nudgeMsgs.map((m) => m.idempotencyKey).sort();
 	ok("N4 nudge idempotencyKeys cover both taskIds", JSON.stringify(msgTaskIds) === JSON.stringify([`pool_depleted:${taskA}`, `pool_depleted:${taskB}`].sort()), `got ${JSON.stringify(msgTaskIds)}`);
 }

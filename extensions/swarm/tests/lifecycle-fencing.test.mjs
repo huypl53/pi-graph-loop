@@ -3,7 +3,7 @@
  * Lifecycle-fencing test (reliability-roadmap issue 9).
  *
  * Invariants under test:
- *   - Stale lifecycle notifications (agent_settled, session_shutdown, orchestrator
+ *   - Stale lifecycle notifications (agent_settled, session_shutdown, root
  *     safety-net nudges, closure / cancellation notifies) are suppressed at EMIT TIME
  *     via the two durable-state predicates (checkStallNotificationStale +
  *     checkClosureNotificationStale). Audit traces `notification.stale.suppressed`
@@ -16,7 +16,7 @@
  * Pattern: REAL emitter invocation per emitter group. NO mocks, NO fixture echoes,
  * NO function-only assertions (per Re-C2 caveat). Per-group real invocation:
  *   - Sites 1-3 (hooks): registerSwarmHooks + captured pi.on callbacks
- *   - Sites 4-5 (pump): pumpOrchestratorMailbox(ctx, "test") via the real orchestrator session_start path
+ *   - Sites 4-5 (pump): pumpRootMailbox(ctx, "test") via the real root session_start path
  *   - Sites 6/7/8 (tools): factory default + captured registerTool + tool.execute
  *   - Site 9 (command): factory default + captured registerCommand + cmd handler
  *
@@ -74,7 +74,7 @@ const fixture = (overrides = {}) => ({
 	version: 1, swarmId: "test", cwd: scratch,
 	tmuxSession: "test",
 	agents: {
-		"orchestrator": { id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+		"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
 		"worker-a": { id: "worker-a", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-a", tmuxTarget: "test:worker-a.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
 		"worker-b": { id: "worker-b", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-b", tmuxTarget: "test:worker-b.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-b.jsonl", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
 	},
@@ -87,7 +87,7 @@ const fixture = (overrides = {}) => ({
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 
-async function loadExtension({ identity = "orchestrator", extraHandlers = {} } = {}) {
+async function loadExtension({ identity = "root", extraHandlers = {} } = {}) {
 	process.env.PI_SWARM_AGENT_ID = identity;
 	const handlers = {};
 	const commands = {};
@@ -114,7 +114,7 @@ const minimalTask = (taskId, nodeId, overrides = {}) => ({
 	version: 1, taskId, title: "test", goal: "test",
 	status: "in_progress", priority: "normal",
 	createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-	owner: "orchestrator", workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
+	owner: "root", workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
 	start: nodeId, currentNodes: [nodeId],
 	sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 	nodes: {
@@ -143,7 +143,7 @@ async function seedTask(task) {
 async function seedAssignmentMessage(st, node, taskId) {
 	const assignee = node.assignee || "worker-a";
 	st.messages[`msg-${node}`] = {
-		id: `msg-${node}`, from: "orchestrator", to: assignee, status: "injected",
+		id: `msg-${node}`, from: "root", to: assignee, status: "injected",
 		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 		injectedAt: new Date().toISOString(), attempts: 1,
 		requiresAck: true, requiresResponse: true,
@@ -181,10 +181,10 @@ async function seedAssignmentMessage(st, node, taskId) {
 	ok("agent_settled hook registered", !!agentSettled);
 
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
-	const beforeMailbox = await readMailbox("orchestrator");
+	const beforeMailbox = await readMailbox("root");
 	const afterEvents0 = await readGlobalEvents();
 	await agentSettled({}, ctx);
-	const afterMailbox = await readMailbox("orchestrator");
+	const afterMailbox = await readMailbox("root");
 	// Within grace: site 2 (open_assignment) AND site 1 (response_missing) both deliver — site 1 is
 	// seeded as a missing-response message in this scenario (assignee=worker-a, requiresResponse, no
 	// response). The site-2 fence is the focus of this scenario (no false-positive suppression).
@@ -215,16 +215,16 @@ async function seedAssignmentMessage(st, node, taskId) {
 
 	const { handlers } = await loadExtension({ identity: "worker-a" });
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
-	const beforeMailbox = await readMailbox("orchestrator");
+	const beforeMailbox = await readMailbox("root");
 	await handlers["agent_settled"][0]({}, ctx);
 	const afterEvents = await readGlobalEvents();
-	const afterMailbox = await readMailbox("orchestrator");
+	const afterMailbox = await readMailbox("root");
 	const suppressedTrace = afterEvents.find((e) => e.event === "notification.stale.suppressed" && e.site === "agent_settled.open_assignment" && e.nodeId === "implement");
 	ok("settle suppression trace present for stopped agent", !!suppressedTrace);
 	ok("settle suppression reason is one of: agent_stopped|node_terminal|assignee_drift|task_closed|superseded", suppressedTrace && /agent_stopped|node_terminal|assignee_drift|task_closed|superseded/.test(suppressedTrace.reason || ""));
 	// Site 1 (response-missing) may still deliver a separate notify; the site-2 open-assignment
 	// notify is the focus of this scenario and must NOT be delivered.
-	ok("orchestrator mailbox did NOT receive site-2 stale notify", !afterMailbox.some((m) => m.subject && m.subject.includes("settled idle with open assignment")));
+	ok("root mailbox did NOT receive site-2 stale notify", !afterMailbox.some((m) => m.subject && m.subject.includes("settled idle with open assignment")));
 
 	// node.json pointer integrity: no mutation
 	const nodeAfter = (await readTaskFile(taskId)).nodes.implement;
@@ -248,7 +248,7 @@ async function seedAssignmentMessage(st, node, taskId) {
 	st.agents["worker-a"].activeTaskIds = [taskId];
 	// Seed a superseded responseMissing rec
 	st.messages["sup-msg-1"] = {
-		id: "sup-msg-1", from: "orchestrator", to: "worker-a", status: "injected",
+		id: "sup-msg-1", from: "root", to: "worker-a", status: "injected",
 		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 		injectedAt: new Date().toISOString(), attempts: 1,
 		requiresAck: true, requiresResponse: true,
@@ -259,13 +259,13 @@ async function seedAssignmentMessage(st, node, taskId) {
 
 	const { handlers } = await loadExtension({ identity: "worker-a" });
 	const beforeEvents = await readGlobalEvents();
-	const beforeMailbox = await readMailbox("orchestrator");
+	const beforeMailbox = await readMailbox("root");
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true };
 	await handlers["agent_settled"][0]({}, ctx);
 	const afterEvents = await readGlobalEvents();
-	const afterMailbox = await readMailbox("orchestrator");
+	const afterMailbox = await readMailbox("root");
 	ok("site 1 suppression trace emitted", afterEvents.some((e) => e.event === "notification.stale.suppressed" && e.site === "agent_settled.response_missing"));
-	ok("orchestrator mailbox did NOT receive stale notify (site 1)", afterMailbox.length === beforeMailbox.length);
+	ok("root mailbox did NOT receive stale notify (site 1)", afterMailbox.length === beforeMailbox.length);
 }
 
 // ============================================================
@@ -292,7 +292,7 @@ async function seedAssignmentMessage(st, node, taskId) {
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true };
 	await handlers["session_shutdown"][0]({}, ctx);
 	const afterEvents = await readGlobalEvents();
-	const afterMailbox = await readMailbox("orchestrator");
+	const afterMailbox = await readMailbox("root");
 	ok("session_shutdown suppression trace emitted", afterEvents.some((e) => e.event === "notification.stale.suppressed" && e.site === "session_shutdown.open_node"));
 	ok("shutdown with terminal node does NOT send notify", afterMailbox.length === 0);
 }
@@ -314,7 +314,7 @@ async function seedAssignmentMessage(st, node, taskId) {
 		version: 1, taskId, title: "test", goal: "test",
 		status: "in_progress", priority: "normal",
 		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		owner: "orchestrator", workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
+		owner: "root", workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
 		start: "plan", currentNodes: ["plan"],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: {
@@ -329,17 +329,17 @@ async function seedAssignmentMessage(st, node, taskId) {
 	// Old assignment message so the predicate's agent_stopped + age>grace branch fires.
 	const oldMsg = new Date(Date.now() - 5 * 60_000).toISOString();
 	task.nodes.plan.assignmentMessageId = "msg-plan";
-	st.messages["msg-plan"] = { id: "msg-plan", from: "orchestrator", to: "worker-a", status: "injected", createdAt: oldMsg, updatedAt: oldMsg, injectedAt: oldMsg, attempts: 1, requiresAck: true, requiresResponse: true, idempotencyKey: "assign:task-fencing-4:plan:worker-a:1" };
+	st.messages["msg-plan"] = { id: "msg-plan", from: "root", to: "worker-a", status: "injected", createdAt: oldMsg, updatedAt: oldMsg, injectedAt: oldMsg, attempts: 1, requiresAck: true, requiresResponse: true, idempotencyKey: "assign:task-fencing-4:plan:worker-a:1" };
 	await writeStateFile(st);
 
-	// Seed the orchestrator leader lease so the pump's preflight passes (it must see the current
+	// Seed the root leader lease so the pump's preflight passes (it must see the current
 	// process as the leader before reconcile runs).
 	const leaderTs = new Date().toISOString();
-	st.orchestratorLeader = { pid: process.pid, sessionStartedAt: leaderTs, claimedAt: leaderTs, lastHeartbeatAt: leaderTs, agentRecordId: "orchestrator" };
+	st.rootLeader = { pid: process.pid, sessionStartedAt: leaderTs, claimedAt: leaderTs, lastHeartbeatAt: leaderTs, agentRecordId: "root" };
 	await writeStateFile(st);
 	// graph-advance + initial-ready watchers in their real withLock block.
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
-	const { handlers } = await loadExtension({ identity: "orchestrator" });
+	process.env.PI_SWARM_IS_ROOT = "1";
+	const { handlers } = await loadExtension({ identity: "root" });
 	const sessionStart = handlers["session_start"][0];
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
 	await sessionStart({}, ctx);
@@ -363,22 +363,22 @@ async function seedAssignmentMessage(st, node, taskId) {
 	st.agents["worker-a"].activeTaskIds = [taskId];
 	const key = `task:${taskId}:agent:worker-a:nudge:settle-stale`;
 	st.messages[`msg-prev`] = {
-		id: "msg-prev", from: "orchestrator", to: "orchestrator", status: "injected",
+		id: "msg-prev", from: "root", to: "root", status: "injected",
 		createdAt: new Date(Date.now() - 10_000).toISOString(), updatedAt: new Date().toISOString(),
 		injectedAt: new Date().toISOString(), attempts: 1, requiresAck: false, requiresResponse: false,
 		subject: "settle-stale", idempotencyKey: key,
 	};
-	st.delivered["orchestrator"] = ["msg-prev"];
+	st.delivered["root"] = ["msg-prev"];
 	await writeStateFile(st);
 
 	const { handlers } = await loadExtension({ identity: "worker-a" });
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true };
-	const beforeMailbox = await readMailbox("orchestrator");
+	const beforeMailbox = await readMailbox("root");
 	await handlers["agent_settled"][0]({}, ctx);
-	const afterMailbox = await readMailbox("orchestrator");
+	const afterMailbox = await readMailbox("root");
 	const afterEvents = await readGlobalEvents();
 	ok("dedupe trace or suppression trace recorded", afterEvents.some((e) => e.event === "notification.stale.suppressed" || e.event === "task.stale.settled.notify_cooldown"));
-	ok("orchestrator mailbox did NOT receive a second settle-stale nudge", afterMailbox.filter((m) => m.subject === "agent worker-a settled idle with open assignment(s)").length === 0);
+	ok("root mailbox did NOT receive a second settle-stale nudge", afterMailbox.filter((m) => m.subject === "agent worker-a settled idle with open assignment(s)").length === 0);
 }
 
 // ============================================================
@@ -396,7 +396,7 @@ async function seedAssignmentMessage(st, node, taskId) {
 		implement: { status: "assigned", role: "implementer", dependsOn: ["plan"], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1, maxAttempts: 3, assignee: "worker-a", activeAttemptId: "a-impl", attemptHistory: [{ attemptId: "a-impl", attemptNumber: 1, assignee: "worker-a", assignedAt: new Date().toISOString(), status: "active" }], lastActivityAt: new Date().toISOString() },
 		test: { status: "pending", role: "tester", dependsOn: ["implement"], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 3 },
 		review: { status: "pending", role: "reviewer", dependsOn: ["test"], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 2 },
-		commit: { status: "pending", role: "orchestrator", dependsOn: ["review"], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, terminal: true },
+		commit: { status: "pending", role: "root", dependsOn: ["review"], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, terminal: true },
 	};
 	planTask.edges = [
 		{ from: "plan", to: "implement", when: "planned" },
@@ -416,10 +416,10 @@ async function seedAssignmentMessage(st, node, taskId) {
 	const update = tools["swarm_update_task"];
 	ok("swarm_update_task tool registered", !!update);
 
-	const beforeMailbox = await readMailbox("orchestrator");
+	const beforeMailbox = await readMailbox("root");
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true };
 	await update.execute("call", { taskId, nodeId: "implement", status: "done", outcome: "implemented", attemptId: "a-impl" }, undefined, undefined, ctx);
-	const afterMailbox = await readMailbox("orchestrator");
+	const afterMailbox = await readMailbox("root");
 	const afterTask = await readTaskFile(taskId);
 	const events = await readEvents(taskId);
 
@@ -448,7 +448,7 @@ async function seedAssignmentMessage(st, node, taskId) {
 	st.agents["worker-a"].activeTaskIds = [taskId];
 	await writeStateFile(st);
 
-	const { tools } = await loadExtension({ identity: "orchestrator" });
+	const { tools } = await loadExtension({ identity: "root" });
 	const update = tools["swarm_update_task"];
 	ok("swarm_update_task tool registered for cancel", !!update);
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true };

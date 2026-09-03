@@ -22,8 +22,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = process.env.SCRATCH_DIR || join(tmpdir(), `swarm-uat-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
-// Identity control: orchestrator runs the harness, worker-a is the simulated worker.
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
+// Identity control: root runs the harness, worker-a is the simulated worker.
+process.env.PI_SWARM_AGENT_ID = "root";
 const mod = await import(join(here, "index.ts"));
 const factory = mod.default;
 

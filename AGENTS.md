@@ -39,7 +39,7 @@ pi --model gpt-5.4-mini --provider openai
 Before changing swarm code that touches Pi lifecycle, delivery, interrupt, or reload semantics
 (any of `pi.sendMessage`, `pi.sendUserMessage`, `ctx.abort`, `ctx.signal`, `ctx.shutdown`,
 `ctx.reload`, `ctx.newSession`, `ctx.switchSession`, `ctx.fork`, the `input` event,
-the `agent_settled`/`agent_end` lifecycle boundary, the orchestrator pump, or
+the `agent_settled`/`agent_end` lifecycle boundary, the root pump, or
 `extensions/swarm/src/tools/messages.ts`'s user-visible delivery text), the contributor MUST:
 
 1. Read [`docs/swarm/pi-runtime-contract.md`](docs/swarm/pi-runtime-contract.md) and the

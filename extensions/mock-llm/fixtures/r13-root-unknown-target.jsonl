@@ -1,0 +1,14 @@
+# r13-root-unknown-target: R13 P0 — high-priority root nudges must surface
+# when the root's tmux target is unknown.
+#
+# Reproduces the 2026-09-01T13:10:27 incident shape in a scripted root lane:
+#   1. Root opens its mailbox (baseline) — should show no prior pool/stale nudges.
+#   2. A STALE-OPEN / pool-depleted priority-high nudge is simulated landing in the root
+#      mailbox with the recipient pseudo-agent at tmuxTarget === "unknown".
+#   3. The pump surfaces it; the root sees the nudge (user-turn) instead of it being
+#      silently suppressed to mailbox_only.
+#
+# Deterministic: same outcome on a fresh lane replay. delayMs gates the close-boundary timing.
+{"name":"r13 unknown-target open mailbox baseline","events":[{"type":"text","delayMs":15,"text":"I'm starting the R13 validation lane. First I'll open the root mailbox to observe any pending nudges (baseline).","chunks":["I'm starting the R13 validation lane. ","First I'll open the root mailbox ","to observe any pending nudges (baseline)."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"mb-0","arguments":{"pendingOnly":true,"markDelivered":false,"limit":20}}]}
+{"name":"r13 unknown-target verify surface","events":[{"type":"text","delayMs":20,"text":"Per the R13 P0 fix, a priority-high safety nudge bound for the root (tmuxTarget unknown) must surface via the local pump boundary even when the worker is busy — it must NOT be silently suppressed to mailbox_only. Opening the mailbox again confirms the nudge is deliverable/pending.","chunks":["Per the R13 P0 fix, ","a priority-high safety nudge bound for the root ","(tmuxTarget unknown) must surface via the local pump boundary ","even when the worker is busy ","— it must NOT be silently suppressed to mailbox_only. ","Opening the mailbox again confirms the nudge is deliverable/pending."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"markDelivered":false,"limit":20}}]}
+{"name":"r13 unknown-target settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Lane complete: the R13 P0 fix guarantees a priority-high root-bound safety nudge surfaces through a reliable local fallback even when tmux target is unknown, while durable mailbox semantics and normal-priority suppression remain intact.","chunks":["Lane complete: ","the R13 P0 fix guarantees a priority-high root-bound safety nudge ","surfaces through a reliable local fallback ","even when tmux target is unknown, ","while durable mailbox semantics and normal-priority suppression remain intact."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

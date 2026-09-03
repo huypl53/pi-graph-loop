@@ -19,9 +19,9 @@ mkdirSync(join(scratch, ".pi/swarm"), { recursive: true });
 writeFileSync(join(scratch, ".pi/settings.json"), JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }, null, 2));
 
 const origAgent = process.env.PI_SWARM_AGENT_ID;
-const origOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
-process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+const origOrch = process.env.PI_SWARM_IS_ROOT;
+process.env.PI_SWARM_AGENT_ID = "root";
+process.env.PI_SWARM_IS_ROOT = "1";
 
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
@@ -93,8 +93,8 @@ try {
   });
   ok("task created", /Created task/.test(created.content?.[0]?.text || ""));
   const taskId = "task-row75-artifact-note";
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   await call("swarm_assign_task", {
     taskId,
     nodeId: "plan",
@@ -124,7 +124,7 @@ try {
       test: { role: "tester", dependsOn: ["implement"], readArtifacts: ["artifacts/implementation-report.md"], writeArtifacts: ["artifacts/test-report.md"] },
       fix: { role: "implementer", dependsOn: ["test"], readArtifacts: ["artifacts/test-report.md"], writeArtifacts: ["artifacts/fix-report.md"], allowedFilesFrom: "implement" },
       review: { role: "reviewer", dependsOn: ["test"], readArtifacts: ["artifacts/implementation-report.md", "artifacts/test-report.md"], writeArtifacts: ["artifacts/review.md"] },
-      commit: { role: "orchestrator", dependsOn: ["review"], writeArtifacts: ["artifacts/final-summary.md"], terminal: true },
+      commit: { role: "root", dependsOn: ["review"], writeArtifacts: ["artifacts/final-summary.md"], terminal: true },
     },
     edges: [
       { from: "plan", to: "implement", when: "planned" },
@@ -136,20 +136,20 @@ try {
       { from: "review", to: "fix", when: "rejected", rework: true },
     ],
   });
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   await call("swarm_assign_task", { taskId: task2, nodeId: "plan", agentId: "planner-2", cwd: scratch });
   const planAttempt = readTask(task2).nodes.plan.activeAttemptId;
   process.env.PI_SWARM_AGENT_ID = "planner-2";
   await call("swarm_update_task", { taskId: task2, nodeId: "plan", status: "done", outcome: "planned", attemptId: planAttempt, cwd: scratch });
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   await call("swarm_assign_task", { taskId: task2, nodeId: "implement", agentId: "impl-2", cwd: scratch });
   const implAttempt = readTask(task2).nodes.implement.activeAttemptId;
   process.env.PI_SWARM_AGENT_ID = "impl-2";
   await call("swarm_update_task", { taskId: task2, nodeId: "implement", status: "done", outcome: "implemented", attemptId: implAttempt, cwd: scratch });
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   await call("swarm_assign_task", { taskId: task2, nodeId: "test", agentId: "tester-2", cwd: scratch });
   const testAttempt = readTask(task2).nodes.test.activeAttemptId;
   process.env.PI_SWARM_AGENT_ID = "tester-2";
@@ -165,7 +165,7 @@ try {
   const state = JSON.parse(readFileSync(statePath, "utf8"));
   const fresh = new Date().toISOString();
   for (const a of Object.values(state.agents)) {
-    if (a.id !== "orchestrator") {
+    if (a.id !== "root") {
       a.runtimeStatus = "idle";
       a.status = "running";
       a.health = "healthy";
@@ -173,9 +173,9 @@ try {
     }
   }
   writeFileSync(statePath, JSON.stringify(state, null, 2));
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   // Drive the stall-nudge helper directly (the pump-tick path is leader-gated; tests bypass it)
   const { evaluateTaskGraphStallNudgeLocked, isStallNudgeEligibleTaskStatus } = await import(join(here, "..", "src/reconcile.ts"));
   const { readState, paths, withLock, writeState, taskPaths, readTaskState } = await import(join(here, "..", "src/state.ts"));
@@ -186,8 +186,8 @@ try {
     await writeState(paths(scratch), st);
   });
   ok("failed recoverable graph emits stall nudge", nudgeResult && nudgeResult.emitted === true);
-  const mb = readMailbox("orchestrator");
-  ok("orchestrator mailbox has graph-stall message", mb.some((m) => /graph-stall/.test(m.idempotencyKey || "") || /actionable but unassigned/.test(m.subject || "")));
+  const mb = readMailbox("root");
+  ok("root mailbox has graph-stall message", mb.some((m) => /graph-stall/.test(m.idempotencyKey || "") || /actionable but unassigned/.test(m.subject || "")));
   ok("isStallNudgeEligibleTaskStatus returns true for failed", isStallNudgeEligibleTaskStatus("failed"));
 
   // 4) commit not auto-closed without real commit evidence
@@ -199,8 +199,8 @@ try {
     goal: "commit node should not auto-close without evidence",
     cwd: scratch,
   });
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   const task3Path = join(scratch, `.pi/swarm/tasks/${task3}/task.json`);
   const task3Raw = JSON.parse(readFileSync(task3Path, "utf8"));
   task3Raw.createdAt = new Date(Date.now() - 120_000).toISOString();
@@ -209,20 +209,20 @@ try {
   const task3Plan = readTask(task3).nodes.plan.activeAttemptId;
   process.env.PI_SWARM_AGENT_ID = "planner-2";
   await call("swarm_update_task", { taskId: task3, nodeId: "plan", status: "done", outcome: "planned", attemptId: task3Plan, cwd: scratch });
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   await call("swarm_assign_task", { taskId: task3, nodeId: "implement", agentId: "impl-2", cwd: scratch });
   const task3Impl = readTask(task3).nodes.implement.activeAttemptId;
   process.env.PI_SWARM_AGENT_ID = "impl-2";
   await call("swarm_update_task", { taskId: task3, nodeId: "implement", status: "done", outcome: "implemented", attemptId: task3Impl, cwd: scratch });
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   await call("swarm_assign_task", { taskId: task3, nodeId: "test", agentId: "tester-2", cwd: scratch });
   const task3Test = readTask(task3).nodes.test.activeAttemptId;
   process.env.PI_SWARM_AGENT_ID = "tester-2";
   await call("swarm_update_task", { taskId: task3, nodeId: "test", status: "done", outcome: "passed", attemptId: task3Test, cwd: scratch });
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   await call("swarm_assign_task", { taskId: task3, nodeId: "review", agentId: "reviewer-1", cwd: scratch });
   const task3Review = readTask(task3).nodes.review.activeAttemptId;
   process.env.PI_SWARM_AGENT_ID = "reviewer-1";
@@ -243,9 +243,9 @@ try {
     return { code: 1, stdout: "", stderr: "" };
   } };
   const task3State = readTask(task3);
-  const { autoCloseOrchestratorTerminalNodes } = await import(join(here, "..", "src/taskgraph.ts"));
+  const { autoCloseRootTerminalNodes } = await import(join(here, "..", "src/taskgraph.ts"));
   task3State.nodes.review = task3State.nodes.review || task3State.nodes.review; // noop
-  const closed = await autoCloseOrchestratorTerminalNodes(fakePi, taskPaths({ tasksDir: join(scratch, ".pi/swarm/tasks"), root: scratch }, task3), task3State);
+  const closed = await autoCloseRootTerminalNodes(fakePi, taskPaths({ tasksDir: join(scratch, ".pi/swarm/tasks"), root: scratch }, task3), task3State);
   ok("commit auto-closes once fake git reports new HEAD", closed.closed.includes("commit"));
   ok("commit evidence status verified", task3State.evidence?.commit?.status === "verified");
 
@@ -264,7 +264,7 @@ try {
     priority: "normal",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    owner: "orchestrator",
+    owner: "root",
     workflow: "feature-dev",
     allowedFiles: [],
     acceptanceCriteria: [],
@@ -273,8 +273,8 @@ try {
     currentNodes: ["commit", "finalize"],
     sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
     nodes: {
-      commit: { status: "pending", role: "orchestrator", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 1, terminal: true },
-      finalize: { status: "pending", role: "orchestrator", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 1, terminal: true },
+      commit: { status: "pending", role: "root", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 1, terminal: true },
+      finalize: { status: "pending", role: "root", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 1, terminal: true },
     },
     edges: [],
     handoffs: [],
@@ -285,50 +285,50 @@ try {
   writeFileSync(mixedTp.taskJson, `${JSON.stringify(mixedTask, null, 2)}\n`, "utf8");
   const mixedPi = { exec: async (cmd, args) => cmd === "git" && args?.[0] === "rev-parse" ? { code: 0, stdout: "post-create-head\n", stderr: "" } : { code: 1, stdout: "", stderr: "" } };
   const mixedState = readTask(task3Mixed);
-  const { autoCloseOrchestratorTerminalNodes: autoCloseMixed } = await import(join(here, "..", "src/taskgraph.ts"));
+  const { autoCloseRootTerminalNodes: autoCloseMixed } = await import(join(here, "..", "src/taskgraph.ts"));
   const mixedClosed = await autoCloseMixed(mixedPi, mixedTp, mixedState);
   ok("mixed graph closes both terminals", mixedClosed.closed.includes("commit") && mixedClosed.closed.includes("finalize"));
   ok("mixed graph retains commit evidence after later terminal close", mixedState.evidence?.commit?.status === "verified");
   ok("mixed graph also stamps finalize evidence", mixedState.evidence?.finalize?.status === "verified");
 
-  // 4d) The commit-guard is keyed off the orchestrator-terminal predicate, not the literal id.
-  // A custom graph whose commit-step node is named "finalize" with role "orchestrator" must also
+  // 4d) The commit-guard is keyed off the root-terminal predicate, not the literal id.
+  // A custom graph whose commit-step node is named "finalize" with role "root" must also
   // require git evidence (this is the Row 75 R5/R6 bypass hole).
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   const task4 = "task-row75-finalize-guard";
   await call("swarm_create_task", {
     taskId: task4,
     title: "finalize guard",
-    goal: "non-commit orchestrator terminal node still requires git evidence",
+    goal: "non-commit root terminal node still requires git evidence",
     cwd: scratch,
-    nodes: { plan: { role: "planner", dependsOn: [] }, implement: { role: "implementer", dependsOn: ["plan"] }, finalize: { role: "orchestrator", dependsOn: ["implement"], terminal: true } },
+    nodes: { plan: { role: "planner", dependsOn: [] }, implement: { role: "implementer", dependsOn: ["plan"] }, finalize: { role: "root", dependsOn: ["implement"], terminal: true } },
     edges: [{ from: "plan", to: "implement", when: "planned" }, { from: "implement", to: "finalize", when: "implemented" }],
     start: "plan",
   });
   await ensureWorker("impl-4", "implementer");
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   await call("swarm_assign_task", { taskId: task4, nodeId: "plan", agentId: "planner-2", cwd: scratch });
   const t4Plan = readTask(task4).nodes.plan.activeAttemptId;
   process.env.PI_SWARM_AGENT_ID = "planner-2";
   await call("swarm_update_task", { taskId: task4, nodeId: "plan", status: "done", outcome: "planned", attemptId: t4Plan, cwd: scratch });
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   await call("swarm_assign_task", { taskId: task4, nodeId: "implement", agentId: "impl-4", cwd: scratch });
   const t4Impl = readTask(task4).nodes.implement.activeAttemptId;
   process.env.PI_SWARM_AGENT_ID = "impl-4";
   await call("swarm_update_task", { taskId: task4, nodeId: "implement", status: "done", outcome: "implemented", attemptId: t4Impl, cwd: scratch });
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   const finalizeNode = readTask(task4).nodes.finalize;
-  ok("finalize orchestrator terminal stays pending without git evidence", finalizeNode.status === "pending");
+  ok("finalize root terminal stays pending without git evidence", finalizeNode.status === "pending");
   ok("finalize evidence recorded under per-node key", readTask(task4).evidence?.finalize?.status === "unverified");
   ok("finalize legacy .commit alias is not dual-written", readTask(task4).evidence?.commit === undefined);
   // With a real commit landing, the finalize node auto-closes AND the per-node evidence flips.
   const fakePiFinalize = { exec: async (cmd, args) => cmd === "git" && args?.[0] === "rev-parse" ? { code: 0, stdout: "post-create-head\n", stderr: "" } : { code: 1, stdout: "", stderr: "" } };
   const task4State = readTask(task4);
-  const { autoCloseOrchestratorTerminalNodes: autoClose4, printGraphText } = await import(join(here, "..", "src/taskgraph.ts"));
+  const { autoCloseRootTerminalNodes: autoClose4, printGraphText } = await import(join(here, "..", "src/taskgraph.ts"));
   const closed4 = await autoClose4(fakePiFinalize, taskPaths({ tasksDir: join(scratch, ".pi/swarm/tasks"), root: scratch }, task4), task4State);
   ok("finalize auto-closes once git HEAD advances", closed4.closed.includes("finalize"));
   ok("finalize per-node evidence flips to verified", task4State.evidence?.finalize?.status === "verified");
@@ -336,7 +336,7 @@ try {
   ok("printGraphText still surfaces finalize evidence via read-compat alias", printGraphText(task4State, [], []).includes("Commit evidence [finalize]"));
 
   // 4d) Create-path ordering: a terminal one-node graph only auto-closes once baseline exists.
-  const { autoCloseOrchestratorTerminalNodes: autoCloseOrder } = await import(join(here, "..", "src/taskgraph.ts"));
+  const { autoCloseRootTerminalNodes: autoCloseOrder } = await import(join(here, "..", "src/taskgraph.ts"));
   const { writeBaselineCommit } = await import(join(here, "..", "src/trace.ts"));
   const seedOneNodeTask = (taskId) => {
     const tp = taskPaths({ tasksDir: join(scratch, ".pi/swarm/tasks"), root: scratch }, taskId);
@@ -346,12 +346,12 @@ try {
       version: 1,
       taskId,
       title: "create ordering",
-      goal: "baseline must precede auto-close for a one-node orchestrator graph",
+      goal: "baseline must precede auto-close for a one-node root graph",
       status: "ready",
       priority: "normal",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      owner: "orchestrator",
+      owner: "root",
       workflow: "feature-dev",
       allowedFiles: [],
       acceptanceCriteria: [],
@@ -360,7 +360,7 @@ try {
       currentNodes: ["finalize"],
       sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
       nodes: {
-        finalize: { status: "pending", role: "orchestrator", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 1, terminal: true },
+        finalize: { status: "pending", role: "root", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 1, terminal: true },
       },
       edges: [],
       handoffs: [],
@@ -408,8 +408,8 @@ try {
     edges: [],
     start: "plan",
   });
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   await call("swarm_assign_task", { taskId: task6, nodeId: "plan", agentId: "writer-2", note: "see ./artifacts/plan.md and artifacts/other.md for context", cwd: scratch });
   const t5Mailbox = readMailbox("writer-2");
   const t5Note = t5Mailbox[t5Mailbox.length - 1]?.body || "";
@@ -420,6 +420,6 @@ try {
   console.log("PASS row75 guardrail test");
 } finally {
   process.env.PI_SWARM_AGENT_ID = origAgent;
-  process.env.PI_SWARM_IS_ORCHESTRATOR = origOrch;
+  process.env.PI_SWARM_IS_ROOT = origOrch;
   rmSync(scratch, { recursive: true, force: true });
 }

@@ -1,6 +1,6 @@
-// === swarm/pool-scaffold.ts — Issue 20: scaffold swarm.modelPool placeholder on orchestrator session_start ===
+// === swarm/pool-scaffold.ts — Issue 20: scaffold swarm.modelPool placeholder on root session_start ===
 //
-// On the orchestrator's first `session_start`, if `.pi/settings.json` does not declare a `modelPool`
+// On the root's first `session_start`, if `.pi/settings.json` does not declare a `modelPool`
 // under either `swarm` or `extensions.swarm` (runtime precedence: `extensions.swarm` is checked FIRST
 // per `session.ts:readSwarmSettings`), write a placeholder slot `[{ "model": null, "provider": null }]`
 // into the resolved swarm block while preserving every other top-level key. Emits a one-shot
@@ -96,7 +96,7 @@ export async function ensurePoolScaffold(
 	const settingsPath = poolScaffoldSettingsPath(cwd);
 	const piDir = join(cwd, CONFIG_DIR_NAME);
 
-	// Skip path: no `.pi/` directory. We deliberately do NOT mkdir it (the orchestrator's first
+	// Skip path: no `.pi/` directory. We deliberately do NOT mkdir it (the root's first
 	// session_start in a non-pi project must not silently create one). Also deliberately do NOT emit a
 	// trace event here — `trace()` would mkdir the entire `.pi/swarm/...` chain via appendJsonl, which
 	// is the exact side-effect we are trying to avoid.

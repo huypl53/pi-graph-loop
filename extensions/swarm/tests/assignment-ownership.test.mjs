@@ -27,7 +27,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = join(tmpdir(), `swarm-assignment-ownership-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
+process.env.PI_SWARM_AGENT_ID = "root";
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 
@@ -155,7 +155,7 @@ console.log("\n[2] in_progress+unassigned -> OWNERSHIP_REQUIRED (inline-string)"
 	delete task.nodes.plan.attemptHistory;
 	writeFileSync(tp, JSON.stringify(task, null, 2), "utf8");
 	const err = await expectErrorCode("worker-a", "swarm_update_task", { taskId, nodeId: "plan", status: "done", cwd: scratch }, "OWNERSHIP_REQUIRED");
-	ok("hint suggests escalate to orchestrator", err && err.suggestedNextCall && err.suggestedNextCall.tool === "swarm_send_message");
+	ok("hint suggests escalate to root", err && err.suggestedNextCall && err.suggestedNextCall.tool === "swarm_send_message");
 	const events = readEvents(taskId);
 	ok("task.update.ownership_reject trace emitted", events.some((e) => e.event === "task.update.ownership_reject" && e.errorCode === "OWNERSHIP_REQUIRED"));
 }
@@ -221,7 +221,7 @@ console.log("\n[5] deliverMessageLocked assignment-style -> auto-stamp");
 		requiresAck: true,
 		requiresResponse: true,
 	};
-	const result = await as("orchestrator", () => call("swarm_send_message", msgParams));
+	const result = await as("root", () => call("swarm_send_message", msgParams));
 	ok("send succeeds", result && result.content);
 	// Read task.json: node.assignee should now be worker-a (auto-stamped)
 	const after = readNode(taskId, "implement");
@@ -256,7 +256,7 @@ console.log("\n[6] assignment-style message to matching assignee -> no stamp");
 		requiresAck: true,
 		requiresResponse: true,
 	};
-	await as("orchestrator", () => call("swarm_send_message", msgParams));
+	await as("root", () => call("swarm_send_message", msgParams));
 	const after = readNode(taskId, "implement");
 	ok("assignee unchanged (idempotent)", after.assignee === "worker-a");
 	const afterEventCount = readEvents(taskId).filter((e) => e.event === "message.deliver.assignment_auto_stamp").length;
@@ -287,7 +287,7 @@ console.log("\n[7] assignment-style message to different assignee -> stamp + mis
 		requiresAck: true,
 		requiresResponse: true,
 	};
-	await as("orchestrator", () => call("swarm_send_message", msgParams));
+	await as("root", () => call("swarm_send_message", msgParams));
 	const after = readNode(taskId, "implement");
 	ok("auto-stamp updated assignee=worker-b", after.assignee === "worker-b");
 	const events = readEvents(taskId);
@@ -393,7 +393,7 @@ console.log("\n[12] Self-heal: writeTaskState failure simulation");
 	// mid-cycle). Then worker-a's swarm_update_task lands in the claim branch (24.a) and
 	// self-heals.
 	// Send an assignment-style message — auto-stamp runs, assignee=worker-a
-	await as("orchestrator", () => call("swarm_send_message", {
+	await as("root", () => call("swarm_send_message", {
 		to: "worker-a",
 		subject: `Task ${taskId} / node implement assigned`,
 		body: "Assignment body",

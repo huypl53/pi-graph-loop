@@ -1,7 +1,7 @@
-// Focused unit test for the orchestrator-pane reject guard added to swarm_send_keys (issue 12 C6
+// Focused unit test for the root-pane reject guard added to swarm_send_keys (issue 12 C6
 // micro-fix). The guard is a principle-based equality check on the resolved tmux target, so it fires
-// regardless of how the agentId is supplied (direct orchestrator id, or any ghost agent mis-stamped to
-// the orchestrator's "unknown" sentinel).
+// regardless of how the agentId is supplied (direct root id, or any ghost agent mis-stamped to
+// the root's "unknown" sentinel).
 //
 // Strategy mirrors agent-lifecycle.test.mjs: build the real tool set with a mock `pi` whose tmux
 // exec pushes send-keys subcommands into a `sentKeys` spy array. State lives under a temp scratch dir.
@@ -9,7 +9,7 @@
 // same registerTool capture pattern.
 //
 // Cases covered (per plan §5.2 + plan-review binding C2 for the undefined variant):
-//   A. agentId="orchestrator"                          -> ORCHESTRATOR_PANE_REJECTED, spy untouched
+//   A. agentId="root"                          -> ROOT_PANE_REJECTED, spy untouched
 //   B. ghost agent with tmuxTarget="unknown"            -> same as A (principle-based, not id-based)
 //   C. worker w1 with tmuxTarget="sess:w1.0"             -> resolves, spy called once with that target
 //   D. agentId="nope"                                  -> throws "Unknown swarm agent: nope" (preserved)
@@ -30,9 +30,9 @@ const scratch = join(tmpdir(), `swarm-sendkeys-guard-${process.pid}-${Date.now()
 rmSync(scratch, { recursive: true, force: true });
 mkdirSync(join(scratch, ".pi", "swarm"), { recursive: true });
 
-// Minimal SwarmState seed with the orchestrator record matching the ensureOrchestrator invariant
+// Minimal SwarmState seed with the root record matching the ensureRoot invariant
 // (tmuxTarget = "unknown"). Workers have real tmux targets; the ghost agent deliberately shares the
-// orchestrator's "unknown" sentinel.
+// root's "unknown" sentinel.
 const swarmState = {
 	version: 1,
 	swarmId: "swarm-test-sendkeys-guard",
@@ -40,10 +40,10 @@ const swarmState = {
 	createdAt: new Date().toISOString(),
 	updatedAt: new Date().toISOString(),
 	agents: {
-		orchestrator: {
-			id: "orchestrator",
-			role: "Swarm orchestrator",
-			roleKind: "orchestrator",
+		root: {
+			id: "root",
+			role: "Swarm root",
+			roleKind: "root",
 			capabilities: [],
 			activeTaskIds: [],
 			maxConcurrentTasks: 99,
@@ -51,12 +51,12 @@ const swarmState = {
 			runtimeStatus: "idle",
 			health: "healthy",
 			tmuxSession: "test",
-			tmuxWindow: "orchestrator",
-			tmuxTarget: "unknown", // canonical orchestrator sentinel per ensureOrchestrator
+			tmuxWindow: "root",
+			tmuxTarget: "unknown", // canonical root sentinel per ensureRoot
 			model: "m",
 			provider: "p",
 			cwd: scratch,
-			mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl",
+			mailbox: ".pi/swarm/mailboxes/root.jsonl",
 			createdAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString(),
 		},
@@ -133,7 +133,7 @@ const swarmState = {
 			health: "healthy",
 			tmuxSession: "test",
 			tmuxWindow: "ghost",
-			tmuxTarget: "unknown", // ghost mis-stamped to orchestrator sentinel — guard must catch this
+			tmuxTarget: "unknown", // ghost mis-stamped to root sentinel — guard must catch this
 			model: "m",
 			provider: "p",
 			cwd: scratch,
@@ -143,7 +143,7 @@ const swarmState = {
 		},
 	},
 	messages: {},
-	delivered: { orchestrator: [] },
+	delivered: { root: [] },
 };
 writeFileSync(join(scratch, ".pi", "swarm", "swarm-state.json"), JSON.stringify(swarmState, null, 2) + "\n");
 
@@ -173,23 +173,23 @@ let pass = 0, fail = 0;
 const ok = (n, c) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n); } };
 const throws = async (n, p) => { try { await p; fail++; console.error("  FAIL", n, "(did not throw)"); } catch { pass++; console.log("  ok  ", n); } };
 
-console.log("\n[A] reject when agentId resolves to orchestrator record (tmuxTarget === 'unknown')");
+console.log("\n[A] reject when agentId resolves to root record (tmuxTarget === 'unknown')");
 {
 	sentKeys.length = 0;
 	let caught;
 	try {
-		await call("swarm_send_keys", { agentId: "orchestrator", keys: "C-c" });
+		await call("swarm_send_keys", { agentId: "root", keys: "C-c" });
 	} catch (e) {
 		caught = e;
 	}
 	ok("A: throws an Error", caught instanceof Error);
-	ok("A: error message starts with ORCHESTRATOR_PANE_REJECTED:", typeof caught?.message === "string" && caught.message.startsWith("ORCHESTRATOR_PANE_REJECTED:"));
+	ok("A: error message starts with ROOT_PANE_REJECTED:", typeof caught?.message === "string" && caught.message.startsWith("ROOT_PANE_REJECTED:"));
 	ok("A: error names the offending target", typeof caught?.message === "string" && caught.message.includes("unknown"));
-	ok("A: error names the offending agentId", typeof caught?.message === "string" && caught.message.includes("agentId=orchestrator"));
+	ok("A: error names the offending agentId", typeof caught?.message === "string" && caught.message.includes("agentId=root"));
 	ok("A: send-keys spy NEVER invoked", sentKeys.length === 0);
 }
 
-console.log("\n[B] reject when ANY agent's resolved target equals the orchestrator target (ghost-agent variant)");
+console.log("\n[B] reject when ANY agent's resolved target equals the root target (ghost-agent variant)");
 {
 	sentKeys.length = 0;
 	let caught;
@@ -198,7 +198,7 @@ console.log("\n[B] reject when ANY agent's resolved target equals the orchestrat
 	} catch (e) {
 		caught = e;
 	}
-	ok("B: throws ORCHESTRATOR_PANE_REJECTED (principle-based, NOT id-based)", caught instanceof Error && caught.message.startsWith("ORCHESTRATOR_PANE_REJECTED:"));
+	ok("B: throws ROOT_PANE_REJECTED (principle-based, NOT id-based)", caught instanceof Error && caught.message.startsWith("ROOT_PANE_REJECTED:"));
 	ok("B: error names ghost agentId", caught?.message?.includes("agentId=ghost"));
 	ok("B: send-keys spy NEVER invoked", sentKeys.length === 0);
 }

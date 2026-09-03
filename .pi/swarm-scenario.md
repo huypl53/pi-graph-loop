@@ -17,8 +17,8 @@ Agents:
    - Task: watch mailbox and trace, inspect `.pi/swarm/traces/events.jsonl`, report whether mailbox enqueue, tmux injection, and input intercept are visible.
 
 Kickoff:
-- Orchestrator spawns all three in the same project cwd and tmux swarm session.
-- Orchestrator sends one kickoff message to `architect`.
+- Root spawns all three in the same project cwd and tmux swarm session.
+- Root sends one kickoff message to `architect`.
 - Agents should communicate only through swarm tools/mailbox, not through the human.
 
 Success indicators:

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // R11-1 completion repro: stale-open scan surfaces an assigned node with NO progress past the
-// threshold, but the surfacing is TRACE-ONLY — nothing nudges the orchestrator. The operator
-// (and the orchestrator LLM) must poll proxyMetrics by hand; the swarm idles for hours
+// threshold, but the surfacing is TRACE-ONLY — nothing nudges the root. The operator
+// (and the root LLM) must poll proxyMetrics by hand; the swarm idles for hours
 // (live evidence: 2026-09-01 — 5 idle-locks, each discovered by the human, staleOpen=1 in
 // metrics with ZERO nudges delivered).
 //
 // Expected CORRECT behavior (assertions): when staleOpenAssignmentScanLocked surfaces a stale
-// node, the orchestrator receives ONE high-priority mailbox nudge (idempotent within the
+// node, the root receives ONE high-priority mailbox nudge (idempotent within the
 // surfacing window, capped, cooled-down). RED today: zero nudges.
 import { rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,7 +17,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = join(tmpdir(), `swarm-stale-open-nudge-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
+process.env.PI_SWARM_AGENT_ID = "root";
 // Shrink the threshold so the fixture doesn't wait 5 minutes.
 process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS = "1000";
 const mod = await import(join(here, "..", "index.ts"));
@@ -53,7 +53,7 @@ const oldIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 writeFileSync(statePath, JSON.stringify({
 	version: 1, swarmId: "repro",
 	agents: {
-		orchestrator: { id: "orchestrator", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
+		root: { id: "root", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
 		"worker-x": { id: "worker-x", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
 	},
 	messages: {}, updatedAt: nowIso,
@@ -105,10 +105,10 @@ ok("scan surfaced the stale node", scan.surfaced === 1, JSON.stringify(scan));
 const tS = JSON.parse(readFileSync(join(scratch, ".pi/swarm/tasks/task-repro-r111/task.json"), "utf8"));
 console.log("   [dbg] staleOpenSurfacedAt after scan:", tS.nodes.implement.staleOpenSurfacedAt);
 
-// --- THE ASSERTIONS: orchestrator must have been nudged ---
+// --- THE ASSERTIONS: root must have been nudged ---
 const st1 = JSON.parse(readFileSync(statePath, "utf8"));
-const nudges = Object.values(st1.messages || {}).filter((m) => m.to === "orchestrator" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"));
-ok("orchestrator received a stale-open nudge", nudges.length >= 1, `nudges=${nudges.length}`);
+const nudges = Object.values(st1.messages || {}).filter((m) => m.to === "root" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"));
+ok("root received a stale-open nudge", nudges.length >= 1, `nudges=${nudges.length}`);
 if (nudges.length >= 1) ok("nudge key names the node", (nudges[0].idempotencyKey || "").includes("implement"), nudges[0].idempotencyKey);
 
 // Idempotency within window: second scan must NOT double-nudge.
@@ -124,7 +124,7 @@ if (nudges.length >= 1) ok("nudge key names the node", (nudges[0].idempotencyKey
 	});
 }
 const st2 = JSON.parse(readFileSync(statePath, "utf8"));
-const nudges2 = Object.values(st2.messages || {}).filter((m) => m.to === "orchestrator" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"));
+const nudges2 = Object.values(st2.messages || {}).filter((m) => m.to === "root" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"));
 ok("no duplicate nudge within window", nudges2.length === nudges.length, `before=${nudges.length} after=${nudges2.length}`);
 
 
@@ -136,7 +136,7 @@ ok("no duplicate nudge within window", nudges2.length === nudges.length, `before
 	writeFileSync(statePath, JSON.stringify({
 		version: 1, swarmId: "repro",
 		agents: {
-			orchestrator: { id: "orchestrator", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
+			root: { id: "root", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
 			"worker-x": { id: "worker-x", status: "running", runtimeStatus: "tool_running", activeTaskIds: [], updatedAt: nowIso },
 		},
 		messages: {}, updatedAt: nowIso,
@@ -163,7 +163,7 @@ ok("no duplicate nudge within window", nudges2.length === nudges.length, `before
 		await writeState(p, st);
 	});
 	const stf = JSON.parse(readFileSync(statePath, "utf8"));
-	const nf = Object.values(stf.messages || {}).filter((m) => m.to === "orchestrator" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"));
+	const nf = Object.values(stf.messages || {}).filter((m) => m.to === "root" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"));
 	ok("KR6: fresh-progress node NOT nudged", nf.length === 0, `nudges=${nf.length}`);
 }
 

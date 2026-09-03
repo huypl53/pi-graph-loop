@@ -6,16 +6,16 @@
  *   (a) ACK-reset loop (window 04:59:18Z – 05:08:55Z): 47 `goal.idle_nudge` events +
  *       35 `goal.nudge.resolved` events. Every resolved trace has `by: "turn_end"`.
  *       The resolve hook at `extensions/swarm/src/hooks.ts:524-549` resets the
- *       counter on ANY orchestrator turn that ends `stopReason:"stop"`, regardless
+ *       counter on ANY root turn that ends `stopReason:"stop"`, regardless
  *       of whether the turn advanced the goal. The cap at MAX_CONSECUTIVE_NUDGES=3
  *       is never reached for a long enough conversation; the back-off never
  *       engages; the user sees the same nudge template repeating at the goal's
  *       interval with no escalation.
  *   (b) Post-R14 vacuous state persistence failure (window 05:09:01Z – 05:36:55Z):
  *       331 `goal.nudge.held_no_live_workers` events at ~5s cadence with ZERO
- *       `goal.escalation.pool_empty` events on a pre-R14 orchestrator. R14 Fix B
+ *       `goal.escalation.pool_empty` events on a pre-R14 root. R14 Fix B
  *       (dedupe flag) and Fix C (escalation cooldown) are present in commit
- *       `40e1dd1` on disk but the running orchestrator never /reload'd, so the
+ *       `40e1dd1` on disk but the running root never /reload'd, so the
  *       active code is pre-R14. After /reload, R14's code MUST keep working
  *       across the state-reload boundary.
  *
@@ -90,13 +90,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, "..", "src");
 
 const {
-	pumpOrchestratorMailbox,
+	pumpRootMailbox,
 	evaluateIdleGoalNudgeLocked,
 	updateIdleEpochLocked,
 } = await import(join(srcDir, "reconcile.ts"));
 
 const { paths, withLock, readState, writeState, trace } = await import(join(srcDir, "state.ts"));
-const { ensureOrchestrator, heartbeatOrchestratorLeader } = await import(join(srcDir, "identity.ts"));
+const { ensureRoot, heartbeatRootLeader } = await import(join(srcDir, "identity.ts"));
 const { deliverMessageLocked } = await import(join(srcDir, "mailbox.ts"));
 
 // ============================================================================
@@ -110,14 +110,14 @@ const ok = (name, cond, info) => {
 };
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const ORIG_PI_SWARM_IS_ORCHESTRATOR = process.env.PI_SWARM_IS_ORCHESTRATOR;
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
-process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+const ORIG_PI_SWARM_IS_ROOT = process.env.PI_SWARM_IS_ROOT;
+process.env.PI_SWARM_AGENT_ID = "root";
+process.env.PI_SWARM_IS_ROOT = "1";
 process.on("exit", () => {
 	if (ORIG_PI_SWARM_AGENT_ID === undefined) delete process.env.PI_SWARM_AGENT_ID;
 	else process.env.PI_SWARM_AGENT_ID = ORIG_PI_SWARM_AGENT_ID;
-	if (ORIG_PI_SWARM_IS_ORCHESTRATOR === undefined) delete process.env.PI_SWARM_IS_ORCHESTRATOR;
-	else process.env.PI_SWARM_IS_ORCHESTRATOR = ORIG_PI_SWARM_IS_ORCHESTRATOR;
+	if (ORIG_PI_SWARM_IS_ROOT === undefined) delete process.env.PI_SWARM_IS_ROOT;
+	else process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 });
 
 function freshScratch(idx) {
@@ -132,8 +132,8 @@ function readEvents(scratchDir) {
 	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
 
-function readOrchestratorMailbox(scratchDir) {
-	const p = join(scratchDir, ".pi/swarm/mailboxes/orchestrator.jsonl");
+function readRootMailbox(scratchDir) {
+	const p = join(scratchDir, ".pi/swarm/mailboxes/root.jsonl");
 	if (!existsSync(p)) return [];
 	const txt = readFileSync(p, "utf8").trim();
 	if (!txt) return [];
@@ -231,7 +231,7 @@ async function seedR16Shape({
 
 	await withLock(p, async () => {
 		const st = await readState(p, scratchDir);
-		ensureOrchestrator(st, scratchDir, p);
+		ensureRoot(st, scratchDir, p);
 		await writeState(p, st);
 	});
 	return { p, nowMs };
@@ -243,7 +243,7 @@ async function seedR16Shape({
 async function pumpTick({ p, scratch, nowMs, pi }) {
 	return await withLock(p, async () => {
 		const st = await readState(p, scratch);
-		heartbeatOrchestratorLeader(st, nowMs, process.pid, "synthetic_tick");
+		heartbeatRootLeader(st, nowMs, process.pid, "synthetic_tick");
 		await updateIdleEpochLocked(p, st, nowMs);
 		const r = await evaluateIdleGoalNudgeLocked(pi, scratch, p, st, nowMs);
 		await writeState(p, st);
@@ -252,7 +252,7 @@ async function pumpTick({ p, scratch, nowMs, pi }) {
 }
 
 /**
- * Simulate the orchestrator's `turn_end` resolve hook using the PRODUCTION code path
+ * Simulate the root's `turn_end` resolve hook using the PRODUCTION code path
  * by calling the real `turnEndIsResolveAction` (module-scope export from hooks.ts) and
  * then mirroring the production counter-reset / no-resolve-trace logic.
  */
@@ -298,7 +298,7 @@ async function simulateTurnEndResolve({ p, scratch, turnContentBlocks = [], tool
 }
 
 /**
- * Reload state from disk (mimics orchestrator restart / /reload).
+ * Reload state from disk (mimics root restart / /reload).
  */
 async function stateReload({ p, scratch }) {
 	return await withLock(p, async () => readState(p, scratch));
@@ -307,7 +307,7 @@ async function stateReload({ p, scratch }) {
 // ============================================================================
 // R16-S1: Config C1 — ack-with-text on settled-but-alive pool (the live bug shape)
 //   The live incident shape: workers are alive enough to fire idle_nudge, but
-//   the orchestrator's ack text resets the counter on every cycle. Counter
+//   the root's ack text resets the counter on every cycle. Counter
 //   never reaches MAX=3; back-off never engages; idle_nudge fires every interval.
 //   RED (pre-fix): idle_nudge fires >= 9 times (multiple cycles).
 //   GREEN (post-fix): idle_nudge fires exactly 3 times (cap reached, back-off engages).
@@ -315,7 +315,7 @@ async function stateReload({ p, scratch }) {
 //   The harness drives BOTH shapes via `resolveAction=false` (pre-fix path) and
 //   `resolveAction=true` (post-fix path: a swarm tool call happened in the same turn).
 //   The test would have FAILED pre-fix at the GREEN assertion because the resolve
-//   would be ignored when the orchestrator's ack text contains no tool call.
+//   would be ignored when the root's ack text contains no tool call.
 //   Post-fix, the GREEN assertion holds because turnEndIsResolveAction in hooks.ts
 //   returns false for ack-only turns and the counter keeps climbing.
 // ============================================================================
@@ -374,7 +374,7 @@ console.log("\n[R16-S1] Config C1 — ack-with-text turn_end on settled-but-aliv
 		escalationCount === 0, `got ${escalationCount}`);
 
 	// GREEN POST-FIX validation: drive a SECOND run with resolveAction=true (modeling
-	// the orchestrator making a swarm tool call in the turn) and confirm the counter
+	// the root making a swarm tool call in the turn) and confirm the counter
 	// DOES reset — i.e., the fix doesn't break the legitimate resolve path.
 	{
 		const s2Scratch = freshScratch("1b");
@@ -686,7 +686,7 @@ console.log("\n[R16-S7] Action-oriented escalation nudge body");
 	const tickNowMs = startMs + 5000;
 	await pumpTick({ p, scratch: sScratch, nowMs: tickNowMs, pi });
 
-	const mb = readOrchestratorMailbox(sScratch);
+	const mb = readRootMailbox(sScratch);
 	const highPriority = mb.filter((m) => m.priority === "high");
 	const body = highPriority[0]?.body || "";
 
@@ -784,7 +784,7 @@ console.log("\n[R16-S8] state.ts readState back-fill for legacy swarm-state.json
 // Cleanup
 // ============================================================================
 process.env.PI_SWARM_AGENT_ID = ORIG_PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = ORIG_PI_SWARM_IS_ORCHESTRATOR;
+process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 
 console.log(`\nR16-IDLE-GOAL-REGRESSION ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 if (fail > 0) {

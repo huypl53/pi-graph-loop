@@ -72,7 +72,7 @@ function makePiMock() {
 }
 
 // =============================================================================
-// CASE G1: 177 stopped agents + 1 orchestrator + 3 running with leases →
+// CASE G1: 177 stopped agents + 1 root + 3 running with leases →
 //          heartbeat GC + sweep keeps the lease-honored running set; stopped set is unchanged.
 // =============================================================================
 console.log("\n[G1] 177-stopped-agents graveyard: heartbeat GC + sweep preserves leases, doesn't disturb stopped records");
@@ -81,7 +81,7 @@ console.log("\n[G1] 177-stopped-agents graveyard: heartbeat GC + sweep preserves
 	const now = Date.now();
 	const oldShutdown = new Date(now - 7_200_000).toISOString(); // 2 hours ago
 
-	const agents = { orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }) };
+	const agents = { root: makeAgent("root", { tmuxTarget: "s:root.0" }) };
 	// Seed 177 stopped agents with old lastShutdownAt — the R9 a3 graveyard shape.
 	for (let i = 0; i < 177; i++) {
 		agents[`graveyard-${i}`] = makeAgent(`graveyard-${i}`, {
@@ -137,13 +137,13 @@ console.log("\n[G1] 177-stopped-agents graveyard: heartbeat GC + sweep preserves
 
 // =============================================================================
 // CASE G2: the bounded-set property — after GC + sweep, the on-disk shape is bounded
-//          (orchestrator + lease-honored running workers only).
+//          (root + lease-honored running workers only).
 // =============================================================================
-console.log("\n[G2] bounded-set property: GC + sweep keeps state.agents small (orchestrator + lease-valid only)");
+console.log("\n[G2] bounded-set property: GC + sweep keeps state.agents small (root + lease-valid only)");
 {
 	await clearEvents();
 	const now = Date.now();
-	const agents = { orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }) };
+	const agents = { root: makeAgent("root", { tmuxTarget: "s:root.0" }) };
 	// Seed some freshly-stopped agents that the GC would otherwise not flip (already stopped).
 	// Plus some dead-pane agents the GC WILL flip.
 	for (let i = 0; i < 50; i++) {

@@ -1,26 +1,26 @@
 #!/usr/bin/env node
 /**
- * R15 P0 — normal-priority worker result to unknown-target orchestrator must not
+ * R15 P0 — normal-priority worker result to unknown-target root must not
  * promise a bounded (~5s) user-visible surface.
  *
  * Source incident: 2026-09-01 normal-priority worker results that landed in the
- * orchestrator's mailbox via durable append (mailbox.ts:200-203 mailbox-only
+ * root's mailbox via durable append (mailbox.ts:200-203 mailbox-only
  * short-circuit) were reported back to the worker with the literal text
  * `"its pump surfaces mailbox messages within ~5s"` (tools/messages.ts:42-48)
- * even though the pump defers while the orchestrator is busy
+ * even though the pump defers while the root is busy
  * (reconcile.ts:1617-1626) and the busy-suppression at reconcile.ts:1665
  * drops the message from the surface plan entirely. Workers interpret the
- * 5s promise as a contract; the orchestrator's pi.sendMessage boundary count
- * is zero until the orchestrator's own agent_settled fires.
+ * 5s promise as a contract; the root's pi.sendMessage boundary count
+ * is zero until the root's own agent_settled fires.
  *
  * Invariants under test (RED→GREEN per plan §5):
- *   R15-S1: normal-priority worker result to unknown-target orchestrator + busy
- *           orchestrator → zero pi.sendMessage calls (L2 boundary count = 0).
+ *   R15-S1: normal-priority worker result to unknown-target root + busy
+ *           root → zero pi.sendMessage calls (L2 boundary count = 0).
  *           The durable mailbox append (L1) is intact and == 1.
  *           RED: pre-fix swarm_send_message tool output contains literal
  *           `"within ~5s"` (the false promise); GREEN: the literal is absent
  *           and the text honestly reports durable-no-time-bound semantics.
- *   R15-S2: idle-orchestrator with explicit agent_settled hook → exactly one
+ *   R15-S2: idle-root with explicit agent_settled hook → exactly one
  *           pi.sendMessage call (non-regression: legitimate idle path still works).
  *   R15-S3: replay guard — second tick on the same mailbox state does NOT add
  *           another pi.sendMessage (R10-1 no-duplicate via consumerReceipts).
@@ -30,11 +30,11 @@
  *           (durable contract intact).
  *   R15-S6: normal suppression/noise guardrails preserved — notification.stale.suppressed
  *           with reason=agent_busy still fires for normal priority on a busy
- *           orchestrator (we do NOT loosen the busy gate for normal priority;
+ *           root (we do NOT loosen the busy gate for normal priority;
  *           we only remove the false text).
  *
  * ISOLATION CONTRACT — SCRATCH CWD ONLY.
- * Run: node extensions/swarm/r15-normal-orchestrator-result.test.mjs
+ * Run: node extensions/swarm/r15-normal-root-result.test.mjs
  */
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,19 +42,19 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const { pumpOrchestratorMailbox } = await import(join(here, "..", "src/reconcile.ts"));
+const { pumpRootMailbox } = await import(join(here, "..", "src/reconcile.ts"));
 const { paths, withLock, readState, writeState } = await import(join(here, "..", "src/state.ts"));
-const { ensureOrchestrator, heartbeatOrchestratorLeader } = await import(join(here, "..", "src/identity.ts"));
+const { ensureRoot, heartbeatRootLeader } = await import(join(here, "..", "src/identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "..", "src/mailbox.ts"));
 // Bring in the production `swarm_send_message` tool registration so we exercise
 // the REAL text-generation path that the worker reads (R10-1 real surface boundary).
 const { registerMessagesTools } = await import(join(here, "..", "src/tools/messages.ts"));
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const ORIG_PI_SWARM_IS_ORCHESTRATOR = process.env.PI_SWARM_IS_ORCHESTRATOR;
+const ORIG_PI_SWARM_IS_ROOT = process.env.PI_SWARM_IS_ROOT;
 
 // Each scenario gets a FRESH scratch to avoid cross-scenario contamination of
-// consumerReceipts / mailbox files / orchestratorPumpSessions state.
+// consumerReceipts / mailbox files / rootPumpSessions state.
 let scenarioIdx = 0;
 function freshScratch() {
 	scenarioIdx++;
@@ -80,15 +80,15 @@ function clearEvents(scratch) {
 	mkdirSync(join(scratch, ".pi/swarm/traces"), { recursive: true });
 	writeFileSync(join(scratch, ".pi/swarm/traces/events.jsonl"), "");
 }
-function readOrchestratorMailbox(scratch) {
-	const p = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
+function readRootMailbox(scratch) {
+	const p = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 	if (!existsSync(p)) return [];
 	return readFileSync(p, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
 
 function makePiMockWithCounters({ busy = true } = {}) {
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const sendMessages = [];
 	const pi = {
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
@@ -102,7 +102,7 @@ function makePiMockWithCounters({ busy = true } = {}) {
 
 /**
  * Seed the incident shape:
- *   - orchestrator pseudo-agent with tmuxTarget="unknown", runtimeStatus: idle by default
+ *   - root pseudo-agent with tmuxTarget="unknown", runtimeStatus: idle by default
  *     (caller flips to "tool_running" for the busy shape by setting runtimeStatus below)
  *   - one worker fs-planner with tmuxTarget=fs-planner.0 (live)
  *   - a normal-priority result message durably enqueued via deliverMessageLocked
@@ -118,8 +118,8 @@ async function seedNormalResultShape({ busy = true, workerId = "fs-planner", tas
 	// test isolates the "normal result" path; stale-open machinery is a separate
 	// concern tested by the R13 row.
 	const workerTs = new Date(nowMs - 1_000).toISOString();
-	// orchestrator is BUSY (mid-turn on its own work) — that's the incident shape.
-	// A worker settle is irrelevant to the orchestrator pump; we set the orchestrator's
+	// root is BUSY (mid-turn on its own work) — that's the incident shape.
+	// A worker settle is irrelevant to the root pump; we set the root's
 	// runtimeStatus to tool_running so the pump's effective-agent-set-not-idle condition fires.
 	const initial = {
 		version: 1, swarmId: "r15-test", cwd: scratch, tmuxSession: "r15",
@@ -139,12 +139,12 @@ async function seedNormalResultShape({ busy = true, workerId = "fs-planner", tas
 	};
 	writeFileSync(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(initial, null, 2));
 
-	// Task graph: required so isActionableOrchestratorMessage doesn't bail with task_missing.
+	// Task graph: required so isActionableRootMessage doesn't bail with task_missing.
 	const taskDir = join(scratch, ".pi/swarm/tasks", taskId);
 	mkdirSync(taskDir, { recursive: true });
 	const task = {
 		version: 1, taskId, title: "R15 victim task", goal: "test", status: "in_progress",
-		priority: "normal", createdAt: workerTs, updatedAt: workerTs, owner: "orchestrator",
+		priority: "normal", createdAt: workerTs, updatedAt: workerTs, owner: "root",
 		workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
 		start: "implement", currentNodes: ["implement"],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
@@ -155,24 +155,24 @@ async function seedNormalResultShape({ busy = true, workerId = "fs-planner", tas
 
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
-		ensureOrchestrator(st, scratch, p);
-		// Flip the orchestrator pseudo-agent to busy so the pump's effective-agent-set-not-idle gate fires.
-		if (busy && st.agents.orchestrator) {
-			st.agents.orchestrator.runtimeStatus = "tool_running";
-			st.agents.orchestrator.tmuxTarget = "unknown"; // explicit — orchestrator never has a real pane
-			st.agents.orchestrator.updatedAt = new Date(nowMs).toISOString();
+		ensureRoot(st, scratch, p);
+		// Flip the root pseudo-agent to busy so the pump's effective-agent-set-not-idle gate fires.
+		if (busy && st.agents.root) {
+			st.agents.root.runtimeStatus = "tool_running";
+			st.agents.root.tmuxTarget = "unknown"; // explicit — root never has a real pane
+			st.agents.root.updatedAt = new Date(nowMs).toISOString();
 		}
-		heartbeatOrchestratorLeader(st, nowMs, process.pid, "r15_test_seed");
+		heartbeatRootLeader(st, nowMs, process.pid, "r15_test_seed");
 		// Reset migration revision + entries so each scenario starts with a clean dedupe ledger.
-		if (st.consumerReceipts?.orchestrator) {
-			st.consumerReceipts.orchestrator.entries = {};
-			st.consumerReceipts.orchestrator.revision = 0;
+		if (st.consumerReceipts?.root) {
+			st.consumerReceipts.root.entries = {};
+			st.consumerReceipts.root.revision = 0;
 		}
 		const pidKey = String(process.pid);
-		if (st.orchestratorPumpSessions?.[pidKey]) {
-			st.orchestratorPumpSessions[pidKey].ids = [];
-			st.orchestratorPumpSessions[pidKey].triggeredAt = {};
-			st.orchestratorPumpSessions[pidKey].retriggerCount = {};
+		if (st.rootPumpSessions?.[pidKey]) {
+			st.rootPumpSessions[pidKey].ids = [];
+			st.rootPumpSessions[pidKey].triggeredAt = {};
+			st.rootPumpSessions[pidKey].retriggerCount = {};
 		}
 		await writeState(p, st);
 	});
@@ -185,7 +185,7 @@ async function seedNormalResultShape({ busy = true, workerId = "fs-planner", tas
 			{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
 			scratch, p, st,
 			{
-				to: "orchestrator",
+				to: "root",
 				priority: "normal",
 				subject: `Result: implement of ${taskId} done`,
 				body: `Node \`implement\` of task ${taskId} completed successfully. No further action required.`,
@@ -212,12 +212,12 @@ async function captureSwarmSendMessageToolOutput(scratch, workerId = "fs-planner
 				// execute the tool synchronously to capture the return text
 				(async () => {
 					process.env.PI_SWARM_AGENT_ID = workerId;
-					process.env.PI_SWARM_IS_ORCHESTRATOR = "";
+					process.env.PI_SWARM_IS_ROOT = "";
 					const fakeCtx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
 					const result = await tool.execute(
 						"call-r15-red",
 						{
-							to: "orchestrator",
+							to: "root",
 							priority: "normal",
 							subject: `Result: implement of ${taskId} done`,
 							body: `Node \`implement\` of task ${taskId} completed successfully.`,
@@ -246,8 +246,8 @@ async function captureSwarmSendMessageToolOutput(scratch, workerId = "fs-planner
 	return capturedText;
 }
 
-// --- R15-S1: busy-orchestrator normal-priority result (the incident shape) ---
-console.log("\n[R15-S1] normal-priority worker result to unknown-target orchestrator + busy orchestrator → 0 pi.sendMessage + literal '~5s' is the false-promise shape");
+// --- R15-S1: busy-root normal-priority result (the incident shape) ---
+console.log("\n[R15-S1] normal-priority worker result to unknown-target root + busy root → 0 pi.sendMessage + literal '~5s' is the false-promise shape");
 {
 	const scratch = freshScratch();
 	const workerId = "fs-planner";
@@ -255,15 +255,15 @@ console.log("\n[R15-S1] normal-priority worker result to unknown-target orchestr
 	await seedNormalResultShape({ busy: true, workerId, taskId, scratch });
 
 	// L1 boundary counter captured BEFORE the tool-capture step (which itself enqueues a second message).
-	const mailboxBeforeToolCapture = readOrchestratorMailbox(scratch);
+	const mailboxBeforeToolCapture = readRootMailbox(scratch);
 	ok("R15-S1 mailboxAppendCount === 1 (L1 durable contract intact, pre-tool-capture)", mailboxBeforeToolCapture.length === 1, `got ${mailboxBeforeToolCapture.length}`);
 
-	// L2 boundary counter — pump the orchestrator mailbox under busy.
+	// L2 boundary counter — pump the root mailbox under busy.
 	const { pi, sendMessages } = makePiMockWithCounters({ busy: true });
 	const p = paths(scratch);
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => false, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	const result = await pumpOrchestratorMailbox(pi, ctx, p, "watchdog");
-	ok("R15-S1 sendMessages.length === 0 (L2 boundary: no surface for busy orchestrator)", sendMessages.length === 0, `got ${sendMessages.length}`);
+	const result = await pumpRootMailbox(pi, ctx, p, "watchdog");
+	ok("R15-S1 sendMessages.length === 0 (L2 boundary: no surface for busy root)", sendMessages.length === 0, `got ${sendMessages.length}`);
 	ok("R15-S1 result.delivered === 0 (no surface on busy)", result.delivered === 0, { delivered: result.delivered });
 
 	// Capture the REAL swarm_send_message tool output to assert the literal text.
@@ -275,8 +275,8 @@ console.log("\n[R15-S1] normal-priority worker result to unknown-target orchestr
 	}
 }
 
-// --- R15-S2: idle-orchestrator with explicit agent_settled → surface (non-regression) ---
-console.log("\n[R15-S2] idle-orchestrator with explicit agent_settled trigger → 1 pi.sendMessage (non-regression of legitimate idle path)");
+// --- R15-S2: idle-root with explicit agent_settled → surface (non-regression) ---
+console.log("\n[R15-S2] idle-root with explicit agent_settled trigger → 1 pi.sendMessage (non-regression of legitimate idle path)");
 {
 	const scratch = freshScratch();
 	const workerId = "fs-planner";
@@ -286,7 +286,7 @@ console.log("\n[R15-S2] idle-orchestrator with explicit agent_settled trigger �
 
 	const { pi, sendMessages } = makePiMockWithCounters({ busy: false });
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	const result = await pumpOrchestratorMailbox(pi, ctx, p, "agent_settled");
+	const result = await pumpRootMailbox(pi, ctx, p, "agent_settled");
 	ok("R15-S2 sendMessages.length === 1 (L2 boundary: legitimate idle path)", sendMessages.length === 1, `got ${sendMessages.length}`);
 	ok("R15-S2 sendMessage triggerTurn === true", sendMessages[0]?.options?.triggerTurn === true);
 	ok("R15-S2 result.delivered === 1 (idle-path surface delivered)", result.delivered === 1, { delivered: result.delivered });
@@ -303,9 +303,9 @@ console.log("\n[R15-S3] replay guard — second tick on same mailbox state does 
 
 	const { pi, sendMessages } = makePiMockWithCounters({ busy: false });
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	await pumpOrchestratorMailbox(pi, ctx, p, "agent_settled_t1");
+	await pumpRootMailbox(pi, ctx, p, "agent_settled_t1");
 	const sendAfterFirst = sendMessages.length;
-	await pumpOrchestratorMailbox(pi, ctx, p, "agent_settled_t2");
+	await pumpRootMailbox(pi, ctx, p, "agent_settled_t2");
 	ok("R15-S3 first tick sendMessages.length === 1", sendAfterFirst === 1, `got ${sendAfterFirst}`);
 	ok("R15-S3 second tick did NOT add another sendMessage", sendMessages.length === sendAfterFirst, `got ${sendMessages.length}`);
 }
@@ -323,13 +323,13 @@ console.log("\n[R15-S4] R13 high-priority unknown-target bypass still works (pri
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
 		// Clear low-priority result and add a high-priority nudge.
-		const ids = Object.keys(st.messages).filter((id) => st.messages[id].to === "orchestrator");
+		const ids = Object.keys(st.messages).filter((id) => st.messages[id].to === "root");
 		for (const id of ids) delete st.messages[id];
 		await deliverMessageLocked(
 			{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
 			scratch, p, st,
 			{
-				to: "orchestrator",
+				to: "root",
 				priority: "high",
 				subject: `STALE OPEN: node implement of ${taskId} assigned but no progress`,
 				body: `Node implement of ${taskId} assigned but no progress.`,
@@ -344,14 +344,14 @@ console.log("\n[R15-S4] R13 high-priority unknown-target bypass still works (pri
 
 	const { pi, sendMessages } = makePiMockWithCounters({ busy: true });
 	// R13 bypass only fires inside the surface loop, which only runs when the
-	// orchestrator's own `ctx.isIdle() === true` (the pump's busy-defer branch
+	// root's own `ctx.isIdle() === true` (the pump's busy-defer branch
 	// returns early before the surface loop). We model the R13 incident shape
 	// — a worker is mid-turn (staleSurfaceReason returns agent_busy because the
 	// worker has an activeTaskIds pointer while runtimeStatus=idle), but the
-	// orchestrator's own idle/agent_settled is true so the surface loop runs
+	// root's own idle/agent_settled is true so the surface loop runs
 	// and the bypass fires for priority-high.
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	await pumpOrchestratorMailbox(pi, ctx, p, "watchdog");
+	await pumpRootMailbox(pi, ctx, p, "watchdog");
 	ok("R15-S4 priority-high still surfaces via R13 bypass (1 pi.sendMessage)", sendMessages.length === 1, `got ${sendMessages.length}`);
 }
 
@@ -365,12 +365,12 @@ const s5Scratch = freshScratch();
 	const events = readEvents(s5Scratch);
 	const mailboxOnlyTrace = events.filter((e) => e.event === "message.deliver.mailbox_only");
 	ok("R15-S5 message.deliver.mailbox_only trace present (durable semantics intact)", mailboxOnlyTrace.length >= 1, { count: mailboxOnlyTrace.length });
-	const mailbox = readOrchestratorMailbox(s5Scratch);
+	const mailbox = readRootMailbox(s5Scratch);
 	ok("R15-S5 mailboxAppendCount === 1", mailbox.length === 1, `got ${mailbox.length}`);
 }
 
 // --- R15-S6: R13 bypass MUST NOT fire for normal-priority (the B1 boundary) ---
-// The R13 P0 bypass is priority=high AND unknown-target orchestrator AND reason=agent_busy.
+// The R13 P0 bypass is priority=high AND unknown-target root AND reason=agent_busy.
 // For normal priority, the bypass MUST NOT fire — that's the guardrail preventing the
 // R10 nudge-storm regression (roadmap.md:937). We force a normal-priority message
 // to enter the surface plan with the agent_busy reason and assert that the bypass
@@ -393,13 +393,13 @@ console.log("\n[R15-S6] R13 bypass MUST NOT fire for normal-priority (the B1 bou
 	// idempotencyKey so the staleSurfaceReason gate applies (`:result:` keys do not match).
 	await withLock(p, async () => {
 		const st = await readState(p, s6Scratch);
-		const ids = Object.keys(st.messages).filter((id) => st.messages[id].to === "orchestrator");
+		const ids = Object.keys(st.messages).filter((id) => st.messages[id].to === "root");
 		for (const id of ids) delete st.messages[id];
 		await deliverMessageLocked(
 			{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
 			s6Scratch, p, st,
 			{
-				to: "orchestrator",
+				to: "root",
 				priority: "normal",
 				subject: `normal nudge for ${taskId}`,
 				body: `Normal-priority nudge for ${taskId} (bypass guard test).`,
@@ -413,7 +413,7 @@ console.log("\n[R15-S6] R13 bypass MUST NOT fire for normal-priority (the B1 bou
 	});
 	const { pi, sendMessages } = makePiMockWithCounters({ busy: true });
 	const ctx = { cwd: s6Scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	await pumpOrchestratorMailbox(pi, ctx, p, "watchdog");
+	await pumpRootMailbox(pi, ctx, p, "watchdog");
 	ok("R15-S6 sendMessages.length === 0 (normal priority does NOT trigger R13 bypass)", sendMessages.length === 0, `got ${sendMessages.length}`);
 	const events = readEvents(s6Scratch);
 	const bypassTrace = events.filter((e) => e.event === "notification.surface.bypass_high_unknown_target");
@@ -422,9 +422,9 @@ console.log("\n[R15-S6] R13 bypass MUST NOT fire for normal-priority (the B1 bou
 
 // --- Cleanup ---
 process.env.PI_SWARM_AGENT_ID = ORIG_PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = ORIG_PI_SWARM_IS_ORCHESTRATOR;
+process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 
-console.log(`\nR15-NORMAL-ORCHESTRATOR-RESULT ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
+console.log(`\nR15-NORMAL-ROOT-RESULT ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 if (fail > 0) {
 	console.error("\n  ↳ RED regression reproduced — the false ~5s promise in tools/messages.ts:42-48 must be removed (B1 honest removal) without altering mailbox/normal busy suppression/reconcile behavior.");
 	process.exit(1);

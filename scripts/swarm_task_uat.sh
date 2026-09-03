@@ -10,17 +10,17 @@ set -euo pipefail
 # Covered paths:
 #   1. create  -> ready                       (engine closure: fresh task derives `ready`)
 #   2. validate(structure + runtime)          (no hard errors)
-#   3. assign  -> orchestrator-role node      (activeTaskIds gains task; assignment msg enqueued)
+#   3. assign  -> root-role node      (activeTaskIds gains task; assignment msg enqueued)
 #   4. update  -> in_progress -> done(outcome)(node terminal; activeTaskIds released)
-#   5. terminal closer -> ready orchestrator-owned terminal node auto-closes
+#   5. terminal closer -> ready root-owned terminal node auto-closes
 #   6. closure -> task.status = done          (every terminal done => derived done)
 #   7. failed  -> task.status = failed        (any node failed => derived failed)
-#   7. cancel  -> task.status = cancelled     (orchestrator force + cancelTask; sticky)
+#   7. cancel  -> task.status = cancelled     (root force + cancelTask; sticky)
 #   8. stale   -> reconcile surfaces stale    (fabricated old lastActivityAt => task_node_stale)
 #   9. drift   -> reconcile mark repairs      (fabricated status drift => task_status_repaired)
-#  10. PM close-notify  -> orchestrator mailbox AND auto-surfaced by pump (node/task closed; no polling)
-#  11. PM settle-notify -> worker settled w/ open work -> orchestrator mailbox + auto-surfaced (cooldown-guarded)
-#  12. Session-safe + read-safe pump -> two orchestrator sessions both surface ONE notification (no theft);
+#  10. PM close-notify  -> root mailbox AND auto-surfaced by pump (node/task closed; no polling)
+#  11. PM settle-notify -> worker settled w/ open work -> root mailbox + auto-surfaced (cooldown-guarded)
+#  12. Session-safe + read-safe pump -> two root sessions both surface ONE notification (no theft);
 #      check_mailbox(markDelivered:true) cannot pre-empt a later pump surface (per-process surfaced set)
 #  14. Identity override + reload -> effective <agent>.md = base+override+provenance; version/hash/loadedAt
 #      stamped on the agent record; reload of a missing agent errors; override removal clears the marker
@@ -29,8 +29,8 @@ set -euo pipefail
 #   scripts/swarm_task_uat.sh
 #   SWARM_MODEL=glm-5.1 SWARM_PROVIDER=zai-coding-cn scripts/swarm_task_uat.sh
 #
-# Every step runs as the orchestrator (the default agent id), so node ownership/transition checks
-# are bypassed and orchestrator-role nodes resolve to the always-present orchestrator pseudo-agent
+# Every step runs as the root (the default agent id), so node ownership/transition checks
+# are bypassed and root-role nodes resolve to the always-present root pseudo-agent
 # (mailbox-only; no tmux spawn required).
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,14 +47,14 @@ LOG_DIR="$ROOT/.pi/swarm-uat/runs/${RUN_ID}"
 SWARM_CWD="${SWARM_CWD:-$LOG_DIR/cwd}"
 mkdir -p "$LOG_DIR" "$SWARM_CWD"
 cd "$SWARM_CWD"
-# Force orchestrator context so node ownership/transition checks are bypassed and orchestrator-role
-# nodes resolve to the always-present orchestrator pseudo-agent. NOTE: just unsetting PI_SWARM_AGENT_ID
+# Force root context so node ownership/transition checks are bypassed and root-role
+# nodes resolve to the always-present root pseudo-agent. NOTE: just unsetting PI_SWARM_AGENT_ID
 # is NOT enough — currentAgentId() then returns the inert "swarm-guest" identity, which never starts
-# the orchestrator mailbox pump (so PM auto-surface / session-safe surfacing could never be exercised)
+# the root mailbox pump (so PM auto-surface / session-safe surfacing could never be exercised)
 # and does not act as the PM. Opt in explicitly. PI_SWARM_AGENT_ID still wins when set (the worker lanes
 # below set it), so this exported opt-in does not affect worker simulations (charlie/settle agents).
 unset PI_SWARM_AGENT_ID
-export PI_SWARM_IS_ORCHESTRATOR=1
+export PI_SWARM_IS_ROOT=1
 TASKS_DIR="$SWARM_CWD/.pi/swarm/tasks"
 STATE_JSON="$SWARM_CWD/.pi/swarm/swarm-state.json"
 TRACE_JSONL="$SWARM_CWD/.pi/swarm/traces/events.jsonl"
@@ -292,7 +292,7 @@ PY
 
 # mailbox_has <recipientId> <subjectSubstring> <label>: assert <recipient>.jsonl contains a message
 # addressed to recipient whose subject includes the substring. Directly asserts PM visibility (the
-# orchestrator mailbox received the notification) without any manual polling.
+# root mailbox received the notification) without any manual polling.
 mailbox_has() {
 	local rcpt="$1" needle="$2" label="$3"
 	local f="$SWARM_CWD/.pi/swarm/mailboxes/$rcpt.jsonl"
@@ -309,14 +309,14 @@ PY
 	fi
 }
 
-# pump_surfaced <subjectSubstring> <label>: assert the orchestrator AUTO-PUMP surfaced (to a turn, via
-# mailbox.orchestrator_pump) an orchestrator-bound message whose subject contains the substring, WITHOUT
-# any swarm_check_mailbox polling. Cross-references pump-traced surfaced ids with the orchestrator mailbox.
+# pump_surfaced <subjectSubstring> <label>: assert the root AUTO-PUMP surfaced (to a turn, via
+# mailbox.root_pump) an root-bound message whose subject contains the substring, WITHOUT
+# any swarm_check_mailbox polling. Cross-references pump-traced surfaced ids with the root mailbox.
 # This is the real PM-visibility signal: the message was surfaced automatically, not just appended.
 pump_surfaced() {
 	local needle="$1" label="$2"
 	local trace_f="$TRACE_JSONL"
-	local omb="$SWARM_CWD/.pi/swarm/mailboxes/orchestrator.jsonl"
+	local omb="$SWARM_CWD/.pi/swarm/mailboxes/root.jsonl"
 	[[ -f "$trace_f" && -f "$omb" ]] || { fail "pump_surfaced[$label]: missing trace or mailbox"; return 0; }
 	if python3 - "$trace_f" "$omb" "$needle" <<'PY'; then
 import json, sys
@@ -327,7 +327,7 @@ for l in open(trace_f):
 	if not l: continue
 	try: d = json.loads(l)
 	except Exception: continue
-	if d.get("event") == "mailbox.orchestrator_pump":
+	if d.get("event") == "mailbox.root_pump":
 		for i in (d.get("ids") or []): surfaced.add(i)
 target = None
 for l in open(mbox_f):
@@ -335,23 +335,23 @@ for l in open(mbox_f):
 	if not l: continue
 	try: m = json.loads(l)
 	except Exception: continue
-	if m.get("to") == "orchestrator" and needle in (m.get("subject") or ""):
+	if m.get("to") == "root" and needle in (m.get("subject") or ""):
 		target = m.get("id"); break
 sys.exit(0 if (target and target in surfaced) else 1)
 PY
-		log "  ok pump-surfaced[$label] orchestrator pump surfaced subject~\"$needle\" (no polling)"
+		log "  ok pump-surfaced[$label] root pump surfaced subject~\"$needle\" (no polling)"
 	else
-		fail "pump-surfaced[$label] orchestrator pump did NOT surface subject~\"$needle\" (auto-pump neutralized?)"
+		fail "pump-surfaced[$label] root pump did NOT surface subject~\"$needle\" (auto-pump neutralized?)"
 	fi
 }
 
 # pump_surfaced_sids <subjectSubstring>: print the distinct PI_SESSION_ID sids (space-separated) whose
-# orchestrator pump surfaced an orchestrator-bound message whose subject contains the substring. Used
+# root pump surfaced an root-bound message whose subject contains the substring. Used
 # by the session-safety / read-safety assertions (section 12). Empty string if none.
 pump_surfaced_sids() {
 	local needle="$1"
 	local trace_f="$TRACE_JSONL"
-	local omb="$SWARM_CWD/.pi/swarm/mailboxes/orchestrator.jsonl"
+	local omb="$SWARM_CWD/.pi/swarm/mailboxes/root.jsonl"
 	[[ -f "$trace_f" && -f "$omb" ]] || { echo ""; return 0; }
 	python3 - "$trace_f" "$omb" "$needle" <<'PY'
 import json, sys
@@ -362,7 +362,7 @@ for l in open(mbox_f):
 	if not l: continue
 	try: m = json.loads(l)
 	except Exception: continue
-	if m.get("to") == "orchestrator" and needle in (m.get("subject") or ""):
+	if m.get("to") == "root" and needle in (m.get("subject") or ""):
 		target = m.get("id"); break
 if not target:
 	print(""); sys.exit(0)
@@ -372,7 +372,7 @@ for l in open(trace_f):
 	if not l: continue
 	try: d = json.loads(l)
 	except Exception: continue
-	if d.get("event") == "mailbox.orchestrator_pump" and target in (d.get("ids") or []):
+	if d.get("event") == "mailbox.root_pump" and target in (d.get("ids") or []):
 		s = d.get("sid")
 		if s is not None: sids.add(s)
 print(" ".join(sorted(s for s in sids if s)))
@@ -380,7 +380,7 @@ PY
 }
 
 # pump_surfaced_by_all_sids <subjectSubstring> <space-separated-sids> <label>: assert the subject was
-# surfaced by EVERY listed sid. This is the session-safety guarantee: each distinct orchestrator
+# surfaced by EVERY listed sid. This is the session-safety guarantee: each distinct root
 # session surfaces the notification once; no session steals it from another.
 pump_surfaced_by_all_sids() {
 	local needle="$1" want="$2" label="$3"
@@ -396,15 +396,15 @@ pump_surfaced_by_all_sids() {
 	fi
 }
 
-# shared_delivered_has <subjectSubstring>: print True if the orchestrator-bound message with that
-# subject is in the SHARED st.delivered.orchestrator ledger (the read/check_mailbox ledger the legacy
+# shared_delivered_has <subjectSubstring>: print True if the root-bound message with that
+# subject is in the SHARED st.delivered.root ledger (the read/check_mailbox ledger the legacy
 # pump consulted and that tester-02 proved starved surfacing — a single check_mailbox(markDelivered)
 # pre-empted ~15 messages). Used to prove a cross-session read actually marked the shared ledger (the
 # pre-emption vector) before asserting the session-safe pump still surfaces the message anyway.
 shared_delivered_has() {
 	local needle="$1"
 	local f="$STATE_JSON"
-	local omb="$SWARM_CWD/.pi/swarm/mailboxes/orchestrator.jsonl"
+	local omb="$SWARM_CWD/.pi/swarm/mailboxes/root.jsonl"
 	[[ -f "$f" && -f "$omb" ]] || { echo False; return 0; }
 	python3 - "$f" "$omb" "$needle" <<'PY'
 import json, sys
@@ -415,10 +415,10 @@ for l in open(mbox_f):
 	if not l: continue
 	try: m = json.loads(l)
 	except Exception: continue
-	if m.get("to") == "orchestrator" and needle in (m.get("subject") or ""):
+	if m.get("to") == "root" and needle in (m.get("subject") or ""):
 		target = m.get("id"); break
 st = json.load(open(state_f))
-shared = set((st.get("delivered") or {}).get("orchestrator", []) or [])
+shared = set((st.get("delivered") or {}).get("root", []) or [])
 print("True" if (target and target in shared) else "False")
 PY
 }
@@ -437,7 +437,7 @@ run_step preflight swarm_create_task \
 
 # ---------- 2. Happy path: create -> assign -> update -> done closure ----------
 run_step create-happy swarm_create_task \
-	"Call swarm_create_task exactly once with title \"UAT happy closure\", goal \"Deterministic UAT happy-path closure\", taskId \"$HAPPY_ID\", start \"kickoff\", nodes {\"kickoff\":{\"role\":\"orchestrator plan\"},\"ship\":{\"role\":\"orchestrator commit\",\"terminal\":true,\"dependsOn\":[\"kickoff\"]}}, edges [{\"from\":\"kickoff\",\"to\":\"ship\",\"when\":\"go\"}]. Then reply done."
+	"Call swarm_create_task exactly once with title \"UAT happy closure\", goal \"Deterministic UAT happy-path closure\", taskId \"$HAPPY_ID\", start \"kickoff\", nodes {\"kickoff\":{\"role\":\"root plan\"},\"ship\":{\"role\":\"root commit\",\"terminal\":true,\"dependsOn\":[\"kickoff\"]}}, edges [{\"from\":\"kickoff\",\"to\":\"ship\",\"when\":\"go\"}]. Then reply done."
 assert_stdout_contains create-happy "Created task"
 task_json_eq "$HAPPY_ID" "t['status']" "ready"
 trace_has "task.create" "$HAPPY_ID"
@@ -450,7 +450,7 @@ run_step assign-kickoff swarm_assign_task \
 	"Call swarm_assign_task exactly once with taskId \"$HAPPY_ID\", nodeId \"kickoff\". Then reply done."
 assert_stdout_contains assign-kickoff "Assigned node kickoff"
 task_json_eq "$HAPPY_ID" "t['nodes']['kickoff']['status']" "assigned"
-task_json_eq "$HAPPY_ID" "t['nodes']['kickoff']['assignee']" "orchestrator"
+task_json_eq "$HAPPY_ID" "t['nodes']['kickoff']['assignee']" "root"
 
 run_step upd-kickoff-ip swarm_update_task \
 	"Call swarm_update_task exactly once with taskId \"$HAPPY_ID\", nodeId \"kickoff\", status \"in_progress\". Then reply done."
@@ -462,15 +462,15 @@ run_step upd-kickoff-done swarm_update_task \
 task_json_eq "$HAPPY_ID" "t['nodes']['kickoff']['status']" "done"
 task_json_eq "$HAPPY_ID" "t['nodes']['kickoff']['outcome']" "go"
 task_json_eq "$HAPPY_ID" "t['nodes']['ship']['status']" "done"
-trace_has "task.autoclose.orchestrator" "$HAPPY_ID"
+trace_has "task.autoclose.root" "$HAPPY_ID"
 # Path (a) — PM close-notify: task going terminal (done) emits the stronger "task ... closed (done)"
 # even though the terminal ship node was auto-closed by the engine.
-mailbox_has "orchestrator" "closed (done)" "task-close-notify (autoclosed ship, task terminal)"
-# Auto-surface proof: the orchestrator pump surfaced the task-close notify to a turn WITHOUT polling
+mailbox_has "root" "closed (done)" "task-close-notify (autoclosed ship, task terminal)"
+# Auto-surface proof: the root pump surfaced the task-close notify to a turn WITHOUT polling
 # (this run is constrained to swarm_update_task, so swarm_check_mailbox is impossible).
 pump_surfaced "closed (done)" "auto-surface close-notify"
 
-# Closure assertion: every terminal done => derived task.status == done; orchestrator released.
+# Closure assertion: every terminal done => derived task.status == done; root released.
 task_json_eq "$HAPPY_ID" "t['status']" "done"
 trace_has "task.close" "$HAPPY_ID"
 
@@ -481,7 +481,7 @@ assert_stdout_contains status-happy "derivedStatus=done"
 
 # ---------- 3. Failed path: any node failed => derived failed ----------
 run_step create-fail swarm_create_task \
-	"Call swarm_create_task exactly once with title \"UAT failed closure\", goal \"Deterministic UAT failed-path closure\", taskId \"$FAIL_ID\", start \"build\", nodes {\"build\":{\"role\":\"orchestrator build\",\"terminal\":true}}, edges []. Then reply done."
+	"Call swarm_create_task exactly once with title \"UAT failed closure\", goal \"Deterministic UAT failed-path closure\", taskId \"$FAIL_ID\", start \"build\", nodes {\"build\":{\"role\":\"root build\",\"terminal\":true}}, edges []. Then reply done."
 task_json_eq "$FAIL_ID" "t['status']" "ready"
 
 run_step assign-build swarm_assign_task \
@@ -492,9 +492,9 @@ task_json_eq "$FAIL_ID" "t['nodes']['build']['status']" "failed"
 task_json_eq "$FAIL_ID" "t['status']" "failed"
 trace_has "task.close" "$FAIL_ID"
 
-# ---------- 4. Cancel path: orchestrator force + cancelTask => sticky cancelled ----------
+# ---------- 4. Cancel path: root force + cancelTask => sticky cancelled ----------
 run_step create-cancel swarm_create_task \
-	"Call swarm_create_task exactly once with title \"UAT cancel\", goal \"Deterministic UAT cancel-path\", taskId \"$CANCEL_ID\", start \"work\", nodes {\"work\":{\"role\":\"orchestrator work\",\"terminal\":true}}, edges []. Then reply done."
+	"Call swarm_create_task exactly once with title \"UAT cancel\", goal \"Deterministic UAT cancel-path\", taskId \"$CANCEL_ID\", start \"work\", nodes {\"work\":{\"role\":\"root work\",\"terminal\":true}}, edges []. Then reply done."
 run_step cancel-task swarm_update_task \
 	"Call swarm_update_task exactly once with taskId \"$CANCEL_ID\", nodeId \"work\", status \"done\", force true, cancelTask true. Then reply done."
 assert_stdout_contains cancel-task "cancelled"
@@ -503,7 +503,7 @@ trace_has "task.cancel" "$CANCEL_ID"
 
 # ---------- 5. Stale path: fabricated old activity => reconcile surfaces task_node_stale ----------
 run_step create-stale swarm_create_task \
-	"Call swarm_create_task exactly once with title \"UAT stale\", goal \"Deterministic UAT stale-path\", taskId \"$STALE_ID\", start \"slow\", nodes {\"slow\":{\"role\":\"orchestrator work\",\"terminal\":true}}, edges []. Then reply done."
+	"Call swarm_create_task exactly once with title \"UAT stale\", goal \"Deterministic UAT stale-path\", taskId \"$STALE_ID\", start \"slow\", nodes {\"slow\":{\"role\":\"root work\",\"terminal\":true}}, edges []. Then reply done."
 run_step assign-slow swarm_assign_task \
 	"Call swarm_assign_task exactly once with taskId \"$STALE_ID\", nodeId \"slow\". Then reply done."
 run_step upd-slow-ip swarm_update_task \
@@ -519,7 +519,7 @@ task_json_eq "$STALE_ID" "bool(t['nodes']['slow'].get('staleAt'))" "True"
 
 # ---------- 6. Drift path: fabricated status drift => reconcile mark repairs it ----------
 run_step create-drift swarm_create_task \
-	"Call swarm_create_task exactly once with title \"UAT drift\", goal \"Deterministic UAT drift-path\", taskId \"$DRIFT_ID\", start \"d\", nodes {\"d\":{\"role\":\"orchestrator work\",\"terminal\":true}}, edges []. Then reply done."
+	"Call swarm_create_task exactly once with title \"UAT drift\", goal \"Deterministic UAT drift-path\", taskId \"$DRIFT_ID\", start \"d\", nodes {\"d\":{\"role\":\"root work\",\"terminal\":true}}, edges []. Then reply done."
 run_step upd-drift-done swarm_update_task \
 	"Call swarm_update_task exactly once with taskId \"$DRIFT_ID\", nodeId \"d\", status \"done\". Then reply done."
 # Engine already derived done; corrupt stored status to force a stored/derived mismatch.
@@ -536,7 +536,7 @@ assert_stdout_contains pm-status "Closure:"
 
 # ---------- 8. Blocked derivation: all-active-blocked => task blocked (resumable) ----------
 run_step create-blk swarm_create_task \
-	"Call swarm_create_task exactly once with title \"UAT blocked\", goal \"Deterministic UAT blocked-path\", taskId \"$BLK_ID\", start \"w\", nodes {\"w\":{\"role\":\"orchestrator work\",\"terminal\":true}}, edges []. Then reply done."
+	"Call swarm_create_task exactly once with title \"UAT blocked\", goal \"Deterministic UAT blocked-path\", taskId \"$BLK_ID\", start \"w\", nodes {\"w\":{\"role\":\"root work\",\"terminal\":true}}, edges []. Then reply done."
 run_step assign-blk swarm_assign_task \
 	"Call swarm_assign_task exactly once with taskId \"$BLK_ID\", nodeId \"w\". Then reply done."
 run_step upd-blk swarm_update_task \
@@ -560,7 +560,7 @@ state_json_eq "$RK_AGENT" "a.get('roleKindExplicit')" "None"
 
 # ---------- 11. PM auto-notify (settle): worker settles with an open assignment ----------
 # Fabricate a worker that owns an open (in_progress) node, then run one turn AS that worker (print
-# mode). Its agent_settled hook enqueues the settle-notify to the orchestrator mailbox (loop-safe,
+# mode). Its agent_settled hook enqueues the settle-notify to the root mailbox (loop-safe,
 # cooldown-guarded) without any polling. Asserts engine PM visibility for the idle/stall signal.
 SETTLE_AGENT="uat-settle-worker-${SUFFIX}"
 SETTLE_TASK="uat-taskgraph-settle-${SUFFIX}"
@@ -578,27 +578,27 @@ retry_cmd "$SWARM_MAX_ATTEMPTS" 6 env PI_SWARM_AGENT_ID="$SETTLE_AGENT" "${PI_BA
 settle_code=$?
 set -e
 log "settle-worker exit=$settle_code"
-mailbox_has "orchestrator" "settled idle with open assignment" "settle-notify (worker->orchestrator)"
-# The settle-notify is orchestrator-bound; it auto-surfaces on the orchestrator's NEXT pump. Run one
-# orchestrator turn (constrained to swarm_task_status, so NO swarm_check_mailbox) and assert the pump
+mailbox_has "root" "settled idle with open assignment" "settle-notify (worker->root)"
+# The settle-notify is root-bound; it auto-surfaces on the root's NEXT pump. Run one
+# root turn (constrained to swarm_task_status, so NO swarm_check_mailbox) and assert the pump
 # surfaced the settle-notify to a turn without polling.
 run_step orch-pump-after-settle swarm_task_status \
 	"Call swarm_task_status exactly once with taskId \"$SETTLE_TASK\", runtime true. Then reply done."
 pump_surfaced "settled idle with open assignment" "auto-surface settle-notify"
 
-# ---------- 12. Session-safe + read-safe orchestrator surfacing ----------
-# The orchestrator auto-pump keys "already surfaced" PER PROCESS (process.pid), not on the shared
-# st.delivered.orchestrator ledger and not on PI_SESSION_ID (which a child `pi -p` validation run
+# ---------- 12. Session-safe + read-safe root surfacing ----------
+# The root auto-pump keys "already surfaced" PER PROCESS (process.pid), not on the shared
+# st.delivered.root ledger and not on PI_SESSION_ID (which a child `pi -p` validation run
 # inherits from its parent). Consequences under test:
-#   (A) two distinct orchestrator sessions each surface the SAME notification once (no theft);
-#   (B) a swarm_check_mailbox(agentId=orchestrator, markDelivered=true) read writes st.delivered.orchestrator
+#   (A) two distinct root sessions each surface the SAME notification once (no theft);
+#   (B) a swarm_check_mailbox(agentId=root, markDelivered=true) read writes st.delivered.root
 #       but the pump ignores that ledger, so a later pump STILL surfaces the message.
 # Both probes use requiresAck:false (informational, like the real PM close/settle notifications).
 run_step send-sessafety-A swarm_send_message \
-	'Call swarm_send_message exactly once with to "orchestrator", subject "session-safety-probe-A", body "probe", requiresAck false. Then reply done.'
+	'Call swarm_send_message exactly once with to "root", subject "session-safety-probe-A", body "probe", requiresAck false. Then reply done.'
 run_step send-sessafety-B swarm_send_message \
-	'Call swarm_send_message exactly once with to "orchestrator", subject "session-safety-probe-B", body "probe", requiresAck false. Then reply done.'
-# (A) Two orchestrator sessions with DISTINCT PI_SESSION_IDs each run one idle turn; their pumps fire
+	'Call swarm_send_message exactly once with to "root", subject "session-safety-probe-B", body "probe", requiresAck false. Then reply done.'
+# (A) Two root sessions with DISTINCT PI_SESSION_IDs each run one idle turn; their pumps fire
 # at session_start and each surfaces probe-A (fresh per-pid set => nothing stolen).
 log "RUN sessafety-orch-alpha [pi -p, PI_SESSION_ID=uat-alpha; retry on 429]"
 set +e
@@ -609,23 +609,23 @@ set +e
 retry_cmd "$SWARM_MAX_ATTEMPTS" 6 env PI_SESSION_ID=uat-beta "${PI_BASE[@]}" -p 'Reply with exactly: beta-ok' >"$LOG_DIR/sessafety-beta.out" 2>"$LOG_DIR/sessafety-beta.err" || true
 set -e
 pump_surfaced_by_all_sids "session-safety-probe-A" "uat-alpha uat-beta" "two-session no-theft"
-# (B) A NON-orchestrator (worker) session reads the orchestrator mailbox with markDelivered=true.
-# Because currentAgentId != orchestrator this writes the SHARED st.delivered.orchestrator ledger —
+# (B) A NON-root (worker) session reads the root mailbox with markDelivered=true.
+# Because currentAgentId != root this writes the SHARED st.delivered.root ledger —
 # exactly the pre-emption vector tester-02 proved starved the legacy pump (one check_mailbox
 # markDelivered pre-empted ~15 messages). The session-safe pump must IGNORE that shared ledger.
 CHARLIE_AGENT="uat-reader-charlie-${SUFFIX}"
 log "RUN sessafety-reader-charlie [pi -p as worker $CHARLIE_AGENT; check_mailbox markDelivered; retry on 429]"
 set +e
-retry_cmd "$SWARM_MAX_ATTEMPTS" 6 env PI_SWARM_AGENT_ID="$CHARLIE_AGENT" PI_SESSION_ID=uat-charlie "${PI_BASE[@]}" --tools swarm_check_mailbox -p 'Call swarm_check_mailbox exactly once with agentId "orchestrator", markDelivered true. Then reply ok.' >"$LOG_DIR/sessafety-charlie.out" 2>"$LOG_DIR/sessafety-charlie.err" || true
+retry_cmd "$SWARM_MAX_ATTEMPTS" 6 env PI_SWARM_AGENT_ID="$CHARLIE_AGENT" PI_SESSION_ID=uat-charlie "${PI_BASE[@]}" --tools swarm_check_mailbox -p 'Call swarm_check_mailbox exactly once with agentId "root", markDelivered true. Then reply ok.' >"$LOG_DIR/sessafety-charlie.out" 2>"$LOG_DIR/sessafety-charlie.err" || true
 set -e
-# Prove the pre-emption vector was exercised: probe-B must now be in the SHARED delivered.orchestrator
+# Prove the pre-emption vector was exercised: probe-B must now be in the SHARED delivered.root
 # ledger (the bug condition that starved the legacy pump). Without this the read-safe assertion below
 # could pass vacuously (nothing was actually marked in the shared ledger).
 PROBEB_SHARED="$(shared_delivered_has "session-safety-probe-B")"
 if [[ "$PROBEB_SHARED" == "True" ]]; then
-	log "  ok read-safe[probe-B] shared delivered.orchestrator marked by the cross-session read"
+	log "  ok read-safe[probe-B] shared delivered.root marked by the cross-session read"
 else
-	fail "read-safe[probe-B] NOT in shared delivered.orchestrator — pre-emption vector not exercised"
+	fail "read-safe[probe-B] NOT in shared delivered.root — pre-emption vector not exercised"
 fi
 # Session delta (fresh pid) pump MUST STILL surface probe-B: the shared ledger is ignored by the pump.
 log "RUN sessafety-orch-delta [pi -p, PI_SESSION_ID=uat-delta; retry on 429]"
@@ -643,7 +643,7 @@ fi
 # Covers: deterministic idempotency key (same task/node/assignee/attempt -> reuse, no duplicate);
 # newer assignment supersedes prior OPEN assignment (waived, excluded from response_missing); canonical
 # node.assignmentMessageId; swarm_ack_message rejects done/processing on a superseded assignment unless
-# the orchestrator passes waive=true. All assertions are file-backed (task.json + swarm-state messages
+# the root passes waive=true. All assertions are file-backed (task.json + swarm-state messages
 # + global trace); tool stdout (ASSIGNMENT_SUPERSEDED) is a secondary signal.
 IDEM_AGENT="uat-idem-worker-${SUFFIX}"
 IDEM_TASK="uat-taskgraph-idem-${SUFFIX}"
@@ -666,7 +666,7 @@ else
 	fail "idem: retry produced a different/new message (msg1=$MSG1 msg1b=$MSG1B) — idempotency key not honored"
 fi
 trace_global_has "message.idempotent_reuse"
-# (3) force a fresh attempt: orchestrator resets node -> ready, then assign -> new msg2 + supersede msg1
+# (3) force a fresh attempt: root resets node -> ready, then assign -> new msg2 + supersede msg1
 run_step reset-idem-ready swarm_update_task \
 	"Call swarm_update_task exactly once with taskId \"$IDEM_TASK\", nodeId \"w\", status \"ready\", force true. Then reply done."
 run_step assign-idem-3 swarm_assign_task \
@@ -684,7 +684,7 @@ state_msg_eq "$MSG1" "(m.get('response') or {}).get('status')" "waived"
 task_json_eq "$IDEM_TASK" "t['nodes']['w']['assignmentMessageId']" "$MSG2"
 # (4) ack guard: worker attempts done on the superseded msg1 -> rejected (ASSIGNMENT_SUPERSEDED).
 # The guard fires before the result-check, so no resultMessageId is required. File-backed proof:
-# msg1 is NOT completed by the worker (lastAck from worker never becomes 'done'); only the orchestrator
+# msg1 is NOT completed by the worker (lastAck from worker never becomes 'done'); only the root
 # waive in step (5) can complete it. The ASSIGNMENT_SUPERSEDED stdout signal is secondary/soft because a
 # constrained model may decline to call a "negative" tool — the hard check is the non-completion.
 log "RUN idem-ack-guard [pi -p as $IDEM_AGENT; retry on 429]"
@@ -697,10 +697,10 @@ else
 	log "  note idem: ASSIGNMENT_SUPERSEDED not captured (model may not have called the tool); relying on file-backed non-completion below"
 fi
 # HARD: the worker could not complete the superseded assignment. lastAck.status must not be 'done' yet
-# (the orchestrator waive in step 5 is what completes it). response must still be waived.
+# (the root waive in step 5 is what completes it). response must still be waived.
 state_msg_eq "$MSG1" "(m.get('response') or {}).get('status')" "waived"
 state_msg_eq "$MSG1" "(m.get('lastAck') or {}).get('status') == 'done'" "False"
-# (5) orchestrator waive override: ack msg1 done with waive=true -> accepted as waived.
+# (5) root waive override: ack msg1 done with waive=true -> accepted as waived.
 run_step idem-waive swarm_ack_message \
 	"Call swarm_ack_message exactly once with messageId \"$MSG1\", status \"done\", waive true. Then reply done."
 state_msg_eq "$MSG1" "(m.get('lastAck') or {}).get('status')" "done"
@@ -708,10 +708,10 @@ state_msg_eq "$MSG1" "(m.get('response') or {}).get('status')" "waived"
 
 # ---------- 14. Identity override + reload (effective identity, version/hash, missing-agent error) ----------
 # Deterministic + model-independent: writes an override file (bash), reloads via the tool, then asserts
-# on the effective <agent>.md file and the agent record in swarm-state.json. The orchestrator agent is
+# on the effective <agent>.md file and the agent record in swarm-state.json. The root agent is
 # created by the preflight create_task step, so it already exists in swarm-state.json. tmux injection is
-# best-effort and NOT asserted here (the orchestrator is mailbox-only, tmuxTarget="unknown").
-ID_AGENT="orchestrator"
+# best-effort and NOT asserted here (the root is mailbox-only, tmuxTarget="unknown").
+ID_AGENT="root"
 ID_FILE="$SWARM_CWD/.pi/swarm/agents/${ID_AGENT}.md"
 ID_OV="$SWARM_CWD/.pi/swarm/agents/${ID_AGENT}.override.md"
 ID_MARKER="DETERMINISTIC-UAT-IDENTITY-OVERRIDE-${SUFFIX}"
@@ -719,7 +719,7 @@ mkdir -p "$(dirname "$ID_OV")"
 # (1) Write the override file (model-free). Generation must NEVER write this file; only read it.
 printf 'Custom override instructions for %s. Unique marker: %s.\nFollow these custom rules when summarizing work.\n' "$ID_AGENT" "$ID_MARKER" > "$ID_OV"
 log "identity: wrote override $ID_OV (marker=$ID_MARKER)"
-# (2) Reload effective identity for the orchestrator (generated base + override + provenance).
+# (2) Reload effective identity for the root (generated base + override + provenance).
 run_step iden-reload swarm_reload_identity \
 	"Call swarm_reload_identity exactly once with agentId \"$ID_AGENT\". Then reply done."
 # (3) Effective file must contain the override marker AND the provenance footer (version/hash/loadedAt).
@@ -792,7 +792,7 @@ fi
 # guard must not let the (dying) old owner claim the node. Criteria 1-3 are file-backed on real
 # swarm_assign_task output; criterion 4 is the scanAgentOpenAssignments predicate reimplemented 1:1
 # over on-disk task.json + state.messages (design option ii; the real hook is also exercised in the
-# focused live validation). All steps run in orchestrator context.
+# focused live validation). All steps run in root context.
 STALE_OLD="uat-stale-old-${SUFFIX}"
 STALE_NEW="uat-stale-new-${SUFFIX}"
 STALE_TK="uat-taskgraph-stale-reassign-${SUFFIX}"
@@ -869,7 +869,7 @@ log "  ok stale: scanAgentOpenAssignments predicate -> old never holds; new hold
 fabricate_agent "$LOOP_A" "loop proposer"
 fabricate_agent "$LOOP_B" "loop proposer"
 run_step create-loop swarm_create_task \
-	"Call swarm_create_task exactly once with title \"UAT loop\", goal \"Deterministic V1.5 loop\", taskId \"$LOOP_ID\", start \"kickoff\", nodes {\"kickoff\":{\"role\":\"orchestrator plan\"},\"ship\":{\"role\":\"orchestrator commit\",\"terminal\":true,\"dependsOn\":[\"kickoff\"]}}, edges [{\"from\":\"kickoff\",\"to\":\"ship\",\"when\":\"go\"}], loop {\"enabled\":true,\"proposalAgents\":[\"$LOOP_A\",\"$LOOP_B\"],\"refreshAgents\":[\"$LOOP_A\",\"$LOOP_MISSING\"],\"maxRounds\":2}. Then reply done."
+	"Call swarm_create_task exactly once with title \"UAT loop\", goal \"Deterministic V1.5 loop\", taskId \"$LOOP_ID\", start \"kickoff\", nodes {\"kickoff\":{\"role\":\"root plan\"},\"ship\":{\"role\":\"root commit\",\"terminal\":true,\"dependsOn\":[\"kickoff\"]}}, edges [{\"from\":\"kickoff\",\"to\":\"ship\",\"when\":\"go\"}], loop {\"enabled\":true,\"proposalAgents\":[\"$LOOP_A\",\"$LOOP_B\"],\"refreshAgents\":[\"$LOOP_A\",\"$LOOP_MISSING\"],\"maxRounds\":2}. Then reply done."
 assert_stdout_contains create-loop "Created task"
 task_json_eq "$LOOP_ID" "str(t.get('loop',{}).get('enabled'))" "True"
 trace_has "task.create" "$LOOP_ID"
@@ -877,7 +877,7 @@ run_step assign-loop-kickoff swarm_assign_task \
 	"Call swarm_assign_task exactly once with taskId \"$LOOP_ID\", nodeId \"kickoff\". Then reply done."
 run_step upd-loop-ip swarm_update_task \
 	"Call swarm_update_task exactly once with taskId \"$LOOP_ID\", nodeId \"kickoff\", status \"in_progress\". Then reply done."
-# Closing kickoff (outcome go) auto-closes the orchestrator terminal 'ship' -> task done -> the V1.5
+# Closing kickoff (outcome go) auto-closes the root terminal 'ship' -> task done -> the V1.5
 # post-close hook fans out proposal requests to the fixed agent pool (mailbox-only, no spawn).
 run_step upd-loop-done swarm_update_task \
 	"Call swarm_update_task exactly once with taskId \"$LOOP_ID\", nodeId \"kickoff\", status \"done\", outcome \"go\". Then reply done."
@@ -886,14 +886,14 @@ trace_has "task.loop.kickoff" "$LOOP_ID"
 # Proposal requests were queued to BOTH configured proposal agents (fixed pool; no per-iteration spawn).
 mailbox_has "$LOOP_A" "propose next change" "loop proposal fanout -> $LOOP_A"
 mailbox_has "$LOOP_B" "propose next change" "loop proposal fanout -> $LOOP_B"
-# Orchestrator informational nudge: mailbox-only, round started, instructs to use status then plan (no ack).
-mailbox_has orchestrator "proposals requested" "kickoff nudge -> orchestrator"
+# Root informational nudge: mailbox-only, round started, instructs to use status then plan (no ack).
+mailbox_has root "proposals requested" "kickoff nudge -> root"
 # Read-only status surfaces the collecting phase without mutating anything.
 run_step loop-status-collecting swarm_loop_status \
 	"Call swarm_loop_status exactly once with taskId \"$LOOP_ID\". Then reply done."
 assert_stdout_contains loop-status-collecting "collecting_proposals"
 assert_stdout_contains loop-status-collecting "collecting proposals"
-# Orchestrator synthesizes the next plan: writes artifacts/next-plan.md + history, advances to planned,
+# Root synthesizes the next plan: writes artifacts/next-plan.md + history, advances to planned,
 # and best-effort refreshes refreshAgents. $LOOP_A reloads (identity_reload, no error); $LOOP_MISSING is
 # unregistered -> refresh records an error but MUST NOT corrupt loop state.
 run_step loop-plan swarm_loop_plan \
@@ -972,9 +972,9 @@ if state_p.exists():
 		rk_ok = a.get('roleKind') == 'implementer'
 		rk_detail = f"roleKind={a.get('roleKind')!r} explicit={a.get('roleKindExplicit')!r}"
 print(('PASS' if rk_ok else 'FAIL'), '- roleKind id-first (implementer wins over reviewer-in-role) ::', rk_detail)
-# PM auto-notify (engine PM visibility): orchestrator mailbox must hold the close-notify (task terminal)
+# PM auto-notify (engine PM visibility): root mailbox must hold the close-notify (task terminal)
 # and the settle-notify (worker settled with open work) without any manual mailbox polling.
-omb = root / '.pi/swarm/mailboxes/orchestrator.jsonl'
+omb = root / '.pi/swarm/mailboxes/root.jsonl'
 def omb_has(needle):
 	if not omb.exists(): return False
 	for l in omb.read_text().splitlines():
@@ -982,14 +982,14 @@ def omb_has(needle):
 		if not l: continue
 		try: m = json.loads(l)
 		except Exception: continue
-		if m.get('to') == 'orchestrator' and needle in (m.get('subject') or ''): return True
+		if m.get('to') == 'root' and needle in (m.get('subject') or ''): return True
 	return False
 close_ok = omb_has('closed (done)')                          # task terminal close-notify (happy ship -> done)
 settle_ok = omb_has('settled idle with open assignment')     # worker settle-notify (path 11)
-print(('PASS' if close_ok else 'FAIL'), '- PM close-notify in orchestrator mailbox ::', close_ok)
-print(('PASS' if settle_ok else 'FAIL'), '- PM settle-notify in orchestrator mailbox ::', settle_ok)
-# PM auto-surface (no manual polling): the orchestrator auto-pump must surface the close-notify and
-# settle-notify to a turn. Cross-reference pump-traced surfaced ids with the orchestrator mailbox.
+print(('PASS' if close_ok else 'FAIL'), '- PM close-notify in root mailbox ::', close_ok)
+print(('PASS' if settle_ok else 'FAIL'), '- PM settle-notify in root mailbox ::', settle_ok)
+# PM auto-surface (no manual polling): the root auto-pump must surface the close-notify and
+# settle-notify to a turn. Cross-reference pump-traced surfaced ids with the root mailbox.
 import glob as _g
 surfaced = set()
 for _tf in _g.glob(str(root / '.pi/swarm/traces/*.jsonl')):
@@ -998,7 +998,7 @@ for _tf in _g.glob(str(root / '.pi/swarm/traces/*.jsonl')):
 		if not _l: continue
 		try: _d = json.loads(_l)
 		except Exception: continue
-		if _d.get('event') == 'mailbox.orchestrator_pump':
+		if _d.get('event') == 'mailbox.root_pump':
 			for _i in (_d.get('ids') or []): surfaced.add(_i)
 def pump_has_subject(needle):
 	if not omb.exists(): return False
@@ -1007,13 +1007,13 @@ def pump_has_subject(needle):
 		if not _l: continue
 		try: _m = json.loads(_l)
 		except Exception: continue
-		if _m.get('to') == 'orchestrator' and needle in (_m.get('subject') or ''):
+		if _m.get('to') == 'root' and needle in (_m.get('subject') or ''):
 			return _m.get('id') in surfaced
 	return False
 close_surfaced = pump_has_subject('node kickoff -> done')
 settle_surfaced = pump_has_subject('settled idle with open assignment')
 # Session-safe + read-safe (section 12): the pump keys surfaced-ids per process, so two distinct
-# orchestrator sessions each surface one notification, and check_mailbox(markDelivered) cannot
+# root sessions each surface one notification, and check_mailbox(markDelivered) cannot
 # pre-empt a later pump surface.
 def pump_sids_for_subject(needle):
 	if not omb.exists(): return []
@@ -1023,7 +1023,7 @@ def pump_sids_for_subject(needle):
 		if not _l: continue
 		try: _m = json.loads(_l)
 		except Exception: continue
-		if _m.get('to') == 'orchestrator' and needle in (_m.get('subject') or ''):
+		if _m.get('to') == 'root' and needle in (_m.get('subject') or ''):
 			_target = _m.get('id'); break
 	if not _target: return []
 	_out = set()
@@ -1033,7 +1033,7 @@ def pump_sids_for_subject(needle):
 			if not _l: continue
 			try: _d = json.loads(_l)
 			except Exception: continue
-			if _d.get('event') == 'mailbox.orchestrator_pump' and _target in (_d.get('ids') or []):
+			if _d.get('event') == 'mailbox.root_pump' and _target in (_d.get('ids') or []):
 				_s = _d.get('sid')
 				if _s is not None: _out.add(_s)
 	return sorted(s for s in _out if s)
@@ -1042,7 +1042,7 @@ probeB_sids = pump_sids_for_subject('session-safety-probe-B')
 sessafe_ok = ('uat-alpha' in probeA_sids and 'uat-beta' in probeA_sids)
 readsafe_ok = ('uat-delta' in probeB_sids)
 # Read-safe vector proof: the cross-session check_mailbox(markDelivered) must have written the SHARED
-# delivered.orchestrator ledger (the legacy pre-emption vector). Confirms the read actually exercised
+# delivered.root ledger (the legacy pre-emption vector). Confirms the read actually exercised
 # the path that used to starve the pump, so the readsafe_ok surface check is non-vacuous.
 _probeB_id = None
 for _l in (omb.read_text().splitlines() if omb.exists() else []):
@@ -1050,15 +1050,15 @@ for _l in (omb.read_text().splitlines() if omb.exists() else []):
 	if not _l: continue
 	try: _m = json.loads(_l)
 	except Exception: continue
-	if _m.get('to') == 'orchestrator' and 'session-safety-probe-B' in (_m.get('subject') or ''):
+	if _m.get('to') == 'root' and 'session-safety-probe-B' in (_m.get('subject') or ''):
 		_probeB_id = _m.get('id'); break
-_shared_orch = set((json.load(open(state_p)).get('delivered') or {}).get('orchestrator', []) or []) if state_p.exists() else set()
+_shared_orch = set((json.load(open(state_p)).get('delivered') or {}).get('root', []) or []) if state_p.exists() else set()
 readsafe_shared_ok = bool(_probeB_id and _probeB_id in _shared_orch)
-print(('PASS' if close_surfaced else 'FAIL'), '- PM auto-surface: orchestrator pump surfaced close-notify (no polling) ::', close_surfaced)
-print(('PASS' if settle_surfaced else 'FAIL'), '- PM auto-surface: orchestrator pump surfaced settle-notify (no polling) ::', settle_surfaced)
+print(('PASS' if close_surfaced else 'FAIL'), '- PM auto-surface: root pump surfaced close-notify (no polling) ::', close_surfaced)
+print(('PASS' if settle_surfaced else 'FAIL'), '- PM auto-surface: root pump surfaced settle-notify (no polling) ::', settle_surfaced)
 print(('PASS' if sessafe_ok else 'FAIL'), '- session-safe: probe-A surfaced by both uat-alpha+uat-beta (no theft) ::', probeA_sids)
 print(('PASS' if readsafe_ok else 'FAIL'), '- read-safe: probe-B surfaced by uat-delta after check_mailbox(markDelivered) ::', probeB_sids)
-print(('PASS' if readsafe_shared_ok else 'FAIL'), '- read-safe: probe-B in shared delivered.orchestrator (vector exercised) ::', readsafe_shared_ok)
+print(('PASS' if readsafe_shared_ok else 'FAIL'), '- read-safe: probe-B in shared delivered.root (vector exercised) ::', readsafe_shared_ok)
 hard_failures = sum(1 for _, ok, _ in checks if not ok) + (0 if stale_at_ok else 1) + (0 if rk_ok else 1) + (0 if close_ok else 1) + (0 if settle_ok else 1) + (0 if close_surfaced else 1) + (0 if settle_surfaced else 1) + (0 if sessafe_ok else 1) + (0 if readsafe_ok else 1) + (0 if readsafe_shared_ok else 1) + int(failures)
 print(f'CHECK_FAILURES={hard_failures}')
 print('UAT_STATUS:', 'PASS' if hard_failures == 0 else 'FAIL')

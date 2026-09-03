@@ -1,5 +1,5 @@
-// Issue 11: Orchestrator wake-up escalation + durable replay fencing (binding C1–C8)
-// Tests the orchestrator auto-pump with:
+// Issue 11: Root wake-up escalation + durable replay fencing (binding C1–C8)
+// Tests the root auto-pump with:
 // - Durable consumer receipts (C4)
 // - Actionability predicate with reassign race (C5)
 // - Batch suppression trace (C6)
@@ -7,7 +7,7 @@
 // - pi.exec argv spy proving NO tmux (C3)
 // - Migration back-fill (C4)
 //
-// Run: node extensions/swarm/orchestrator-wake.test.mjs
+// Run: node extensions/swarm/root-wake.test.mjs
 
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,14 +19,14 @@ import { createHash } from "node:crypto";
 const here = dirname(fileURLToPath(import.meta.url));
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
-const { isActionableOrchestratorMessage, pumpOrchestratorMailbox } = await import(join(here, "..", "src/reconcile.ts"));
+const { isActionableRootMessage, pumpRootMailbox } = await import(join(here, "..", "src/reconcile.ts"));
 const { paths, readState, writeState, trace, withLock } = await import(join(here, "..", "src/state.ts"));
-const { startOrchestratorPump, stopOrchestratorPump } = await import(join(here, "..", "src/hooks.ts"));
-const { ensureOrchestrator, heartbeatOrchestratorLeader } = await import(join(here, "..", "src/identity.ts"));
+const { startRootPump, stopRootPump } = await import(join(here, "..", "src/hooks.ts"));
+const { ensureRoot, heartbeatRootLeader } = await import(join(here, "..", "src/identity.ts"));
 const { NOTIFY_KEY_PUMP_BATCH_SUPPRESSED } = await import(join(here, "..", "src/constants.ts"));
 const { deliver } = await import(join(here, "..", "src/mailbox.ts"));
 
-const scratch = mkdtempSync(join(tmpdir(), `swarm-orchestrator-wake-${process.pid}-${Date.now()}`));
+const scratch = mkdtempSync(join(tmpdir(), `swarm-root-wake-${process.pid}-${Date.now()}`));
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra) => { if (cond) { pass++; } else { fail++; console.error("  FAIL:", name, extra !== undefined ? JSON.stringify(extra) : ""); } };
@@ -52,7 +52,7 @@ const readEvents = (p) => {
 
 // === C3: pi.exec argv spy (tmux invocations) ===
 {
-	console.log("\n[C3] pi.exec argv spy — NO tmux invocations from orchestrator pump");
+	console.log("\n[C3] pi.exec argv spy — NO tmux invocations from root pump");
 	const tmuxInvocations = [];
 	const sentMessages = [];
 	const pi = {
@@ -68,8 +68,8 @@ const readEvents = (p) => {
 	factory(pi);
 	ok("pi.exec spy installed", pi.exec !== undefined);
 
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const { registerSwarmHooks } = await import(join(here, "..", "src/hooks.ts"));
 	const handlers = [];
 	const spy = { exec: pi.exec, registerTool: () => {}, registerCommand: () => {}, on: (e, fn) => handlers.push({ ev: e, fn }), sendMessage: pi.sendMessage };
@@ -82,7 +82,7 @@ const readEvents = (p) => {
 
 	tmuxInvocations.length = 0;
 	try { await sessionStart({}, ctx); } catch(e) { /* may throw if leader check fails in test mode */ }
-	ok("C3: tmux.ts helpers NEVER called from orchestrator pump session_start", tmuxInvocations.length === 0, { count: tmuxInvocations.length });
+	ok("C3: tmux.ts helpers NEVER called from root pump session_start", tmuxInvocations.length === 0, { count: tmuxInvocations.length });
 }
 
 // === C5: Reassign race test ===
@@ -91,7 +91,7 @@ const readEvents = (p) => {
 	const nowMs = Date.now();
 	const task = {
 		version: 1, taskId: "task-reassign", title: "test", goal: "test", status: "in_progress", priority: "normal",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), owner: "orchestrator", workflow: "feature-dev",
+		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), owner: "root", workflow: "feature-dev",
 		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "node1", currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: {
@@ -99,13 +99,13 @@ const readEvents = (p) => {
 		},
 		edges: [],
 		handoffs: [
-			{ toNode: "node1", kind: "assign", idempotencyKey: "key-B", by: "orchestrator", at: new Date(nowMs - 1000).toISOString() },
+			{ toNode: "node1", kind: "assign", idempotencyKey: "key-B", by: "root", at: new Date(nowMs - 1000).toISOString() },
 		],
 		gates: {}, editLocks: {}, evidence: {},
 	};
 	const taskIndex = { "task-reassign": task };
-	const msg = { id: "mA", to: "orchestrator", requiresAck: true, conversationId: "task:task-reassign:node1", idempotencyKey: "key-A", status: "injected" };
-	const result = isActionableOrchestratorMessage(msg, taskIndex, nowMs, {}, false);
+	const msg = { id: "mA", to: "root", requiresAck: true, conversationId: "task:task-reassign:node1", idempotencyKey: "key-A", status: "injected" };
+	const result = isActionableRootMessage(msg, taskIndex, nowMs, {}, false);
 	ok("C5: reassign race suppressed (node_reassigned)", result.ok === false && result.reason === "node_reassigned", result);
 }
 
@@ -114,45 +114,45 @@ const readEvents = (p) => {
 	console.log("\n[C6] Batch suppression trace — emitted on every tick including total=0");
 	const task = {
 		version: 1, taskId: "task-node-terminal", title: "test", goal: "test", status: "in_progress", priority: "normal",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), owner: "orchestrator", workflow: "feature-dev",
+		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), owner: "root", workflow: "feature-dev",
 		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: { n1: { status: "done", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 } },
 		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
 	};
 	const taskIndex = { "task-node-terminal": task };
-	const msg = { id: "m-done", to: "orchestrator", requiresAck: true, conversationId: "task:task-node-terminal:n1", status: "injected" };
+	const msg = { id: "m-done", to: "root", requiresAck: true, conversationId: "task:task-node-terminal:n1", status: "injected" };
 	const nowMs = Date.now();
-	const result = isActionableOrchestratorMessage(msg, taskIndex, nowMs, {}, false);
+	const result = isActionableRootMessage(msg, taskIndex, nowMs, {}, false);
 	ok("C6: terminal-node message suppressed (node_terminal)", result.ok === false && result.reason === "node_terminal", result);
 
 	const task2 = {
 		version: 1, taskId: "task-done", title: "test", goal: "test", status: "done", priority: "normal",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), owner: "orchestrator", workflow: "feature-dev",
+		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), owner: "root", workflow: "feature-dev",
 		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: { n1: { status: "done", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 } },
 		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
 	};
 	const taskIndex2 = { "task-done": task2 };
-	const msg2 = { id: "m-done2", to: "orchestrator", requiresAck: true, conversationId: "task:task-done:n1", status: "injected" };
-	const result2 = isActionableOrchestratorMessage(msg2, taskIndex2, nowMs, {}, false);
+	const msg2 = { id: "m-done2", to: "root", requiresAck: true, conversationId: "task:task-done:n1", status: "injected" };
+	const result2 = isActionableRootMessage(msg2, taskIndex2, nowMs, {}, false);
 	ok("C6: done-task message suppressed (task_done)", result2.ok === false && result2.reason === "task_done", result2);
 
-	// Real batch trace: pumpOrchestratorMailbox must emit notification.batch.suppressed every tick (including total=0).
+	// Real batch trace: pumpRootMailbox must emit notification.batch.suppressed every tick (including total=0).
 	// Use a scratch swarm with no messages; pump once; expect at least one notification.batch.suppressed trace.
 	{
 		const p = setupScratch();
 		const sentMessages = [];
 		const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
-		// Seed orchestrator as leader so the second-line defense doesn't deny
+		// Seed root as leader so the second-line defense doesn't deny
 		await withLock(p, async () => {
 			const st = await readState(p, scratch);
-			ensureOrchestrator(st, scratch, p);
-			heartbeatOrchestratorLeader(st, Date.now(), process.pid, "test_seed");
+			ensureRoot(st, scratch, p);
+			heartbeatRootLeader(st, Date.now(), process.pid, "test_seed");
 			await writeState(p, st);
 		});
-		await pumpOrchestratorMailbox({ sendMessage: (m, o) => sentMessages.push({ customType: m.customType, options: o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test");
+		await pumpRootMailbox({ sendMessage: (m, o) => sentMessages.push({ customType: m.customType, options: o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test");
 		const evs = readEvents(p);
 		const batchTraces = evs.filter((e) => e.event === "notification.batch.suppressed");
 		ok("C6: notification.batch.suppressed emitted on every tick", batchTraces.length >= 1, { count: batchTraces.length });
@@ -165,46 +165,46 @@ const readEvents = (p) => {
 {
 	console.log("\n[C2/C7] IO-error classification — EACCES/ENOSPC continue, generic stops");
 	// Real runtime guards: drive the watchdog tick closure directly with synthetic errors.
-	// Use a fresh scratch + a tiny harness that imports startOrchestratorPump/stopOrchestratorPump
-	// and exercises the inner run() catch classification by stubbing pumpOrchestratorMailbox to throw.
+	// Use a fresh scratch + a tiny harness that imports startRootPump/stopRootPump
+	// and exercises the inner run() catch classification by stubbing pumpRootMailbox to throw.
 
 	const p = setupScratch();
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 
 	// === Scenario A: synthetic EACCES → pump NOT stopped ===
 	{
 		const evsBefore = readEvents(p).length;
 		const stub = { sendMessage: () => {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
-		// We need to throw from inside pumpOrchestratorMailbox. Easiest path: seed consumerReceipts to a
+		// We need to throw from inside pumpRootMailbox. Easiest path: seed consumerReceipts to a
 		// value that will trigger an error path. Simplest robust path: write a file the pump can't read.
 		// We use a different approach: monkey-patch the import by re-importing and patching module state.
-		// Cleanest: drive the watchdog tick by calling startOrchestratorPump (which awaits run() once),
+		// Cleanest: drive the watchdog tick by calling startRootPump (which awaits run() once),
 		// and pre-write corrupt JSON to the state file so the inner readState throws EACCES-ish.
 		// EACCES is hard to simulate portably; instead, throw a synthetic error directly via the import
-		// surface: re-import pumpOrchestratorMailbox and have the harness call the same inner run() path.
+		// surface: re-import pumpRootMailbox and have the harness call the same inner run() path.
 		// For C2/C7 we'll use a direct test of the classification regex via the source:
 		const { execSync } = await import("node:child_process");
 		const hooksSrc = readFileSync(join(here, "..", "src/hooks.ts"), "utf8");
 		const hasClassify = /const isStaleCtx = \/stale after session\/i\.test\(msg\)/.test(hooksSrc)
 			&& /const isIoTransient = \/EACCES\|ENOSPC\|EROFS\|EAGAIN\|EBUSY\|ENFILE\|EMFILE\//.test(hooksSrc)
-			&& /const isLeaderDenied = msg\.startsWith\("ORCHESTRATOR_LEADER_DENIED"\)/.test(hooksSrc);
+			&& /const isLeaderDenied = msg\.startsWith\("ROOT_LEADER_DENIED"\)/.test(hooksSrc);
 		ok("C2/C7: hooks.ts run() catch classification has stale-ctx/leader-denied/IO branches", hasClassify);
 
-		// Runtime assertion: throw synthetic errors at startOrchestratorPump's inner run() and verify
+		// Runtime assertion: throw synthetic errors at startRootPump's inner run() and verify
 		// the watchdog timer remains armed. We monkey-patch by re-importing the module under a fresh
-		// scratch and intercepting pumpOrchestratorMailbox via a manual export hook.
-		// Strategy: create a dedicated test scratch, seed corrupt state, call startOrchestratorPump with
+		// scratch and intercepting pumpRootMailbox via a manual export hook.
+		// Strategy: create a dedicated test scratch, seed corrupt state, call startRootPump with
 		// a ctx whose isIdle() throws. Verify the catch runs and the watchdog is reset (transient: kept
 		// alive; stale: stopped).
-		// We instead do a direct runtime check: invoke pumpOrchestratorMailbox with a stub pi that throws,
+		// We instead do a direct runtime check: invoke pumpRootMailbox with a stub pi that throws,
 		// wrapped by a small driver that mimics the run() catch.
 		const classify = (msg) => {
 			const code = String((msg && msg.code) || "");
 			const m = String((msg && msg.message) || msg);
 			const isStaleCtx = /stale after session/i.test(m);
-			const isLeaderDenied = m.startsWith("ORCHESTRATOR_LEADER_DENIED");
+			const isLeaderDenied = m.startsWith("ROOT_LEADER_DENIED");
 			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) ||
 								  /EACCES|ENOSPC|EROFS/.test(m);
 			return { isStaleCtx, isLeaderDenied, isIoTransient, shouldStop: isStaleCtx || (!isLeaderDenied && !isIoTransient) };
@@ -217,7 +217,7 @@ const readEvents = (p) => {
 		ok("C2: synthetic EACCES → not stopped", classify(eacces).shouldStop === false);
 		ok("C2: synthetic ENOSPC → not stopped", classify(enospc).shouldStop === false);
 		ok("C2: stale-ctx → stopped", classify(stale).shouldStop === true);
-		ok("C2: leader-denied → not stopped", classify(new Error("ORCHESTRATOR_LEADER_DENIED: live leader")).shouldStop === false);
+		ok("C2: leader-denied → not stopped", classify(new Error("ROOT_LEADER_DENIED: live leader")).shouldStop === false);
 		ok("C2: generic error → stopped (preserved safe default)", classify(generic).shouldStop === true);
 	}
 }
@@ -231,7 +231,7 @@ const readEvents = (p) => {
 	writeFileSync(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify({
 		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
 		agents: {}, delivered: {}, messages: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		consumerReceipts: { orchestrator: { entries: {}, revision: 0 } },
+		consumerReceipts: { root: { entries: {}, revision: 0 } },
 	}, null, 2));
 	// Clear any leftover traces/events from earlier blocks
 	const tracesDir = join(scratch, ".pi/swarm/traces");
@@ -250,7 +250,7 @@ const readEvents = (p) => {
 	const cancelledTask = {
 		version: 1, taskId: taskIdCancelled, title: "t", goal: "t", status: "cancelled", priority: "normal",
 		createdAt: new Date(nowMs - 10000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString(),
-		owner: "orchestrator", workflow: "feature-dev",
+		owner: "root", workflow: "feature-dev",
 		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: { n1: { status: "cancelled", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 } },
@@ -259,7 +259,7 @@ const readEvents = (p) => {
 	const liveTask = {
 		version: 1, taskId: taskIdLive, title: "t", goal: "t", status: "in_progress", priority: "normal",
 		createdAt: new Date(nowMs - 10000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString(),
-		owner: "orchestrator", workflow: "feature-dev",
+		owner: "root", workflow: "feature-dev",
 		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		// node status "assigned" so reconcileGraphAdvanceLocked (which fires on ready+unassigned) doesn't
@@ -270,8 +270,8 @@ const readEvents = (p) => {
 
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
-		ensureOrchestrator(st, scratch, p);
-		heartbeatOrchestratorLeader(st, Date.now(), process.pid, "test_seed_c4");
+		ensureRoot(st, scratch, p);
+		heartbeatRootLeader(st, Date.now(), process.pid, "test_seed_c4");
 		// Seed the two tasks into the on-disk tasks dir so the pump's actionability predicate can see them.
 		const { taskPaths, writeTaskState } = await import(join(here, "..", "src/state.ts"));
 		const tpc = taskPaths(p, taskIdCancelled);
@@ -283,31 +283,31 @@ const readEvents = (p) => {
 
 		// Seed 4 legacy messages
 		const ackedAt = new Date(nowMs - 1000).toISOString();
-		st.messages["m-acked"] = { id: "m-acked", from: "worker-1", to: "orchestrator", status: "acked", requiresAck: true, ackedAt, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: ackedAt };
-		st.messages["m-dead"] = { id: "m-dead", from: "worker-1", to: "orchestrator", status: "dead_letter", requiresAck: true, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString() };
-		st.messages["m-cancelled"] = { id: "m-cancelled", from: "worker-1", to: "orchestrator", status: "injected", requiresAck: true, conversationId: `task:${taskIdCancelled}:n1`, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString() };
-		st.messages["m-live"] = { id: "m-live", from: "worker-1", to: "orchestrator", status: "injected", requiresAck: true, conversationId: `task:${taskIdLive}:n1`, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString() };
+		st.messages["m-acked"] = { id: "m-acked", from: "worker-1", to: "root", status: "acked", requiresAck: true, ackedAt, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: ackedAt };
+		st.messages["m-dead"] = { id: "m-dead", from: "worker-1", to: "root", status: "dead_letter", requiresAck: true, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString() };
+		st.messages["m-cancelled"] = { id: "m-cancelled", from: "worker-1", to: "root", status: "injected", requiresAck: true, conversationId: `task:${taskIdCancelled}:n1`, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString() };
+		st.messages["m-live"] = { id: "m-live", from: "worker-1", to: "root", status: "injected", requiresAck: true, conversationId: `task:${taskIdLive}:n1`, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString() };
 
-		// Append corresponding entries to the orchestrator mailbox JSONL so the pump's readMailboxCached
+		// Append corresponding entries to the root mailbox JSONL so the pump's readMailboxCached
 		// returns them. Format: one JSON per line.
-		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
+		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 		const lines = [
-			{ id: "m-acked", to: "orchestrator", requiresAck: true, body: "acked" },
-			{ id: "m-dead", to: "orchestrator", requiresAck: true, body: "dead" },
-			{ id: "m-cancelled", to: "orchestrator", requiresAck: true, body: "cancelled", conversationId: `task:${taskIdCancelled}:n1` },
-			{ id: "m-live", to: "orchestrator", requiresAck: true, body: "live", conversationId: `task:${taskIdLive}:n1` },
+			{ id: "m-acked", to: "root", requiresAck: true, body: "acked" },
+			{ id: "m-dead", to: "root", requiresAck: true, body: "dead" },
+			{ id: "m-cancelled", to: "root", requiresAck: true, body: "cancelled", conversationId: `task:${taskIdCancelled}:n1` },
+			{ id: "m-live", to: "root", requiresAck: true, body: "live", conversationId: `task:${taskIdLive}:n1` },
 		].map((m) => JSON.stringify({ swarmId: "test", from: "worker-1", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date(nowMs - 5000).toISOString(), headers: {}, ...m }));
 		writeFileSync(mailboxFile, lines.join("\n") + "\n");
 
 		// Reset consumerReceipts so the migration back-fill triggers (revision === 0)
-		st.consumerReceipts = { orchestrator: { entries: {}, revision: 0 } };
+		st.consumerReceipts = { root: { entries: {}, revision: 0 } };
 
 		await writeState(p, st);
 	});
 
 	// Run pump once; it should perform the migration back-fill AND surface m-live.
 	const stub = { sendMessage: (m, o) => {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
-	const result = await pumpOrchestratorMailbox(stub, ctx, p, "test_c4");
+	const result = await pumpRootMailbox(stub, ctx, p, "test_c4");
 
 	// Verify migration back-fill produced notification.backfill.receipts_written with { written: 3, scanned: 4 }.
 	const evs = readEvents(p);
@@ -321,8 +321,8 @@ const readEvents = (p) => {
 	// Verify revision was bumped. Back-fill sets revision to 1; the standard surface path bumps it
 	// again after a successful m-live delivery, so we expect 2 here.
 	const stAfter = await readState(p, scratch);
-	ok("C4: consumerReceipts.orchestrator.revision >= 1 (back-fill ran)", (stAfter.consumerReceipts?.orchestrator?.revision ?? 0) >= 1, { rev: stAfter.consumerReceipts?.orchestrator?.revision });
-	const entries = stAfter.consumerReceipts?.orchestrator?.entries || {};
+	ok("C4: consumerReceipts.root.revision >= 1 (back-fill ran)", (stAfter.consumerReceipts?.root?.revision ?? 0) >= 1, { rev: stAfter.consumerReceipts?.root?.revision });
+	const entries = stAfter.consumerReceipts?.root?.entries || {};
 	ok("C4: m-acked got a receipt entry (back-fill)", !!entries["m-acked"]);
 	ok("C4: m-dead got a receipt entry (back-fill)", !!entries["m-dead"]);
 	ok("C4: m-cancelled got a receipt entry (back-fill)", !!entries["m-cancelled"]);
@@ -341,26 +341,26 @@ const readEvents = (p) => {
 	mkdirSync(tracesDir, { recursive: true });
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
-		ensureOrchestrator(st, scratch, p);
-		heartbeatOrchestratorLeader(st, nowMs, process.pid, "test_seed_c8");
+		ensureRoot(st, scratch, p);
+		heartbeatRootLeader(st, nowMs, process.pid, "test_seed_c8");
 		st.idleNudgeState = { allIdleSinceAt: new Date(nowMs - 60_000).toISOString() };
 		const goalId = "goal-coalesce";
-		st.goal = { id: goalId, text: "coalesce backlog", setAt: new Date(nowMs - 120_000).toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0 };
-		st.messages["msg-old"] = { id: "msg-old", from: "orchestrator", to: "orchestrator", status: "injected", createdAt: new Date(nowMs - 120_000).toISOString(), updatedAt: new Date(nowMs - 120_000).toISOString(), requiresAck: false, subject: "stale goal", body: "stale", idempotencyKey: `goal:${goalId}:nudge:idle-streak:1` };
-		st.messages["msg-fresh-1"] = { id: "msg-fresh-1", from: "orchestrator", to: "orchestrator", status: "injected", createdAt: new Date(nowMs - 5_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), requiresAck: false, subject: "fresh goal 1", body: "fresh", idempotencyKey: `goal:${goalId}:nudge:idle-streak:2` };
-		st.messages["msg-fresh-2"] = { id: "msg-fresh-2", from: "orchestrator", to: "orchestrator", status: "injected", createdAt: new Date(nowMs - 4_000).toISOString(), updatedAt: new Date(nowMs - 4_000).toISOString(), requiresAck: false, subject: "fresh goal 2", body: "fresh", idempotencyKey: `goal:${goalId}:nudge:idle-streak:3` };
-		st.delivered.orchestrator = [];
-		st.consumerReceipts = { orchestrator: { entries: {}, revision: 1 } };
+		st.goal = { id: goalId, text: "coalesce backlog", setAt: new Date(nowMs - 120_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0 };
+		st.messages["msg-old"] = { id: "msg-old", from: "root", to: "root", status: "injected", createdAt: new Date(nowMs - 120_000).toISOString(), updatedAt: new Date(nowMs - 120_000).toISOString(), requiresAck: false, subject: "stale goal", body: "stale", idempotencyKey: `goal:${goalId}:nudge:idle-streak:1` };
+		st.messages["msg-fresh-1"] = { id: "msg-fresh-1", from: "root", to: "root", status: "injected", createdAt: new Date(nowMs - 5_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), requiresAck: false, subject: "fresh goal 1", body: "fresh", idempotencyKey: `goal:${goalId}:nudge:idle-streak:2` };
+		st.messages["msg-fresh-2"] = { id: "msg-fresh-2", from: "root", to: "root", status: "injected", createdAt: new Date(nowMs - 4_000).toISOString(), updatedAt: new Date(nowMs - 4_000).toISOString(), requiresAck: false, subject: "fresh goal 2", body: "fresh", idempotencyKey: `goal:${goalId}:nudge:idle-streak:3` };
+		st.delivered.root = [];
+		st.consumerReceipts = { root: { entries: {}, revision: 1 } };
 		await writeState(p, st);
-		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
-		const lines = ["msg-old", "msg-fresh-1", "msg-fresh-2"].map((id) => JSON.stringify({ swarmId: "test", from: "orchestrator", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id, to: "orchestrator", subject: st.messages[id].subject, body: st.messages[id].body, requiresAck: false, createdAt: st.messages[id].createdAt, updatedAt: st.messages[id].updatedAt, idempotencyKey: st.messages[id].idempotencyKey }));
+		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
+		const lines = ["msg-old", "msg-fresh-1", "msg-fresh-2"].map((id) => JSON.stringify({ swarmId: "test", from: "root", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id, to: "root", subject: st.messages[id].subject, body: st.messages[id].body, requiresAck: false, createdAt: st.messages[id].createdAt, updatedAt: st.messages[id].updatedAt, idempotencyKey: st.messages[id].idempotencyKey }));
 		writeFileSync(mailboxFile, lines.join("\n") + "\n");
 	});
 	const sentMessages = [];
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
-	await pumpOrchestratorMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8");
+	await pumpRootMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8");
 	let evs = readEvents(p);
-	ok("C8: stale backlog item suppressed", evs.filter((e) => e.event === "notification.stale.suppressed" && e.site === "orchestrator_pump.surface" && e.messageId === "msg-old").length === 1, evs.filter((e) => e.event === "notification.stale.suppressed"));
+	ok("C8: stale backlog item suppressed", evs.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface" && e.messageId === "msg-old").length === 1, evs.filter((e) => e.event === "notification.stale.suppressed"));
 	ok("C8: duplicate backlog coalesced", evs.some((e) => e.event === "notification.coalesced.suppressed" && e.count === 1), evs.filter((e) => e.event === "notification.coalesced.suppressed"));
 	ok("C8: only one fresh surfaced message sent", sentMessages.length === 1, sentMessages.map((x) => x.o));
 
@@ -369,7 +369,7 @@ const readEvents = (p) => {
 	const receiptTaskId = "task-receipt-gate";
 	const receiptTask = {
 		version: 1, taskId: receiptTaskId, title: "receipt gate", goal: "receipt gate", status: "in_progress", priority: "normal",
-		createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), owner: "orchestrator", workflow: "feature-dev",
+		createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), owner: "root", workflow: "feature-dev",
 		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: { n1: { status: "assigned", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: ["msg-receipt"], attempts: 1, assignee: "worker-1" } },
@@ -381,8 +381,8 @@ const readEvents = (p) => {
 		const tp = taskPaths(p, receiptTaskId);
 		mkdirSync(tp.root, { recursive: true });
 		writeTaskState(tp, receiptTask);
-		st.messages["msg-receipt"] = { id: "msg-receipt", from: "worker-1", to: "orchestrator", status: "injected", requiresAck: true, conversationId: `task:${receiptTaskId}:n1`, createdAt: new Date(nowMs - 400_000).toISOString(), updatedAt: new Date(nowMs - 400_000).toISOString(), attempts: 1 };
-		st.consumerReceipts = { orchestrator: { entries: { "msg-receipt": { surfacedAt: new Date(nowMs - 300_000).toISOString(), requiresAck: true, conversationId: `task:${receiptTaskId}:n1`, fingerprint: "fp" } }, revision: 1 } };
+		st.messages["msg-receipt"] = { id: "msg-receipt", from: "worker-1", to: "root", status: "injected", requiresAck: true, conversationId: `task:${receiptTaskId}:n1`, createdAt: new Date(nowMs - 400_000).toISOString(), updatedAt: new Date(nowMs - 400_000).toISOString(), attempts: 1 };
+		st.consumerReceipts = { root: { entries: { "msg-receipt": { surfacedAt: new Date(nowMs - 300_000).toISOString(), requiresAck: true, conversationId: `task:${receiptTaskId}:n1`, fingerprint: "fp" } }, revision: 1 } };
 		await writeState(p, st);
 	});
 	const receiptActions = await reconcileTasks({ exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, p, await readState(p, scratch), { dryRun: true, nowMs });
@@ -392,7 +392,7 @@ const readEvents = (p) => {
 	const staleTaskId = "task-stale-trace";
 	const staleTask = {
 		version: 1, taskId: staleTaskId, title: "stale trace", goal: "stale trace", status: "done", priority: "normal",
-		createdAt: new Date(nowMs - 30_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), owner: "orchestrator", workflow: "feature-dev",
+		createdAt: new Date(nowMs - 30_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), owner: "root", workflow: "feature-dev",
 		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: { n1: { status: "done", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 } },
@@ -404,17 +404,17 @@ const readEvents = (p) => {
 		const tp = taskPaths(p, staleTaskId);
 		mkdirSync(tp.root, { recursive: true });
 		writeTaskState(tp, staleTask);
-		st.messages["msg-stale"] = { id: "msg-stale", from: "worker-1", to: "orchestrator", status: "injected", requiresAck: true, conversationId: `task:${staleTaskId}:n1`, createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 20_000).toISOString(), attempts: 1 };
-		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
-		writeFileSync(mailboxFile, `${JSON.stringify({ swarmId: "test", from: "worker-1", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id: "msg-stale", to: "orchestrator", requiresAck: true, conversationId: `task:${staleTaskId}:n1`, createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 20_000).toISOString(), body: "stale", attempts: 1 })}
+		st.messages["msg-stale"] = { id: "msg-stale", from: "worker-1", to: "root", status: "injected", requiresAck: true, conversationId: `task:${staleTaskId}:n1`, createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 20_000).toISOString(), attempts: 1 };
+		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
+		writeFileSync(mailboxFile, `${JSON.stringify({ swarmId: "test", from: "worker-1", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id: "msg-stale", to: "root", requiresAck: true, conversationId: `task:${staleTaskId}:n1`, createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 20_000).toISOString(), body: "stale", attempts: 1 })}
 `, { flag: "a" });
 		await writeState(p, st);
 	});
-	await pumpOrchestratorMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8_repeat1");
+	await pumpRootMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8_repeat1");
 	evs = readEvents(p);
-	await pumpOrchestratorMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8_repeat2");
+	await pumpRootMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8_repeat2");
 	evs = readEvents(p);
-	const staleEvents = evs.filter((e) => e.event === "notification.stale.suppressed" && e.site === "orchestrator_pump.surface" && e.messageId === "msg-stale");
+	const staleEvents = evs.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface" && e.messageId === "msg-stale");
 	ok("C8: stale suppression traced once across repeated pump ticks", staleEvents.length === 1, staleEvents);
 }
 
@@ -439,38 +439,38 @@ const readEvents = (p) => {
 	console.log("\n[Watchdog] self-rescheduling setTimeout chain survives + re-arms via agent_settled");
 	const p = setupScratch();
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 
-	// Make orchestrator the leader so the preflight gate passes
+	// Make root the leader so the preflight gate passes
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
-		ensureOrchestrator(st, scratch, p);
-		heartbeatOrchestratorLeader(st, Date.now(), process.pid, "watchdog_seed");
+		ensureRoot(st, scratch, p);
+		heartbeatRootLeader(st, Date.now(), process.pid, "watchdog_seed");
 		await writeState(p, st);
 	});
 
-	await startOrchestratorPump(ctx, "test_watchdog");
-	// After startOrchestratorPump, the watchdog timer should be set.
-	// We don't expose the timer directly, but we can verify by counting mailbox.orchestrator_pump events
+	await startRootPump(ctx, "test_watchdog");
+	// After startRootPump, the watchdog timer should be set.
+	// We don't expose the timer directly, but we can verify by counting mailbox.root_pump events
 	// after a wait > pump interval.
-	const evsBefore = readEvents(p).filter((e) => e.event === "mailbox.orchestrator_pump").length;
+	const evsBefore = readEvents(p).filter((e) => e.event === "mailbox.root_pump").length;
 
 	// We expect the watchdog to fire at least 2 times in ~12s (interval = 5s, so 2 ticks).
 	// To keep the test fast, run a shorter wait and assert at least 1 new tick.
 	await sleep(7_000);
-	const evsAfter = readEvents(p).filter((e) => e.event === "mailbox.orchestrator_pump").length;
+	const evsAfter = readEvents(p).filter((e) => e.event === "mailbox.root_pump").length;
 	ok("Watchdog: at least 1 pump tick within 7s of start (interval=5s)", evsAfter > evsBefore, { before: evsBefore, after: evsAfter });
 
-	stopOrchestratorPump();
+	stopRootPump();
 	// After stop(), no further ticks should fire.
-	const evsFinal = readEvents(p).filter((e) => e.event === "mailbox.orchestrator_pump").length;
+	const evsFinal = readEvents(p).filter((e) => e.event === "mailbox.root_pump").length;
 	await sleep(7_000);
-	const evsStopped = readEvents(p).filter((e) => e.event === "mailbox.orchestrator_pump").length;
-	ok("Watchdog: stopOrchestratorPump halts further ticks", evsStopped === evsFinal, { final: evsFinal, stopped: evsStopped });
+	const evsStopped = readEvents(p).filter((e) => e.event === "mailbox.root_pump").length;
+	ok("Watchdog: stopRootPump halts further ticks", evsStopped === evsFinal, { final: evsFinal, stopped: evsStopped });
 
-	// Now test agent_settled re-install: after stopOrchestratorPump, the agent_settled hook should re-arm
-	// if ctx.mode === "tui" and orchestratorPumpCtxFresh is set. We simulate by calling the agent_settled
+	// Now test agent_settled re-install: after stopRootPump, the agent_settled hook should re-arm
+	// if ctx.mode === "tui" and rootPumpCtxFresh is set. We simulate by calling the agent_settled
 	// handler registered in hooks.ts.
 	// Re-import hooks to get a fresh agent_settled handler list:
 	const handlers = [];
@@ -481,10 +481,10 @@ const readEvents = (p) => {
 	ok("agent_settled handler registered", typeof agentSettled === "function");
 	await agentSettled({}, ctx);
 	await sleep(7_000);
-	const evsAfterReinstall = readEvents(p).filter((e) => e.event === "mailbox.orchestrator_pump").length;
+	const evsAfterReinstall = readEvents(p).filter((e) => e.event === "mailbox.root_pump").length;
 	ok("Watchdog: agent_settled re-installs the watchdog after stop()", evsAfterReinstall > evsStopped, { stopped: evsStopped, reinstalled: evsAfterReinstall });
 
-	stopOrchestratorPump();
+	stopRootPump();
 }
 
 // === Summary ===

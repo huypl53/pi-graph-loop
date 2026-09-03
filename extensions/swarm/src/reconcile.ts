@@ -25,9 +25,9 @@ export {
 } from "./nudges/status-predicates.ts";
 
 export {
-  isActionableOrchestratorMessage,
+  isActionableRootMessage,
   staleSurfaceReason,
-  pumpOrchestratorMailbox,
+  pumpRootMailbox,
   orchSession,
   runtimeTaskWarnings,
   traceStaleSuppressedOnce,

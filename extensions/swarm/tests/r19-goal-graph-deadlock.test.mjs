@@ -16,9 +16,9 @@
  *   C-R19-1:  goal.idle_nudge trace count
  *   C-R19-2:  goal.nudge.deferred_by_actionable_graph trace count
  *   C-R19-3:  goal.nudge.suppressed_by_actionable_graph trace count (LIVE-task case retained)
- *   C-R19-4:  deliverMessageLocked to orchestrator with goal-idle-nudge body
+ *   C-R19-4:  deliverMessageLocked to root with goal-idle-nudge body
  *   C-R19-5:  hasActionableGraphWork return value (excludeTerminalTaskOrphans: true)
- *   C-R19-6:  pi.sendMessage count for orchestrator
+ *   C-R19-6:  pi.sendMessage count for root
  *   C-R19-7:  goal.consecutiveNoResolveNudges value
  *   C-R19-8:  goal.nudgeSeq value
  *   C-R19-9:  nextGoalNudgeAt value (bounded; not every tick)
@@ -35,14 +35,14 @@ process.env.PI_SWARM_TASK_STALL_NUDGE_IDLE_INTERVAL_MS ||= "500";
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs } = await import(join(here, "..", "src", "state.ts"));
 const { evaluateIdleGoalNudgeLocked, evaluateTaskGraphStallNudgeLocked, updateIdleEpochLocked } = await import(join(here, "..", "src", "reconcile.ts"));
-const { ensureOrchestrator } = await import(join(here, "..", "src", "identity.ts"));
+const { ensureRoot } = await import(join(here, "..", "src", "identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "..", "src", "mailbox.ts"));
 const { findIdempotentMessage } = await import(join(here, "..", "src", "mailbox.ts"));
 
 const SAVED_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const SAVED_ORCH = process.env.PI_SWARM_IS_ORCHESTRATOR;
+const SAVED_ORCH = process.env.PI_SWARM_IS_ROOT;
 delete process.env.PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+process.env.PI_SWARM_IS_ROOT = "1";
 
 let passed = 0, failed = 0;
 const ok = (n, c, info) => { if (c) { passed++; console.log("  ok  ", n); } else { failed++; console.error("  FAIL:", n, info ?? ""); } };
@@ -65,7 +65,7 @@ async function readMailboxMessages(p, agentId) {
 	} catch { return []; }
 }
 async function countMailboxGoalNudges(p) {
-	const msgs = await readMailboxMessages(p, "orchestrator");
+	const msgs = await readMailboxMessages(p, "root");
 	return msgs.filter((m) => m && m.subject && m.subject.includes("Idle streak")).length;
 }
 
@@ -91,7 +91,7 @@ async function buildScratchDir() {
 
 async function seedState(p, dir, overrides = {}) {
 	const st = await readState(p, dir);
-	ensureOrchestrator(st, dir, p);
+	ensureRoot(st, dir, p);
 	const now = Date.now();
 	const ts = new Date(now).toISOString();
 	st.agents["worker-a"] = {
@@ -146,7 +146,7 @@ function makeTask(taskId, overrides = {}) {
 		status: overrides.status || "failed",
 		createdAt: new Date(now - 3600000).toISOString(),
 		updatedAt: new Date(now).toISOString(),
-		owner: "orchestrator",
+		owner: "root",
 		workflow: "feature-dev",
 		allowedFiles: [],
 		nodes: {
@@ -155,7 +155,7 @@ function makeTask(taskId, overrides = {}) {
 			test: { status: "failed", role: "tester", assignee: "worker-b", outcome: "failed" },
 			fix: { status: "ready", role: "implementer", assignee: undefined, outcome: null },
 			review: { status: "pending", role: "reviewer", assignee: undefined, outcome: null },
-			commit: { status: "pending", role: "orchestrator", assignee: undefined, outcome: null },
+			commit: { status: "pending", role: "root", assignee: undefined, outcome: null },
 		},
 		edges: [
 			{ from: "plan", to: "implement", when: "planned" },
@@ -222,11 +222,11 @@ console.log("\n=== R19-S1: orphan on FAILED task (C-orphan) ===");
 	const backoffCount = await countEvents(p, "goal.nudge.backoff");
 	const scheduleReanchoredCount = await countEvents(p, "goal.nudge.schedule_reanchored");
 
-	// C-R19-4: deliverMessageLocked to orchestrator with goal.idle_nudge body — count via mailbox JSONL
+	// C-R19-4: deliverMessageLocked to root with goal.idle_nudge body — count via mailbox JSONL
 	const deliveredGoalMessages = await countMailboxGoalNudges(p);
-	// C-R19-6: pi.sendMessage count for orchestrator (every emit calls pi.sendMessage via the pump loop,
+	// C-R19-6: pi.sendMessage count for root (every emit calls pi.sendMessage via the pump loop,
 	// but here we drive evaluateIdleGoalNudgeLocked directly; deliverMessageLocked doesn't call pi.sendMessage
-	// for orchestrator because the orchestrator's tmuxTarget is 'unknown' — durable enqueue only)
+	// for root because the root's tmuxTarget is 'unknown' — durable enqueue only)
 	const st = await readState(p, dir);
 
 	console.log("  R19-S1 results:");
@@ -258,7 +258,7 @@ console.log("\n=== R19-S1: orphan on FAILED task (C-orphan) ===");
 		// (the terminal task never enters the actionable branch at all). This is CORRECT:
 		// the orphan on a failed task does not participate in any graph-work gate.
 		ok("R19-S1: deferred_by_actionable_graph === 0 for terminal task (Fix B excludes it)", deferredCount === 0, `got ${deferredCount}`);
-		// C-R19-4: deliverMessageLocked to orchestrator with goal.idle_nudge body — counts via mailbox JSONL
+		// C-R19-4: deliverMessageLocked to root with goal.idle_nudge body — counts via mailbox JSONL
 		ok("C-R19-4: deliverMessageLocked goal-nudge count >= 1 (GREEN)", deliveredGoalMessages >= 1, `got ${deliveredGoalMessages}`);
 		ok("R19-S1: consecutiveNoResolveNudges >= 1", (st.goal?.consecutiveNoResolveNudges ?? 0) >= 1, `got ${st.goal?.consecutiveNoResolveNudges}`);
 		ok("R19-S1: nudgeSeq >= 1", (st.goal?.nudgeSeq ?? 0) >= 1, `got ${st.goal?.nudgeSeq}`);
@@ -375,10 +375,10 @@ console.log("\n=== R19-S4: vacuous pool (no regression) ===");
 {
 	const { dir, p } = await buildScratchDir();
 	const st = await readState(p, dir);
-	ensureOrchestrator(st, dir, p);
-	// Only orchestrator — no effective agents
+	ensureRoot(st, dir, p);
+	// Only root — no effective agents
 	st.agents = {
-		orchestrator: st.agents.orchestrator,
+		root: st.agents.root,
 	};
 	st.goal = {
 		id: "goal-r19-vacuous",

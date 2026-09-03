@@ -33,7 +33,7 @@ Implementation files inspected for grounding this review:
 - `extensions/swarm/src/tools/messages.ts` — `swarm_send_message`, `swarm_ack_message`, `swarm_check_mailbox`, `swarm_reconcile`.
 - `extensions/swarm/src/tools/tasks.ts` — `swarm_create_task`, `swarm_assign_task`, `swarm_update_task` (claim branch + cancellation fence + attempt fencing), `swarm_task_message`.
 - `extensions/swarm/src/taskgraph.ts` — `mintNodeAttempt`, `deriveNodeAttention`, `checkStallNotificationStale`, `checkClosureNotificationStale`, `computeTaskStatus`, `releaseNodeAssignment`.
-- `extensions/swarm/src/reconcile.ts` — `reconcileGraphAdvanceLocked`, `reconcileInitialReadyLocked`, `evaluateIdleGoalNudgeLocked`, `evaluateTaskGraphStallNudgeLocked`, `pumpOrchestratorMailbox`.
+- `extensions/swarm/src/reconcile.ts` — `reconcileGraphAdvanceLocked`, `reconcileInitialReadyLocked`, `evaluateIdleGoalNudgeLocked`, `evaluateTaskGraphStallNudgeLocked`, `pumpRootMailbox`.
 - `extensions/swarm/src/types.ts` — `MessageRecord`, `SwarmMessage`, `TaskNode`, `TaskNodeAttempt`, `MessageResponseStatus`.
 
 ---
@@ -140,12 +140,12 @@ in the migration plan and reflected in §3.2.
 
 The current fencing model is two-layered:
 
-1. **`attemptId` parameter** on `swarm_update_task` — required for non-orchestrator
+1. **`attemptId` parameter** on `swarm_update_task` — required for non-root
    callers when `node.activeAttemptId` is set, rejected on mismatch with
    `ATTEMPT_TOKEN_MISMATCH` (`tasks.ts:618-636`). This is the worker's primary fence
    against accidentally completing a superseded attempt.
 2. **Supersede guard** on `swarm_ack_message` — `messages.ts:61-69` rejects progress acks
-   on a superseded message and (when the orchestrator waves) accepts them as waived.
+   on a superseded message and (when the root waves) accepts them as waived.
 
 If the proposal hides `swarm_ack_message` from the worker surface, then the worker's
 *only* interaction with the engine is `swarm_update_task`, `swarm_send_message`, and
@@ -157,17 +157,17 @@ Layer (1) rejects with `ATTEMPT_TOKEN_MISMATCH` (`tasks.ts:624-636`). Good — t
 holds without `swarm_ack_message`.
 
 But consider: a superseded worker calls `swarm_send_message({ replyTo: <old assignment id>,
-to: <orchestrator>, body: "I finished" })`. This is **NOT** fenced. The reply message
+to: <root>, body: "I finished" })`. This is **NOT** fenced. The reply message
 gets a fresh message id, the `original.response.status` flips from `"missing"` to
 `"sent"` (`mailbox.ts:317-319`), and a stale worker can still signal work-completion on
-an obsolete assignment. If the orchestrator then issues `swarm_ack_message(status=done,
-resultMessageId=<replyId>)`, the `supersede` guard on the orchestrator's *ack* (`messages.ts:61-69`)
-saves it — but the orchestrator's own view of "who finished what" is now polluted.
+an obsolete assignment. If the root then issues `swarm_ack_message(status=done,
+resultMessageId=<replyId>)`, the `supersede` guard on the root's *ack* (`messages.ts:61-69`)
+saves it — but the root's own view of "who finished what" is now polluted.
 
 The proposal's §5 correctly preserves `swarm_update_task` as the authoritative fenced
 mutation, but it is silent on what happens to replies on superseded assignments. A worker
 who calls only `swarm_send_message` (no ack path) can still *appear* to satisfy a
-superseded assignment via reply. The orchestrator must treat every reply on a
+superseded assignment via reply. The root must treat every reply on a
 superseded/orphaned assignment as informational only, but the current
 `deliverMessageLocked` code path flips `response.status` to `"sent"` unconditionally
 (`mailbox.ts:317-319`) — no check against `rec.superseded`.
@@ -182,7 +182,7 @@ superseded/orphaned assignment as informational only, but the current
 - (c) Explicitly document that "replies on superseded messages are advisory only" and
   remove the `response.status = "sent"` mutation in that branch.
 
-Any of these prevents the orchestrator from being misled by a stale worker's reply.
+Any of these prevents the root from being misled by a stale worker's reply.
 
 ## BLOCKER 4 — `seen`/`processing` derivation introduces false early state when injection and mailbox-read happen concurrently
 
@@ -202,8 +202,8 @@ and conflates three distinct events:
   success only (`mailbox.ts:307-311`).
 - "Agent surfaced the message via `swarm_check_mailbox`" — `delivered[]` is also updated
   here when `markDelivered: true` (`messages.ts:147-153`).
-- "Orchestrator pump surfaced the message into a TUI delivery" — recorded on
-  `consumerReceipts.orchestrator.entries` (a different ledger entirely, see
+- "Root pump surfaced the message into a TUI delivery" — recorded on
+  `consumerReceipts.root.entries` (a different ledger entirely, see
   `reconcile.ts:769-787`).
 
 Splitting `seen` derivation requires at minimum a `surfaceDeliveredAt` and an
@@ -228,7 +228,7 @@ exist partially: `MessageRecord.injectedAt` and `MessageRecord.surfacedAt` in `t
 and ensure the `seen` derivation requires BOTH conditions: a successful pane injection
 AND either a `surfacedAt` (TUI delivery) or a successful `check_mailbox(markDelivered)`
 read. Today the second condition is recorded on `MessageRecord.surfacedAt` only for
-orchestrator informational reads (`messages.ts:155-160`); extending it to all
+root informational reads (`messages.ts:155-160`); extending it to all
 recipients is straightforward but must be in scope of Phase 1.
 
 ---
@@ -237,15 +237,15 @@ recipients is straightforward but must be in scope of Phase 1.
 
 The auto-stamp branch in `deliverMessageLocked` (`mailbox.ts:280-294`) runs inside the
 caller's lock and checks `node.assignee !== to` before stamping. A concurrent
-`swarm_assign_task` call from a different orchestrator lane would race here, but
-`swarm_assign_task` itself calls `requireOrchestratorAuthority` (`tasks.ts:262`) and
-the multi-orchestrator policy is strict-reject (`types.ts:553-563`). So the
+`swarm_assign_task` call from a different root lane would race here, but
+`swarm_assign_task` itself calls `requireRootAuthority` (`tasks.ts:262`) and
+the multi-root policy is strict-reject (`types.ts:553-563`). So the
 auto-stamp window is safe under the current leader-lease invariant.
 
 However, the proposal to add `seen`/`processing`/`done` derivation introduces a
 *new* lock-held state mutation: setting `seenAt`/`processingAt` on a message record
 from inside the `swarm_update_task` lock branch. If `swarm_update_task` (which runs
-under `withLock(p)` at `tasks.ts:518`) and `pumpOrchestratorMailbox` (which also runs
+under `withLock(p)` at `tasks.ts:518`) and `pumpRootMailbox` (which also runs
 under `withLock(p)` at `reconcile.ts:660`) both want to write to the same message
 record, the existing lock discipline is sufficient — they serialize naturally.
 
@@ -366,12 +366,12 @@ Examples:
   must run an admin-mode session to clear it. The proposal should name the operator
   workflow ("`/swarm admin` mode or `PI_SWARM_ADMIN_MODE=1`") in §2.3.
 
-- An orchestrator that wants to send a `waive` ack on a superseded message
+- An root that wants to send a `waive` ack on a superseded message
   (`messages.ts:61-69`) currently uses `swarm_ack_message({ waive: true })`. If
-  `swarm_ack_message` is hidden from the orchestrator's normal surface (§2.2 does
-  NOT list it as one of the 8-9), the orchestrator loses the ability to waive. The
+  `swarm_ack_message` is hidden from the root's normal surface (§2.2 does
+  NOT list it as one of the 8-9), the root loses the ability to waive. The
   proposal should either include `swarm_ack_message({ waive: true })` on the
-  orchestrator's admin surface or add an equivalent `swarm_waive_message` tool.
+  root's admin surface or add an equivalent `swarm_waive_message` tool.
 
 **Recommendation:** §2.3 should enumerate the exact recovery paths an operator must
 be able to invoke via admin mode: release-agent-task, waive-superseded-ack,
@@ -388,7 +388,7 @@ task-stall nudge covers the case of stalled task graphs without needing a goal. 
 tasks exist and the swarm is idle with a goal set — that case is not covered by the
 task-stall nudge.
 
-**Recommendation:** Keep `swarm_set_goal` / `swarm_mark_goal_done` on the orchestrator
+**Recommendation:** Keep `swarm_set_goal` / `swarm_mark_goal_done` on the root
 surface (they emit idempotent nudges with anti-loop back-off and trace evidence) or
 explicitly document the regression: "After Phase 2, an idle swarm with no tasks and a
 set goal will no longer receive a goal-nudge; the operator must rely on
@@ -412,7 +412,7 @@ called out, not silently dropped.
 | 8 | non-blocker | `swarm_next_nodes` consolidation refreshes `currentNodes` | Either preserve the write or remove `currentNodes` as a persisted field |
 | 9 | non-blocker | BC window underspecified | Pin schema merge semantics, migration deadline, dead-letter cutoff |
 | 10 | non-blocker | Admin tool hiding missing recovery ergonomics | Enumerate exact admin-mode operator workflows in §2.3 |
-| 11 | non-blocker | `swarm_set_goal` disposition drops idle-no-task nudge | Either keep on orchestrator surface or explicitly accept the regression |
+| 11 | non-blocker | `swarm_set_goal` disposition drops idle-no-task nudge | Either keep on root surface or explicitly accept the regression |
 
 ## Recommended disposition
 
@@ -511,7 +511,7 @@ This is the strongest possible fence — the reply is recorded (so the audit tra
 preserves what the stale worker did) but state is unchanged and a trace event is
 emitted. Combined with §B.2 ("accepted only if the original record is not
 superseded/cancelled and its task/node/attempt context matches the current
-assignment"), the orchestrator-side waiver is no longer load-bearing — the fence
+assignment"), the root-side waiver is no longer load-bearing — the fence
 moves into the engine.
 
 NB6 (waived as authoritative) is also closed by §B.6: "response.status === 'waived'
@@ -536,7 +536,7 @@ surface/read receipt."
 
 This is exactly the split I asked for. The current `MessageRecord.surfacedAt`
 (`types.ts:458`) becomes the canonical surface-read timestamp, generalized from
-"orchestrator informational" to "any recipient surface" — which is a minimal additive
+"root informational" to "any recipient surface" — which is a minimal additive
 change.
 
 UAT matrix row 3 in §H confirms the regression test: "Pane injects then recipient
@@ -593,11 +593,11 @@ explicit ACK; reload/regenerate identities under gate=1." — this closes the
 behavioral drift where identity prompts could re-teach the old protocol.
 
 ### NB11 (swarm_set_goal disposition) → **RESOLVED**
-v2 §E: "`swarm_set_goal` and `swarm_mark_goal_done` remain orchestrator tools: they
+v2 §E: "`swarm_set_goal` and `swarm_mark_goal_done` remain root tools: they
 retain the legitimate idle-no-task goal-nudge use case. Their current low use is
 not a basis for removal."
 
-Also UAT row 8 in §H confirms the regression test: "Orchestrator goal with no task |
+Also UAT row 8 in §H confirms the regression test: "Root goal with no task |
 1 | Goal tools available; goal-nudge behavior still works."
 
 ## Additional Strengths in v2

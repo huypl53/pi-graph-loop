@@ -1,13 +1,13 @@
 // === swarm/src/surface.ts ===
-// Module boundary: orchestrator-facing message surface machinery.
+// Module boundary: root-facing message surface machinery.
 //   - orchSession              — session gate + retrigger counter source-of-truth
 //   - runtimeTaskWarnings      — task.json closure/warning extractor
-//   - isActionableOrchestratorMessage — predicate gating orchestrator-visible PM surfacing
+//   - isActionableRootMessage — predicate gating root-visible PM surfacing
 //   - staleSurfaceReason       — actionable→stale edge reasoning (fingerprint + reason code)
-//   - pumpOrchestratorMailbox  — the per-tick surface pump (R10-1 boundary)
+//   - pumpRootMailbox  — the per-tick surface pump (R10-1 boundary)
 //   - traceStaleSuppressedOnce — dedupe helper for the stale→suppressed transition
 //
-// Why co-located: the orchestrator surface is a single end-to-end path (predicate → pump →
+// Why co-located: the root surface is a single end-to-end path (predicate → pump →
 // deliver), and each step hands off the next step's inputs.
 //
 // Depends on: status-predicates (for terminal/abandoned task check), goal-epoch (for
@@ -18,14 +18,14 @@ import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { OrchestratorReceiptEntry, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
+import type { RootReceiptEntry, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
 import {
   ACK_MISSING_MS, ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS, ARTIFACT_PROGRESS_GRACE_MS, ARTIFACT_PROGRESS_MAX_FILES, ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS, ARTIFACT_PROGRESS_NUDGE_CAP, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED, TRACE_ARTIFACT_PROGRESS_NUDGE, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LATE_RESULT_REJECTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED, TRACE_STALE_OPEN_SURFACED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
 import { computeReadyNodes, computeTaskStatus, deriveNodeAttention, proxyMetricEmitLocked, staleOpenAssignmentScanLocked, staleOpenNudgeLocked } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
 import { deliver, deliverMessageLocked, deriveLifecycleFromTrigger, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
-import { claimOrchestratorLeader, ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader, requireOrchestratorAuthority } from "./identity.ts";
+import { claimRootLeader, ensureRoot, heartbeatRootLeader, readRootLeader, requireRootAuthority } from "./identity.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
@@ -35,15 +35,15 @@ import { allEffectiveIdleAgents, updateIdleEpochLocked } from "./nudges/goal-epo
 
 import { isStallNudgeEligibleTaskStatus, isTerminalOrAbandonedTaskStatus } from "./nudges/status-predicates.ts";
 
-// Module boundary: orchestrator-facing message surface machinery.
+// Module boundary: root-facing message surface machinery.
 //   - orchSession              — session gate + retrigger counter source-of-truth
 //   - runtimeTaskWarnings      — task.json closure/warning extractor
-//   - isActionableOrchestratorMessage — predicate gating orchestrator-visible PM surfacing
+//   - isActionableRootMessage — predicate gating root-visible PM surfacing
 //   - staleSurfaceReason       — actionable→stale edge reasoning (fingerprint + reason code)
-//   - pumpOrchestratorMailbox  — the per-tick surface pump (R10-1 boundary)
+//   - pumpRootMailbox  — the per-tick surface pump (R10-1 boundary)
 //   - traceStaleSuppressedOnce — dedupe helper for the stale→suppressed transition
 
-// Why co-located: the orchestrator surface is a single end-to-end path (predicate → pump →
+// Why co-located: the root surface is a single end-to-end path (predicate → pump →
 // deliver), and each step hands off the next step's inputs.
 
 // Depends on: status-predicates (for terminal/abandoned task check), goal-epoch (for
@@ -60,7 +60,7 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 		if (!node.assignee) continue;
 		if (node.status !== "ready" && node.status !== "assigned" && node.status !== "in_progress") continue;
 		const agent = st.agents[node.assignee];
-		if (!agent && node.assignee !== "orchestrator") {
+		if (!agent && node.assignee !== "root") {
 			warnings.push(`node ${id} assigned to missing agent ${node.assignee}`);
 		} else if (agent) {
 			ensureAgentDefaults(agent);
@@ -96,7 +96,7 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 	for (const [id, node] of Object.entries(task.nodes)) {
 		const att = deriveNodeAttention(st, task, id, nowMs);
 		if (!att.workerReminderEligible) continue;
-		warnings.push(`attention: node ${id} → ${att.category} (assignee ${node.assignee || "?"}) — ${att.evidence.join("; ")} — orchestrator may send one bounded reminder via /swarm remind ${task.taskId} ${id}`);
+		warnings.push(`attention: node ${id} → ${att.category} (assignee ${node.assignee || "?"}) — ${att.evidence.join("; ")} — root may send one bounded reminder via /swarm remind ${task.taskId} ${id}`);
 	}
 	if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
 		for (const agent of Object.values(st.agents)) {
@@ -108,22 +108,22 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 }
 
 export function orchSession(st: SwarmState, nowMs: number): { ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string } | null {
-	if (currentAgentId() !== "orchestrator") return null;
-	st.orchestratorPumpSessions ||= {};
+	if (currentAgentId() !== "root") return null;
+	st.rootPumpSessions ||= {};
 	const key = String(process.pid);
-	if (!st.orchestratorPumpSessions[key]) st.orchestratorPumpSessions[key] = { ids: [], lastAt: new Date(nowMs).toISOString() };
-	return st.orchestratorPumpSessions[key];
+	if (!st.rootPumpSessions[key]) st.rootPumpSessions[key] = { ids: [], lastAt: new Date(nowMs).toISOString() };
+	return st.rootPumpSessions[key];
 }
 
-// === Graph-advance watcher: detect a READY-but-unassigned node and nudge the orchestrator to assign it. ===
+// === Graph-advance watcher: detect a READY-but-unassigned node and nudge the root to assign it. ===
 // This is the mid-graph counterpart to the loop watcher. The loop watcher drives iteration boundaries
 // (plan / reopen / execute); this drives the nodes IN BETWEEN. The observed failure: when a worker
 // completes a node and sends a result message, the message is informational (requiresAck:false), so the
-// orchestrator often DESCRIBES the next step ("implement_change now just needs to...") instead of ACTING
+// root often DESCRIBES the next step ("implement_change now just needs to...") instead of ACTING
 // (calling swarm_assign_task), and the graph stalls with the next node ready-but-unassigned and nothing
-// prompting the orchestrator to move. This watcher is a safety net: after ~LOOP_RECONCILE_INTERVAL_MS of a
-// node being ready-but-unassigned, it nudges the orchestrator with the exact assign call. Idempotent per
-// (task,node); auto-acked once the node is assigned/terminal. The harness never assigns (the orchestrator
+// prompting the root to move. This watcher is a safety net: after ~LOOP_RECONCILE_INTERVAL_MS of a
+// node being ready-but-unassigned, it nudges the root with the exact assign call. Idempotent per
+// (task,node); auto-acked once the node is assigned/terminal. The harness never assigns (the root
 // Issue F2 (task-202608310422): graph-advance nudge key now carries a per-(taskId, nodeId) monotonic
 // seq suffix. The pre-fix static key allowed exactly one mailbox nudge per (taskId, nodeId) for the
 // node's lifetime (mailbox.ts:237-245 dedupes on from+to+idempotencyKey regardless of ackedAt), so
@@ -136,12 +136,12 @@ export function orchSession(st: SwarmState, nowMs: number): { ids: string[]; tri
 // Cap + cooldown semantics unchanged — only the per-emit key uniqueness changed. Cap is still
 // NOTIFY_DEFAULT_MAX_NUDGES sends per (taskId, nodeId) across the node's lifetime (the prior-scan now
 
-function ackOrchestratorNudgeLocked(st: SwarmState, key: string, nowMs: number, note: string): void {
-	const rec = findIdempotentMessage(st, "orchestrator", "orchestrator", key) || Object.values(st.messages || {}).find((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+function ackRootNudgeLocked(st: SwarmState, key: string, nowMs: number, note: string): void {
+	const rec = findIdempotentMessage(st, "root", "root", key) || Object.values(st.messages || {}).find((r) => r.to === "root" && r.idempotencyKey === key);
 	if (rec && rec.requiresAck && !rec.ackedAt) {
 		const at = new Date(nowMs).toISOString();
-		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "orchestrator", status: "done", note, at } };
-		st.delivered["orchestrator"] = Array.from(new Set([...(st.delivered["orchestrator"] || []), rec.id]));
+		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "root", status: "done", note, at } };
+		st.delivered["root"] = Array.from(new Set([...(st.delivered["root"] || []), rec.id]));
 	}
 }
 
@@ -149,20 +149,20 @@ function ackOrchestratorNudgeLocked(st: SwarmState, key: string, nowMs: number, 
 // to clear when a node leaves ready+unassigned — there can be up to NOTIFY_DEFAULT_MAX_NUDGES open
 // records (each at a different seq) for the same (taskId, nodeId). This helper auto-acks every open
 // seq-suffixed record for the pair. Idempotent w.r.t. already-acked records (the inner guard skips
-// records with `ackedAt`). Mirror of ackOrchestratorNudgeLocked but matching the seq-prefix set.
-function ackOrchestratorGraphAdvanceNudgesLocked(st: SwarmState, taskId: string, nodeId: string, nowMs: number, note: string): void {
+// records with `ackedAt`). Mirror of ackRootNudgeLocked but matching the seq-prefix set.
+function ackRootGraphAdvanceNudgesLocked(st: SwarmState, taskId: string, nodeId: string, nowMs: number, note: string): void {
 	const keyPrefix = `task:${taskId}:node:${nodeId}:nudge:assign:seq:`;
 	const at = new Date(nowMs).toISOString();
 	const ids: string[] = [];
 	for (const rec of Object.values(st.messages || {})) {
-		if (rec.to !== "orchestrator") continue;
+		if (rec.to !== "root") continue;
 		if (!(rec.idempotencyKey?.startsWith(keyPrefix) ?? false)) continue;
 		if (!rec.requiresAck || rec.ackedAt) continue;
-		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "orchestrator", status: "done", note, at } };
+		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "root", status: "done", note, at } };
 		ids.push(rec.id);
 	}
 	if (ids.length) {
-		st.delivered["orchestrator"] = Array.from(new Set([...(st.delivered["orchestrator"] || []), ...ids]));
+		st.delivered["root"] = Array.from(new Set([...(st.delivered["root"] || []), ...ids]));
 	}
 }
 
@@ -191,13 +191,13 @@ function parseTaskNodeRef(conversationId: string | undefined): { taskId?: string
 	return null;
 }
 
-// Actionability predicate for historical orchestrator PM messages (issue 11, §5). Returns { ok: false }
+// Actionability predicate for historical root PM messages (issue 11, §5). Returns { ok: false }
 // for messages that must NOT be surfaced: acked, dead_lettered, superseded, wrong recipient, task
 // terminal/cancelled/missing, node terminal/missing/reassigned, retrigger-budget-exhausted, or
 // informational already consumed. The `strictForMigration` flag treats retrigger-budget-exhausted as
 // non-actionable for the one-time migration back-fill (the budget resets per session). Exported
 // for reuse by the migration back-fill block.
-export function isActionableOrchestratorMessage(
+export function isActionableRootMessage(
 	rec: { id: string; to: string; requiresAck?: boolean; status?: string; ackedAt?: string; superseded?: any; conversationId?: string; idempotencyKey?: string },
 	taskIndex: Record<string, TaskState>,
 	nowMs: number,
@@ -231,7 +231,7 @@ export function isActionableOrchestratorMessage(
 		}
 		return { ok: false, reason: "superseded" };
 	}
-	if (rec.to !== "orchestrator") return { ok: false, reason: "wrong_recipient" };
+	if (rec.to !== "root") return { ok: false, reason: "wrong_recipient" };
 
 	// Task-scoped predicate (covers terminal task, cancelled, terminal node, reassigned node).
 	// Parse task/node reference from conversationId, falling back to the canonical
@@ -247,11 +247,11 @@ export function isActionableOrchestratorMessage(
 		// === R24 result-class exemption (2026-09-03) — task-scoped RESULT messages are not
 		// suppressed by node_terminal/task_terminal. The pump's per-tick actionability gate
 		// misclassifies these as moot historical alerts (the node they report on IS done), but
-		// the recipient — typically the orchestrator PM — needs the result visible at the
+		// the recipient — typically the root PM — needs the result visible at the
 		// surface to advance the task graph. Live incident 2026-09-02T15:26:06Z:
 		// msg-1788362766708-64f55b39 (R23 implement-done result) was durably enqueued
 		// (L1/C1 + L1/C2 mailbox_delivered) and durably classified node_terminal in
-		// `isActionableOrchestratorMessage`, suppressing every pump tick for 5+ minutes
+		// `isActionableRootMessage`, suppressing every pump tick for 5+ minutes
 		// (notification.stale.suppressed reason:node_terminal) and only surfacing via a
 		// manual swarm_check_mailbox at 15:31:09.993Z. The fix: detect result-class by the
 		// minimal fingerprint (requiresAck && !requiresResponse && replyTo set) and treat the
@@ -364,15 +364,15 @@ export async function staleSurfaceReason(
 		// === R22 (2026-09-02) — the agent_busy leg is REMOVED for goal keys. ===
 		// Emission (evaluateIdleGoalNudgeLocked) already required
 		// allEffectiveIdleAgents().allIdle, so a worker that turned busy AFTER emission is
-		// the nudge's own requested action succeeding (the orchestrator assigned work), not
+		// the nudge's own requested action succeeding (the root assigned work), not
 		// message staleness. Re-checking it here contradicted the emission-time gate and
 		// starved every queued goal nudge at surface time: live incident
 		// 2026-09-02T12:03:36..12:30Z — nudges goal-1788350610025-7efafe
 		// (msg-1788350616129-691b4e7c / -0aea3216 / -c6f752b8) suppressed with
-		// `notification.stale.suppressed site=orchestrator_pump.surface reason=agent_busy`,
-		// mailbox.orchestrator_pump_stuck_escalated every tick for 26+ min, ZERO
+		// `notification.stale.suppressed site=root_pump.surface reason=agent_busy`,
+		// mailbox.root_pump_stuck_escalated every tick for 26+ min, ZERO
 		// pi.sendMessage at the boundary, while consecutiveNoResolveNudges burned to
-		// max+backoff on messages the orchestrator LLM never saw. R21 principle: surface
+		// max+backoff on messages the root LLM never saw. R21 principle: surface
 		// revalidation must AGREE with emission-time gating, never contradict it.
 		// The legs that can make the MESSAGE itself false remain:
 		//   - LIVE actionable graph work (R21 C-R21-3 preserved);
@@ -412,7 +412,7 @@ export async function staleSurfaceReason(
 			}
 		} else if (nodeId) {
 			const node = task.nodes[nodeId];
-			const check = checkStallNotificationStale(st, task, nodeId, node?.assignee || "orchestrator", nowMs);
+			const check = checkStallNotificationStale(st, task, nodeId, node?.assignee || "root", nowMs);
 			if (check.stale) {
 				staleReason = check.reason || "stale";
 				evidence = check.evidence;
@@ -428,7 +428,7 @@ export async function staleSurfaceReason(
 	return { stale: staleReason !== null, reason: staleReason, evidence };
 }
 
-function orchestratorSurfaceGroupKey(rec: { id: string; from?: string; subject?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; idempotencyKey?: string }): string {
+function rootSurfaceGroupKey(rec: { id: string; from?: string; subject?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; idempotencyKey?: string }): string {
 	const rawKey = String(rec.idempotencyKey || "");
 	if (rawKey) {
 		const normalized = rawKey
@@ -470,8 +470,8 @@ export async function traceStaleSuppressedOnce(
 	}).catch(() => {});
 	return true;
 }
-export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reason: string) {
-	if (currentAgentId() !== "orchestrator") return { delivered: 0, ids: [] as string[] };
+export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reason: string) {
+	if (currentAgentId() !== "root") return { delivered: 0, ids: [] as string[] };
 	// Read idle once, up front. Non-TUI modes have no live agent loop to trigger, so they are treated as
 	// "busy" — the file-IO surfacing decision still runs (for trace visibility) but no ctx-bound call is made.
 	const idleAtStart = ctx.mode === "tui" ? ctx.isIdle() : false;
@@ -482,27 +482,27 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// pump. Read the leader record INSIDE the existing withLock (atomic with the rest of the
 		// pump decision block; no extra file IO); on deny, trace + return empty without firing
 		// nudges or stamping any surfaced set. This check piggybacks on the per-tick readState.
-		const leaderCheck = readOrchestratorLeader(st, Date.now());
+		const leaderCheck = readRootLeader(st, Date.now());
 		if (leaderCheck.kind !== "claimed" || leaderCheck.leader.pid !== process.pid) {
 			// === STALE-LEASE SELF-HEAL ===
-			// A STALE lease (heartbeat older than ORCHESTRATOR_LEADER_STALE_MS — no live orchestrator
+			// A STALE lease (heartbeat older than ROOT_LEADER_STALE_MS — no live root
 			// refreshed it) used to deny this tick, but the pump tick is the ONLY thing that refreshes
 			// the lease. After a watchdog gap (module reload, extension edit mid-session) the pump
 			// deadlocked on its own stale lease: every tick denied, no tick ever heartbeating again —
-			// observed live as 16+ min of orchestrator.pump.denied(state=stale) with goal nudges and
+			// observed live as 16+ min of root.pump.denied(state=stale) with goal nudges and
 			// message surfacing frozen while all agents sat idle. Now: when the lease is stale
-			// (whoever held it, including this pid), re-claim — claimOrchestratorLeader only denies when
+			// (whoever held it, including this pid), re-claim — claimRootLeader only denies when
 			// a LIVE competing pid holds it — and continue the tick. Deny remains only for a genuinely
-			// LIVE lease held by a DIFFERENT pid (true multi-orchestrator conflict).
+			// LIVE lease held by a DIFFERENT pid (true multi-root conflict).
 			if (leaderCheck.kind === "stale") {
-				const reclaimed = claimOrchestratorLeader(st, Date.now(), process.pid);
+				const reclaimed = claimRootLeader(st, Date.now(), process.pid);
 				if (reclaimed.kind === "denied") {
-					await trace(p, "orchestrator.pump.denied", { reason, currentLeaderPid: reclaimed.currentLeader.pid, state: "claimed", callerPid: process.pid, heartbeatAgeMs: reclaimed.ageMs, reclaimedStale: true }).catch(() => {});
+					await trace(p, "root.pump.denied", { reason, currentLeaderPid: reclaimed.currentLeader.pid, state: "claimed", callerPid: process.pid, heartbeatAgeMs: reclaimed.ageMs, reclaimedStale: true }).catch(() => {});
 					return { toSurface: [] as SwarmMessage[], retriggered: 0 };
 				}
-				await trace(p, "orchestrator.pump.lease_reclaimed", { reason, previousPid: leaderCheck.leader.pid, staleForMs: Math.round(leaderCheck.ageMs), callerPid: process.pid }).catch(() => {});
+				await trace(p, "root.pump.lease_reclaimed", { reason, previousPid: leaderCheck.leader.pid, staleForMs: Math.round(leaderCheck.ageMs), callerPid: process.pid }).catch(() => {});
 			} else {
-				await trace(p, "orchestrator.pump.denied", {
+				await trace(p, "root.pump.denied", {
 					reason,
 					currentLeaderPid: leaderCheck.kind === "claimed" ? leaderCheck.leader.pid : null,
 					state: leaderCheck.kind,
@@ -514,19 +514,19 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		}
 		// === Issue 11 (rework): per-tick leader heartbeat ===
 		// The leader lease must stay alive between session_starts (otherwise the second-line defense
-		// above starts denying ticks within ORCHESTRATOR_LEADER_STALE_MS of the last session_start).
+		// above starts denying ticks within ROOT_LEADER_STALE_MS of the last session_start).
 		// Refresh it inside the existing withLock (atomic with the rest of the pump decision block;
-		// no extra file IO). heartbeatOrchestratorLeader is a no-op for the current pid when the
+		// no extra file IO). heartbeatRootLeader is a no-op for the current pid when the
 		// lease is already held by it; if a competing pid claimed it between the read and the
-		// refresh, it throws ORCHESTRATOR_LEADER_DENIED, which is propagated to the watchdog catch.
-		heartbeatOrchestratorLeader(st, Date.now(), process.pid, "pump_tick");
-		// ensureOrchestrator (create-only post-issue-8): no heartbeat refresh, just materialises the
+		// refresh, it throws ROOT_LEADER_DENIED, which is propagated to the watchdog catch.
+		heartbeatRootLeader(st, Date.now(), process.pid, "pump_tick");
+		// ensureRoot (create-only post-issue-8): no heartbeat refresh, just materialises the
 		// pseudo-agent record for mailbox delivery. The heartbeat is owned by the gate.
-		ensureOrchestrator(st, ctx.cwd, p);
+		ensureRoot(st, ctx.cwd, p);
 		const nowMs = Date.now();
 		// Prune dead sessions (not pumped within TTL) to bound growth from transient validation pids.
-		for (const [k, v] of Object.entries(st.orchestratorPumpSessions!)) {
-			if (k !== String(process.pid) && nowMs - new Date(v.lastAt).getTime() > PUMP_SESSION_TTL_MS) delete st.orchestratorPumpSessions![k];
+		for (const [k, v] of Object.entries(st.rootPumpSessions!)) {
+			if (k !== String(process.pid) && nowMs - new Date(v.lastAt).getTime() > PUMP_SESSION_TTL_MS) delete st.rootPumpSessions![k];
 		}
 		// === Issue 82: heartbeat-driven agent GC pass (P0, R9 a3 graveyard) ===
 		// Runs inside the existing pump withLock (no nested lock acquisition). Bounded cost:
@@ -538,19 +538,19 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		try { await agentHeartbeatGCLocked(pi, ctx.cwd, p, st, nowMs); }
 		catch (err: any) { await trace(p, "agent.heartbeat_gc.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// === Issue 83a — stale-open assignment scan [R10-3 restart-required pump phase] ===
-		// Pump phase: `staleOpenAssignmentScanLocked` (called from `pumpOrchestratorMailbox`).
+		// Pump phase: `staleOpenAssignmentScanLocked` (called from `pumpRootMailbox`).
 		// Runs after heartbeat GC (so freshly-stopped agents are excluded by status) and before the
 		// graph-stall safety net (so a freshly-stale-open node does not double-fire the graph-advance
 		// nudge). R10-1 cost-bound: per-tick readdir of tasks dir + readTaskState per task under
 		// pump lock; no subprocess/tmux. The bound is N+1 file reads per tick where N = count of
-		// `task-*` subdirs; ZERO tmux subprocess calls. Surfacing is TRACE-ONLY: no orchestrator
+		// `task-*` subdirs; ZERO tmux subprocess calls. Surfacing is TRACE-ONLY: no root
 		// mailbox nudge is sent (the plan's nudge was consciously dropped; pre-existing stall
 		// nudge machinery still nudges on stalled nodes). Throws are wrapped in try/catch so a
 		// scan failure never kills the tick.
 		try {
 			const r = await staleOpenAssignmentScanLocked(p, st, nowMs);
 			// R11-1 completion: surface → nudge. Every FRESHLY surfaced node gets one high-priority
-			// orchestrator nudge (capped/cooled-down inside). Trace-only surfacing left the swarm
+			// root nudge (capped/cooled-down inside). Trace-only surfacing left the swarm
 			// idling for hours with staleOpen>0 and nobody told.
 			for (const n of r.surfacedNodes || []) {
 				try { await staleOpenNudgeLocked(pi, ctx.cwd, p, st, n.taskId, n.nodeId); }
@@ -564,10 +564,10 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// SwarmState.proxyMetrics for `/swarm status` / `/swarm metrics` to surface.
 		try { await proxyMetricEmitLocked(p, st, nowMs); }
 		catch (err: any) { await trace(p, "proxy.metric_emit.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}); }
-		// Mid-graph stall safety net: nudge the orchestrator to assign any ready-but-unassigned node in an
+		// Mid-graph stall safety net: nudge the root to assign any ready-but-unassigned node in an
 		// in_progress task. The nudge is idempotent, so it is safe to run on every pump tick.
 		try { await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
-		// Fresh-task stall safety net: nudge the orchestrator when a start node is still ready + unassigned
+		// Fresh-task stall safety net: nudge the root when a start node is still ready + unassigned
 		// past the creation grace period. Also idempotent + read-only on task state.
 		try { await reconcileInitialReadyLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "task.initial_ready_reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// === Row 68: shared idle-epoch maintenance (once per tick, before both nudge evaluators) ===
@@ -583,20 +583,20 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// throw never kills the tick.
 		try { await evaluateTaskGraphStallNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "task_stall.nudge_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// === Issue 18: goal idle-streak nudge (goal fallback, runs after the graph path) ===
-		// When the orchestrator has set a goal, there is no actionable graph work, and every effective
+		// When the root has set a goal, there is no actionable graph work, and every effective
 		// agent has been continuously idle for the full interval, emit the goal fallback nudge. Anti-loop
 		// counter + back-off handled inside the function.
 		try { await evaluateIdleGoalNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "goal.nudge.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// === R20: artifact-progress self-nudge (Issue: settled idle with open assignment) ===
-		// Pump-tick phase. Fires an action-oriented nudge to the AGENT itself (not the orchestrator)
+		// Pump-tick phase. Fires an action-oriented nudge to the AGENT itself (not the root)
 		// when fs.stat detects a fresh write to a node's allowedFiles but the node is still open.
-		// Companion to the existing orchestrator-facing stale-open nudge (which targets the PM,
+		// Companion to the existing root-facing stale-open nudge (which targets the PM,
 		// not the worker). Wrapped in try/catch so a single tick failure never kills the pump.
 		try { await evaluateArtifactProgressNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "worker.artifact_progress_nudge_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// === Issue 21: slot recovery scan ===
 		// When a slot's bench naturally expires AND lastBenchReason === "quota" AND the agent on
 		// that slot still has active task assignments, emit pool.slot_recovered. NO auto-resume;
-		// the orchestrator decides. Idempotent under tick storms via lastRecoveredAt dedupe.
+		// the root decides. Idempotent under tick storms via lastRecoveredAt dedupe.
 		try { await evaluateSlotRecoveryLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "pool.slot_recovered.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
 		const sess = orchSession(st, nowMs)!;
 		const surfaced = new Set(sess.ids);
@@ -604,13 +604,13 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		const retriggerCount = { ...(sess.retriggerCount ?? {}) };
 		const keepalive = () => { sess.lastAt = new Date(nowMs).toISOString(); };
 		// Session-safe surfacing keying is unchanged (per-pid, not PI_SESSION_ID, so a validation run or a
-		// second orchestrator lane cannot starve this PM process). Recent window bounds work; acked messages
+		// second root lane cannot starve this PM process). Recent window bounds work; acked messages
 		// (ackedAt = "recipient processed it") are skipped. We no longer pre-filter surfaced here: surfaced
 		// vs triggered vs re-trigger is decided below, because surfacing must be gated on idle.
 
 		// === Issue 11: One-time migration back-fill (binding C4) ===
-		if ((st.consumerReceipts?.orchestrator?.revision ?? 0) === 0) {
-			const migrationEntries = st.consumerReceipts!.orchestrator!.entries!;
+		if ((st.consumerReceipts?.root?.revision ?? 0) === 0) {
+			const migrationEntries = st.consumerReceipts!.root!.entries!;
 			let written = 0;
 			let scanned = 0;
 			// Build task index for actionability predicate.
@@ -628,12 +628,12 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 			const retriggerCounts = orchSession(st, nowMs)!.retriggerCount || {};
 			for (const rec of Object.values(st.messages)) {
 				scanned++;
-				if (rec.to !== "orchestrator") continue;
+				if (rec.to !== "root") continue;
 				if (!rec.requiresAck) continue;
 				// Use the actionability predicate; non-actionable messages get a receipt.
 				// Note: do NOT short-circuit on rec.ackedAt here — the predicate returns reason="acked"
 				// and we want the receipt entry written so a reincarnated consumer reads it.
-				const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ true, p);
+				const v = isActionableRootMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ true, p);
 				if (!v.ok) {
 					migrationEntries[rec.id] = {
 						surfacedAt: rec.updatedAt || rec.createdAt,
@@ -645,12 +645,12 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 					written++;
 				}
 			}
-			st.consumerReceipts!.orchestrator!.revision = 1;
+			st.consumerReceipts!.root!.revision = 1;
 			await trace(p, "notification.backfill.receipts_written", { written, scanned, ts: nowMs }).catch(() => {});
 		}
 
 		// === Issue 11: Durable dedupe gate + actionability filter (binding C4 + C5) ===
-		const deliveredOrch = new Set(st.delivered.orchestrator || []);
+		const deliveredOrch = new Set(st.delivered.root || []);
 		// Build task index for actionability predicate.
 		const taskIndex: Record<string, TaskState> = {};
 		if (existsSync(p.tasksDir)) {
@@ -664,19 +664,19 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 			} catch { /* ignore readdir errors */ }
 		}
 		const retriggerCounts = orchSession(st, nowMs)!.retriggerCount || {};
-		const windowMsgs = (await readMailboxCached(p, "orchestrator"))
+		const windowMsgs = (await readMailboxCached(p, "root"))
 			.slice(-PUMP_SCAN_WINDOW)
 			.filter((m) => {
 				const rec = st.messages[m.id];
 				if (!rec) return false;
 
 				// Durable dedupe gate (binding C4): check consumerReceipts first, then legacy delivered ledger, then per-pid surfaced.
-				if (st.consumerReceipts?.orchestrator?.entries?.[m.id]) return false;
+				if (st.consumerReceipts?.root?.entries?.[m.id]) return false;
 				if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) return false;
 				if (surfaced.has(m.id)) return false; // per-pid surfaced (retrigger bound)
 
 				// Actionability predicate (binding C5): skip non-actionable messages and batch-count suppressions.
-				const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ false, p);
+				const v = isActionableRootMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ false, p);
 				return v.ok;
 			});
 
@@ -687,19 +687,19 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 			node_terminal: 0, node_reassigned: 0, task_missing: 0, node_missing: 0,
 			wrong_recipient: 0, retrigger_budget_exhausted: 0, informational_already_consumed: 0,
 		};
-		const allMsgs = (await readMailboxCached(p, "orchestrator")).slice(-PUMP_SCAN_WINDOW);
+		const allMsgs = (await readMailboxCached(p, "root")).slice(-PUMP_SCAN_WINDOW);
 		for (const m of allMsgs) {
 			const rec = st.messages[m.id];
-			if (!rec || rec.to !== "orchestrator") continue;
-			if (st.consumerReceipts?.orchestrator?.entries?.[m.id]) { suppressedCounts.informational_already_consumed++; continue; }
+			if (!rec || rec.to !== "root") continue;
+			if (st.consumerReceipts?.root?.entries?.[m.id]) { suppressedCounts.informational_already_consumed++; continue; }
 			if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) { suppressedCounts.informational_already_consumed++; continue; }
 			if (surfaced.has(m.id)) continue; // not suppressed - already surfaced this session
-			const v = isActionableOrchestratorMessage(rec, taskIndex, nowMs, retriggerCounts, false, p);
+			const v = isActionableRootMessage(rec, taskIndex, nowMs, retriggerCounts, false, p);
 			if (!v.ok) {
 				const key = v.reason === "retrigger_budget_exhausted" ? "retrigger_budget_exhausted" : v.reason;
 				suppressedCounts[key] = (suppressedCounts[key] || 0) + 1;
 				if (key === "node_reassigned" || key === "node_terminal" || key === "task_done" || key === "task_failed" || key === "task_cancelled" || key === "task_missing" || key === "node_missing") {
-					await traceStaleSuppressedOnce(p, "orchestrator_pump.surface", {
+					await traceStaleSuppressedOnce(p, "root_pump.surface", {
 						messageId: m.id,
 						idempotencyKey: rec.idempotencyKey || m.idempotencyKey || null,
 						reason: key,
@@ -723,11 +723,11 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// agent_settled) skip it forever — the loop-nudge-stuck-at-awaiting_plan bug. Deferring keeps the
 		// message un-marked so the next idle pump (session_start / agent_settled / 5s interval) re-reads it
 		// and delivers it WITH a real triggerTurn. It also stops queuing followUps that can themselves keep
-		// isIdle() false (a secondary cause of the orchestrator never waking).
+		// isIdle() false (a secondary cause of the root never waking).
 		//
 		// STUCK-BUSY ESCALATION: ctx.isIdle() can stay false indefinitely while pi has a queued
 		// continuation / auto-retry pending (e.g. provider 429 backoff, auto-compaction retry) even
-		// though the orchestrator is swarm-idle (heartbeat says idle, nothing is running). Without an
+		// though the root is swarm-idle (heartbeat says idle, nothing is running). Without an
 		// escape hatch the deferral above is unbounded: messages pile up until the human intervenes
 		// (Esc/reload) — the observed "messages only arrive when I press /reload" bug. When the oldest
 		// never-displayed message has waited longer than PUMP_STUCK_DEFER_ESCALATE_MS while busy, surface
@@ -740,7 +740,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		if (!idleAtStart && oldestWaitMs < PUMP_STUCK_DEFER_ESCALATE_MS) {
 			keepalive();
 			if (neverDisplayedBusy.length) {
-				await trace(p, "mailbox.orchestrator_pump_deferred", {
+				await trace(p, "mailbox.root_pump_deferred", {
 					reason, queued: neverDisplayedBusy.length, oldestWaitMs: Math.round(oldestWaitMs),
 					thresholdMs: PUMP_STUCK_DEFER_ESCALATE_MS, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null,
 				});
@@ -750,7 +750,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		}
 		const escalateStuck = !idleAtStart && oldestWaitMs >= PUMP_STUCK_DEFER_ESCALATE_MS;
 		if (escalateStuck) {
-			await trace(p, "mailbox.orchestrator_pump_stuck_escalated", {
+			await trace(p, "mailbox.root_pump_stuck_escalated", {
 				reason, queued: neverDisplayedBusy.length, oldestWaitMs: Math.round(oldestWaitMs),
 				thresholdMs: PUMP_STUCK_DEFER_ESCALATE_MS, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null,
 			});
@@ -760,7 +760,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// (1) Messages never displayed to this pid (highest priority — fresh work).
 		// (2) Action-expected (requiresAck) messages already surfaced+triggered but still unacked and overdue
 		//     (bounded re-trigger). Informational (requiresAck:false) messages are NOT re-triggered: a single
-		//     triggered delivery already prompted the orchestrator once, which is sufficient.
+		//     triggered delivery already prompted the root once, which is sufficient.
 		const neverDisplayed = windowMsgs.filter((m) => !surfaced.has(m.id));
 		const overdueRetrigger = windowMsgs.filter((m) => {
 			if (!surfaced.has(m.id)) return false;
@@ -779,22 +779,22 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		// action.
 		const surfacePlan = [...surfaceCandidates].sort(compareSurfaceCandidates).reverse().map((msg) => {
 			const rec = st.messages[msg.id] || msg;
-			return { msg, rec, groupKey: orchestratorSurfaceGroupKey(rec) };
+			return { msg, rec, groupKey: rootSurfaceGroupKey(rec) };
 		});
 		const coalesced = new Map<string, { msg: SwarmMessage; dropped: string[] }>();
 		for (const item of surfacePlan) {
 			const v = await staleSurfaceReason(p, st, item.msg, taskIndex, nowMs);
 			if (v.stale) {
-				// === R13 P0 (2026-09-01) — priority-high unknown-target orchestrator safety-net bypass ===
-				// The orchestrator pseudo-agent has tmuxTarget === "unknown" by design (identity.ts:69)
+				// === R13 P0 (2026-09-01) — priority-high unknown-target root safety-net bypass ===
+				// The root pseudo-agent has tmuxTarget === "unknown" by design (identity.ts:69)
 				// and a worker in `tool_running` state causes `staleSurfaceReason` to return
 				// `{stale: true, reason: "agent_busy"}` — suppressing the durable nudge so the user
 				// never sees it even though `deliverMessageLocked` reported success via mailbox_only.
 				// Live incident 2026-09-01T13:10:27 trace: priority-high STALE-OPEN nudge durably
 				// enqueued, mailbox_only logged, then `notification.stale.suppressed site=
-				// orchestrator_pump.surface reason=agent_busy` with zero `pi.sendMessage` calls at the
+				// root_pump.surface reason=agent_busy` with zero `pi.sendMessage` calls at the
 				// reconcile.ts:1763-1773 boundary. Fix: for priority-high nudges bound for the
-				// unknown-target orchestrator pseudo-agent, BYPASS the busy-suppression gate so the
+				// unknown-target root pseudo-agent, BYPASS the busy-suppression gate so the
 				// safety nudge still surfaces locally. Normal-priority traffic still respects the
 				// gate (otherwise the `goal.nudge.suppressed_by_active_task` storm from R10 returns).
 				const recForBypass = item.rec;
@@ -804,7 +804,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 				const bypassPriority = String((recForBypass.priority ?? (item.msg as any)?.priority) || "").toLowerCase();
 				const isHighPriority = bypassPriority === "high";
 				const recipient = st.agents[recForBypass.to];
-				const isUnknownTargetOrchestrator = recipient?.id === "orchestrator" && (!recipient.tmuxTarget || recipient.tmuxTarget === "unknown");
+				const isUnknownTargetRoot = recipient?.id === "root" && (!recipient.tmuxTarget || recipient.tmuxTarget === "unknown");
 				// === R13 P1 (2026-09-02) — liveness gate: the bypass MUST NOT rescue nudges whose
 				// referenced task/node is already terminal. Live incident 2026-09-02: pre-R13
 				// priority-high stale-open nudges that were durably enqueued on 2026-09-01
@@ -841,12 +841,12 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 						liveTerminalReason = "node_terminal";
 					}
 				}
-				const bypassBusyForHigh = isHighPriority && isUnknownTargetOrchestrator && v.reason === "agent_busy" && !liveTaskIsTerminal;
+				const bypassBusyForHigh = isHighPriority && isUnknownTargetRoot && v.reason === "agent_busy" && !liveTaskIsTerminal;
 				if (liveTaskIsTerminal) {
 					// Do NOT bypass — surface the historical nudge's terminal state via the
 					// standard suppression trace + counters so it is observable in the
 					// notification.batch.suppressed census (task_done / node_terminal).
-					await traceStaleSuppressedOnce(p, "orchestrator_pump.surface", {
+					await traceStaleSuppressedOnce(p, "root_pump.surface", {
 						messageId: item.msg.id,
 						idempotencyKey: String(recForBypass.idempotencyKey || ""),
 						reason: liveTerminalReason || "task_terminal",
@@ -864,7 +864,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 					}).catch(() => {});
 					// Fall through to the coalescing path (do NOT continue past this item).
 				} else {
-					await traceStaleSuppressedOnce(p, "orchestrator_pump.surface", {
+					await traceStaleSuppressedOnce(p, "root_pump.surface", {
 						messageId: item.msg.id,
 						idempotencyKey: String(item.rec.idempotencyKey || item.msg.idempotencyKey || ""),
 						reason: v.reason,
@@ -890,7 +890,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		for (const [groupKey, entry] of coalesced.entries()) {
 			if (!entry.dropped.length) continue;
 			await trace(p, "notification.coalesced.suppressed", {
-				site: "orchestrator_pump.surface",
+				site: "root_pump.surface",
 				groupKey,
 				keptId: entry.msg.id,
 				droppedIds: entry.dropped,
@@ -905,27 +905,27 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 		if (consumedSuppressedIds.size) {
 			const ts = now();
 			if (!st.consumerReceipts) st.consumerReceipts = {};
-			if (!st.consumerReceipts.orchestrator) st.consumerReceipts.orchestrator = { entries: {}, revision: 0 };
-			if (!st.consumerReceipts.orchestrator.entries) st.consumerReceipts.orchestrator.entries = {};
+			if (!st.consumerReceipts.root) st.consumerReceipts.root = { entries: {}, revision: 0 };
+			if (!st.consumerReceipts.root.entries) st.consumerReceipts.root.entries = {};
 			for (const id of consumedSuppressedIds) {
 				const rec = st.messages[id];
-				if (!rec || rec.to !== "orchestrator") continue;
+				if (!rec || rec.to !== "root") continue;
 				if (rec.requiresAck === false) {
-					st.delivered.orchestrator = Array.from(new Set([...(st.delivered.orchestrator || []), id]));
+					st.delivered.root = Array.from(new Set([...(st.delivered.root || []), id]));
 					if (!rec.surfacedAt) {
 						rec.surfacedAt = ts;
 						rec.updatedAt = ts;
 					}
 					continue;
 				}
-				if (!st.consumerReceipts.orchestrator.entries[id]) {
-					st.consumerReceipts.orchestrator.entries[id] = {
+				if (!st.consumerReceipts.root.entries[id]) {
+					st.consumerReceipts.root.entries[id] = {
 						surfacedAt: ts,
 						requiresAck: true,
 						conversationId: rec.conversationId,
 						fingerprint: fingerprintMessage(rec),
 					};
-					st.consumerReceipts.orchestrator.revision = (st.consumerReceipts.orchestrator.revision || 0) + 1;
+					st.consumerReceipts.root.revision = (st.consumerReceipts.root.revision || 0) + 1;
 				}
 			}
 		}
@@ -955,7 +955,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 	});
 	const pending = result.toSurface;
 	if (!pending.length) {
-		if (ctx.mode === "tui") await trace(p, "mailbox.orchestrator_pump", { reason, count: 0, deferred: !idleAtStart ? 1 : 0, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart });
+		if (ctx.mode === "tui") await trace(p, "mailbox.root_pump", { reason, count: 0, deferred: !idleAtStart ? 1 : 0, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart });
 		return { delivered: 0, ids: [] as string[] };
 	}
 	// Delivery is TUI-only (session-bound APIs: pi.sendMessage/ctx.isIdle). In print/rpc/json mode,
@@ -978,7 +978,7 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 			}, opts);
 		}
 		// Global-consume informational PM traffic ONLY AFTER a real TUI surface succeeded. This avoids
-		// losing a message on stale-ctx/sendMessage failure while still preventing a later orchestrator
+		// losing a message on stale-ctx/sendMessage failure while still preventing a later root
 		// process from replaying historical requiresAck:false notices that were already shown once.
 		const surfacedInfoIds = pending
 			.filter((m) => m.requiresAck === false)
@@ -996,16 +996,16 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 				const ts = now();
 				// Legacy informational ledger (unchanged).
 				if (surfacedInfoIds.length) {
-					const ledgerIds = st.delivered.orchestrator || [];
-					st.delivered.orchestrator = Array.from(new Set([...ledgerIds, ...surfacedInfoIds]));
+					const ledgerIds = st.delivered.root || [];
+					st.delivered.root = Array.from(new Set([...ledgerIds, ...surfacedInfoIds]));
 				}
 				// Durable consumer receipts for actionable messages.
 				if (surfacedActionIds.length) {
-					const entries = st.consumerReceipts!.orchestrator!.entries!;
+					const entries = st.consumerReceipts!.root!.entries!;
 					let bumped = false;
 					for (const id of surfacedActionIds) {
 						const rec = st.messages[id];
-						if (!rec || rec.to !== "orchestrator" || rec.requiresAck !== true) continue;
+						if (!rec || rec.to !== "root" || rec.requiresAck !== true) continue;
 						// Write receipt only if not already present (TUI delivery idempotence).
 						if (entries[id]) continue;
 						entries[id] = {
@@ -1018,22 +1018,22 @@ export async function pumpOrchestratorMailbox(pi: ExtensionAPI, ctx: any, p: Pat
 						bumped = true;
 						}
 					// Bump revision immediately after entries mutation (binding C10).
-					if (bumped) st.consumerReceipts!.orchestrator!.revision = (st.consumerReceipts!.orchestrator!.revision || 0) + 1;
+					if (bumped) st.consumerReceipts!.root!.revision = (st.consumerReceipts!.root!.revision || 0) + 1;
 				}
 				// Legacy informational surfacedAt stamp (unchanged).
 				for (const id of surfacedInfoIds) {
 					const rec = st.messages[id];
-					if (!rec || rec.to !== "orchestrator" || rec.requiresAck !== false || rec.surfacedAt) continue;
+					if (!rec || rec.to !== "root" || rec.requiresAck !== false || rec.surfacedAt) continue;
 					rec.surfacedAt = ts;
 					rec.updatedAt = ts;
 				}
 				await writeState(p, st);
 			});
 		}
-		await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), retriggered: result.retriggered, informationalConsumed: surfacedInfoIds.length, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart });
+		await trace(p, "mailbox.root_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), retriggered: result.retriggered, informationalConsumed: surfacedInfoIds.length, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart });
 	} else {
 		// In non-TUI mode, still trace pump activity (without ctx.isIdle) for visibility.
-		await trace(p, "mailbox.orchestrator_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, mode: ctx.mode });
+		await trace(p, "mailbox.root_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, mode: ctx.mode });
 	}
 	return { delivered: pending.length, ids: pending.map((m) => m.id) };
 }

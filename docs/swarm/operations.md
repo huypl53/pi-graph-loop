@@ -71,7 +71,7 @@ Common first actions:
 - `swarm_reconcile` (also reports advisory `task_node_ownership_legacy` drift for active nodes on pre-policy tasks; never fabricates ownership)
 - `swarm_release_agent_task` for stale pointers after confirming reconcile results
 
-### Cancel a task (orchestrator-only)
+### Cancel a task (root-only)
 
 Cancel a stuck or obsolete task with the existing `swarm_update_task(force=true, cancelTask=true)`:
 
@@ -93,8 +93,8 @@ This is the ONLY cancellation surface — no separate `swarm_cancel_task` tool w
 After cancellation:
 
 - Any `swarm_update_task` call on that task is rejected with `TASK_CANCELLED` (or `NODE_CANCELLED`),
-  even from the orchestrator. Re-opening requires a separately-designed policy.
-- A later ACK on a superseded assignment is rejected with `ASSIGNMENT_SUPERSEDED` (the orchestrator
+  even from the root. Re-opening requires a separately-designed policy.
+- A later ACK on a superseded assignment is rejected with `ASSIGNMENT_SUPERSEDED` (the root
   may pass `waive=true` to accept it as waived).
 - The audit trail is preserved: task.json, per-task events, message records (marked superseded, not
   deleted), and attempt history all remain readable.
@@ -103,9 +103,9 @@ Un-cancelling is not supported in this release. To work on the same goal again, 
 
 ### Inspect or change agent roles
 
-### Model pool auto-scaffold on first orchestrator session (Issue 20)
+### Model pool auto-scaffold on first root session (Issue 20)
 
-On the orchestrator's first `session_start` in a swarm, the extension checks
+On the root's first `session_start` in a swarm, the extension checks
 `.pi/settings.json`. If neither `swarm.modelPool` nor `extensions.swarm.modelPool`
 (runtime precedence: extensions wins per `src/session.ts:readSwarmSettings`) is
 declared, the extension writes a placeholder slot `[{ "model": null, "provider": null }]`
@@ -126,7 +126,7 @@ leave `.pi/settings.json` untouched:
 The one-shot `ctx.ui.notify` fires **only** when (a) `modelpool_present` /
 `no_pi_dir` / `settings_unparseable` did NOT skip AND (b) the durable flag
 `SwarmState.poolScaffoldNotifiedAt` is absent. The flag is stamped inside the
-same `withLock` block that creates the leader-orchestrator session record, so
+same `withLock` block that creates the leader-root session record, so
 subsequent `session_start` invocations (including `/reload` of the same swarm)
 are suppressed until the entire `.pi/swarm` directory is cleared (clean-slate
 re-notify is the intended escape hatch). The notify text is stable; see the
@@ -145,7 +145,7 @@ Trace events (durable in `.pi/swarm/traces/events.jsonl`):
 Placeholder `model: null` is intentionally invalid against
 `validateSwarmSettings()` (which reports `slot_empty_model`); this nudges the
 user to replace it with a real slot before running `/swarm pool validate`.
-Concurrent orchestrator session_starts (two PM panes racing) both call
+Concurrent root session_starts (two PM panes racing) both call
 `ensurePoolScaffold`; both observe `modelPool` absent; the first
 `atomicWriteFile` wins and the second sees the post-write state on its next read
 or simply overwrites with the same idempotent payload — neither the user nor
@@ -179,7 +179,7 @@ Slot fields:
 - `roles`: optional array of role-kind names; when set & non-empty, this slot is only eligible for
   `pickSlot()` when the spawning agent's roleKind is in the list. Absent / empty = available for
   all roleKinds (default). The closed set of roleKinds is defined in
-  `extensions/swarm/src/completion.ts` `ROLE_KINDS` (seven entries: orchestrator, planner,
+  `extensions/swarm/src/completion.ts` `ROLE_KINDS` (seven entries: root, planner,
   reviewer, tester, implementer, worker, observer). Manual `/swarm pool rotate now` ALWAYS
   bypasses the role filter (operator override) and stamps `rolesIgnored: true` in the swap trace.
   **Strict roles (2026-08-31)**: when at least one slot is tagged for a roleKind, that roleKind is
@@ -256,10 +256,10 @@ prints the action directly so the operator never has to guess the fix.
 - **Swap-chain cap**: at most 2 consecutive swaps per agent (chain resets after 5 idle minutes). A fully-dead pool cannot cascade fail→swap→retry through every slot; beyond the cap the turn fails naturally and the trace `pool.swap_chain_capped` makes it visible.
 - **Pi engine retry coordination** (Issue 17 gate + Issue 19 manual override): the pi engine itself retries a failed provider request up to `retry.maxRetries` (default `3`) times with exponential backoff (2s, 4s, 8s = 14s total budget) before giving up. The extension cannot subscribe to engine retry events (the `auto_retry_*` family is not in the extension event allowlist), so the gate observes retries **indirectly**: every retry re-enters via `agent.continue()` and emits a fresh `turn_end { stopReason: "error" }` with the SAME `providerKey + errorMessage`. The gate counts consecutive same-error turn_ends per agent; only after `ENGINE_MAX_RETRIES` (`3`) strikes within `ENGINE_RETRY_WINDOW_MS` (`14000`) does it conclude the engine has exhausted retries and let the auto-swap path fire. Below the threshold, the swap path is suppressed: `pool.swap_gated_by_engine_retry` is traced, but there is NO `setModel`, NO bench, NO failure-streak bump. A successful turn (`stopReason: "stop"`) clears any open incident (`pool.engine_retry_recovered`), as does `session_start`, `session_shutdown`, and `agent_settled`. The constants live in `extensions/swarm/src/constants.ts` and are mirrored by pi's own defaults — the swarm does NOT read `retry.maxRetries` from settings; engine policy belongs to the engine.
 - **Streak-counting behavior change** (binding C4 of Issue 17, operator-visible in Issue 19): a persistent transient now needs **2 retry-exhaustion cycles** (not 2 consecutive errors) to bench the slot. The engine-retry gate collapses the burst — `ENGINE_MAX_RETRIES` strikes inside one `ENGINE_RETRY_WINDOW_MS` window count as exactly **one** `recordProviderError` call, not three. The bench-streak therefore tracks exhaustion cycles 1:1, not raw error events. Operators who relied on "after the second provider error the slot is benched" should now plan for 2 full 14s retry-exhaustion windows on the slot before it benches. The trace lane (`pool.swap_gated_by_engine_retry` per gated strike, then `pool.engine_retry_exhausted` on the terminal strike, then `pool.slot_failure` / `pool.swap` / `pool.swap_failed`) tells you exactly which cycle you are on.
-- **Manual override paths** (Issue 19, orchestrator-only, slash commands only — no new public tools):
+- **Manual override paths** (Issue 19, root-only, slash commands only — no new public tools):
   - **`/swarm pool rotate now`** — bypasses the gate, force-swaps the current slot to a healthy alternative via `pi.setModel()`. Traces `pool.swap_forced_by_manual_override` with the same `{ agentId, from, to, reason, target }` shape the auto-swap uses for `pool.swap`. Bumps the swap-chain counter (a swap happened; the operator is accountable for the same `MAX_SWAP_CHAIN=2` cap).
   - **`/swarm pool rotate next`** — benches the current slot for `rotation.cooldownMs` so the next normal `pickSlot()` skips it. Does NOT call `setModel()` — the agent keeps its current model for this turn, and the next `turn_end` (or the next exhaustion) advances organically. Traces `pool.bench_forced_by_manual_override` with `{ agentId, slot, cooldownMs }`. Does NOT bump the swap-chain counter (no swap happened) and does NOT call `recordProviderError` (the bench is a deliberate operator decision, not a provider error).
-  - Both commands are orchestrator-gated (`currentAgentId() === "orchestrator"`, same wording as `/swarm goal|attention|remind|stop|release`: `<cmd> is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)`). Guest sessions are naturally refused by the same check.
+  - Both commands are root-gated (`currentAgentId() === "root"`, same wording as `/swarm goal|attention|remind|stop|release`: `<cmd> is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)`). Guest sessions are naturally refused by the same check.
   - Manual override traces are distinguishable in dashboards (`pool.swap_forced_by_manual_override` vs `pool.swap`, `pool.bench_forced_by_manual_override` vs `pool.slot_failure`) so an operator can audit when the gate was bypassed vs when it fired naturally.
 - **Where to look in the trace log**:
   - `pool.swap_gated_by_engine_retry` — gate held (below threshold; no swap, no bench, no streak bump).
@@ -274,7 +274,7 @@ prints the action directly so the operator never has to guess the fix.
 - Health state persists in `.pi/swarm/pool-state.json` (includes the classified error); all read-modify-write cycles run under a dedicated lock so concurrent agent processes cannot lose updates. Provider errors classify as `quota` | `rate_limit` | `auth` | `transient`; anything else (e.g. context overflow) is traced (`pool.turn_error_unclassified`) but never benches or swaps a slot. A slot must resolve under its own provider in the model registry — slots with no explicit provider are rejected with `pool.swap_model_not_found`.
 - Traces: `pool.slot_failure`, `pool.swap`, `pool.swap_failed`, `pool.swap_no_candidate`, `pool.swap_chain_capped`, `pool.swap_model_not_found`, `pool.swap_gated_by_engine_retry`, `pool.engine_retry_exhausted`, `pool.engine_retry_recovered`, `pool.swap_forced_by_manual_override`, `pool.bench_forced_by_manual_override`, `pool.manual_rotate_no_alternative`, `pool.manual_rotate_model_not_found`, `pool.manual_rotate_no_current_slot`, `pool.slot_success`, `pool.turn_error_unclassified` (`.pi/swarm/traces/`).
 - `message.late_result_rejected` — emitted when a worker tries to apply a stale result against a superseded assignment attempt. The trace appears from both the tool-layer `swarm_update_task` fence and the rec-level superseded-message guard, so operators can count late arrivals in the same trace census regardless of where the refusal was detected.
-- Commands: `/swarm pool list`, `/swarm pool cooldown <provider/model> <ms>`, `/swarm pool clear <provider/model>`, `/swarm pool rotate now` (orchestrator-only; force-swap current slot, bypass gate), `/swarm pool rotate next` (orchestrator-only; bench current slot for `rotation.cooldownMs`, advance organically), `/swarm pool show`, `/swarm pool validate`, `/swarm pool help`, `/swarm pool preview-preflight`.
+- Commands: `/swarm pool list`, `/swarm pool cooldown <provider/model> <ms>`, `/swarm pool clear <provider/model>`, `/swarm pool rotate now` (root-only; force-swap current slot, bypass gate), `/swarm pool rotate next` (root-only; bench current slot for `rotation.cooldownMs`, advance organically), `/swarm pool show`, `/swarm pool validate`, `/swarm pool help`, `/swarm pool preview-preflight`.
 - Without `modelPool`, the single `defaultModel`/`defaultProvider` behavior is unchanged.
 
 ### Inspect or change agent roles
@@ -285,33 +285,33 @@ prints the action directly so the operator never has to guess the fix.
 - `swarm_set_agent_paused`
 - `swarm_restart_agent`
 
-## Orchestrator leadership and recovery
+## Root leadership and recovery
 
-The swarm is intentionally strict-reject: one live orchestrator leadership record is the source of truth
-for authority-sensitive mutations. The durable record lives in `swarm-state.json.orchestratorLeader`.
+The swarm is intentionally strict-reject: one live root leadership record is the source of truth
+for authority-sensitive mutations. The durable record lives in `swarm-state.json.rootLeader`.
 
 ### Leadership rules
-- The current orchestrator pid must be the active holder of the leader record before any gated
-  orchestrator mutation runs.
-- A second live pid is rejected with `ORCHESTRATOR_LEADER_DENIED`.
+- The current root pid must be the active holder of the leader record before any gated
+  root mutation runs.
+- A second live pid is rejected with `ROOT_LEADER_DENIED`.
 - Legacy/absent leader state is treated as vacant.
-- `ORCHESTRATOR_LEADER_STALE_MS` is the leadership blind-spot bound; today it matches `LOCK_STALE_MS`
+- `ROOT_LEADER_STALE_MS` is the leadership blind-spot bound; today it matches `LOCK_STALE_MS`
   (60s). That means a pane crash or hard stop can leave a short window before a fresh claim replaces
   the stale leader.
 
 ### Recovery behavior
-- `heartbeatOrchestratorLeader` refreshes the durable leader record during gated tool/command paths.
-- Create-only orchestrator materialization is allowed for startup normalization, but it does not upgrade
+- `heartbeatRootLeader` refreshes the durable leader record during gated tool/command paths.
+- Create-only root materialization is allowed for startup normalization, but it does not upgrade
   a worker pane into authority.
-- Command and tool gates still reject unsafe non-orchestrator mutations even if a stale leader has not
+- Command and tool gates still reject unsafe non-root mutations even if a stale leader has not
   yet been replaced.
-- When debugging leadership drift, inspect `swarm-state.json`, the orchestrator mailbox, and the tmux
+- When debugging leadership drift, inspect `swarm-state.json`, the root mailbox, and the tmux
   capture for the fresh session before assuming the recorded leader is current.
 
 ### What to do on recovery
 1. Start or reattach the intended PM session.
 2. Confirm the session is the one that should claim leadership.
-3. Use the orchestrator-gated command or tool path so the leader record is refreshed.
+3. Use the root-gated command or tool path so the leader record is refreshed.
 4. If another pane still believes it is leader, capture its pane and stop/release it only after
    confirming it is not the active PM.
 
@@ -368,7 +368,7 @@ model-side gate. Ops and dashboards surface it via `swarm_trace` or the `events.
 
 ### Pre-flight auto-clear (Issue 16)
 
-When the same orchestrator session that called `swarm_spawn_agent` follows up with
+When the same root session that called `swarm_spawn_agent` follows up with
 `swarm_assign_task` resolving to the freshly-spawned agentId within
 `PREFLIGHT_ASSIGN_GRACE_MS` (default `max(5_000, ORPHAN_SPAWN_WARNING_TIMEOUT_MS - 1_000)` =
 **29 000 ms** at production defaults), the orphan watch is **pre-cleared** before the timer fires:
@@ -379,11 +379,11 @@ When the same orchestrator session that called `swarm_spawn_agent` follows up wi
 - The `spawnedByPid` and `spawnedBySessionStartedAt` stamps carried on the entry are surfaced in
   the trace payload for ops correlation.
 
-Same-orchestrator detection uses `process.pid` + `process.env.PI_SWARM_SESSION_STARTED_AT` stamped
+Same-root detection uses `process.pid` + `process.env.PI_SWARM_SESSION_STARTED_AT` stamped
 **unconditionally** onto the entry at `armOrphanWatch` time (so it works on the operator's first
-tool call after PM opt-in, when the leader record may still be vacant). A foreign orchestrator
+tool call after PM opt-in, when the leader record may still be vacant). A foreign root
 session invoking `swarm_assign_task` against the fresh record does **not** preempt — the warning
-fires normally, because the spawn was not followed by the spawning orchestrator's intended use.
+fires normally, because the spawn was not followed by the spawning root's intended use.
 
 The existing delivery-side `clearReason="swarm_assign_task"` path inside `deliverMessageLocked`
 remains intact as a late-clear backstop; if pre-clear already removed the entry, the delivery-side
@@ -443,7 +443,7 @@ tasks don't leave behind a long tail of stopped ghost workers.
 
 **Eligibility rules** (all must hold):
 
-1. The agent is NOT the orchestrator pseudo-agent.
+1. The agent is NOT the root pseudo-agent.
 2. The agent is NOT paused (`agent.paused === true`).
 3. The agent was associated with the closing task AND has no remaining active tasks on other tasks.
 4. The agent is NOT protected by `PI_SWARM_KEEP_TASK_WORKERS=1`.
@@ -467,7 +467,7 @@ finds nothing to stop and emits zero traces. Already-stopped agents are skipped 
 
 ## Operator: heartbeat-driven agent GC (Issue 82, P0)
 
-The heartbeat GC is a periodic pump-tick phase in `pumpOrchestratorMailbox` that reclaims
+The heartbeat GC is a periodic pump-tick phase in `pumpRootMailbox` that reclaims
 dead-pane agents and downgrades stale-heartbeat agents. Wired inside the existing
 `withLock(p)` so no nested lock acquisition is possible.
 
@@ -497,7 +497,7 @@ dead-pane agents and downgrades stale-heartbeat agents. Wired inside the existin
 
 **Exemptions** (skipped entirely before gates):
 
-- Orchestrator pseudo-agent.
+- Root pseudo-agent.
 - Lease-valid agents (`leaseKind === "reuse" || leaseKind === "park"` AND `leaseUntil > now`).
 - Paused agents without a lease, OR paused agents with a VALID lease.
 
@@ -508,7 +508,7 @@ Gate 1 still runs, so an expired-park agent whose pane actually died gets flippe
 `agent.heartbeat_gc.expired_park_flipped {reason:"tmux_dead_after_lease_expiry"}` distinguishes
 this case from the normal gate-1 dead-pane flip.
 
-**`swarm_prune` remains the orchestrator escape hatch** for already-stopped records that
+**`swarm_prune` remains the root escape hatch** for already-stopped records that
 the heartbeat GC does not touch. The GC is bounded by `probesFired + direct flips`; the
 size of the `state.agents` stopped set only grows until prune runs. The R9 a3 graveyard
 (177 stopped agents) becomes bounded: the GC flips dead-pane running records automatically,
@@ -518,11 +518,11 @@ and prune removes the resulting stopped records on operator demand.
 
 The liveness/progress subsystem surfaces worker nodes that have been assigned or in-progress
 for longer than a threshold without any forward-progress signal. Surfacing is **trace-only**
-(no orchestrator mailbox nudge is sent — the plan's nudge was consciously dropped; the
+(no root mailbox nudge is sent — the plan's nudge was consciously dropped; the
 pre-existing task-stall machinery still nudges on stalled nodes per "Pipeline-stall nudge"
 below).
 
-**The gate** (in `staleOpenAssignmentScanLocked`, called from `pumpOrchestratorMailbox` after
+**The gate** (in `staleOpenAssignmentScanLocked`, called from `pumpRootMailbox` after
 `agentHeartbeatGCLocked` and before `reconcileGraphAdvanceLocked`):
 
 ```
@@ -585,7 +585,7 @@ N is bounded by `agent.maxConcurrentTasks`. This is **extra I/O vs the pre-83a b
 | plan | implementation | rationale |
 | --- | --- | --- |
 | 3 stamp surfaces (tool hook + `swarm_update_task` transitions + `swarm_send_message`) | 1 stamp surface (tool hook only) | The max-anchor picks up `lastActivityAt`, which the assign + update paths already stamp. `swarm_send_message` did not add value (mailbox acks are not "progress" in the worker's task context). |
-| Send orchestrator mailbox nudge on surface | Trace-only surfacing | Pre-existing task-stall nudge machinery (see "Pipeline-stall nudge") already nudges on stalled nodes. Adding a redundant nudge would inflate the idle-streak budget and create double-fire risk. |
+| Send root mailbox nudge on surface | Trace-only surfacing | Pre-existing task-stall nudge machinery (see "Pipeline-stall nudge") already nudges on stalled nodes. Adding a redundant nudge would inflate the idle-streak budget and create double-fire risk. |
 | R10-KR5 (silent-swallow keeper rule) | Documented | Hook's bare-catch is locked in by C9 (integration test exercises the production hook path; swallowed throw fails C9 loudly). |
 | R10-KR6 (seed-diversity keeper rule) | Documented | C3 + C10 together pin both sides of the stale boundary; C11 pins the dirty-task selection. |
 
@@ -602,7 +602,7 @@ Two related guards protect against late worker results and reassign churn:
 
 2. **Reassign rate-limit gate** in `swarm_assign_task` — a fixed-window per-node gate (`supersessionCount` / `supersessionWindowStart` on `TaskNode`) refuses fresh reassigns with `REASSIGN_RATE_LIMITED` once the node has accumulated `PI_SWARM_REASSIGN_RATE_LIMIT` reassigns within `PI_SWARM_REASSIGN_RATE_WINDOW_MS`. The refusal emits `reassign.rate_limited` with the current count, limit, and `windowResetAt`. The gate is HARD — refusals do not queue; the caller must wait for the window to expire.
 
-The rec-level superseded-message guard in `reconcile.ts` (the `isActionableOrchestratorMessage` predicate used by pump re-trigger and migration back-fill) also emits `message.late_result_rejected` with `reason: "rec_superseded"` so operators can count late arrivals from both the tool-layer and rec-level paths in the same trace census.
+The rec-level superseded-message guard in `reconcile.ts` (the `isActionableRootMessage` predicate used by pump re-trigger and migration back-fill) also emits `message.late_result_rejected` with `reason: "rec_superseded"` so operators can count late arrivals from both the tool-layer and rec-level paths in the same trace census.
 
 **Environment overrides**
 
@@ -665,7 +665,7 @@ Proxy metrics are a cheap, proxy-first snapshot of the swarm's stall surface. Th
 ## Operator: explicit reuse lease + park mechanism (Issue 82)
 
 By default the task-close sweep stops task-scoped workers (Issue 26) and the heartbeat GC
-flips dead panes. For workers the orchestrator wants to outlive their task scope, the
+flips dead panes. For workers the root wants to outlive their task scope, the
 explicit reuse lease + park mechanism overrides these defaults.
 
 **Lease fields on `SwarmAgent`** (additive; absent == default behavior):
@@ -682,7 +682,7 @@ explicit reuse lease + park mechanism overrides these defaults.
 **Three stamp surfaces**:
 
 1. `/swarm agent lease <id> [--reuse|--park] [--until <iso>] [--reason <text...>] [--clear]`
-   (orchestrator-only; `--reason` consumes all remaining tokens). Traces
+   (root-only; `--reason` consumes all remaining tokens). Traces
    `agent.lease_set` / `agent.lease_cleared`. Default flags: `--reuse`,
    `--until now+1h`, `--reason "operator lease"`.
 2. `swarm_assign_task({ lease: { kind: "reuse"|"park", until?, reason? } })` — stamps
@@ -705,7 +705,7 @@ a per-sweep audit count.
 Phase 2 ships with the gate OFF. Behavior switches only when
 `PI_SWARM_MINIMAL_PROTOCOL=1` is set at module load:
 
-- **Gate flip**: set the env var for the orchestrator (and workers) to enable
+- **Gate flip**: set the env var for the root (and workers) to enable
   authoritative lifecycle derivations, reply auto-verify + fencing, ACK-banner
   removal, and profile-gated active tool sets. Default `0` keeps Phase-1 shadow
   behavior byte-identical.
@@ -713,7 +713,7 @@ Phase 2 ships with the gate OFF. Behavior switches only when
   behavior-preserving; no on-disk migration is required to roll back.
 - **Rate-limit env var**: `PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS` (default
   60000) throttles worker-scoped dry-run reconcile; workers are also forced to
-  `scope: "self"` while orchestrator/admin may pass `scope: "all"`.
+  `scope: "self"` while root/admin may pass `scope: "all"`.
 - **New trace events** under gate=1: `message.lifecycle_derived` (per derivation
   site), `message.response.verified`, `message.reply_rejected_superseded`.
 - Before flipping the gate in a production swarm, run the proposal §H 10×2 UAT
@@ -722,17 +722,17 @@ for the test matrix and `docs/swarm/reliability-execution-plan.md` for issue-tra
 
 ## Recovery nudges (Phase 1)
 
-Recovery nudges are orchestrator-bound messages that surface a concrete decision. They never
+Recovery nudges are root-bound messages that surface a concrete decision. They never
 auto-assign, auto-spawn, or mark semantic work complete; a worker's idle/pane state is never treated as
 proof that work finished.
 
 ### Initial-ready nudge
 - A freshly created task whose **start node stays ready and unassigned** past `TASK_INITIAL_READY_GRACE_MS`
-  (1 minute) is surfaced to the orchestrator with an action-required message.
+  (1 minute) is surfaced to the root with an action-required message.
 - The nudge is **idempotent** (one per task key), bounded by `NOTIFY_DEFAULT_MAX_NUDGES` and a
   `NOTIFY_DEFAULT_COOLDOWN_MS` (5 minutes), and auto-clears once the node is assigned or the task leaves
   the ready state.
-- It only directs the orchestrator to `swarm_assign_task` (or cancel); it does not assign anything itself.
+- It only directs the root to `swarm_assign_task` (or cancel); it does not assign anything itself.
 
 ### Unified notification policy
 All recovery nudges share one semantic key space (`task:{taskId}:node:{nodeId}:nudge:...`,
@@ -742,22 +742,22 @@ and the same dedupe/cooldown/cap contract. Every message tells the recipient the
 
 ### Goal idle-streak nudge (Issue 18)
 
-The orchestrator's durable goal plus an anti-loop nudge that fires when the swarm has nothing to do.
+The root's durable goal plus an anti-loop nudge that fires when the swarm has nothing to do.
 
-- **Set the goal**: `/swarm goal set [--interval <ms>] <text>` or `swarm_set_goal({ text, intervalMs? })`. The orchestrator-only
+- **Set the goal**: `/swarm goal set [--interval <ms>] <text>` or `swarm_set_goal({ text, intervalMs? })`. The root-only
   tool/command stores `swarm-state.json.goal = { id, text, setAt, setBy, consecutiveNoResolveNudges, nudgeIntervalMs? }`.
   Setting a new goal replaces the old one, resets `consecutiveNoResolveNudges` to 0, and clears any
   back-off state (`backoffTicksRemaining`, `lastNudgeAt`, `lastResolvedAt`) so a new intent never
   inherits the previous goal's counter. When `nudgeIntervalMs` is absent the pump falls back to
   `PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS` (default 60s); when present, the durable per-goal value
   controls the goal nudge cadence and is surfaced by `/swarm goal show` and `/swarm status`.
-- **Idle predicate** (every pump tick, inside the existing `withLock` in `pumpOrchestratorMailbox`):
-  every non-orchestrator agent must be `runtimeStatus: "idle"` AND zero task nodes may be in
+- **Idle predicate** (every pump tick, inside the existing `withLock` in `pumpRootMailbox`):
+  every non-root agent must be `runtimeStatus: "idle"` AND zero task nodes may be in
   `assigned` or `in_progress` status across `tasks/<taskId>/task.json`. If either fails, no nudge.
-- **Anti-loop counter**: `consecutiveNoResolveNudges` resets to 0 on ANY orchestrator turn that ends
+- **Anti-loop counter**: `consecutiveNoResolveNudges` resets to 0 on ANY root turn that ends
   `stopReason: "stop"` AND `role: "assistant"` — the act of ending a turn (vs staying silent) is the
   resolve signal. A `turn_end {error}` is intentionally NOT a resolve (tool/model failures are not
-  "I addressed the goal"); a non-orchestrator `turn_end` is also NOT a resolve (workers don't decide
+  "I addressed the goal"); a non-root `turn_end` is also NOT a resolve (workers don't decide
   the goal). The reset runs in a second `pi.on("turn_end", ...)` handler registered AFTER the
   model-pool swap branch, so the resolve observes the post-swap state.
 - **Back-off**: once `consecutiveNoResolveNudges` reaches `MAX_CONSECUTIVE_NUDGES_DEFAULT` (3,
@@ -769,7 +769,7 @@ The orchestrator's durable goal plus an anti-loop nudge that fires when the swar
   until the goal is resolved (counter reset) or cleared (`swarm_mark_goal_done`).
 - **Idempotency**: the nudge's semantic key is `goal:{goalId}:nudge:idle-streak`, validated via
   `SAFE_ID_RE`. A fresh `swarm_set_goal` mints a new `goalId` so a fresh goal is a fresh emit slot.
-  Within the same goal, `findIdempotentMessage(st, "orchestrator", "orchestrator", key)` suppresses
+  Within the same goal, `findIdempotentMessage(st, "root", "root", key)` suppresses
   duplicate emissions across concurrent ticks (matches the existing semantic-key dedupe pattern used
   by `reconcileGraphAdvanceLocked` and `reconcileInitialReadyLocked`).
 - **Clear the goal**: `/swarm goal done [<goalId>]` or `swarm_mark_goal_done({ goalId? })`. Deletes
@@ -789,16 +789,16 @@ The orchestrator's durable goal plus an anti-loop nudge that fires when the swar
   - `goal.nudge.error` — caught exception wrapper (matches the existing `reconcileGraphAdvanceLocked`
     / `reconcileInitialReadyLocked` try/catch pattern; a throw never kills the pump tick).
 - **Authoritative gate**: both `swarm_set_goal` and `swarm_mark_goal_done` call
-  `requireOrchestratorAuthority(currentAgentId(), "<tool>")` which throws
-  `ERR_ORCHESTRATOR_AUTHORITY_REQUIRED` for non-orchestrators. The `/swarm goal` slash command adds
-  an explicit `currentAgentId() !== "orchestrator"` notify (matches the `attention`/`remind`/`stop`
+  `requireRootAuthority(currentAgentId(), "<tool>")` which throws
+  `ERR_ROOT_AUTHORITY_REQUIRED` for non-roots. The `/swarm goal` slash command adds
+  an explicit `currentAgentId() !== "root"` notify (matches the `attention`/`remind`/`stop`
   /`release` pattern).
 - **No new public schema**: only the two declared tools + the two slash command subcommands. No
   new event hooks, no new env knobs beyond `PI_SWARM_MAX_NUDGES`.
 
 ### Pipeline-stall nudge (Issue 23)
 
-The goal-nudge (Issue 18) only fires when the orchestrator has set an explicit `swarm_goal`. If
+The goal-nudge (Issue 18) only fires when the root has set an explicit `swarm_goal`. If
 the operator never sets a goal, a task can stall silently: every node is `ready` (or `assigned`
 to a dead agent), every agent is `idle`, and no nudge is ever sent because the predicate
 `if (!goal) return { emitted: false, reason: "no_goal" }` short-circuits. The pipeline-stall
@@ -808,7 +808,7 @@ nudge is the goal-independent counterpart.
   1. At least one `in_progress` task exists in `tasksDir`.
   2. At least one of its nodes has `status === "ready"` AND `assignee === undefined` (the same
      actionable set as `reconcileGraphAdvanceLocked`).
-  3. Every non-orchestrator agent is `runtimeStatus === "idle"`.
+  3. Every non-root agent is `runtimeStatus === "idle"`.
   4. The task has existed for at least `TASK_INITIAL_READY_GRACE_MS` (60 seconds) so a fresh
      task's first tick is not immediately flagged.
   5. NOT firing the existing `reconcileGraphAdvanceLocked` nudge for the same node already
@@ -857,7 +857,7 @@ non-terminal unassigned node is claimed by the first caller: status moves to `as
 attempt-mint via the shared `mintNodeAttempt` helper (in `taskgraph.ts`), and the claimer's
 `activeTaskIds` is updated. An in-flight unassigned node (`status="in_progress"` + `assignee=undefined`)
 is still refused with the inline-string `OWNERSHIP_REQUIRED` error code; the caller is directed
-to escalate to the orchestrator (`force=true` or a fresh `swarm_assign_task`).
+to escalate to the root (`force=true` or a fresh `swarm_assign_task`).
 
 The trace event `task.node.claimed` is emitted on every successful claim with `{ taskId,
 nodeId, claimer, priorAssignee: null, priorStatus, attemptId, created }`.
@@ -881,7 +881,7 @@ an `actionableHint` or `suggestedNextCall` so the LLM caller has a concrete next
 
 `task.update.ownership_reject` is emitted on every `NODE_ASSIGNEE_MISMATCH` (and the new
 `OWNERSHIP_REQUIRED`) so dashboards can surface ownership drift. Payload includes `{ taskId,
-nodeId, attemptedBy, priorAssignee, priorStatus, isOrchestrator, remediation, errorCode }`.
+nodeId, attemptedBy, priorAssignee, priorStatus, isRoot, remediation, errorCode }`.
 
 #### Assignment-mismatch trace (Issue 24.e)
 
@@ -891,20 +891,20 @@ recipient whose `node.assignee` already differs (reassign race or config error).
 
 ### Recovery attention and bounded worker reminder (roadmap issue 5)
 
-The orchestrator can derive a durable, decision-oriented **attention report** from persisted state
+The root can derive a durable, decision-oriented **attention report** from persisted state
 only (task graph + assignment attempts + mailbox records). Pane/process/tmux idle state is NEVER
 semantic evidence of completion or failure.
 
-- **`/swarm attention [<#|task-id>]`** (orchestrator-only, read-only): per-node classification —
+- **`/swarm attention [<#|task-id>]`** (root-only, read-only): per-node classification —
   `unassigned_ready`, `ack_missing`, `response_missing`, `delivery_failed`, `dead_letter`,
   `transport_unavailable`, `no_progress`, `reminder_eligible`, `reminder_sent`, `superseded`,
-  `cancelled`, `terminal` — each with evidence lines and a summary of orchestrator decisions.
+  `cancelled`, `terminal` — each with evidence lines and a summary of root decisions.
   Advisory only: it never reassigns, cancels, completes, or alters graph readiness.
 - **`swarm_task_status(runtime=true)`** appends the same `attention:` warning lines for
   reminder-eligible nodes (no new tool parameter).
 - **`swarm_reconcile`** reports an informational `reminder_eligible` action naming the exact
   `/swarm remind` invocation. **Reconcile never sends anything.**
-- **`/swarm remind <task-id> <node-id>`** (orchestrator-only): the ONLY sending surface. Sends at
+- **`/swarm remind <task-id> <node-id>`** (root-only): the ONLY sending surface. Sends at
   most **one reminder per attempt, permanently** (idempotency key
   `task:{taskId}:node:{nodeId}:attempt:{attemptId}:reminder`), and only when ALL hold:
   1. canonical, non-superseded assignment message exists;
@@ -920,16 +920,16 @@ semantic evidence of completion or failure.
 
 R25 closes a visibility gap: a worker that settles (engine `agent_settled` event) or is stopped
 via `swarm_stop_agent` while still holding **live, non-superseded `requiresAck` messages** now
-emits an informational mailbox notify to the orchestrator. Previously this debt was invisible to
+emits an informational mailbox notify to the root. Previously this debt was invisible to
 the PM except by polling.
 
-**Notify shape** (read-only, `requiresAck:false` so the orchestrator pump surfaces it without
+**Notify shape** (read-only, `requiresAck:false` so the root pump surfaces it without
 creating a new ack-debt loop):
 
 - Subject: `agent <id> settled owing N unacked ack(s)` (or `stopped owing …` for `swarm_stop_agent`).
 - Body lists the message ids, subjects, and the close-action `swarm_ack_message`.
-- `from` derives from `currentAgentId()` — the worker in settle path; the orchestrator in the stop
-  path (since stop is invoked by the orchestrator). Both are correct per the deliver path.
+- `from` derives from `currentAgentId()` — the worker in settle path; the root in the stop
+  path (since stop is invoked by the root). Both are correct per the deliver path.
 
 **Storm guards** (mirror the response-missing + open-assignment settle-notify patterns):
 
@@ -938,7 +938,7 @@ creating a new ack-debt loop):
 - Idempotency key derived from the SET of unacked ids:
   `r25:ackdebt:<agent>:<sha1(sorted-ids)[:8]>` — reused across settles, so the durable mailbox
   dedupes identical notifications across process restarts.
-- Failure paths (`pane kill`, orchestrator deliver error) emit a `message.ack_debt.notify_failed`
+- Failure paths (`pane kill`, root deliver error) emit a `message.ack_debt.notify_failed`
   trace with `error`; the stop path's notify is wrapped in a `try/catch` and **never** blocks the
   underlying stop.
 
@@ -954,7 +954,7 @@ creating a new ack-debt loop):
   cooldown) — suppressed by `findIdempotentMessage` on the same `from+to+key`.
 
 **R10-1 boundary counter** (corrected per R25 fix round): real `pi.sendMessage` call count
-at the `pumpOrchestratorMailbox` boundary — ≥1 ack-debt send (subject matching
+at the `pumpRootMailbox` boundary — ≥1 ack-debt send (subject matching
 `/owing.*unacked ack/`) on first settle AND on the stop path; 0 NEW sends on re-settle within
 cooldown (the consumer-receipts ledger dedupes by idempotencyKey). Asserted in
 `extensions/swarm/tests/r25-unacked-notify.test.mjs` R10-1 section (3 pump-based
@@ -996,7 +996,7 @@ notification was caught before it could mislead the recipient.
   deduped. This is the same predicate fan-out per entry; the aggregate event summarises the
   empty-notify outcome.
 - **What it is NOT**: it is not a failure, not an error, and not a request for action. The
-  orchestrator does not need to re-issue, retry, or inspect anything unless the volume of
+  root does not need to re-issue, retry, or inspect anything unless the volume of
   suppressions for a given `taskId`+`nodeId` looks wrong for the timeline (e.g. a single node
   whose notify keeps being suppressed while no fresh assignment is being issued).
 
@@ -1056,7 +1056,7 @@ A migration run is additive-only. Deleting the `migrationRunId` and `migratedAt`
 ### When this matters
 
 You have set a user-origin goal (`swarm_set_goal({origin:"user",...})`) and the
-worker pool has been empty for >5 minutes. The orchestrator has not seen any
+worker pool has been empty for >5 minutes. The root has not seen any
 recovery nudge — the pump fired `goal.nudge.held_no_live_workers` every tick
 (7_278 traces over ~16h was the live incident; `goal-1788266039522-6eae40`).
 Without R14 the user sees a silent stall; the operator sees only the spam
@@ -1084,7 +1084,7 @@ Three coupled fixes (live `reconcile.ts`):
 - **Fix C — bounded user-origin escalation** (new path inside the
   vacuous branch). For an active user/system/batch-origin goal whose pool is
   genuinely vacuous (no worker passes the predicate), the pump emits ONE
-  high-priority orchestrator-bound nudge per
+  high-priority root-bound nudge per
   `NOTIFY_DEFAULT_COOLDOWN_MS` (5min default). The nudge goes through the
   existing R13 P0 high-priority surface (mailbox-only durable append +
   pump's R13 bypass). The escalation stops when:
@@ -1098,9 +1098,9 @@ Three coupled fixes (live `reconcile.ts`):
 | --- | --- | --- |
 | `idleAgentsCount` | `reconcile.ts:318` filter | `>0` for settled-but-alive pool (Fix A); `0` for genuinely-vacuous pool |
 | `heldNoLiveWorkersTraceCount` | `reconcile.ts:520` trace | `1` per false→true transition (Fix B); `0` once the pool recovers |
-| `escalationSendCount` | `reconcile.ts:escalation.deliverMessageLocked` | `1` per cooldown (Fix C); `0` for orchestrator-origin goals |
+| `escalationSendCount` | `reconcile.ts:escalation.deliverMessageLocked` | `1` per cooldown (Fix C); `0` for root-origin goals |
 | `mailboxAppendCount` | `mailbox.ts:362,445` durable append | `1` per escalation (durable contract intact) |
-| `sendMessageCallCount` | `reconcile.ts:1763-1773` pump | `1` per escalation when orchestrator idle (R13 path; unchanged) |
+| `sendMessageCallCount` | `reconcile.ts:1763-1773` pump | `1` per escalation when root idle (R13 path; unchanged) |
 | `escalationCancelledOnClearCount` | `goals.ts:32-51` clear | `1` when goal clears mid-cooldown; `0` escalations after clear |
 
 ### Diagnosing in the field
@@ -1109,9 +1109,9 @@ If `goal.nudge.held_no_live_workers` is firing repeatedly and
 `goal.escalation.pool_empty` is NOT firing:
 
 1. Check `goal.origin`. The escalation only fires for
-   `user` / `system` / `batch` origin (NOT `orchestrator`). Use
+   `user` / `system` / `batch` origin (NOT `root`). Use
    `swarm_set_goal({origin:"user",...})` if the goal was set by an automated
-   orchestrator and you want escalation.
+   root and you want escalation.
 2. Check the cooldown. `idleNudgeState.lastPoolEmptyEscalationAt` is the
    anchor; one nudge per `NOTIFY_DEFAULT_COOLDOWN_MS` (5min default). The
    second escalation within the cooldown is expected to be silent.
@@ -1133,7 +1133,7 @@ node extensions/swarm/r14-goal-empty-pool-escalation.test.mjs  # PASS 15/0
 
 # Live tmux lane (settled-but-alive shape, 12 ticks):
 tmux new-session -d -s r14-validate -n r14 -c "$REPO"
-tmux send-keys -t r14-validate:r14.0 -l "PI_SWARM_AGENT_ID=orchestrator PI_SWARM_IS_ORCHESTRATOR=1 pi -ne --provider mock-llm --model r14-goal-empty-pool-vacuous -e ./extensions/mock-llm -e ./extensions/swarm" Enter
+tmux send-keys -t r14-validate:r14.0 -l "PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1 pi -ne --provider mock-llm --model r14-goal-empty-pool-vacuous -e ./extensions/mock-llm -e ./extensions/swarm" Enter
 # Wait 10s, drive scripted turns, observe escalation surfaced once per cooldown.
 ```
 
@@ -1144,15 +1144,15 @@ goal.set                                         (origin=user, nudgeIntervalMs=5
 goal.nudge.held_no_live_workers                  (×1 — once per false→true transition; pre-fix was ×N per tick)
 goal.escalation.pool_empty                       (×1 — one per cooldown; first cooldown-eligible tick)
 message.deliver.mailbox_only                     (×1 — durable escalation append)
-[next orchestrator pump tick when orchestrator is idle]
-pi.sendMessage → orchestrator                    (×1 — R13 P0 high-priority surface; the escalation finally crosses the swarm→Pi boundary)
+[next root pump tick when root is idle]
+pi.sendMessage → root                    (×1 — R13 P0 high-priority surface; the escalation finally crosses the swarm→Pi boundary)
 ```
 
 ### Related tools / commands
 
 - `swarm_set_goal({origin:"user",...})` — set a goal with escalation.
 - `swarm_check_mailbox` — inspect the durable escalation nudge in the
-  orchestrator mailbox (R13 boundary; unchanged).
+  root mailbox (R13 boundary; unchanged).
 - `/swarm trace` — view the trace census above.
 
 ## Operator: R16 idle-goal ACK-loop + vacuous persistence (2026-09-02)
@@ -1168,14 +1168,14 @@ R16 fixes two regressions that survived R14:
 2. **Post-R14 vacuous state persistence failure:** the `lastWasVacuous` +
    `lastPoolEmptyEscalationAt` mutations lived in RAM and persisted only
    via the pump tail writeState. Live incident: 331 held_no_live_workers
-   traces over 27m 54s with zero escalations because the orchestrator
+   traces over 27m 54s with zero escalations because the root
    process had not been /reload'd since before R14 landed.
 
 ### When this matters
 
-- The orchestrator emits plain ack text in response to goal nudges (any
-  LLM-driven orchestrator does this by default).
-- The orchestrator /reload's mid-conversation while a standing user
+- The root emits plain ack text in response to goal nudges (any
+  LLM-driven root does this by default).
+- The root /reload's mid-conversation while a standing user
   goal is still active.
 
 ### What R16 changed
@@ -1187,7 +1187,7 @@ R16 fixes two regressions that survived R14:
   `goal.nudge.turn_no_resolve_action` (new trace) instead of resetting.
 - **reconcile.ts** — vacuous branch ends with an explicit
   `writeState(p, st)` so `lastWasVacuous` + `lastPoolEmptyEscalationAt`
-  survive an immediate readState (orchestrator /reload right after the
+  survive an immediate readState (root /reload right after the
   pump). The pump tail writeState at `reconcile.ts:1929` still runs as
   the source of truth for OTHER pump mutations; this is the minimum
   additional write that closes the persistence gap.
@@ -1195,7 +1195,7 @@ R16 fixes two regressions that survived R14:
   dead-panes / stopped-agents / stale-heartbeats / fallback hint buckets
   and joins them with `swarm_spawn_agent` / `swarm_restart_agent` /
   `swarm_create_task` / `swarm_mark_goal_done` references. The body is
-  now action-oriented per the orchestrator's note.
+  now action-oriented per the root's note.
 - **state.ts** — `idleNudgeState` back-fill: narrow to a plain object so
   legacy swarm-state.json files with `idleNudgeState: null` or
   non-object values don't crash the evaluator.
@@ -1220,12 +1220,12 @@ R16 fixes two regressions that survived R14:
 
 ### Diagnosing in the field
 
-- **High `goal.nudge.resolved` rate with no cap reached:** the orchestrator is
+- **High `goal.nudge.resolved` rate with no cap reached:** the root is
   acking (text-only turn_end) without doing work. Look for
   `goal.nudge.turn_no_resolve_action` traces — these are the ack signals
   the fix surfaces.
 - **Many `goal.nudge.held_no_live_workers` + zero `goal.escalation.pool_empty`:**
-  the orchestrator is running pre-R16 code (no /reload'd yet) OR the
+  the root is running pre-R16 code (no /reload'd yet) OR the
   vacuous-branch writeState is failing silently. Check the file's mtime
   on `swarm-state.json` after a held trace to confirm the writeState
   reached disk.
@@ -1253,8 +1253,8 @@ After R16 lands, a standing user goal on a vacuous pool produces:
 goal.nudge.held_no_live_workers   1   (one per false→true transition; suppressed on every subsequent vacuous tick)
 goal.escalation.pool_empty        1   (one per NOTIFY_DEFAULT_COOLDOWN_MS=5min window)
 escalationMailboxAppendCount      1   (durable append per escalation)
-escalationSendMessageCount        1   (when the orchestrator is idle at surface time; 0 if busy)
-goal.nudge.turn_no_resolve_action N   (one per ack-only turn_end; N climbs as the orchestrator stalls)
+escalationSendMessageCount        1   (when the root is idle at surface time; 0 if busy)
+goal.nudge.turn_no_resolve_action N   (one per ack-only turn_end; N climbs as the root stalls)
 ```
 
 The post-R16 trace census is bounded: `goal.nudge.held_no_live_workers`
@@ -1302,7 +1302,7 @@ fires once per ack turn (observability, not a counter reset).
 
 ### Diagnosing in the field
 
-- **High `goal.nudge.suppressed_by_actionable_graph` rate with ZERO `goal.idle_nudge` AND a `failed` task in the dir:** pre-R19 orchestrator (no /reload'd yet). The suppression is permanent because the orphan `fix` node on a `failed` task counts as actionable graph work. **Fix:** /reload.
+- **High `goal.nudge.suppressed_by_actionable_graph` rate with ZERO `goal.idle_nudge` AND a `failed` task in the dir:** pre-R19 root (no /reload'd yet). The suppression is permanent because the orphan `fix` node on a `failed` task counts as actionable graph work. **Fix:** /reload.
 - **High `goal.nudge.deferred_by_actionable_graph` rate with `goal.idle_nudge` firing on the next tick:** R19 active and working as designed. The defer is a one-interval rate adjustment; the floor fires on the next legitimate boundary.
 - **LIVE-task `actionable_graph` suppression still firing:** expected. R19 only excludes terminal tasks (`failed`/`cancelled`/`blocked`) from the graph scan. Live `in_progress` / `ready` tasks still suppress/defer correctly.
 - **Orphan rework node on a `failed` task repeatedly fires `goal.idle_nudge`:** post-R19 expected. The floor surfaces abandoned work so the operator (or a fresh worker) can pick it up.
@@ -1332,11 +1332,11 @@ All six MUST be green in the post-fix shape. R19-S1 (orphan on `failed` task) is
 
 ### When this matters
 
-A worker writes real artifacts to disk (tests pass, files edited, `artifacts/<x>.md` produced), then `agent_settled` fires WITHOUT a call to `swarm_update_task` (close) + `swarm_send_message replyTo` (link the verified result) + `swarm_ack_message` (clear the assignment). Pre-R20 the orchestrator's recovery ladder was: probe pane → send directive → restart → force-close. Step 1 was unreliable — the worker had already settled and missed the directive.
+A worker writes real artifacts to disk (tests pass, files edited, `artifacts/<x>.md` produced), then `agent_settled` fires WITHOUT a call to `swarm_update_task` (close) + `swarm_send_message replyTo` (link the verified result) + `swarm_ack_message` (clear the assignment). Pre-R20 the root's recovery ladder was: probe pane → send directive → restart → force-close. Step 1 was unreliable — the worker had already settled and missed the directive.
 
-R20 adds a self-nudge that fires BEFORE the agent settles: every pump tick, the swarm scans `node.allowedFiles ?? task.allowedFiles` for fresh mtime, and when an artifact write has landed since the last `lastProgressAt`, delivers an action-oriented nudge to the agent itself (not the orchestrator) naming the exact close-action triple.
+R20 adds a self-nudge that fires BEFORE the agent settles: every pump tick, the swarm scans `node.allowedFiles ?? task.allowedFiles` for fresh mtime, and when an artifact write has landed since the last `lastProgressAt`, delivers an action-oriented nudge to the agent itself (not the root) naming the exact close-action triple.
 
-A second, related improvement: `swarm_agent_status` now returns a single top-level `taskProgressState` field derived from the agent's runtime state + mailbox + artifact mtime. The orchestrator's "3 đường kiểm chứng" rule becomes "read taskProgressState, then cross-check against disk artifacts."
+A second, related improvement: `swarm_agent_status` now returns a single top-level `taskProgressState` field derived from the agent's runtime state + mailbox + artifact mtime. The root's "3 đường kiểm chứng" rule becomes "read taskProgressState, then cross-check against disk artifacts."
 
 ### What R20 changed
 
@@ -1396,7 +1396,7 @@ task.artifact_progress_nudge_count_reset    # forward-transition reset
 
 - `swarm_agent_status({agentId:"..."})` — observe the new top-level `taskProgressState`. `completed_unverified` is the R20 nudge target.
 - `swarm_update_task({status:"done|failed|blocked"})` — closes the node and resets the R20 nudge cycle for future re-opens.
-- `swarm_send_message({to:"orchestrator", replyTo:"<assignment msg id>", ...})` — links the verified result to the assignment.
+- `swarm_send_message({to:"root", replyTo:"<assignment msg id>", ...})` — links the verified result to the assignment.
 - `swarm_ack_message({messageId:"<assignment msg id>", status:"done", resultMessageId:"..."})` — the third leg of the close-action triple.
 - `swarm_audit({mode:"events", event:"worker.artifact_progress_no_status_update"})` — inspect nudge history.
 - `swarm_audit({mode:"events", event:"worker.artifact_progress_cap_exceeded"})` — inspect cap escalations.
@@ -1406,7 +1406,7 @@ task.artifact_progress_nudge_count_reset    # forward-transition reset
 
 ### When this matters
 
-You see goal nudges emitted and durably enqueued, but they never become visible at the orchestrator surface. The tell is a goal-key message whose trace shows `notification.stale.suppressed site=orchestrator_pump.surface reason=actionable_graph` even though the task carrying the orphan node is already terminal (`failed`, `cancelled`, or `blocked`). This is the surface-layer twin of the R19 evaluator bug: emission-time gating was fine, but surface-time revalidation was too permissive and swallowed the nudge.
+You see goal nudges emitted and durably enqueued, but they never become visible at the root surface. The tell is a goal-key message whose trace shows `notification.stale.suppressed site=root_pump.surface reason=actionable_graph` even though the task carrying the orphan node is already terminal (`failed`, `cancelled`, or `blocked`). This is the surface-layer twin of the R19 evaluator bug: emission-time gating was fine, but surface-time revalidation was too permissive and swallowed the nudge.
 
 ### Field diagnosis
 
@@ -1414,7 +1414,7 @@ You see goal nudges emitted and durably enqueued, but they never become visible 
    ```bash
    swarm_audit({mode:"events", event:"notification.stale.suppressed", since: "2026-09-02T10:30:00Z"})
    ```
-   Look for `site=orchestrator_pump.surface` + `reason=actionable_graph` on a goal-key message.
+   Look for `site=root_pump.surface` + `reason=actionable_graph` on a goal-key message.
 2. Inspect the task directory for a terminal task with an orphan `ready` node:
    ```bash
    swarm_task_status({taskId:"task-202609020536", includeArtifacts:true, runtime:true})
@@ -1442,7 +1442,7 @@ node extensions/swarm/task-liveness.test.mjs
 
 ### When this matters
 
-Goal nudges are emitted under the all-idle gate, then a worker turns busy (because the orchestrator did what the nudge asked — assigned work) and every queued goal nudge is dropped at surface time forever: `notification.stale.suppressed site=orchestrator_pump.surface reason=agent_busy evidence=[effective-agent-set-not-idle]` on goal-key messages, `mailbox.orchestrator_pump_stuck_escalated` every watchdog tick with an empty surface set, and ZERO `pi.sendMessage` at the pump boundary while `consecutiveNoResolveNudges` burns to max + back-off on messages the orchestrator LLM never saw. Live incident: 2026-09-02T12:04:08Z, nudges `msg-1788350616129-691b4e7c` / `-0aea3216` / `-c6f752b8` (goal `goal-1788350610025-7efafe`), starved 26+ minutes. This was the `agent_busy` twin of the R21 `actionable_graph` leg — same F13 disease, different leg.
+Goal nudges are emitted under the all-idle gate, then a worker turns busy (because the root did what the nudge asked — assigned work) and every queued goal nudge is dropped at surface time forever: `notification.stale.suppressed site=root_pump.surface reason=agent_busy evidence=[effective-agent-set-not-idle]` on goal-key messages, `mailbox.root_pump_stuck_escalated` every watchdog tick with an empty surface set, and ZERO `pi.sendMessage` at the pump boundary while `consecutiveNoResolveNudges` burns to max + back-off on messages the root LLM never saw. Live incident: 2026-09-02T12:04:08Z, nudges `msg-1788350616129-691b4e7c` / `-0aea3216` / `-c6f752b8` (goal `goal-1788350610025-7efafe`), starved 26+ minutes. This was the `agent_busy` twin of the R21 `actionable_graph` leg — same F13 disease, different leg.
 
 ### Field diagnosis
 
@@ -1450,12 +1450,12 @@ Goal nudges are emitted under the all-idle gate, then a worker turns busy (becau
    ```bash
    swarm_audit({mode:"events", event:"notification.stale.suppressed", since:"2026-09-02T12:04:00Z"})
    ```
-   Look for `site=orchestrator_pump.surface reason=agent_busy` on messages whose `idempotencyKey` matches `goal:<gid>:nudge:idle-streak:*`.
+   Look for `site=root_pump.surface reason=agent_busy` on messages whose `idempotencyKey` matches `goal:<gid>:nudge:idle-streak:*`.
 2. Confirm the starvation window (escalating but never surfacing):
    ```bash
-   swarm_audit({mode:"events", event:"mailbox.orchestrator_pump_stuck_escalated"})
+   swarm_audit({mode:"events", event:"mailbox.root_pump_stuck_escalated"})
    ```
-   Repeated `queued>=1` with `mailbox.orchestrator_pump count:0` every tick = the stale gate is eating the surface set.
+   Repeated `queued>=1` with `mailbox.root_pump count:0` every tick = the stale gate is eating the surface set.
 3. Pre-R22 code shows the suppression; post-R22 the same goal-key message surfaces once (coalesced to the freshest of the streak) and the busy worker no longer suppresses it.
 
 ### Verify commands
@@ -1467,7 +1467,7 @@ node extensions/swarm/stale-open-nudge.test.mjs
 node extensions/swarm/r21-goal-surface-suppression.test.mjs
 ```
 
-Mock-llm lane (seeded live-incident snapshot; BEFORE lane shows 3× `reason=agent_busy` suppressions, AFTER lane surfaces + the orchestrator acks):
+Mock-llm lane (seeded live-incident snapshot; BEFORE lane shows 3× `reason=agent_busy` suppressions, AFTER lane surfaces + the root acks):
 
 ```bash
 bash .pi/swarm/tasks/task-202609021945-r22-goal-nudge-surface-starve/artifacts/lanes/goal-nudge-surface-starve/launch.sh /tmp/r22-starve-lane
@@ -1484,7 +1484,7 @@ bash .pi/swarm/tasks/task-202609021945-r22-goal-nudge-surface-starve/artifacts/l
 
 ### When this matters
 
-A user-origin goal stops producing nudges entirely: the pool is fully idle, a fresh all-idle epoch is running, but no `goal.idle_nudge` fires and nothing reaches the orchestrator. The tell is `goal.consecutiveNoResolveNudges === 3` (MAX) with `goal.backoffTicksRemaining` cycling `2→1→0→2` on every eligible tick, and `idleNudgeState.allIdleSinceAt` NEWER than `goal.lastNudgeAt`. This is the post-R22 successor: R22 lets nudges survive a busy worker, but when the legacy burst is already surface-invalidated by the epoch advance (`idle_epoch_advanced`), it can never be delivered — and the cap loop blocks every fresh emission. Live incident: goal `goal-1788350610025-7efafe`, 2026-09-02T14:44:37..14:45:17Z.
+A user-origin goal stops producing nudges entirely: the pool is fully idle, a fresh all-idle epoch is running, but no `goal.idle_nudge` fires and nothing reaches the root. The tell is `goal.consecutiveNoResolveNudges === 3` (MAX) with `goal.backoffTicksRemaining` cycling `2→1→0→2` on every eligible tick, and `idleNudgeState.allIdleSinceAt` NEWER than `goal.lastNudgeAt`. This is the post-R22 successor: R22 lets nudges survive a busy worker, but when the legacy burst is already surface-invalidated by the epoch advance (`idle_epoch_advanced`), it can never be delivered — and the cap loop blocks every fresh emission. Live incident: goal `goal-1788350610025-7efafe`, 2026-09-02T14:44:37..14:45:17Z.
 
 ### Field diagnosis
 
@@ -1518,7 +1518,7 @@ bash .pi/swarm/tasks/task-202609022150-r23-goal-backoff-epoch-starvation/artifac
 
 ### When this matters
 
-A goal-floor `goal.idle_nudge` seq marches past the planned MAX+backoff window (e.g. seq 4 → 38 instead of seq 4 → 6) and `goal.nudge.saturation_reset_on_epoch` fires many times across a short window (e.g. 12 in ~3 minutes) — the floor is re-arming on every churn edge, not just the legitimate R23 re-arm. Tell: `goal.nudgeSeq` keeps climbing past the post-cap backoff (`backoffTicksRemaining` cleared repeatedly); `goal.consecutiveNoResolveNudges` keeps resetting to 0 instead of being preserved at MAX; `idleNudgeState.lastEpochBusyAgents` shows ONLY `["orchestrator"]` between resets (orchestrator-turn churn, NOT a worker break). Live storm: implementer lane 2026-09-02T15:19:06..15:21:46Z, `mailbox.orchestrator_pump_stuck_escalated` ×34 (suppressed legacy pair stayed queued and re-escalated every watchdog tick — secondary observation, not blocking).
+A goal-floor `goal.idle_nudge` seq marches past the planned MAX+backoff window (e.g. seq 4 → 38 instead of seq 4 → 6) and `goal.nudge.saturation_reset_on_epoch` fires many times across a short window (e.g. 12 in ~3 minutes) — the floor is re-arming on every churn edge, not just the legitimate R23 re-arm. Tell: `goal.nudgeSeq` keeps climbing past the post-cap backoff (`backoffTicksRemaining` cleared repeatedly); `goal.consecutiveNoResolveNudges` keeps resetting to 0 instead of being preserved at MAX; `idleNudgeState.lastEpochBusyAgents` shows ONLY `["root"]` between resets (root-turn churn, NOT a worker break). Live storm: implementer lane 2026-09-02T15:19:06..15:21:46Z, `mailbox.root_pump_stuck_escalated` ×34 (suppressed legacy pair stayed queued and re-escalated every watchdog tick — secondary observation, not blocking).
 
 ### Field diagnosis
 
@@ -1531,8 +1531,8 @@ A goal-floor `goal.idle_nudge` seq marches past the planned MAX+backoff window (
    ```bash
    swarm_audit({mode:"events", event:"idle.epoch.reset", since:"<window>"})
    ```
-   Each reset trace carries a `busyAgents` array. Storm shape: only `["orchestrator"]` (orchestrator-turn churn); legitimate R23 re-arm shape: contains a non-orchestrator id (e.g. `["worker-a"]`).
-3. Pre-R23B the reset fires on every edge; post-R23B the cap branch is the SOLE reset site AND the worker-breaker guard (`lastEpochBusyAgents?.some(id => id !== "orchestrator")`) rejects orchestrator-turn churn. Storm ≤ 1 reset per anchor; counter preserved at MAX; backoff engages.
+   Each reset trace carries a `busyAgents` array. Storm shape: only `["root"]` (root-turn churn); legitimate R23 re-arm shape: contains a non-root id (e.g. `["worker-a"]`).
+3. Pre-R23B the reset fires on every edge; post-R23B the cap branch is the SOLE reset site AND the worker-breaker guard (`lastEpochBusyAgents?.some(id => id !== "root")`) rejects root-turn churn. Storm ≤ 1 reset per anchor; counter preserved at MAX; backoff engages.
 
 ### Verify commands
 
@@ -1548,7 +1548,7 @@ node extensions/mock-llm/selftest.test.mjs                                      
 
 - The edge-site reset inside `updateIdleEpochLocked` is DELETED. The cap branch of `evaluateIdleGoalNudgeLocked` is the SOLE reset site (it consults the `r23LastEpochAnchor` memo and now also the `lastEpochBusyAgents` worker-breaker guard).
 - Every anchor-clearing busy edge now stamps `idleNudgeState.lastEpochBusyAgents = busyAgents` (same array already passed to the `idle.epoch.reset` trace). Stamped at the busy edge, cleared at the busy→idle edge stamp.
-- The cap-branch reset fires ONLY when the most recent anchor-clearing busy edge was caused by a WORKER (any busy id !== "orchestrator"). Orchestrator-turn churn that briefly flips a worker busy/idle does NOT qualify; the cap branch falls into the `arm backoff` path and returns `max_nudges`.
+- The cap-branch reset fires ONLY when the most recent anchor-clearing busy edge was caused by a WORKER (any busy id !== "root"). Root-turn churn that briefly flips a worker busy/idle does NOT qualify; the cap branch falls into the `arm backoff` path and returns `max_nudges`.
 - Storm-shape regression test in `extensions/swarm/idle-nudge.test.mjs` R23B section (12 assertions): cap-branch reset + 3 emissions, ≥2 churn edges rejected, counter preserved at MAX, backoff engaged, `nudgeSeq` bounded to 6 (no seq 7+ storm).
 - R23B task: `task-202609022240-r23b-reset-storm-rework`. Same-epoch cap/backoff (G7), active-task gate (G6), R21 `idle_epoch_advanced` (C5), and R22 worker-busy surface rule are all preserved.
 
@@ -1556,7 +1556,7 @@ node extensions/mock-llm/selftest.test.mjs                                      
 
 ### When this matters
 
-Even after R23B (edge-site reset deleted, worker-breaker guard added), `goal.nudge.saturation_reset_on_epoch` continues firing on every orchestrator turn boundary (storm rerouted through the cap branch instead of the edge site). Live evidence: `artifacts/tester-turnstart-probe.mjs` against the R23B-only tree — 2 resets, 4 emissions, seq 4→7 across 5 turn cycles. Tell: `idleNudgeState.lastEpochBusyAgents` is `null` at the cap-branch reset trace (the breaker field never made it from the clear site to the eval); `idle.epoch.reset reason:"orchestrator_busy"` fires from `hooks.ts turn_start` (the orchestrator's busy edge that bypasses `updateIdleEpochLocked`).
+Even after R23B (edge-site reset deleted, worker-breaker guard added), `goal.nudge.saturation_reset_on_epoch` continues firing on every root turn boundary (storm rerouted through the cap branch instead of the edge site). Live evidence: `artifacts/tester-turnstart-probe.mjs` against the R23B-only tree — 2 resets, 4 emissions, seq 4→7 across 5 turn cycles. Tell: `idleNudgeState.lastEpochBusyAgents` is `null` at the cap-branch reset trace (the breaker field never made it from the clear site to the eval); `idle.epoch.reset reason:"root_busy"` fires from `hooks.ts turn_start` (the root's busy edge that bypasses `updateIdleEpochLocked`).
 
 ### Field diagnosis
 
@@ -1570,8 +1570,8 @@ Even after R23B (edge-site reset deleted, worker-breaker guard added), `goal.nud
    ```bash
    swarm_audit({mode:"events", event:"goal.nudge.saturation_reset_on_epoch", since:"<window>"})
    ```
-   Each reset trace carries a `lastEpochBusyAgents` field. Rerouted-storm shape: `null` (breaker never stamped at the clear site). R23C-correct shape: `["orchestrator"]` (hooks.ts stamped provenance at turn_start) or `["worker-a"]` (busy edge stamped real agents).
-3. Pre-R23C the hook bypasses `updateIdleEpochLocked`; post-R23C the hook stamps provenance first, the mint branch preserves it, and the cap branch breaker rejects orchestrator-churn anchors.
+   Each reset trace carries a `lastEpochBusyAgents` field. Rerouted-storm shape: `null` (breaker never stamped at the clear site). R23C-correct shape: `["root"]` (hooks.ts stamped provenance at turn_start) or `["worker-a"]` (busy edge stamped real agents).
+3. Pre-R23C the hook bypasses `updateIdleEpochLocked`; post-R23C the hook stamps provenance first, the mint branch preserves it, and the cap branch breaker rejects root-churn anchors.
 
 ### Verify commands
 
@@ -1587,7 +1587,7 @@ node extensions/mock-llm/selftest.test.mjs                                      
 
 ### What changed
 
-- `extensions/swarm/src/hooks.ts` `turn_start` handler: stamps `idleState.lastEpochBusyAgents = ["orchestrator"]` before clearing the anchor. This is the orchestrator's busy edge (bypasses `updateIdleEpochLocked`); without the stamp the cap branch sees `breaker = undefined` → absent→reset legacy default → storm.
+- `extensions/swarm/src/hooks.ts` `turn_start` handler: stamps `idleState.lastEpochBusyAgents = ["root"]` before clearing the anchor. This is the root's busy edge (bypasses `updateIdleEpochLocked`); without the stamp the cap branch sees `breaker = undefined` → absent→reset legacy default → storm.
 - `extensions/swarm/src/reconcile.ts` mint branch in `updateIdleEpochLocked`: PRESERVES `lastEpochBusyAgents` (does NOT clear it). Provenance must survive from the clear site to the next atCap eval; clearing at mint erased the stamp from hooks.ts and re-opened the storm window.
 - `extensions/swarm/idle-nudge.test.mjs` G2b + R23B section seeds now include `r23LastEpochAnchor = allIdleSinceAt` (production-mint shape — the legacy R23 code stamped the memo at mint, real sessions hold this state). New R23C section: 10 assertions at runtime (6 source sites — 2 drains, 5 in-loop orbit rejections, 3 bounds), invokes the REAL `hooks.ts turn_start` handler via `registerSwarmHooks` mock pi (not an inline replica), so removing the stamp from hooks.ts makes the test go RED (blindness control both ways verified).
 - Lane launcher `goal-nudge-backoff-epoch-rearm/launch.sh` re-copied under R23C artifacts with `r23LastEpochAnchor` seeded.
@@ -1595,18 +1595,18 @@ node extensions/mock-llm/selftest.test.mjs                                      
 - Known corner (documented, accepted): a real worker break followed by turn-start-only churn can carry a stale `["worker-a"]` stamp into one churn epoch → at most ONE wrong-cause reset per genuine worker break. Bounded, not a storm; tightening (stamp at every clear site including future ones) is follow-up hardening.
 - The `turn_start` handler now writes swarm state from a Pi lifecycle hook — a new Pi-runtime boundary crossing. See `pi-runtime-contract.md §10 F15` row (AMENDED 2026-09-03 R23C) for the boundary-counter assertions.
 
-## Operator: R24 worker result is invisible to the orchestrator without manual `swarm_check_mailbox` (2026-09-03)
+## Operator: R24 worker result is invisible to the root without manual `swarm_check_mailbox` (2026-09-03)
 
 ### When this matters
 
-A worker's `swarm_send_message` result to the orchestrator (the close-out shape: `requiresAck && !requiresResponse && replyTo` set, conversationId task-scoped) is durably enqueued (L1/C1 + L1/C2 `message.deliver.mailbox_only`) but never visibly surfaces — the orchestrator only sees it after a manual `swarm_check_mailbox` poll. Tell: `notification.stale.suppressed site=orchestrator_pump.surface reason:node_terminal` traces repeatedly with ZERO `pi.sendMessage` at the pump boundary, followed by a single `message.lifecycle_derived_shadow source=mailbox.surfaced via=swarm_check_mailbox` when the human PM (or test node) finally polls the mailbox. Live incident 2026-09-02T15:26:06.708Z: `msg-1788362766708-64f55b39` (R23 implement-done result), durably enqueued at 15:26:06.714Z, durably suppressed at 15:26:06.913Z + 15:28:08.886Z, manual surfaced at 15:31:09.993Z. Adjacent cases: any task-scoped RESULT/REPLY/ASSIGNMENT message on a terminal node/task — the recipient PM cannot advance the graph without polling.
+A worker's `swarm_send_message` result to the root (the close-out shape: `requiresAck && !requiresResponse && replyTo` set, conversationId task-scoped) is durably enqueued (L1/C1 + L1/C2 `message.deliver.mailbox_only`) but never visibly surfaces — the root only sees it after a manual `swarm_check_mailbox` poll. Tell: `notification.stale.suppressed site=root_pump.surface reason:node_terminal` traces repeatedly with ZERO `pi.sendMessage` at the pump boundary, followed by a single `message.lifecycle_derived_shadow source=mailbox.surfaced via=swarm_check_mailbox` when the human PM (or test node) finally polls the mailbox. Live incident 2026-09-02T15:26:06.708Z: `msg-1788362766708-64f55b39` (R23 implement-done result), durably enqueued at 15:26:06.714Z, durably suppressed at 15:26:06.913Z + 15:28:08.886Z, manual surfaced at 15:31:09.993Z. Adjacent cases: any task-scoped RESULT/REPLY/ASSIGNMENT message on a terminal node/task — the recipient PM cannot advance the graph without polling.
 
 ### Field diagnosis
 
 1. Confirm the suppression pattern in the durable trace:
    ```bash
    swarm_audit({mode:"events", event:"notification.stale.suppressed", since:"<window>"})
-   # Look for site=orchestrator_pump.surface reason=node_terminal on a message with
+   # Look for site=root_pump.surface reason=node_terminal on a message with
    # conversationId matching task:<id>:<node> and replyTo pointing at a prior assignment.
    ```
 2. Confirm the message was durably delivered (the L1/L2 part of the contract still holds):
@@ -1628,28 +1628,28 @@ node .pi/swarm/tasks/task-202609022235-r24-orchestrator-visible-surface-gap/arti
 node extensions/swarm/idle-nudge.test.mjs                                                          # 145 passed incl. R24 section (9 assertions)
 node extensions/swarm/swarm-goal.test.mjs                                                          # 67 passed
 node extensions/swarm/stale-open-nudge.test.mjs                                                    # 6 passed
-node extensions/swarm/r15-normal-orchestrator-result.test.mjs                                       # 15 passed
-node extensions/swarm/r13-orchestrator-unknown-target.test.mjs                                     # 24 passed
-node extensions/mock-llm/selftest.test.mjs                                                         # 71 scenario models incl. orchestrator-visible-surface-gap
+node extensions/swarm/r15-normal-root-result.test.mjs                                       # 15 passed
+node extensions/swarm/r13-root-unknown-target.test.mjs                                     # 24 passed
+node extensions/mock-llm/selftest.test.mjs                                                         # 71 scenario models incl. root-visible-surface-gap
 # Real mock-llm lane (dedicated tmux):
 bash .pi/swarm/tasks/task-202609022235-r24-orchestrator-visible-surface-gap/artifacts/lanes/orchestrator-visible-surface-gap/launch.sh /tmp/r24-lane
 # Evidence captured in <scratch>/.pi/swarm/traces/events.jsonl:
-#   - mailbox.orchestrator_pump reason=session_start count=1 ids=["msg-r24-result-1"]
+#   - mailbox.root_pump reason=session_start count=1 ids=["msg-r24-result-1"]
 #   - message.ack status=done (fixture turn 1 ack closes the lifecycle — C5 LLM consumption)
 #   - Subsequent watchdog ticks count=0, deferred=0 (replay dedupe holds)
 ```
 
 ### What changed
 
-- `extensions/swarm/src/reconcile.ts` `isActionableOrchestratorMessage` task-scoped branch: a message whose fingerprint is `requiresAck && !requiresResponse && replyTo` (the close-out shape) is exempted from `node_terminal` / `task_done` / `task_failed` / `task_cancelled` suppression. Predicate checks `isResultClass` BEFORE the task-terminal legs so nudges (which lack `replyTo`) keep full gating.
-- No new `pi.sendMessage` call site is introduced (the existing pump boundary counts at the real `pumpOrchestratorRealSend` counter). The change is a predicate flip on the existing per-tick actionability filter that builds `windowMsgs`.
+- `extensions/swarm/src/reconcile.ts` `isActionableRootMessage` task-scoped branch: a message whose fingerprint is `requiresAck && !requiresResponse && replyTo` (the close-out shape) is exempted from `node_terminal` / `task_done` / `task_failed` / `task_cancelled` suppression. Predicate checks `isResultClass` BEFORE the task-terminal legs so nudges (which lack `replyTo`) keep full gating.
+- No new `pi.sendMessage` call site is introduced (the existing pump boundary counts at the real `pumpRootRealSend` counter). The change is a predicate flip on the existing per-tick actionability filter that builds `windowMsgs`.
 - The semantic distinction (durable mailbox delivery does not imply visible Pi surface or LLM consumption) is now TRUE for result-class messages: L1+C1 + L2+C2 mailbox_only delivers as before; L3+C3+C4 visible surface now fires; L4+L5 (LLM consumption) only fires when the pump surfaces it via real `pi.sendMessage` with `triggerTurn: true` (C5 not asserted unless provider transcript proves it — fixture's first turn does ack `done` which proves C5).
 - Nudges (canonical `task:<id>:node:<id>:nudge:*` idempotencyKey without `replyTo`) keep full gating — proven by the R24-2/R24-6/R24-7/R24-9 unit assertions and the driver CONTROL-nudge that still produces a suppression trace under the fix.
 - Stale filtering preserved: `acked` / `dead_letter` / `superseded` / `wrong_recipient` early-return paths are unchanged; `notification.batch.suppressed` census still counts terminal suppressions for observable behavior.
-- Priority/abort semantics unchanged: `deliverAs` / `priority` plumbing is untouched; the `bypassBusyForHigh` R13 P0 / R13 P1 surface gate is untouched; high-priority unknown-target orchestrator bypass still works for high-priority nudges.
-- Replay dedupe preserved: per-pid `surfaced` ledger + `consumerReceipts.orchestrator.entries` still bound the surface to once per recipient per pid per session; subsequent watchdog ticks for the same already-surfaced msgId produce `count=0, deferred=0` (verified in the live lane events.jsonl).
+- Priority/abort semantics unchanged: `deliverAs` / `priority` plumbing is untouched; the `bypassBusyForHigh` R13 P0 / R13 P1 surface gate is untouched; high-priority unknown-target root bypass still works for high-priority nudges.
+- Replay dedupe preserved: per-pid `surfaced` ledger + `consumerReceipts.root.entries` still bound the surface to once per recipient per pid per session; subsequent watchdog ticks for the same already-surfaced msgId produce `count=0, deferred=0` (verified in the live lane events.jsonl).
 - The result-class fingerprint is intentionally NARROW (`requiresAck && !requiresResponse && replyTo`): only the close-out shape is exempted. A nudge that someone sloppily attaches `replyTo` to would also pass — but that's a producer-side bug (nudges are produced by the swarm, not user code, so this is bounded).
-- Mock-LLM fixture `extensions/mock-llm/fixtures/orchestrator-visible-surface-gap.jsonl` + selftest count (71). Lane launcher at `artifacts/lanes/orchestrator-visible-surface-gap/launch.sh` seeds the live-incident shape (task in_progress + implement DONE + result-class msg mailbox JSONL appended) and runs `pi --provider mock-llm --model orchestrator-visible-surface-gap` in a dedicated tmux window.
-- R24 task: `task-202609022235-r24-orchestrator-visible-surface-gap`. No related regressions: R13 P0 bypass + R13 P1 liveness gate (R13-ORCHESTRATOR-UNKNOWN-TARGET 24/24 PASS), R15 normal-priority surface (R15-NORMAL-ORCHESTRATOR-RESULT 15/15 PASS), R22 worker-busy surface rule (R22-REGRESSION 1/1 PASS), R23C storm guard (idle-nudge 145/0 PASS incl. R23/R23B/R23C sections), all preserved.
+- Mock-LLM fixture `extensions/mock-llm/fixtures/root-visible-surface-gap.jsonl` + selftest count (71). Lane launcher at `artifacts/lanes/orchestrator-visible-surface-gap/launch.sh` seeds the live-incident shape (task in_progress + implement DONE + result-class msg mailbox JSONL appended) and runs `pi --provider mock-llm --model root-visible-surface-gap` in a dedicated tmux window.
+- R24 task: `task-202609022235-r24-root-visible-surface-gap`. No related regressions: R13 P0 bypass + R13 P1 liveness gate (R13-ROOT-UNKNOWN-TARGET 24/24 PASS), R15 normal-priority surface (R15-NORMAL-ROOT-RESULT 15/15 PASS), R22 worker-busy surface rule (R22-REGRESSION 1/1 PASS), R23C storm guard (idle-nudge 145/0 PASS incl. R23/R23B/R23C sections), all preserved.
 - Known corner (documented, accepted): the predicate exemption applies to the close-out shape regardless of whether `replyTo` points at an existing message. A result message with a stale `replyTo` (e.g., pointing at a superseded assignment) will still surface — bounded by the `acked` / `dead_letter` / `superseded` early-return paths and the `consumerReceipts` dedupe ledger, so it's at most once per recipient.
-- New Pi-runtime boundary crossing counted: the live lane's real `pi.sendMessage` boundary call (`pumpOrchestratorRealSend`) at `mailbox.orchestrator_pump reason=session_start count=1 ids=["msg-r24-result-1"]` is the C-R24-1 boundary assertion. C-R24-2 (replay dedupe ≥0 subsequent watchdog ticks) and C-R24-3 (CONTROL nudge control suppressed in the driver — gate intact) round out the R10-1 boundary discipline. See `pi-runtime-contract.md §10 F16` row for the contract claim being corrected.
+- New Pi-runtime boundary crossing counted: the live lane's real `pi.sendMessage` boundary call (`pumpRootRealSend`) at `mailbox.root_pump reason=session_start count=1 ids=["msg-r24-result-1"]` is the C-R24-1 boundary assertion. C-R24-2 (replay dedupe ≥0 subsequent watchdog ticks) and C-R24-3 (CONTROL nudge control suppressed in the driver — gate intact) round out the R10-1 boundary discipline. See `pi-runtime-contract.md §10 F16` row for the contract claim being corrected.

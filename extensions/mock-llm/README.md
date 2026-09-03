@@ -33,6 +33,6 @@ script:
 npm run test:mockllm
 ```
 
-The orchestrator-authority-gated suites in `extensions/swarm/tests/` require
-`PI_SWARM_AGENT_ID=orchestrator PI_SWARM_IS_ORCHESTRATOR=1` — see
+The root-authority-gated suites in `extensions/swarm/tests/` require
+`PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1` — see
 `docs/swarm/contributor-guide.md`.

@@ -162,17 +162,17 @@ console.log("\n[7] substring-collapsed matchKind is recorded when roleKind field
 	ok("matchKind=substring-collapsed (audit signal)", got[0]?.matchKind === "substring-collapsed");
 }
 
-console.log("\n[8] the orchestrator is never a reuse match (invariant preserved)");
+console.log("\n[8] the root is never a reuse match (invariant preserved)");
 {
 	const st = {
 		agents: {
-			orchestrator: mkAgent("orchestrator", "PM", "orchestrator"),
+			root: mkAgent("root", "PM", "root"),
 			"reviewer-01": mkAgent("reviewer-01", "Senior reviewer", "reviewer"),
 		},
 		messages: {},
 	};
 	const got = matchReusableAgents(st, { roleKind: "reviewer" });
-	ok("orchestrator excluded", !got.some((m) => m.agentId === "orchestrator"), `got=${JSON.stringify(got.map((m) => m.agentId))}`);
+	ok("root excluded", !got.some((m) => m.agentId === "root"), `got=${JSON.stringify(got.map((m) => m.agentId))}`);
 }
 
 console.log(`\n${fail === 0 ? "REUSE-MISROUTE PASS" : "REUSE-MISROUTE FAIL"} (${pass} passed, ${fail} failed)`);

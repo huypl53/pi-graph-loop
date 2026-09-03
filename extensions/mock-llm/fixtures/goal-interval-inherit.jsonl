@@ -3,7 +3,7 @@
 # intervalMs is passed (was: silently reset to 5s default). Live incident 2026-08-31 09:00 emitted
 # 3 nudges in 15s because a text-only replacement dropped a tuned 600000ms cadence back to default.
 #
-# Lane seeding: orchestrator session only (no other agents needed). The harness reads the durable
+# Lane seeding: root session only (no other agents needed). The harness reads the durable
 # `swarm-state.json` after turn 3 to assert the post-emit interval value.
 {"name":"goal interval inherit set long","events":[{"type":"text","delayMs":15,"text":"Setting goal A with a long 1h interval so we can observe the inheritance on the next text-only replace.","chunks":["Setting goal A ","with a long 1h interval ","so we can observe the inheritance ","on the next text-only replace."]},{"type":"toolcall","delayMs":15,"name":"swarm_set_goal","id":"set-1","arguments":{"text":"Goal A — long interval","intervalMs":3600000}}]}
 {"name":"goal interval inherit replace no interval","events":[{"type":"text","delayMs":15,"text":"Replacing with new text only — the prior 1h interval MUST inherit (no silent reset to 5s default).","chunks":["Replacing with new text only ","— the prior 1h interval MUST inherit ","(no silent reset to 5s default)."]},{"type":"toolcall","delayMs":15,"name":"swarm_set_goal","id":"set-2","arguments":{"text":"Goal B — text-only replace"}}]}

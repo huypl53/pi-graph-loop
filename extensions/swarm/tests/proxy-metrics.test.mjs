@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 process.env.PI_SWARM_PROXY_METRIC_INTERVAL_MS ||= "60000";
 process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ||= "300000";
-process.env.PI_SWARM_IS_ORCHESTRATOR ||= "1";
+process.env.PI_SWARM_IS_ROOT ||= "1";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, writeState, taskPaths, ensureDirs, writeTaskState, withLock } = await import(join(here, "..", "src/state.ts"));
@@ -32,7 +32,7 @@ function makeTask(taskId, assignee, { stale = false, supersessionWindowStart, su
 		priority: "normal",
 		createdAt: ts,
 		updatedAt: ts,
-		owner: "orchestrator",
+		owner: "root",
 		workflow: "feature-dev",
 		allowedFiles: [],
 		acceptanceCriteria: [],
@@ -156,13 +156,13 @@ async function readEvents(scratch) {
 	const now = Date.now();
 	const st = await readState(p, scratch);
 	st.agents = {
-		orchestrator: makeAgent("orchestrator", ["task-stale-a", "task-stale-b"]),
+		root: makeAgent("root", ["task-stale-a", "task-stale-b"]),
 		"worker-a": makeAgent("worker-a", ["task-stale-a"]),
 		"worker-b": makeAgent("worker-b", ["task-stale-b"]),
 	};
-	st.agents.orchestrator.roleKind = "orchestrator";
-	st.agents.orchestrator.tmuxTarget = "orchestrator:0.0";
-	st.agents.orchestrator.runtimeStatus = "idle";
+	st.agents.root.roleKind = "root";
+	st.agents.root.tmuxTarget = "root:0.0";
+	st.agents.root.runtimeStatus = "idle";
 	st.agents["worker-a"].runtimeStatus = "idle";
 	st.agents["worker-b"].runtimeStatus = "idle";
 	st.proxyMetrics = { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0, lastEmitAt: new Date(now - 120_000).toISOString() };
@@ -203,7 +203,7 @@ async function readEvents(scratch) {
 	};
 	registerSwarmCommand(pi);
 	const prevAgent = process.env.PI_SWARM_AGENT_ID;
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	process.env.PI_SWARM_AGENT_ID = "root";
 	await cmds.swarm.handler("metrics", { cwd: scratch, hasUI: true, ui: { notify: (msg) => notes.push(msg), setStatus: () => {} }, mode: "tui" });
 	if (prevAgent === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = prevAgent;
 	ok("C4 /swarm metrics surfaces proxy snapshot", notes.at(-1)?.includes("proxy metrics: hungButAlive=2 staleOpen=2 supersessionChurn=2"), notes.at(-1));

@@ -26,14 +26,14 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 {
 	const st = { messages: {}, swarmId: "s" };
 	for (let i = 0; i < 300; i++) {
-		st.messages[`m${i}`] = { id: `m${i}`, from: i < 150 ? "orchestrator" : "planner", to: i < 150 ? "worker" : "orchestrator", status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 1, requiresAck: true, ...(i === 42 ? { idempotencyKey: "k42" } : {}) };
+		st.messages[`m${i}`] = { id: `m${i}`, from: i < 150 ? "root" : "planner", to: i < 150 ? "worker" : "root", status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 1, requiresAck: true, ...(i === 42 ? { idempotencyKey: "k42" } : {}) };
 	}
-	const hit = findIdempotentMessage(st, "orchestrator", "worker", "k42");
+	const hit = findIdempotentMessage(st, "root", "worker", "k42");
 	ok("index finds existing idempotent record", hit?.id === "m42");
-	ok("index misses absent key", findIdempotentMessage(st, "orchestrator", "worker", "nope") === undefined);
+	ok("index misses absent key", findIdempotentMessage(st, "root", "worker", "nope") === undefined);
 	ok("index built + cached", st.idempotencyIndex && Object.keys(st.idempotencyIndex).length === 1);
-	st.messages.m2000 = { id: "m2000", from: "orchestrator", to: "worker", status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 1, requiresAck: true, idempotencyKey: "k43" };
-	ok("index rebuilds on count change", findIdempotentMessage(st, "orchestrator", "worker", "k43")?.id === "m2000");
+	st.messages.m2000 = { id: "m2000", from: "root", to: "worker", status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 1, requiresAck: true, idempotencyKey: "k43" };
+	ok("index rebuilds on count change", findIdempotentMessage(st, "root", "worker", "k43")?.id === "m2000");
 }
 
 // --- Issue B: stat-gated mailbox read (identical semantics, cache hit on unchanged file) ---
@@ -41,18 +41,18 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 	const { readMailbox, readMailboxCached } = await import(join(here, "..", "src/mailbox.ts"));
 	const { mailboxPath } = await import(join(here, "..", "src/state.ts"));
 	const p = { mailboxes: join(scratch, ".pi/swarm/mailboxes"), traces: join(scratch, ".pi/swarm/traces"), root: join(scratch, ".pi/swarm") };
-	const file = mailboxPath(p, "orchestrator");
+	const file = mailboxPath(p, "root");
 	const lines = [];
-	for (let i = 0; i < 200; i++) lines.push(JSON.stringify({ id: `msg-${i}`, from: "a", to: "orchestrator", body: String(i), swarmId: "s", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date().toISOString(), requiresAck: true, headers: {} }));
+	for (let i = 0; i < 200; i++) lines.push(JSON.stringify({ id: `msg-${i}`, from: "a", to: "root", body: String(i), swarmId: "s", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date().toISOString(), requiresAck: true, headers: {} }));
 	writeFileSync(file, lines.join("\n") + "\n");
-	const a = await readMailbox(p, "orchestrator");
+	const a = await readMailbox(p, "root");
 	ok("readMailbox parses all 200", a.length === 200);
-	const b1 = await readMailboxCached(p, "orchestrator");
-	const b2 = await readMailboxCached(p, "orchestrator");
+	const b1 = await readMailboxCached(p, "root");
+	const b2 = await readMailboxCached(p, "root");
 	ok("cached read identical to full read", b1.length === 200 && b2.length === 200 && b1[0].id === b2[0].id);
 	ok("second cached read returns SAME array (no re-parse)", b1 === b2);
-	writeFileSync(file, lines.join("\n") + "\n" + JSON.stringify({ id: "msg-new", from: "a", to: "orchestrator", body: "x", swarmId: "s", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date().toISOString(), requiresAck: true, headers: {} }) + "\n");
-	const b3 = await readMailboxCached(p, "orchestrator");
+	writeFileSync(file, lines.join("\n") + "\n" + JSON.stringify({ id: "msg-new", from: "a", to: "root", body: "x", swarmId: "s", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date().toISOString(), requiresAck: true, headers: {} }) + "\n");
+	const b3 = await readMailboxCached(p, "root");
 	ok("cache invalidates on append", b3.length === 201 && b3 !== b1);
 }
 
@@ -63,9 +63,9 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 	const msgId = "msg-repro-ttl";
 	const state = {
 		version: 1, swarmId: "s", cwd: scratch, tmuxSession: "sess",
-		agents: {}, delivered: { orchestrator: [] },
+		agents: {}, delivered: { root: [] },
 		messages: {
-			[msgId]: { id: msgId, from: "orchestrator", to: "worker-1", status: "queued", createdAt: old, updatedAt: old, attempts: 0, requiresAck: true, ttlMs: 1 },
+			[msgId]: { id: msgId, from: "root", to: "worker-1", status: "queued", createdAt: old, updatedAt: old, attempts: 0, requiresAck: true, ttlMs: 1 },
 		},
 		createdAt: old, updatedAt: old,
 	};
@@ -99,12 +99,12 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 		},
 		delivered: { "worker-1": [] },
 		messages: {
-			[msgId]: { id: msgId, from: "orchestrator", to: "worker-1", status: "injected", createdAt: old, updatedAt: old, injectedAt: old, attempts: 1, requiresAck: true, reinjects: 0 },
+			[msgId]: { id: msgId, from: "root", to: "worker-1", status: "injected", createdAt: old, updatedAt: old, injectedAt: old, attempts: 1, requiresAck: true, reinjects: 0 },
 		},
 		createdAt: old, updatedAt: old,
 	};
 	writeFileSync(stateFile, JSON.stringify(state));
-	writeFileSync(join(scratch, ".pi/swarm/mailboxes/worker-1.jsonl"), JSON.stringify({ id: msgId, swarmId: "s", from: "orchestrator", to: "worker-1", subject: "s", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: old, body: "repro A", requiresAck: true, headers: {} }) + "\n");
+	writeFileSync(join(scratch, ".pi/swarm/mailboxes/worker-1.jsonl"), JSON.stringify({ id: msgId, swarmId: "s", from: "root", to: "worker-1", subject: "s", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: old, body: "repro A", requiresAck: true, headers: {} }) + "\n");
 
 	let sendKeysCalls = 0;
 	const tools = {};

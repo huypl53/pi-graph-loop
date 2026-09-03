@@ -8,12 +8,12 @@ import { randomUUID } from "node:crypto";
 import { capturePane, isTmuxRunning, tmux } from "../tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "../session.ts";
 import { ensureDirs, identityPath, paths, readState, taskPaths, readTaskState, trace, withLock, writeState } from "../state.ts";
-import { classifyGoalClearAuthority, GOAL_ORIGIN_ORCHESTRATOR, GOAL_ORIGIN_VALUES } from "../goals.ts";
+import { classifyGoalClearAuthority, GOAL_ORIGIN_ROOT, GOAL_ORIGIN_VALUES } from "../goals.ts";
 import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
-import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority, writeEffectiveIdentity } from "../identity.ts";
+import { heartbeatRootLeader, overridePath, requireRootAuthority, writeEffectiveIdentity } from "../identity.ts";
 import { attachTarget, deriveTaskProgressState, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
-import { ERR_ORCHESTRATOR_PANE_REJECTED } from "../constants.ts";import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
+import { ERR_ROOT_PANE_REJECTED } from "../constants.ts";import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
 import { resolveGoalNudgeIntervalMs } from "../reconcile.ts";
 
@@ -86,8 +86,8 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "swarm_prune",
 		label: "Swarm Prune",
-		description: "Orchestrator/admin cleanup tool. Dry-run by default. Marks zombie agents whose tmux panes are gone and can optionally remove stopped agent records from state.",
-		promptGuidelines: ["Use `swarm_prune` only for orchestrator/admin cleanup. Do not use it for normal worker tasks. Run dryRun first before mutating state."],
+		description: "Root/admin cleanup tool. Dry-run by default. Marks zombie agents whose tmux panes are gone and can optionally remove stopped agent records from state.",
+		promptGuidelines: ["Use `swarm_prune` only for root/admin cleanup. Do not use it for normal worker tasks. Run dryRun first before mutating state."],
 		parameters: Type.Object({
 			dryRun: Type.Optional(Type.Boolean({ description: "Preview actions without modifying state. Defaults to true." })),
 			markDead: Type.Optional(Type.Boolean({ description: "Mark running agents with missing tmux panes as stopped. Defaults to true." })),
@@ -97,7 +97,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_prune", async () => {
 				const p = paths(ctx.cwd);
-				requireOrchestratorAuthority(currentAgentId(), "swarm_prune");
+				requireRootAuthority(currentAgentId(), "swarm_prune");
 				const dryRun = params.dryRun !== false;
 			const markDead = params.markDead !== false;
 			const removeStopped = Boolean(params.removeStopped);
@@ -108,7 +108,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				const ts = now();
 				const nowMs = Date.now();
 				for (const [agentId, agent] of Object.entries(st.agents)) {
-					if (agentId === "orchestrator") continue;
+					if (agentId === "root") continue;
 					const hasPane = Boolean(agent.tmuxTarget) && agent.tmuxTarget !== "unknown";
 					const tmuxAlive = hasPane ? await isTmuxRunning(pi, agent.tmuxTarget) : false;
 					if (markDead && agent.status === "running" && !tmuxAlive) {
@@ -162,7 +162,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "Stable agent id, e.g. planner or reviewer. Lowercase letters, digits, dash and underscore are safest." })),
 			role: Type.String({ description: "Role/instructions for the agent." }),
-			roleKind: Type.Optional(Type.String({ description: "Explicit role kind override (orchestrator/planner/reviewer/tester/observer/implementer/worker). Pinned so it is not re-derived from id/role. Defaults to inference (id-first, then role text)." })),
+			roleKind: Type.Optional(Type.String({ description: "Explicit role kind override (root/planner/reviewer/tester/observer/implementer/worker). Pinned so it is not re-derived from id/role. Defaults to inference (id-first, then role text)." })),
 			model: Type.Optional(Type.String({ description: "pi model id. Defaults to the model pool (if configured), else PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1." })),
 			provider: Type.Optional(Type.String({ description: "pi provider id. Defaults to PI_SWARM_DEFAULT_PROVIDER or model preset provider (zai-coding-cn for glm-5.1, openai for gpt-5.4-mini)." })),
 			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt to send into the spawned agent after pi starts." })),
@@ -192,7 +192,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		description: "Read or refresh a swarm agent's durable Markdown identity card under .pi/swarm/agents/<agent-id>.md.",
 		promptGuidelines: ["Use `swarm_agent_identity` when you need a swarm agent's role, protocol, mailbox, or identity file path."],
 		parameters: Type.Object({
-			agentId: Type.Optional(Type.String({ description: "Agent id. Defaults to current PI_SWARM_AGENT_ID or orchestrator." })),
+			agentId: Type.Optional(Type.String({ description: "Agent id. Defaults to current PI_SWARM_AGENT_ID or root." })),
 			refresh: Type.Optional(Type.Boolean({ description: "Regenerate the identity markdown from current swarm state before reading. Defaults to false." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -307,13 +307,13 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "swarm_register_agent",
 		label: "Swarm Register",
-		description: "Adopt an EXISTING tmux pane into the swarm under a role WITHOUT spawning a new pi. Upsert by id: re-registering with a different tmuxTarget retargets the agent (fixes the 'tmuxTarget: unknown' ghost-agent case for externally-started agents). The operator asserts the pane is available for the role. The reserved 'orchestrator' id is refused here — opt a session in as the PM via '/swarm register here orchestrator' or PI_SWARM_IS_ORCHESTRATOR=1.",
+		description: "Adopt an EXISTING tmux pane into the swarm under a role WITHOUT spawning a new pi. Upsert by id: re-registering with a different tmuxTarget retargets the agent (fixes the 'tmuxTarget: unknown' ghost-agent case for externally-started agents). The operator asserts the pane is available for the role. The reserved 'root' id is refused here — opt a session in as the PM via '/swarm register here root' or PI_SWARM_IS_ROOT=1.",
 		promptGuidelines: ["Use `swarm_register_agent` to bring an already-running pi pane (or shell pane you will start pi in) into the swarm as a role, instead of spawning a fresh agent. Prefer `swarm_spawn_agent` when you need a brand new pi."],
 		parameters: Type.Object({
 			tmuxTarget: Type.String({ description: "Tmux target of the pane to adopt, e.g. session:window.pane, session:window, %paneid, or =session. Pass the special token 'here' (also 'self'/'current'/'.') to adopt the CURRENT pane the tool is running in — useful to register this very pi session without first discovering its target." }),
 			id: Type.Optional(Type.String({ description: "Stable agent id. If the pane already runs pi with PI_SWARM_AGENT_ID set, pass that same id so the record matches." })),
 			role: Type.String({ description: "Role/instructions for the agent." }),
-			roleKind: Type.Optional(Type.String({ description: "Explicit role kind override (orchestrator/planner/reviewer/tester/observer/implementer/worker). Pinned; otherwise derived from id+role, or preserved from an existing pin." })),
+			roleKind: Type.Optional(Type.String({ description: "Explicit role kind override (root/planner/reviewer/tester/observer/implementer/worker). Pinned; otherwise derived from id+role, or preserved from an existing pin." })),
 			model: Type.Optional(Type.String({ description: "pi model id. Defaults to the existing agent's model, then session default." })),
 			provider: Type.Optional(Type.String({ description: "pi provider id." })),
 			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt injected into the adopted pane (defaults to a role/identity kickoff)." })),
@@ -352,10 +352,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_stop_agent", async () => {
 				const p = paths(ctx.cwd);
-				requireOrchestratorAuthority(currentAgentId(), "swarm_stop_agent");
+				requireRootAuthority(currentAgentId(), "swarm_stop_agent");
 				const result = await withLock(p, async () => {
 					const st = await readState(p, ctx.cwd);
-					heartbeatOrchestratorLeader(st, Date.now(), process.pid, "stop_agent");
+					heartbeatRootLeader(st, Date.now(), process.pid, "stop_agent");
 					const r = await stopAgent(pi, ctx.cwd, p, st, safeId(params.agentId), { force: params.force, killPane: params.killPane });
 					await writeState(p, st);
 					return r;
@@ -446,7 +446,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		name: "swarm_send_keys",
 		label: "Swarm Send Keys",
 		description: "Send raw tmux keys to an agent's pane: interrupt (C-c), dismiss, navigate, or type text. Non-literal mode interprets tmux key names; literal mode sends exact text. Powerful/destructive — use to unstick a runaway agent.",
-		promptGuidelines: ["Use `swarm_send_keys` to send raw tmux input to an agent pane, e.g. C-c to interrupt. Prefer the normal mailbox/identity tools for coordination; this is an escape hatch. Targets another agent's pane by id — never use to send keys into the orchestrator pane from a worker."],
+		promptGuidelines: ["Use `swarm_send_keys` to send raw tmux input to an agent pane, e.g. C-c to interrupt. Prefer the normal mailbox/identity tools for coordination; this is an escape hatch. Targets another agent's pane by id — never use to send keys into the root pane from a worker."],
 		parameters: Type.Object({
 			agentId: Type.String({ description: "Agent id whose pane to send keys to." }),
 			keys: Type.String({ description: "Keys to send. Non-literal: space-separated tmux key names (C-c, Up, Enter). Literal: exact text." }),
@@ -459,16 +459,16 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				const st = await readState(p, ctx.cwd);
 				const agent = st.agents[safeId(params.agentId)];
 				if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
-				// Issue 12 C6 micro-fix: principle-based orchestrator-pane reject guard. Fires when the
-			// resolved tmux target equals the orchestrator record's tmuxTarget (typically "unknown"),
-			// so a future refactor cannot silently route raw keystrokes into the orchestrator host
+				// Issue 12 C6 micro-fix: principle-based root-pane reject guard. Fires when the
+			// resolved tmux target equals the root record's tmuxTarget (typically "unknown"),
+			// so a future refactor cannot silently route raw keystrokes into the root host
 			// pane. Principle-based (target equality, not id) so ghost agents mis-stamped to "unknown"
 			// are also rejected. Read-only — no state mutation on rejection.
-			const orchestrator = st.agents["orchestrator"];
-			const orchestratorTarget = orchestrator?.tmuxTarget;
-			if (agent.tmuxTarget && orchestratorTarget && agent.tmuxTarget === orchestratorTarget) {
-				await trace(p, "agent.send_keys.rejected", { agentId: agent.id, resolvedTarget: agent.tmuxTarget, orchestratorTarget, by: currentAgentId() });
-				throw new Error(`${ERR_ORCHESTRATOR_PANE_REJECTED}: swarm_send_keys target ${agent.tmuxTarget} equals the orchestrator record's tmuxTarget; refusing to inject keystrokes into the orchestrator host pane (agentId=${agent.id}).`);
+			const root = st.agents["root"];
+			const rootTarget = root?.tmuxTarget;
+			if (agent.tmuxTarget && rootTarget && agent.tmuxTarget === rootTarget) {
+				await trace(p, "agent.send_keys.rejected", { agentId: agent.id, resolvedTarget: agent.tmuxTarget, rootTarget, by: currentAgentId() });
+				throw new Error(`${ERR_ROOT_PANE_REJECTED}: swarm_send_keys target ${agent.tmuxTarget} equals the root record's tmuxTarget; refusing to inject keystrokes into the root host pane (agentId=${agent.id}).`);
 			}
 			await sendKeys(pi, p, agent.tmuxTarget, params.keys, { literal: params.literal, enter: params.enter });
 			await trace(p, "agent.send_keys", { agentId: agent.id, target: agent.tmuxTarget, literal: Boolean(params.literal), enter: Boolean(params.enter) });
@@ -508,10 +508,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_release_agent_task", async () => {
 				const p = paths(ctx.cwd);
-				requireOrchestratorAuthority(currentAgentId(), "swarm_release_agent_task");
+				requireRootAuthority(currentAgentId(), "swarm_release_agent_task");
 				const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "release_agent_task");
+				heartbeatRootLeader(st, Date.now(), process.pid, "release_agent_task");
 				const agent = st.agents[safeId(params.agentId)];
 				if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
 				const candidate = (agent.activeTaskIds || []).slice().filter((tid) => !params.taskId || tid === safeId(params.taskId));
@@ -536,8 +536,8 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 	}))
 
 	// === Issue 18: swarm_set_goal + swarm_mark_goal_done tools ===
-	// The orchestrator's durable goal + the idle-streak nudge counter live on SwarmState.goal (see
-	// types.ts). Both tools are orchestrator-only (server-side requireOrchestratorAuthority). Setting
+	// The root's durable goal + the idle-streak nudge counter live on SwarmState.goal (see
+	// types.ts). Both tools are root-only (server-side requireRootAuthority). Setting
 	// a goal resets consecutiveNoResolveNudges to 0 AND clears back-off + lastNudgeAt + lastResolvedAt
 	// (a fresh goal never inherits the previous goal's counter / back-off). Marking done clears the
 	// entire entry (delete st.goal). The pump's evaluateIdleGoalNudgeLocked reads these fields under
@@ -545,22 +545,22 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "swarm_set_goal",
 		label: "Swarm Set Goal",
-		description: "Persist a swarm-level goal. While a goal is set and every non-orchestrator agent is idle with no active task nodes, the orchestrator pump emits an idle-streak nudge (anti-loop: max MAX_CONSECUTIVE_NUDGES_DEFAULT consecutive, then 2-tick back-off). Orchestrator-only.",
+		description: "Persist a swarm-level goal. While a goal is set and every non-root agent is idle with no active task nodes, the root pump emits an idle-streak nudge (anti-loop: max MAX_CONSECUTIVE_NUDGES_DEFAULT consecutive, then 2-tick back-off). Root-only.",
 		promptGuidelines: ["Use `swarm_set_goal` to record or update the swarm's current goal in durable state.", "Pass `intervalMs` when you want a durable per-goal idle interval override.", "Pass `update: true` to update the existing goal in place without resetting counters.", "Pair with `swarm_mark_goal_done` when the goal is achieved or abandoned."],
 		parameters: Type.Object({
 			text: Type.Optional(Type.String({ description: "Goal text. Required for create mode; optional for update mode when only interval changes." })),
 			id: Type.Optional(Type.String({ description: "Optional explicit goalId. Omit to auto-generate." })),
 			intervalMs: Type.Optional(Type.Number({ description: "Optional durable idle interval override in milliseconds; positive values only." })),
 			update: Type.Optional(Type.Boolean({ description: "When true, update the current goal in place without resetting counters or goalId." })),
-			// Issue 81: durable origin metadata. Default "orchestrator" (backwards-compatible).
+			// Issue 81: durable origin metadata. Default "root" (backwards-compatible).
 			// "user" marks the goal as user-intent (refuses clear/replace without approval).
-			origin: Type.Optional(Type.String({ description: "Goal origin provenance: 'user' | 'orchestrator' | 'system' | 'batch'. Default 'orchestrator'. User-origin goals refuse clear/replace without explicit approval." })),
+			origin: Type.Optional(Type.String({ description: "Goal origin provenance: 'user' | 'root' | 'system' | 'batch'. Default 'root'. User-origin goals refuse clear/replace without explicit approval." })),
 			setByScope: Type.Optional(Type.String({ description: "Human-readable provenance hint (e.g. 'pm-cli', 'batch-worker-r80'). Optional, audit only." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_set_goal", async () => {
 				const p = paths(ctx.cwd);
-				requireOrchestratorAuthority(currentAgentId(), "swarm_set_goal");
+				requireRootAuthority(currentAgentId(), "swarm_set_goal");
 				const isUpdate = Boolean(params.update);
 				const text = String(params.text || "").trim();
 				if (!isUpdate && !text) throw new Error("swarm_set_goal: text must be non-empty");
@@ -576,12 +576,12 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 					}
 					const nudgeIntervalMs = hasInterval ? Math.floor(requestedInterval) : undefined;
 					const defaultIntervalMs = resolveGoalNudgeIntervalMs();
-					// Issue 81: validate origin parameter against the allowed set; default "orchestrator".
+					// Issue 81: validate origin parameter against the allowed set; default "root".
 					const requestedOrigin = params.origin;
 					if (requestedOrigin !== undefined && !GOAL_ORIGIN_VALUES.has(requestedOrigin as any)) {
 						throw new Error(`swarm_set_goal: invalid origin ${params.origin} (must be one of: ${[...GOAL_ORIGIN_VALUES].join(", ")})`);
 					}
-					const newOrigin = (requestedOrigin ?? GOAL_ORIGIN_ORCHESTRATOR) as import("../goals.ts").GoalOrigin;
+					const newOrigin = (requestedOrigin ?? GOAL_ORIGIN_ROOT) as import("../goals.ts").GoalOrigin;
 					const requestedSetByScope = params.setByScope ? String(params.setByScope) : undefined;
 					if (isUpdate) {
 						if (!st.goal) return { updated: false, noop: true };
@@ -672,8 +672,8 @@ if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs
 	pi.registerTool(defineTool({
 		name: "swarm_mark_goal_done",
 		label: "Swarm Mark Goal Done",
-		description: "Clear the swarm-level goal and stop the idle-streak nudge loop. Orchestrator-only.",
-		promptGuidelines: ["Use `swarm_mark_goal_done` once the goal is achieved or abandoned — it stops the orchestrator pump's idle nudge entirely."],
+		description: "Clear the swarm-level goal and stop the idle-streak nudge loop. Root-only.",
+		promptGuidelines: ["Use `swarm_mark_goal_done` once the goal is achieved or abandoned — it stops the root pump's idle nudge entirely."],
 		parameters: Type.Object({
 			goalId: Type.Optional(Type.String({ description: "Optional goalId to clear (safety fence; clear fails if it does not match the current goal)." })),
 			// Issue 81: explicit user-approval signal. Without this, swarm_mark_goal_done refuses on
@@ -685,7 +685,7 @@ if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_mark_goal_done", async () => {
 				const p = paths(ctx.cwd);
-				requireOrchestratorAuthority(currentAgentId(), "swarm_mark_goal_done");
+				requireRootAuthority(currentAgentId(), "swarm_mark_goal_done");
 				const result = await withLock(p, async () => {
 					const st = await readState(p, ctx.cwd);
 					if (!st.goal) return { cleared: true, noop: true };

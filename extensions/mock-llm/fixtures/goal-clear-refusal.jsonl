@@ -1,10 +1,10 @@
 # goal-clear-refusal: a standing user-origin goal must refuse swarm_mark_goal_done by default.
 # Lane seeding helper pre-stamps st.goal.origin = "user", st.goal.text = "chỉ dùng khi user yêu cầu".
-# Turn 1: orchestrator (mistakenly) calls swarm_mark_goal_done with no approval -> refuses.
-# Turn 2: orchestrator retries with approvedByUser=true -> clears (legitimate path).
-# Turn 3: orchestrator sets a NEW user-origin goal (replacement intent; the new goal is also
+# Turn 1: root (mistakenly) calls swarm_mark_goal_done with no approval -> refuses.
+# Turn 2: root retries with approvedByUser=true -> clears (legitimate path).
+# Turn 3: root sets a NEW user-origin goal (replacement intent; the new goal is also
 #         user-origin, mirroring the legitimate "user replaces their own standing goal" path).
-# Turn 4: orchestrator (mistakenly) calls swarm_set_goal with a replace text on top of the
+# Turn 4: root (mistakenly) calls swarm_set_goal with a replace text on top of the
 #         user-origin goal -> refuses (replace blocked on user-origin).
 # Turn 5: settle (interval-only update on the still-active user-origin goal).
 {"name":"clear refuse","events":[{"type":"text","delayMs":15,"text":"Attempting to clear the user-origin goal without approval must refuse.","chunks":["Attempting to clear ","the user-origin goal ","without approval must refuse."]},{"type":"toolcall","delayMs":15,"name":"swarm_mark_goal_done","id":"clear-refuse-1","arguments":{}}]}

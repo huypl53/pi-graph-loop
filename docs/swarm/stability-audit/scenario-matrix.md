@@ -26,9 +26,9 @@ Rules:
 
 | ID | Scenario | Fixture | Choreography | Pass criteria |
 |---|---|---|---|---|
-| S5 | ALL agents stale, tasks NOT done | `stale-all-agents.jsonl` — turn 0 = normal accept+processing ack, then script ends | Spawn 2 worker lanes, let them ack, then KILL both panes; wait past attention/stale windows; run swarm_reconcile; inspect task + traces | Dead/missing panes detected; nodes surfaced (staleAt/blocked-visible); assignments released or flagged; orchestrator notified via trace; NO auto-success, NO fabricated evidence |
+| S5 | ALL agents stale, tasks NOT done | `stale-all-agents.jsonl` — turn 0 = normal accept+processing ack, then script ends | Spawn 2 worker lanes, let them ack, then KILL both panes; wait past attention/stale windows; run swarm_reconcile; inspect task + traces | Dead/missing panes detected; nodes surfaced (staleAt/blocked-visible); assignments released or flagged; root notified via trace; NO auto-success, NO fabricated evidence |
 | S6 | Agent dies mid-node (in_progress) | `inprogress-death.jsonl` — turn 0 = update_task in_progress + ack | Kill pane after turn 0; wait; reconcile | Node stays in_progress + stale-flagged (not auto-closed); reassign candidate surfaced; evidence not stamped |
-| S7 | Assignment injection to dead pane | none (orchestrator-side) | Kill worker pane; send assignment via swarm_assign_task; observe delivery retries; inspect dead letters | Failed injection retried then dead-lettered/intercepted with record; no silent drop; reconcile surfaces it |
+| S7 | Assignment injection to dead pane | none (root-side) | Kill worker pane; send assignment via swarm_assign_task; observe delivery retries; inspect dead letters | Failed injection retried then dead-lettered/intercepted with record; no silent drop; reconcile surfaces it |
 | S8 | response-required worker dies before result | `response-required-death.jsonl` — turn 0 = seen+processing acks only | Kill pane after turn 0; wait past REMINDER_NO_PROGRESS_MS; observe escalation chain | response_missing escalation fires: blocking + reminder thread; final verdict (abort/dead-letter) WITHOUT false credit; thread records the attempt honestly |
 
 ## C. Task-graph multi-agent communication

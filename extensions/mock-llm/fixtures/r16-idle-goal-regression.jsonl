@@ -1,8 +1,8 @@
-# r16-idle-goal-regression: orchestrator-side probe for the ACK-loop fix.
+# r16-idle-goal-regression: root-side probe for the ACK-loop fix.
 #
 # Lane seeding helper pre-stamps st.goal as a user-origin standing goal with
 # nudgeIntervalMs=5000 (mirroring the live `goal-1788266039522-6eae40` incident
-# shape). The fixture drives ONE orchestrator turn whose text reads like a plain
+# shape). The fixture drives ONE root turn whose text reads like a plain
 # "ack" — exactly the resolve-shape the R16 fix must distinguish from a real
 # resolve-action (spawn/assign/mark_goal_done/send_keys).
 #

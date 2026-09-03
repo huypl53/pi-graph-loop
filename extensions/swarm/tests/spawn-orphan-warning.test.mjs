@@ -22,7 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 process.env.PI_SWARM_ORPHAN_TIMEOUT_MS = "50";
 
 // Direct imports of the cores + types we exercise. Real handlers, real lock, real state.
-const { spawnAgent, stopAgent, restartAgent, fireOrphanWarning, armOrphanWatch, clearOrphanWatch, recentSpawnCount, isSameOrchestratorLeader } = await import(join(here, "..", "src", "agents.ts"));
+const { spawnAgent, stopAgent, restartAgent, fireOrphanWarning, armOrphanWatch, clearOrphanWatch, recentSpawnCount, isSameRootLeader } = await import(join(here, "..", "src", "agents.ts"));
 const { enqueueAndDeliver } = await import(join(here, "..", "src", "mailbox.ts"));
 const { paths, withLock, readState, writeState } = await import(join(here, "..", "src", "state.ts"));
 
@@ -81,7 +81,7 @@ const freshScratch = (label) => {
 
 // Direct helper: inject a pre-existing message record into state.messages without going through the
 // delivery path. Used by the race-backstop case to simulate "a message already exists at fire time".
-const seedInboundMessage = async (cwd, p, toAgentId, fromAgentId = "orchestrator") => {
+const seedInboundMessage = async (cwd, p, toAgentId, fromAgentId = "root") => {
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const id = `msg-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -108,9 +108,9 @@ console.log("\n[1] Happy path: spawn then send within window -> cleared, NO orph
 	const p = paths(cwd);
 	const { msg } = await withLock(p, async () => {
 		const st = await readState(p, cwd);
-		// Pre-seed the orchestrator pseudo-agent (enqueueAndDeliver keys `from = currentAgentId()`).
-		st.agents["orchestrator"] ||= {
-			id: "orchestrator", role: "PM", roleKind: "orchestrator", roleKindExplicit: true,
+		// Pre-seed the root pseudo-agent (enqueueAndDeliver keys `from = currentAgentId()`).
+		st.agents["root"] ||= {
+			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
 			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
 			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
 			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -169,8 +169,8 @@ console.log("\n[3] Cancel via assignment: spawn then deliver_message -> cleared,
 	const p = paths(cwd);
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
-		st.agents["orchestrator"] ||= {
-			id: "orchestrator", role: "PM", roleKind: "orchestrator", roleKindExplicit: true,
+		st.agents["root"] ||= {
+			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
 			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
 			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
 			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -258,8 +258,8 @@ console.log("\n[6] Race backstop: message exists at fire time -> orphan_resolved
 	let spawnedId = null;
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
-		st.agents["orchestrator"] ||= {
-			id: "orchestrator", role: "PM", roleKind: "orchestrator", roleKindExplicit: true,
+		st.agents["root"] ||= {
+			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
 			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
 			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
 			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -284,14 +284,14 @@ console.log("\n[6] Race backstop: message exists at fire time -> orphan_resolved
 	rmSync(cwd, { recursive: true, force: true });
 }
 
-console.log("\n[7] Preflight clear: spawn + same-orchestrator assign within grace window");
+console.log("\n[7] Preflight clear: spawn + same-root assign within grace window");
 {
 	const cwd = freshScratch("preflight");
 	const p = paths(cwd);
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
-		st.agents["orchestrator"] ||= {
-			id: "orchestrator", role: "PM", roleKind: "orchestrator", roleKindExplicit: true,
+		st.agents["root"] ||= {
+			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
 			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
 			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
 			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -317,8 +317,8 @@ console.log("\n[7] Preflight clear: spawn + same-orchestrator assign within grac
 	// test [8]'s pattern of deriving the comparison tuple from the real stamped
 	// value rather than from the test-setup fallback ISO.
 	const callerLeader = { pid: process.pid, sessionStartedAt: entry?.spawnedBySessionStartedAt };
-	ok("isSameOrchestratorLeader returns true for matching pid+sessionStartedAt",
-		isSameOrchestratorLeader(entry, callerLeader) === true);
+	ok("isSameRootLeader returns true for matching pid+sessionStartedAt",
+		isSameRootLeader(entry, callerLeader) === true);
 	// Drive the pre-clear site directly.
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
@@ -340,16 +340,16 @@ console.log("\n[7] Preflight clear: spawn + same-orchestrator assign within grac
 	rmSync(cwd, { recursive: true, force: true });
 }
 
-console.log("\n[7a] Preflight clear: spawn as orchestrator's first tool call (leader was vacant at arm time)");
+console.log("\n[7a] Preflight clear: spawn as root's first tool call (leader was vacant at arm time)");
 {
 	const cwd = freshScratch("preflight-vacant");
 	const p = paths(cwd);
-	// Do NOT seed st.orchestratorLeader — production "first tool call" case.
+	// Do NOT seed st.rootLeader — production "first tool call" case.
 	// The spawn-time stamp must still match the assign-time caller (same process).
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
-		st.agents["orchestrator"] ||= {
-			id: "orchestrator", role: "PM", roleKind: "orchestrator", roleKindExplicit: true,
+		st.agents["root"] ||= {
+			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
 			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
 			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
 			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -367,8 +367,8 @@ console.log("\n[7a] Preflight clear: spawn as orchestrator's first tool call (le
 	ok("entry stamped with spawnedBySessionStartedAt despite vacant leader",
 		typeof entry?.spawnedBySessionStartedAt === "string" &&
 		entry.spawnedBySessionStartedAt.length > 0);
-	ok("isSameOrchestratorLeader returns true (same process, no leader needed)",
-		isSameOrchestratorLeader(entry, { pid: process.pid, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT }) === true);
+	ok("isSameRootLeader returns true (same process, no leader needed)",
+		isSameRootLeader(entry, { pid: process.pid, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT }) === true);
 	// Drive the pre-clear site.
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
@@ -388,18 +388,18 @@ console.log("\n[7a] Preflight clear: spawn as orchestrator's first tool call (le
 	rmSync(cwd, { recursive: true, force: true });
 }
 
-console.log("\n[8] Cross-orchestrator assign does NOT pre-clear");
+console.log("\n[8] Cross-root assign does NOT pre-clear");
 {
 	const cwd = freshScratch("cross-orch");
 	const p = paths(cwd);
 	const foreignLeader = {
-		pid: 999_001,                                            // DIFFERENT pid (foreign orchestrator)
+		pid: 999_001,                                            // DIFFERENT pid (foreign root)
 		sessionStartedAt: new Date().toISOString(),
 	};
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
-		st.agents["orchestrator"] ||= {
-			id: "orchestrator", role: "PM", roleKind: "orchestrator", roleKindExplicit: true,
+		st.agents["root"] ||= {
+			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
 			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
 			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
 			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -407,7 +407,7 @@ console.log("\n[8] Cross-orchestrator assign does NOT pre-clear");
 		await spawnAgent(pi, cwd, p, st, { id: "cross-orch-1", role: "Worker", initialPrompt: "go" });
 		await writeState(p, st);
 	});
-	// Override the entry's stamp to simulate a foreign orchestrator's spawn (different pid + session).
+	// Override the entry's stamp to simulate a foreign root's spawn (different pid + session).
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const e = st.recentSpawns?.find((s) => s.agentId === "cross-orch-1");
@@ -424,16 +424,16 @@ console.log("\n[8] Cross-orchestrator assign does NOT pre-clear");
 		return st.recentSpawns.find((s) => s.agentId === "cross-orch-1");
 	});
 	const callerLeader = { pid: process.pid, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || undefined };
-	ok("isSameOrchestratorLeader returns false for foreign pid",
-		isSameOrchestratorLeader(entry, callerLeader) === false);
+	ok("isSameRootLeader returns false for foreign pid",
+		isSameRootLeader(entry, callerLeader) === false);
 	// N1 strengthening: also verify the helper returns true when caller DOES match.
-	ok("isSameOrchestratorLeader returns true when caller matches the stamp",
-		isSameOrchestratorLeader(entry, foreignLeader) === true);
+	ok("isSameRootLeader returns true when caller matches the stamp",
+		isSameRootLeader(entry, foreignLeader) === true);
 	await wait(TIMER_MARGIN_MS);
 	const events = readEvents(cwd);
-	ok("orphan_warning fires (foreign orchestrator did not pre-clear)",
+	ok("orphan_warning fires (foreign root did not pre-clear)",
 		eventNames(events, "agent.spawn.orphan_warning").length === 1);
-	ok("NO orphan_cleared trace (foreign orchestrator cannot clear)",
+	ok("NO orphan_cleared trace (foreign root cannot clear)",
 		eventNames(events, "agent.spawn.orphan_cleared").length === 0);
 	ok("recentSpawns cleared after warning fired",
 		recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);

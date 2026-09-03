@@ -137,8 +137,8 @@ st.agents = {
 await writeState(p, st);
 
 const swarmEvents = [
-	{ ts: isoAt(1000), event: "swarm.init", by: "orchestrator" },
-	{ ts: isoAt(3000), event: "swarm.status", by: "orchestrator", count: 3 },
+	{ ts: isoAt(1000), event: "swarm.init", by: "root" },
+	{ ts: isoAt(3000), event: "swarm.status", by: "root", count: 3 },
 ];
 const taskEvents = [
 	{ ts: isoAt(2000), event: "task.create", taskId, by: "engine" },

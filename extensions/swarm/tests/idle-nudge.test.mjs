@@ -22,9 +22,9 @@ process.env.PI_SWARM_TASK_STALL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs } = await import(join(here, "..", "src", "state.ts"));
-const { evaluateIdleGoalNudgeLocked, evaluateTaskGraphStallNudgeLocked, staleSurfaceReason, updateIdleEpochLocked, pumpOrchestratorMailbox } = await import(join(here, "..", "src", "reconcile.ts"));
+const { evaluateIdleGoalNudgeLocked, evaluateTaskGraphStallNudgeLocked, staleSurfaceReason, updateIdleEpochLocked, pumpRootMailbox } = await import(join(here, "..", "src", "reconcile.ts"));
 
-const { ensureOrchestrator, heartbeatOrchestratorLeader } = await import(join(here, "..", "src", "identity.ts"));
+const { ensureRoot, heartbeatRootLeader } = await import(join(here, "..", "src", "identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "..", "src", "mailbox.ts"));
 
 const dir = await mkdtemp(join(tmpdir(), "idle-nudge-"));
@@ -48,14 +48,14 @@ let pass = 0, fail = 0;
 const ok = (n, c, info) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL:", n, info ?? ""); } };
 
 const SAVED_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const SAVED_ORCH = process.env.PI_SWARM_IS_ORCHESTRATOR;
+const SAVED_ORCH = process.env.PI_SWARM_IS_ROOT;
 delete process.env.PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+process.env.PI_SWARM_IS_ROOT = "1";
 process.on("exit", () => {
 	if (SAVED_AGENT_ID === undefined) delete process.env.PI_SWARM_AGENT_ID;
 	else process.env.PI_SWARM_AGENT_ID = SAVED_AGENT_ID;
-	if (SAVED_ORCH === undefined) delete process.env.PI_SWARM_IS_ORCHESTRATOR;
-	else process.env.PI_SWARM_IS_ORCHESTRATOR = SAVED_ORCH;
+	if (SAVED_ORCH === undefined) delete process.env.PI_SWARM_IS_ROOT;
+	else process.env.PI_SWARM_IS_ROOT = SAVED_ORCH;
 });
 
 async function readEventsFile() {
@@ -73,7 +73,7 @@ async function countEvents(name) {
 
 async function setup({ taskId = "task-1", ageMs = 0, withTask = false, taskStatus = undefined } = {}) {
 	const st = await readState(p, dir);
-	ensureOrchestrator(st, dir, p);
+	ensureRoot(st, dir, p);
 	const ts = new Date().toISOString();
 	st.agents["worker-a"] = {
 		id: "worker-a", role: "worker-a role", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
@@ -94,7 +94,7 @@ async function setup({ taskId = "task-1", ageMs = 0, withTask = false, taskStatu
 		id: `goal-${Date.now()}-test`,
 		text: "Ship Issue 68",
 		setAt: new Date(Date.now() - ageMs).toISOString(),
-		setBy: "orchestrator",
+		setBy: "root",
 		consecutiveNoResolveNudges: 0,
 	};
 	await writeState(p, st);
@@ -128,7 +128,7 @@ async function seedGraphTask(taskId, { ageMs = 0, taskStatus = "in_progress" } =
 		priority: "normal",
 		createdAt,
 		updatedAt: createdAt,
-		owner: "orchestrator",
+		owner: "root",
 		workflow: "feature-dev",
 		allowedFiles: [],
 		acceptanceCriteria: [],
@@ -152,7 +152,7 @@ async function tickGoal(nowMs = Date.now()) {
 	let result;
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
-		ensureOrchestrator(st, dir, p);
+		ensureRoot(st, dir, p);
 		result = await evaluateIdleGoalNudgeLocked(pi, dir, p, st, nowMs);
 		await writeState(p, st);
 	});
@@ -163,7 +163,7 @@ async function tickGraph(nowMs = Date.now()) {
 	let result;
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
-		ensureOrchestrator(st, dir, p);
+		ensureRoot(st, dir, p);
 		result = await evaluateTaskGraphStallNudgeLocked(pi, dir, p, st, nowMs);
 		await writeState(p, st);
 	});
@@ -499,8 +499,8 @@ console.log("\n[K] schedule self-heal clamps stale boundaries to the CURRENT int
 	// via a path that did NOT re-anchor (pre-fix state on disk). epoch + old interval = far future.
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
-		ensureOrchestrator(st, dir, p);
-		st.goal = { id: "g-k1", text: "K1 stale schedule", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
+		ensureRoot(st, dir, p);
+		st.goal = { id: "g-k1", text: "K1 stale schedule", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
 		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 3_600_000).toISOString(), nextGoalNudgeAt: new Date(t0 - 1_800_000).toISOString() }; // wait — stale is FUTURE under 1h
 		// stale boundary from the OLD 1h interval: epoch (t0-1h) + 1h = t0 + 0? Use epoch far past + old interval => boundary in the FUTURE
 		st.idleNudgeState.nextGoalNudgeAt = new Date(t0 + 3_300_000).toISOString(); // ~55min out (old 1h schedule)
@@ -522,8 +522,8 @@ console.log("\n[L] after a resolve, next nudge waits the full interval from the 
 	const t0 = Date.now();
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
-		ensureOrchestrator(st, dir, p);
-		st.goal = { id: "g-l1", text: "L1 post-resolve spacing", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
+		ensureRoot(st, dir, p);
+		st.goal = { id: "g-l1", text: "L1 post-resolve spacing", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
 		// Live bug shape: epoch is 45min old; a resolve just cleared the counter; the v1 clamp
 		// computed epoch+30s = far past => re-fired EVERY tick. v2 must anchor at last-emit.
 		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 2_700_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 5_000).toISOString(), nextGoalNudgeAt: new Date(t0 - 4_999).toISOString() };
@@ -538,8 +538,8 @@ console.log("\n[L] after a resolve, next nudge waits the full interval from the 
 	await setup();
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
-		ensureOrchestrator(st, dir, p);
-		st.goal = { id: "g-l2", text: "L2 epoch anchor", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
+		ensureRoot(st, dir, p);
+		st.goal = { id: "g-l2", text: "L2 epoch anchor", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
 		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 20_000).toISOString() };
 		await writeState(p, st);
 	});
@@ -550,36 +550,36 @@ console.log("\n[L] after a resolve, next nudge waits the full interval from the 
 }
 
 // =============================================================
-// M. Orchestrator busy resets the idle epoch (turn_start busy edge)
+// M. Root busy resets the idle epoch (turn_start busy edge)
 // =============================================================
-console.log("\n[M] orchestrator busy during the interval resets the epoch");
+console.log("\n[M] root busy during the interval resets the epoch");
 {
 	await setup();
 	const t0 = Date.now();
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
-		ensureOrchestrator(st, dir, p);
-		st.goal = { id: "g-m1", text: "M1 orchestrator busy", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "orchestrator", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
+		ensureRoot(st, dir, p);
+		st.goal = { id: "g-m1", text: "M1 root busy", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
 		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 25_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 25_000).toISOString() };
 		await writeState(p, st);
 	});
-	// 5s later the orchestrator goes BUSY (turn_start): epoch + pending boundary dropped.
-	// Row 68 fix: busy orchestrator work must not count toward the idle interval.
+	// 5s later the root goes BUSY (turn_start): epoch + pending boundary dropped.
+	// Row 68 fix: busy root work must not count toward the idle interval.
 	const hooks = await import(join(here, "..", "src", "hooks.ts"));
 	const handlers = {};
 	const hpi = { on: (ev, fn) => { (handlers[ev] ||= []).push(fn); }, registerTool(){}, registerCommand(){}, exec: pi.exec, setModel: pi.setModel, sendMessage: pi.sendMessage };
 	hooks.registerSwarmHooks(hpi);
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	await handlers["turn_start"][0]({ turnIndex: 0 }, { cwd: dir });
 	{
 		const st = await getGoalState();
-		ok("turn_start (orchestrator) drops the idle epoch", st.idle?.allIdleSinceAt === undefined && st.idle?.nextGoalNudgeAt === undefined, JSON.stringify(st.idle));
+		ok("turn_start (root) drops the idle epoch", st.idle?.allIdleSinceAt === undefined && st.idle?.nextGoalNudgeAt === undefined, JSON.stringify(st.idle));
 	}
 	// 25s of busy work elapse; turn ends at t0+25s. Next pump tick stamps a FRESH epoch
 	// (t0+25s) and the nudge must wait until t0+25s+30s — NOT fire at t0+30s (which would
 	// ignore the busy window, the live bug).
 	let r = await tickGoal(t0 + 30_000);
-	ok("interval measured from the END of orchestrator work (not old epoch)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	ok("interval measured from the END of root work (not old epoch)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
 	{
 		const st = await getGoalState();
 		const fresh = new Date(st.idle.allIdleSinceAt).getTime();
@@ -643,7 +643,7 @@ console.log("\n[M] vacuous idle: zero effective agents holds goal nudge");
 		st.goal.nudgeIntervalMs = 1000;
 		await writeState(p, st);
 	});
-	// Remove every non-orchestrator agent from st.agents so `agentIsEffectivelyAlive` filter is empty.
+	// Remove every non-root agent from st.agents so `agentIsEffectivelyAlive` filter is empty.
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
 		delete st.agents["worker-a"];
@@ -686,7 +686,7 @@ console.log("\n[N] ghost agents do not count as effective workers (vacuous sanit
 // R22 — goal nudges must survive worker-busy at surface time.
 // Live incident 2026-09-02T12:03:36..12:30Z: 3 goal nudges emitted under the all-idle
 // gate, then a worker turned busy (the nudge's requested action succeeded), and
-// staleSurfaceReason's goal-key agent_busy leg dropped them at orchestrator_pump.surface
+// staleSurfaceReason's goal-key agent_busy leg dropped them at root_pump.surface
 // FOREVER: stuck_escalated every tick, ZERO pi.sendMessage at the boundary for 26+ min.
 // R21 principle: surface-time revalidation must AGREE with emission-time gating, not
 // re-check a condition emission already guaranteed. Fix (b): the goal-key branch drops
@@ -711,7 +711,7 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 	ok("R22 three nudges durably enqueued", goalMsgs.length === 3, `got ${goalMsgs.length}`);
 
 	// ---- THE STARVATION TRIGGER: worker-a turns busy (tool_running) after emission.
-	// This is the nudge's own requested action succeeding (orchestrator assigned work).
+	// This is the nudge's own requested action succeeding (root assigned work).
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
 		s.agents["worker-a"].runtimeStatus = "tool_running";
@@ -773,17 +773,17 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 	}, t0 + 5300);
 	ok("R22-C1 taskKey graph-stall nudge still suppressed by busy worker", vC1.stale === true && vC1.reason === "agent_busy", JSON.stringify(vC1));
 
-	// ---- R22-S2 (R10-1 boundary): idle-orchestrator pump tick must surface the queued
+	// ---- R22-S2 (R10-1 boundary): idle-root pump tick must surface the queued
 	// nudges through the REAL pi.sendMessage boundary — not an internal helper. The pi
 	// object's sendMessage pushes into the shared sentMessages array (R10-1 counter).
 	// Claim the leader (as production session_start does) so the pump's second-line
 	// defense doesn't deny the tick — same reason the R13 harness claims it.
 	const prevAgentId = process.env.PI_SWARM_AGENT_ID;
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	process.env.PI_SWARM_AGENT_ID = "root";
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		ensureOrchestrator(s, dir, p);
-		heartbeatOrchestratorLeader(s, t0 + 5400, process.pid, "r22_test_seed");
+		ensureRoot(s, dir, p);
+		heartbeatRootLeader(s, t0 + 5400, process.pid, "r22_test_seed");
 		await writeState(p, s);
 	});
 	const ctx = { cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } };
@@ -800,7 +800,7 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 			.filter((m) => m.idempotencyKey?.startsWith(`goal:${s.goal.id}:nudge:idle-streak`))
 			.map((m) => m.id));
 		for (const id of Object.keys(s.messages)) if (!keep.has(id)) delete s.messages[id];
-		const mb = join(dir, ".pi", "swarm", "mailboxes", "orchestrator.jsonl");
+		const mb = join(dir, ".pi", "swarm", "mailboxes", "root.jsonl");
 		try {
 			const lines = (await readFile(mb, "utf8")).trim().split("\n").filter(Boolean)
 				.map((l) => JSON.parse(l)).filter((e) => keep.has(e.id));
@@ -811,7 +811,7 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 
 
 	const sendsAtPumpStart = sentMessages.length;
-	const pump1 = await pumpOrchestratorMailbox(pi, ctx, p, 'r22_starve_tick');
+	const pump1 = await pumpRootMailbox(pi, ctx, p, 'r22_starve_tick');
 	ok("R22-S2 pump delivers the queued goal nudge (delivered >= 1)", (pump1?.delivered ?? 0) >= 1, `delivered=${pump1?.delivered}`);
 	ok("R22-S2 pi.sendMessage called >= 1 at the real boundary", sentMessages.length - sendsAtPumpStart >= 1, `sends=${sentMessages.length - sendsAtPumpStart}`);
 	if (sentMessages.length - sendsAtPumpStart >= 1) {
@@ -822,7 +822,7 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 
 	// Replay guard (R13-S2 pattern): a second idle tick must NOT re-surface the same nudge.
 	const sendsAfterFirst = sentMessages.length;
-	const pump2 = await pumpOrchestratorMailbox(pi, ctx, p, "r22_starve_replay");
+	const pump2 = await pumpRootMailbox(pi, ctx, p, "r22_starve_replay");
 	ok("R22-S2 replay tick does not duplicate surface", sentMessages.length === sendsAfterFirst && (pump2?.delivered ?? 0) === 0, `sends=${sentMessages.length - sendsAfterFirst} delivered=${pump2?.delivered} ids=${JSON.stringify(pump2?.ids)}`);
 
 	if (prevAgentId === undefined) delete process.env.PI_SWARM_AGENT_ID;
@@ -852,7 +852,7 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	const tickR23 = async (nowMs) => {
 		await withLock(p, async () => {
 			const s = await readState(p, dir);
-			for (const a of Object.values(s.agents)) if (a.id !== "orchestrator") a.lastHeartbeatAt = new Date(nowMs).toISOString();
+			for (const a of Object.values(s.agents)) if (a.id !== "root") a.lastHeartbeatAt = new Date(nowMs).toISOString();
 			await writeState(p, s);
 		});
 		return tickGoal(nowMs);
@@ -861,7 +861,7 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		const s = await readState(p, dir);
 		s.goal = { id: gid, text: "R23 user goal", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(t0 - 120_000).toISOString() };
 		s.idleNudgeState = { allIdleSinceAt: new Date(t0 - 60_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
-		s.messages["msg-r23-legacy-3"] = { id: "msg-r23-legacy-3", from: "orchestrator", to: "orchestrator", status: "mailbox_delivered", createdAt: new Date(t0 - 120_000).toISOString(), updatedAt: new Date(t0 - 120_000).toISOString(), requiresAck: true, requiresResponse: false, subject: "legacy", body: "legacy", idempotencyKey: `goal:${gid}:nudge:idle-streak:3` };
+		s.messages["msg-r23-legacy-3"] = { id: "msg-r23-legacy-3", from: "root", to: "root", status: "mailbox_delivered", createdAt: new Date(t0 - 120_000).toISOString(), updatedAt: new Date(t0 - 120_000).toISOString(), requiresAck: true, requiresResponse: false, subject: "legacy", body: "legacy", idempotencyKey: `goal:${gid}:nudge:idle-streak:3` };
 		await writeState(p, s);
 	});
 	let r = await tickR23(t0);
@@ -896,12 +896,12 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	// Purge the file-shared mailbox slice to THIS goal's messages (R22 pattern): earlier
 	// sections' never-pumped nudges are still durable candidates.
 	const prevAgentIdR23 = process.env.PI_SWARM_AGENT_ID;
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
+	process.env.PI_SWARM_AGENT_ID = "root";
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
 		const keep = new Set(Object.values(s.messages).filter((m) => m.idempotencyKey?.startsWith(`goal:${gid}:nudge:idle-streak`)).map((m) => m.id));
 		for (const id of Object.keys(s.messages)) if (!keep.has(id)) delete s.messages[id];
-		const mb = join(dir, ".pi", "swarm", "mailboxes", "orchestrator.jsonl");
+		const mb = join(dir, ".pi", "swarm", "mailboxes", "root.jsonl");
 		try {
 			const lines = (await readFile(mb, "utf8")).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((e) => keep.has(e.id));
 			await writeFile(mb, lines.map((e) => JSON.stringify(e)).join("\n") + "\n");
@@ -910,12 +910,12 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	});
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		ensureOrchestrator(s, dir, p);
-		heartbeatOrchestratorLeader(s, Date.now(), process.pid, "r23_test_seed");
+		ensureRoot(s, dir, p);
+		heartbeatRootLeader(s, Date.now(), process.pid, "r23_test_seed");
 		await writeState(p, s);
 	});
 	const sendsAtPumpR23 = sentMessages.length;
-	const pumpR23 = await pumpOrchestratorMailbox(pi, { cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } }, p, "r23_rearm_tick");
+	const pumpR23 = await pumpRootMailbox(pi, { cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } }, p, "r23_rearm_tick");
 	ok("R23-G4 pump surfaces the fresh nudge (delivered >= 1)", (pumpR23?.delivered ?? 0) >= 1, `delivered=${pumpR23?.delivered}`);
 	ok("R23-G4 pi.sendMessage called >= 1 at the real boundary", sentMessages.length - sendsAtPumpR23 >= 1, `sends=${sentMessages.length - sendsAtPumpR23}`);
 	if (sentMessages.length - sendsAtPumpR23 >= 1) {
@@ -923,7 +923,7 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		ok("R23-G4 first surface carries triggerTurn", sentMessages[sendsAtPumpR23]?.o?.triggerTurn === true, JSON.stringify(sentMessages[sendsAtPumpR23]?.o));
 	}
 	const sendsAfterPumpR23 = sentMessages.length;
-	const pumpR23b = await pumpOrchestratorMailbox(pi, { cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } }, p, "r23_rearm_replay");
+	const pumpR23b = await pumpRootMailbox(pi, { cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } }, p, "r23_rearm_replay");
 	ok("R23-G4 replay tick does not duplicate surface", sentMessages.length === sendsAfterPumpR23 && (pumpR23b?.delivered ?? 0) === 0, `sends=${sentMessages.length - sendsAfterPumpR23} delivered=${pumpR23b?.delivered}`);
 	if (prevAgentIdR23 === undefined) delete process.env.PI_SWARM_AGENT_ID;
 	else process.env.PI_SWARM_AGENT_ID = prevAgentIdR23;
@@ -1013,36 +1013,36 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	r = await tickGoal(tR23B + 240_000);
 	ok("R23B-5 tick5 emits seq=6 (counter 2→3=MAX)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
 	// The legitimate R23 burst is complete. Counter at MAX, backoff drained. Now we drive
-	// ≥2 ORCHESTRATOR-turn churn edges (the live storm source — `agent_settled` fires at
-	// every orchestrator turn boundary, briefly marking the orchestrator busy/idle). The
+	// ≥2 ROOT-turn churn edges (the live storm source — `agent_settled` fires at
+	// every root turn boundary, briefly marking the root busy/idle). The
 	// storm guard (cap branch memo + worker-breaker `lastEpochBusyAgents` rejecting
-	// orchestrator-only busy edges) MUST reject all churn-edge resets. Live incident:
+	// root-only busy edges) MUST reject all churn-edge resets. Live incident:
 	// 2026-09-02T15:19:06..15:21:46Z — reset ×12, seq 4→38. Post-fix: exactly ONE reset
-	// per anchor; the orchestrator-churn anchors are rejected by the breaker guard; the
+	// per anchor; the root-churn anchors are rejected by the breaker guard; the
 	// counter stays at MAX where backoff engages.
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		s.agents["orchestrator"].runtimeStatus = "busy";
+		s.agents["root"].runtimeStatus = "busy";
 		await writeState(p, s);
 	});
-	await tickGoal(tR23B + 300_000); // orchestrator busy edge: anchor cleared, lastEpochBusyAgents=["orchestrator"]
+	await tickGoal(tR23B + 300_000); // root busy edge: anchor cleared, lastEpochBusyAgents=["root"]
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		s.agents["orchestrator"].runtimeStatus = "idle";
+		s.agents["root"].runtimeStatus = "idle";
 		await writeState(p, s);
 	});
-	r = await tickGoal(tR23B + 360_000); // orchestrator idle edge: new anchor stamped, mint clears memo, cap branch breaker rejects
-	ok("R23B-6 churn1 idle: NO reset (storm guard — worker-breaker rejects orchestrator-only)", r.emitted === false && (r.reason === "idle_interval_pending" || r.reason === "backoff"), JSON.stringify(r));
+	r = await tickGoal(tR23B + 360_000); // root idle edge: new anchor stamped, mint clears memo, cap branch breaker rejects
+	ok("R23B-6 churn1 idle: NO reset (storm guard — worker-breaker rejects root-only)", r.emitted === false && (r.reason === "idle_interval_pending" || r.reason === "backoff"), JSON.stringify(r));
 	// churn cycle 2
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		s.agents["orchestrator"].runtimeStatus = "busy";
+		s.agents["root"].runtimeStatus = "busy";
 		await writeState(p, s);
 	});
 	await tickGoal(tR23B + 420_000);
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		s.agents["orchestrator"].runtimeStatus = "idle";
+		s.agents["root"].runtimeStatus = "idle";
 		await writeState(p, s);
 	});
 	r = await tickGoal(tR23B + 480_000);
@@ -1057,12 +1057,12 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	ok("R23B-12 backoff engaged after the burst (backoffTicksRemaining > 0)", (st.goal.backoffTicksRemaining ?? 0) > 0, `remaining=${st.goal.backoffTicksRemaining}`);
 
 	// ---- R23C: turn-start orbit storm guard (the live R23 storm source).
-	// hooks.ts `turn_start` clears the anchor bypassing updateIdleEpochLocked (orchestrator's
+	// hooks.ts `turn_start` clears the anchor bypassing updateIdleEpochLocked (root's
 	// busy edge — `agent_settled` fires at every turn boundary in production). Pre-R23C: turn_start
 	// cleared the anchor WITHOUT stamping `lastEpochBusyAgents`; the cap branch's worker-breaker
 	// guard saw `breaker = undefined` → absent→reset legacy default → STORM rerouted through the
-	// mint site. R23C fix: turn_start now stamps `["orchestrator"]` before clearing, so the
-	// breaker rejects orchestrator-turn churn anchors. This test exercises the orbit: 5
+	// mint site. R23C fix: turn_start now stamps `["root"]` before clearing, so the
+	// breaker rejects root-turn churn anchors. This test exercises the orbit: 5
 	// turn_start cycles each followed by a mint tick + eval tick; storm-safe = ≤1 emission
 	// (the legitimate R23 re-arm on the first eligible tick past the cap; subsequent orbits
 	// return max_nudges/backoff with NO new emission). Live storm shape: reset ×12,
@@ -1082,15 +1082,15 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	r = await tickGoal(tR23C + 60_000);
 	ok("R23C-2 drain2: backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
 	// orbit helper — exercises the REAL hooks.ts turn_start handler (R23C proof: removing the
-	// orchestrator-provenance stamp in hooks.ts must make this test RED). We register a minimal
+	// root-provenance stamp in hooks.ts must make this test RED). We register a minimal
 	// mock pi that captures the handler, then invoke it on each orbit.
 	const turnStartHandlers = [];
 	const mockPi = {
 		on(eventName, handler) { if (eventName === "turn_start") turnStartHandlers.push(handler); },
 	};
 	const { registerSwarmHooks } = await import(join(here, "..", "src", "hooks.ts"));
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	registerSwarmHooks(mockPi);
 	if (turnStartHandlers.length !== 1) throw new Error(`expected exactly 1 turn_start handler, got ${turnStartHandlers.length}`);
 	const realTurnStart = turnStartHandlers[0];
@@ -1107,7 +1107,7 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		const orbitResult = await turnStartOrbit(orbitBase);
 		if (!orbitResult) continue;
 		if (orbitResult.emitted) r23cEmissions++;
-		ok(`R23C-3.${i} orbit${i}: NO reset (storm guard — orchestrator provenance rejects)`, orbitResult.emitted === false || (orbitResult.emitted === true && i === 1), JSON.stringify(orbitResult));
+		ok(`R23C-3.${i} orbit${i}: NO reset (storm guard — root provenance rejects)`, orbitResult.emitted === false || (orbitResult.emitted === true && i === 1), JSON.stringify(orbitResult));
 	}
 	ok("R23C-4 exactly 0 saturation_reset traces across 5 turn-start orbits (storm dead)", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 0);
 	st = await getGoalState();
@@ -1118,26 +1118,26 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	// Plan §4.1 + §7.4: a task-scoped message that is a RESULT — requiresAck && !requiresResponse
 	// && replyTo set — must NOT be suppressed by node_terminal/task_terminal (the states it
 	// reports). Nudges (canonical task:<id>:node:<id>:nudge:* idempotencyKey) keep full gating.
-	// The unit assertions below exercise `isActionableOrchestratorMessage` directly (the predicate
+	// The unit assertions below exercise `isActionableRootMessage` directly (the predicate
 	// the per-tick actionability filter uses to build `windowMsgs`).
-	const { isActionableOrchestratorMessage } = await import(join(here, "..", "src", "reconcile.ts"));
+	const { isActionableRootMessage } = await import(join(here, "..", "src", "reconcile.ts"));
 	const r24TaskId = "task-r24-result-class";
 	const r24TaskNodeRef = { taskId: r24TaskId, nodeId: "implement" };
 	const r24TaskDone = { id: r24TaskId, status: "done", nodes: { implement: { nodeId: "implement", status: "done" } }, handoffs: [] };
 	const r24TaskInProgress = { id: r24TaskId, status: "in_progress", nodes: { implement: { nodeId: "implement", status: "done" } }, handoffs: [] };
-	const r24ResultRec = { id: "m-result", to: "orchestrator", requiresAck: true, requiresResponse: false, replyTo: "msg-1788360728586-75f828bd", conversationId: `task:${r24TaskId}:implement`, idempotencyKey: "r24-result-1" };
-	const r24NudgeRec = { id: "m-nudge", to: "orchestrator", requiresAck: true, requiresResponse: false, conversationId: `task:${r24TaskId}:node:implement:nudge:stale-open:seq:1`, idempotencyKey: `task:${r24TaskId}:node:implement:nudge:stale-open:seq:1` };
+	const r24ResultRec = { id: "m-result", to: "root", requiresAck: true, requiresResponse: false, replyTo: "msg-1788360728586-75f828bd", conversationId: `task:${r24TaskId}:implement`, idempotencyKey: "r24-result-1" };
+	const r24NudgeRec = { id: "m-nudge", to: "root", requiresAck: true, requiresResponse: false, conversationId: `task:${r24TaskId}:node:implement:nudge:stale-open:seq:1`, idempotencyKey: `task:${r24TaskId}:node:implement:nudge:stale-open:seq:1` };
 	const r24TaskIndex = { [r24TaskId]: r24TaskDone };
 	const r24TaskIndexInProgress = { [r24TaskId]: r24TaskInProgress };
-	ok("R24-1 result-class message on DONE implement node → actionable (exempted from node_terminal)", isActionableOrchestratorMessage(r24ResultRec, r24TaskIndex, Date.now(), {}, false).ok === true, "result-class must surface");
-	ok("R24-2 nudge-shaped message on DONE implement node → node_terminal (gate intact)", isActionableOrchestratorMessage(r24NudgeRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal", "nudges keep full gating");
-	ok("R24-3 result-class message on DONE task → result_class_exempt_task_done", isActionableOrchestratorMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "done", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_done");
-	ok("R24-4 result-class message on FAILED task → result_class_exempt_task_failed", isActionableOrchestratorMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "failed", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_failed");
-	ok("R24-5 result-class message on CANCELLED task → result_class_exempt_task_cancelled", isActionableOrchestratorMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "cancelled", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_cancelled");
-	ok("R24-6 result-class message WITHOUT replyTo → falls through to node_terminal (gate intact)", isActionableOrchestratorMessage({ ...r24ResultRec, replyTo: undefined }, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
-	ok("R24-7 result-class message with requiresResponse:true → falls through to node_terminal (gate intact)", isActionableOrchestratorMessage({ ...r24ResultRec, requiresResponse: true }, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
-	ok("R24-8 result-class message on in-progress task + done node → result_class_exempt_node_terminal", isActionableOrchestratorMessage(r24ResultRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "result_class_exempt_node_terminal");
-	ok("R24-9 nudge-shaped on in-progress task + done node → node_terminal (gate intact)", isActionableOrchestratorMessage(r24NudgeRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
+	ok("R24-1 result-class message on DONE implement node → actionable (exempted from node_terminal)", isActionableRootMessage(r24ResultRec, r24TaskIndex, Date.now(), {}, false).ok === true, "result-class must surface");
+	ok("R24-2 nudge-shaped message on DONE implement node → node_terminal (gate intact)", isActionableRootMessage(r24NudgeRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal", "nudges keep full gating");
+	ok("R24-3 result-class message on DONE task → result_class_exempt_task_done", isActionableRootMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "done", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_done");
+	ok("R24-4 result-class message on FAILED task → result_class_exempt_task_failed", isActionableRootMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "failed", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_failed");
+	ok("R24-5 result-class message on CANCELLED task → result_class_exempt_task_cancelled", isActionableRootMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "cancelled", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_cancelled");
+	ok("R24-6 result-class message WITHOUT replyTo → falls through to node_terminal (gate intact)", isActionableRootMessage({ ...r24ResultRec, replyTo: undefined }, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
+	ok("R24-7 result-class message with requiresResponse:true → falls through to node_terminal (gate intact)", isActionableRootMessage({ ...r24ResultRec, requiresResponse: true }, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
+	ok("R24-8 result-class message on in-progress task + done node → result_class_exempt_node_terminal", isActionableRootMessage(r24ResultRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "result_class_exempt_node_terminal");
+	ok("R24-9 nudge-shaped on in-progress task + done node → node_terminal (gate intact)", isActionableRootMessage(r24NudgeRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
 
 	// ---- G6: active-task emission gate still enforced (reset must not bypass it).
 	await setup();

@@ -141,10 +141,10 @@ For `i = 1..N`:
 3. Agent/tester writes evidence under `.pi/swarm/evidence/iter-XX/`.
 4. `swarm_run_record(runId="iter-XX", ...)`.
 5. `swarm_iteration_record(iterationId, runId="iter-XX", label="...")`.
-6. If there is a reusable lesson, `swarm_memory_propose`; reviewer/orchestrator may `swarm_memory_accept`.
+6. If there is a reusable lesson, `swarm_memory_propose`; reviewer/root may `swarm_memory_accept`.
 7. `swarm_iteration_status(includeContext=true)` or dashboard review.
 
-This is simplest when one orchestrator/agent is driving the loop manually.
+This is simplest when one root/agent is driving the loop manually.
 
 ### Option B — graph-driven bounded loop (`N` unrolled iterations)
 
@@ -206,7 +206,7 @@ Call swarm_create_task with:
   acceptanceCriteria: [
     "Each iteration records a run against project-quality-v1.",
     "Metric gate rejects ineligible failed/running/stale-version/wrong-type runs.",
-    "Memory proposals require file-backed evidence and reviewer/orchestrator acceptance.",
+    "Memory proposals require file-backed evidence and reviewer/root acceptance.",
     "Final report names bestRunId, improvement, meaningful flag, and accepted memories."
   ],
   start: "iter01_context",
@@ -356,7 +356,7 @@ At every `iterXX_memory_review` node:
 1. Read the run's evidence and metric delta.
 2. If there is no reusable lesson, write "no memory proposed".
 3. If there is a reusable lesson, call `swarm_memory_propose` with `sourceRunId` and evidence refs.
-4. Reviewer/orchestrator may call `swarm_memory_accept` only if the evidence gate passes.
+4. Reviewer/root may call `swarm_memory_accept` only if the evidence gate passes.
 
 Good memory claim:
 
@@ -403,7 +403,7 @@ V1 does **not** automatically:
 - choose the metric for your project;
 - decide how many iterations to run;
 - create graph cycles;
-- accept memory without reviewer/orchestrator approval;
+- accept memory without reviewer/root approval;
 - promote evidence-free claims;
 - run a daemon optimizer.
 

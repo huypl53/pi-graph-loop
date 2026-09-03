@@ -1,18 +1,18 @@
-# ct2-r15-surface-bound: CT-2 probe — mid-turn orchestrator receives normal-priority
+# ct2-r15-surface-bound: CT-2 probe — mid-turn root receives normal-priority
 # worker result; NOT surfaced within 5s; surfaces only after agent_settled.
 #
 # Reproduces the R15 incident shape at the Pi runtime contract boundary:
-#   1. Orchestrator starts a long-running tool (`exec sleep 8`) — keeps
+#   1. Root starts a long-running tool (`exec sleep 8`) — keeps
 #      `ctx.isIdle() === false` and `runtimeStatus === "tool_running"`.
 #   2. A worker sends a normal-priority `swarm_send_message` to the
-#      orchestrator DURING the sleep (the test harness injects this directly
-#      via the swarm `deliverMessageLocked` path so the orchestrator's pump
+#      root DURING the sleep (the test harness injects this directly
+#      via the swarm `deliverMessageLocked` path so the root's pump
 #      sees a real mailbox-only durable append).
 #   3. Within the first 5s, `pi.sendMessage` is NOT called on the
-#      orchestrator's mock pi (the busy-defer branch in
+#      root's mock pi (the busy-defer branch in
 #      reconcile.ts:1617-1626 holds the message; the busy-suppression at
 #      reconcile.ts:1665 drops it from the surface plan).
-#   4. After the `sleep 8` returns and the orchestrator's own turn fully
+#   4. After the `sleep 8` returns and the root's own turn fully
 #      settles, `agent_settled` fires → the pump surfaces the message via
 #      `pi.sendMessage({ triggerTurn: true })` exactly once.
 #   5. On a stale-settle replay, the surface does NOT re-fire
@@ -21,7 +21,7 @@
 # Deterministic: scripted turns + delayMs gates. The probe outcome table is
 # printed by the test driver (`extensions/swarm/ct-contract-probes.test.mjs`
 # §CT-2) after the lane completes.
-{"name":"ct2 baseline (orchestrator starts long-running exec sleep 8; pool seeded with one worker mid-task)","events":[{"type":"text","delayMs":15,"text":"CT-2 probe: orchestrator starts a long-running tool call to keep ctx.isIdle() === false. The probe will inject a normal-priority worker result DURING the sleep and assert pi.sendMessage boundary counters at T+5s and post-settle.","chunks":["CT-2 probe: ","orchestrator starts a long-running tool call ","to keep ctx.isIdle() === false."," The probe will inject a normal-priority worker result DURING the sleep ","and assert pi.sendMessage boundary counters at T+5s and post-settle."],"actions":[{"type":"toolcall","name":"exec","id":"ct2-sleep","arguments":{"command":"sleep 8","MAXDuration":10000}}]}]}
-{"name":"ct2 mid-sleep assertions (within 5s of worker send: 0 pi.sendMessage calls + 1 durable mailbox append)","events":[{"type":"text","delayMs":20,"text":"While the orchestrator's exec sleep is in flight, the test harness injects a normal-priority worker result via the swarm's deliverMessageLocked path. The probe asserts: pi.sendMessage calls within first 5s === 0; mailbox append === 1; tmux send-keys calls === 0.","chunks":["While the orchestrator's exec sleep is in flight, ","the test harness injects a normal-priority worker result ","via the swarm's deliverMessageLocked path."," The probe asserts: ","pi.sendMessage calls within first 5s === 0; ","mailbox append === 1; tmux send-keys calls === 0."],"actions":[{"type":"toolcall","name":"swarm_ct2_assert_mid_sleep","id":"ct2-a","arguments":{"afterMs":5000}}]}]}
-{"name":"ct2 post-settle assertions (after agent_settled: 1 pi.sendMessage call with triggerTurn=true)","events":[{"type":"text","delayMs":20,"text":"After the exec sleep returns and the orchestrator's own turn fully settles, agent_settled fires. The probe asserts: pi.sendMessage call count === 1; opts.triggerTurn === true. Then a stale-settle replay is simulated to assert consumerReceipts dedupe.","chunks":["After the exec sleep returns and the orchestrator's own turn fully settles, ","agent_settled fires."," The probe asserts: ","pi.sendMessage call count === 1; opts.triggerTurn === true."," Then a stale-settle replay is simulated to assert consumerReceipts dedupe."],"actions":[{"type":"toolcall","name":"swarm_ct2_assert_post_settled","id":"ct2-b","arguments":{}},{"type":"toolcall","name":"swarm_ct2_assert_replay_dedupe","id":"ct2-c","arguments":{}}]}]}
+{"name":"ct2 baseline (root starts long-running exec sleep 8; pool seeded with one worker mid-task)","events":[{"type":"text","delayMs":15,"text":"CT-2 probe: root starts a long-running tool call to keep ctx.isIdle() === false. The probe will inject a normal-priority worker result DURING the sleep and assert pi.sendMessage boundary counters at T+5s and post-settle.","chunks":["CT-2 probe: ","root starts a long-running tool call ","to keep ctx.isIdle() === false."," The probe will inject a normal-priority worker result DURING the sleep ","and assert pi.sendMessage boundary counters at T+5s and post-settle."],"actions":[{"type":"toolcall","name":"exec","id":"ct2-sleep","arguments":{"command":"sleep 8","MAXDuration":10000}}]}]}
+{"name":"ct2 mid-sleep assertions (within 5s of worker send: 0 pi.sendMessage calls + 1 durable mailbox append)","events":[{"type":"text","delayMs":20,"text":"While the root's exec sleep is in flight, the test harness injects a normal-priority worker result via the swarm's deliverMessageLocked path. The probe asserts: pi.sendMessage calls within first 5s === 0; mailbox append === 1; tmux send-keys calls === 0.","chunks":["While the root's exec sleep is in flight, ","the test harness injects a normal-priority worker result ","via the swarm's deliverMessageLocked path."," The probe asserts: ","pi.sendMessage calls within first 5s === 0; ","mailbox append === 1; tmux send-keys calls === 0."],"actions":[{"type":"toolcall","name":"swarm_ct2_assert_mid_sleep","id":"ct2-a","arguments":{"afterMs":5000}}]}]}
+{"name":"ct2 post-settle assertions (after agent_settled: 1 pi.sendMessage call with triggerTurn=true)","events":[{"type":"text","delayMs":20,"text":"After the exec sleep returns and the root's own turn fully settles, agent_settled fires. The probe asserts: pi.sendMessage call count === 1; opts.triggerTurn === true. Then a stale-settle replay is simulated to assert consumerReceipts dedupe.","chunks":["After the exec sleep returns and the root's own turn fully settles, ","agent_settled fires."," The probe asserts: ","pi.sendMessage call count === 1; opts.triggerTurn === true."," Then a stale-settle replay is simulated to assert consumerReceipts dedupe."],"actions":[{"type":"toolcall","name":"swarm_ct2_assert_post_settled","id":"ct2-b","arguments":{}},{"type":"toolcall","name":"swarm_ct2_assert_replay_dedupe","id":"ct2-c","arguments":{}}]}]}
 {"name":"ct2 settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"CT-2 probe complete. The probe driver records the outcome table (CONTRACT_CONFIRMED / BUG_FOUND_R_ROW_NEEDED) per sub-case based on the R10-1 boundary counters at the mock pi boundary.","chunks":["CT-2 probe complete. ","The probe driver records the outcome table ","(CONTRACT_CONFIRMED / BUG_FOUND_R_ROW_NEEDED) per sub-case ","based on the R10-1 boundary counters."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

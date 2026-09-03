@@ -21,7 +21,7 @@ PI_CT_PROBE=CT3|CT4|CT5|CT6|CT7
 
 Defaults to `CT3` if unset. CT-8 is intentionally NOT implemented here — it
 is a source-import unit (`extensions/swarm/src/identity.ts:80,106`
-`ensureOrchestrator`); see `extensions/swarm/ct-phase2-probes.test.mjs` §CT-8.
+`ensureRoot`); see `extensions/swarm/ct-phase2-probes.test.mjs` §CT-8.
 
 ## Output
 

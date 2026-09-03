@@ -119,7 +119,7 @@ console.log("\n[C1] sole-task worker without lease → stopped (existing behavio
 	await clearEvents();
 	const taskId = "task-c1";
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
+		root: makeAgent("root", { tmuxTarget: "s:root.0" }),
 		"worker-c1": makeAgent("worker-c1", { spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c1.0" }),
 	});
 	const task = makeTask(taskId, { "node-c1": { id: "node-c1", assignee: "worker-c1", status: "done" } });
@@ -151,7 +151,7 @@ console.log("\n[C2] sole-task worker WITH leaseKind:'reuse' + valid leaseUntil �
 	const taskId = "task-c2";
 	const futureIso = new Date(Date.now() + 3_600_000).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
+		root: makeAgent("root", { tmuxTarget: "s:root.0" }),
 		"worker-c2": makeAgent("worker-c2", {
 			spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c2.0",
 			leaseKind: "reuse", leaseUntil: futureIso, leaseReason: "reuse across tasks",
@@ -186,7 +186,7 @@ console.log("\n[C3] sole-task worker WITH leaseKind:'park' + valid leaseUntil �
 	const taskId = "task-c3";
 	const futureIso = new Date(Date.now() + 3_600_000).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
+		root: makeAgent("root", { tmuxTarget: "s:root.0" }),
 		"worker-c3": makeAgent("worker-c3", {
 			spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c3.0",
 			leaseKind: "park", leaseUntil: futureIso, leaseReason: "park for inspection",
@@ -226,7 +226,7 @@ console.log("\n[C4] lease with EXPIRED leaseUntil → default behavior (stop)");
 	const taskId = "task-c4";
 	const expiredIso = new Date(Date.now() - 60_000).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
+		root: makeAgent("root", { tmuxTarget: "s:root.0" }),
 		"worker-c4": makeAgent("worker-c4", {
 			spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c4.0",
 			leaseKind: "reuse", leaseUntil: expiredIso, leaseReason: "expired",
@@ -260,7 +260,7 @@ console.log("\n[C5] lease valid but cross-task → cross-task rule wins (skipped
 	const otherTaskId = "task-c5-other";
 	const futureIso = new Date(Date.now() + 3_600_000).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
+		root: makeAgent("root", { tmuxTarget: "s:root.0" }),
 		"worker-c5": makeAgent("worker-c5", {
 			spawnedForTaskId: taskId, activeTaskIds: [taskId, otherTaskId], tmuxTarget: "s:worker-c5.0",
 			leaseKind: "reuse", leaseUntil: futureIso, leaseReason: "reuse",
@@ -289,7 +289,7 @@ console.log("\n[C6] archived task (missing task.json) → agents with activeTask
 	await clearEvents();
 	const taskId = "task-c6-archived";
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
+		root: makeAgent("root", { tmuxTarget: "s:root.0" }),
 		"worker-c6": makeAgent("worker-c6", { activeTaskIds: [taskId], tmuxTarget: "s:worker-c6.0", spawnedForTaskId: taskId }),
 	});
 	await writeStateFile(state);
@@ -315,7 +315,7 @@ console.log("\n[C7] PI_SWARM_KEEP_TASK_WORKERS=1 → opt-out");
 	await clearEvents();
 	const taskId = "task-c7";
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
+		root: makeAgent("root", { tmuxTarget: "s:root.0" }),
 		"worker-c7": makeAgent("worker-c7", { spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c7.0" }),
 	});
 	const task = makeTask(taskId, { "node-c7": { id: "node-c7", assignee: "worker-c7", status: "done" } });
@@ -345,7 +345,7 @@ console.log("\n[C8] idempotent re-invocation: second call is a no-op");
 	await clearEvents();
 	const taskId = "task-c8";
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
+		root: makeAgent("root", { tmuxTarget: "s:root.0" }),
 		"worker-c8": makeAgent("worker-c8", { spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c8.0" }),
 	});
 	const task = makeTask(taskId, { "node-c8": { id: "node-c8", assignee: "worker-c8", status: "done" } });
@@ -380,7 +380,7 @@ console.log("\n[C-R11-2] live assigned/in_progress node → skipped as live_assi
 	await clearEvents();
 	const taskId = "task-c-r112";
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxTarget: "s:orchestrator.0" }),
+		root: makeAgent("root", { tmuxTarget: "s:root.0" }),
 		"worker-c1": makeAgent("worker-c1", { spawnedForTaskId: taskId, activeTaskIds: [taskId], tmuxTarget: "s:worker-c1.0" }),
 	});
 	// Re-armed sub-task cycle: one node closed, one node LIVE (assigned to the same worker).

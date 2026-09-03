@@ -5,7 +5,7 @@
  * The pre-fix `sendGraphAdvanceNudgeLocked` used a static per-(taskId, nodeId) notify key, so after
  * a deferral ack the next reconcile tick passed the cap + cooldown + in-flight gates but the
  * eventual `deliverMessageLocked` dedupe on `from + to + idempotencyKey` returned the original
- * acked message (`message.idempotent_reuse`). The orchestrator mailbox received exactly one nudge
+ * acked message (`message.idempotent_reuse`). The root mailbox received exactly one nudge
  * per node for the node's lifetime.
  *
  * The fix: NOTIFY_KEY_GRAPH_ADVANCE carries a `{seq}` slot; the seq advances per successful emit
@@ -76,8 +76,8 @@ async function readGlobalEvents() {
 	const txt = await readFile(p, "utf8").catch(() => "");
 	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
-async function readOrchestratorMailbox() {
-	const p = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
+async function readRootMailbox() {
+	const p = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
 	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
@@ -87,12 +87,12 @@ function freshState(overrides = {}) {
 		version: 1, swarmId: "test-f2", cwd: scratch,
 		tmuxSession: "test-f2",
 		agents: {
-			"orchestrator": {
-				id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99,
+			"root": {
+				id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99,
 				status: "running", runtimeStatus: "idle", health: "healthy",
 				tmuxSession: "test-f2", tmuxWindow: "orch", tmuxTarget: "test-f2:orch.0",
 				model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch,
-				mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl",
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
 				createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 			},
 		},
@@ -108,7 +108,7 @@ function freshTask(taskId = TASK_ID, nodeId = NODE_ID, nodeOverrides = {}) {
 		version: 1, taskId, title: "test-f2", goal: "test-f2",
 		status: "in_progress", priority: "normal",
 		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		owner: "orchestrator", workflow: "feature-dev",
+		owner: "root", workflow: "feature-dev",
 		allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
 		start: nodeId, currentNodes: [nodeId],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
@@ -127,7 +127,7 @@ function freshTask(taskId = TASK_ID, nodeId = NODE_ID, nodeOverrides = {}) {
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 
-async function loadExtension({ identity = "orchestrator" } = {}) {
+async function loadExtension({ identity = "root" } = {}) {
 	process.env.PI_SWARM_AGENT_ID = identity;
 	const handlers = {};
 	const commands = {};
@@ -147,9 +147,9 @@ async function loadExtension({ identity = "orchestrator" } = {}) {
 	return { pi, handlers, tools, commands };
 }
 
-async function runReconcile({ identity = "orchestrator" } = {}) {
+async function runReconcile({ identity = "root" } = {}) {
 	const { handlers } = await loadExtension({ identity });
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const sessionStart = handlers["session_start"][0];
 	const ctx = {
 		cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false,
@@ -176,10 +176,10 @@ async function setupClean({ nodeOverrides = {}, ageMs = 120_000 } = {}) {
 	await writeTask(task);
 
 	const st = freshState();
-	st.orchestratorLeader = {
+	st.rootLeader = {
 		pid: process.pid, sessionStartedAt: new Date().toISOString(),
 		claimedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(),
-		agentRecordId: "orchestrator",
+		agentRecordId: "root",
 	};
 	await writeStateFile(st);
 }
@@ -191,7 +191,7 @@ async function seedGraphAdvanceMessage(st, opts = {}) {
 	const id = `msg-f2-seq${seq}-${Math.random().toString(36).slice(2, 8)}`;
 	const createdAt = overrideCreatedAt || new Date(Date.now() - ageMs).toISOString();
 	st.messages[id] = {
-		id, from: "orchestrator", to: "orchestrator", status: acked ? "acked" : "injected",
+		id, from: "root", to: "root", status: acked ? "acked" : "injected",
 		createdAt, updatedAt: createdAt,
 		injectedAt: acked ? undefined : createdAt,
 		ackedAt: acked ? createdAt : undefined,
@@ -210,7 +210,7 @@ await setupClean();
 await runReconcile();
 {
 	const st = await readStateFile();
-	const mailbox = await readOrchestratorMailbox();
+	const mailbox = await readRootMailbox();
 	const events = await readGlobalEvents();
 	const seqRecs = mailbox.filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:1`);
 	ok("exactly one mailbox record with seq:1 idempotency key", seqRecs.length === 1, `mailbox=${JSON.stringify(mailbox.map(m => m.idempotencyKey))}`);
@@ -241,7 +241,7 @@ console.log("\n[C2] deferral ack + cooldown elapsed -> seq:2 record (distinct id
 }
 await runReconcile();
 {
-	const mailbox = await readOrchestratorMailbox();
+	const mailbox = await readRootMailbox();
 	const events = await readGlobalEvents();
 	const st = await readStateFile();
 	const seq1Recs = mailbox.filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:1`);
@@ -249,7 +249,7 @@ await runReconcile();
 	ok("seq:1 record still present (1)", seq1Recs.length === 1);
 	ok("seq:2 record emitted (1)", seq2Recs.length === 1, `mailbox=${JSON.stringify(mailbox.map(m => m.idempotencyKey))}`);
 	ok("seq:2 has a distinct id from seq:1", seq1Recs[0]?.id !== seq2Recs[0]?.id);
-	ok("seq:2 record requiresAck=true (orchestrator must ack the re-arm)", seq2Recs[0]?.requiresAck === true);
+	ok("seq:2 record requiresAck=true (root must ack the re-arm)", seq2Recs[0]?.requiresAck === true);
 	ok("durable seq store advanced to 2", st.graphAdvanceNudgeState?.[TASK_ID]?.[NODE_ID]?.nudgeSeq === 2);
 	ok("graph.advance_nudge_emitted trace recorded with seq:2", events.some((e) => e.event === "graph.advance_nudge_emitted" && e.seq === 2 && e.taskId === TASK_ID && e.nodeId === NODE_ID));
 	// Critical: the bug under test was that the second emit was short-circuited by
@@ -281,7 +281,7 @@ console.log("\n[C3] cooldown skip — seq:2 within cooldown -> no seq:3");
 }
 await runReconcile();
 {
-	const mailbox = await readOrchestratorMailbox();
+	const mailbox = await readRootMailbox();
 	const seq3Recs = mailbox.filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:3`);
 	ok("no seq:3 record while seq:2 is within cooldown", seq3Recs.length === 0, `mailbox=${JSON.stringify(mailbox.map(m => m.idempotencyKey))}`);
 	const st = await readStateFile();
@@ -310,7 +310,7 @@ console.log("\n[C4] monotonic seq: prior seq:1 + seq:2 acked + > cooldown -> seq
 }
 await runReconcile();
 {
-	const mailbox = await readOrchestratorMailbox();
+	const mailbox = await readRootMailbox();
 	const seq3Recs = mailbox.filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:3`);
 	ok("seq:3 record emitted (1)", seq3Recs.length === 1);
 	const st = await readStateFile();
@@ -339,7 +339,7 @@ console.log("\n[C5] cap 3 holds — three prior acked records > cooldown -> no n
 }
 await runReconcile();
 {
-	const mailbox = await readOrchestratorMailbox();
+	const mailbox = await readRootMailbox();
 	const seq4Recs = mailbox.filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:4`);
 	ok("no seq:4 record when cap reached (3 prior)", seq4Recs.length === 0);
 	const st = await readStateFile();
@@ -356,9 +356,9 @@ await setupClean();
 	// Two reconcile invocations back-to-back in the same tick must not double-emit.
 	// session_start is the single entry point; calling it twice simulates two pump ticks
 	// in the same async microtask burst (which is the worst-case for the seq guard).
-	await loadExtension({ identity: "orchestrator" });
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
-	const { handlers } = await loadExtension({ identity: "orchestrator" });
+	await loadExtension({ identity: "root" });
+	process.env.PI_SWARM_IS_ROOT = "1";
+	const { handlers } = await loadExtension({ identity: "root" });
 	const sessionStart = handlers["session_start"][0];
 	const ctx = {
 		cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false,
@@ -369,7 +369,7 @@ await setupClean();
 	await sessionStart({}, ctx);
 }
 {
-	const mailbox = await readOrchestratorMailbox();
+	const mailbox = await readRootMailbox();
 	const seq1Recs = mailbox.filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:1`);
 	const st = await readStateFile();
 	ok("exactly one seq:1 record across two reconcile calls in same tick", seq1Recs.length === 1, `count=${seq1Recs.length}`);
@@ -404,7 +404,7 @@ await runReconcile();
 
 // Restore env
 delete process.env.PI_SWARM_AGENT_ID;
-delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+delete process.env.PI_SWARM_IS_ROOT;
 
 console.log(`\nGRAPH-ADVANCE-NUDGE-REARM ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 process.exit(fail === 0 ? 0 : 1);

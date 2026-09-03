@@ -53,14 +53,14 @@ export async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string,
 
 	// Cap: count ALL prior sends for this (taskId, nodeId) across all seqs — the seq-prefix set.
 	const keyPrefix = `task:${taskId}:node:${nodeId}:nudge:assign:seq:`;
-	const prior = Object.values(st.messages || {}).filter((r) => r.to === "orchestrator" && (r.idempotencyKey?.startsWith(keyPrefix) ?? false));
-	if (prior.length >= NOTIFY_DEFAULT_MAX_NUDGES) return; // cap: orchestrator has ignored the stall
+	const prior = Object.values(st.messages || {}).filter((r) => r.to === "root" && (r.idempotencyKey?.startsWith(keyPrefix) ?? false));
+	if (prior.length >= NOTIFY_DEFAULT_MAX_NUDGES) return; // cap: root has ignored the stall
 	const lastSent = prior.map((r) => r.createdAt || "").sort().pop() || "";
 	if (lastSent && Date.now() - new Date(lastSent).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) return; // cooldown
-	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key) && !prior.some((r) => r.ackedAt)) return; // in-flight, unacked: idempotent
+	if (findIdempotentMessage(st, "root", "root", key) && !prior.some((r) => r.ackedAt)) return; // in-flight, unacked: idempotent
 	try {
 		await deliverMessageLocked(pi, cwd, p, st, {
-			to: "orchestrator",
+			to: "root",
 			subject: `Node ${nodeId} (${role}) is READY but unassigned — advance task ${taskId} now`,
 			body: `Task ${taskId} has stalled mid-graph: node \`${nodeId}\` (${role}) is READY (its dependencies are satisfied) but it is still unassigned, so no agent is working on it.\n\nAssign it now:\n  swarm_assign_task(taskId="${taskId}", nodeId="${nodeId}")\n\nThen KEEP DRIVING the graph to completion in the same turn — do not stop to summarize. After ${nodeId} completes, call swarm_next_nodes + swarm_assign_task for the next ready node, and repeat until every node is terminal. Never end a turn by merely describing the next step — ACT on it (call the tool).\n\n(Action required; this safety net auto-acknowledges once the node is assigned. If you cannot assign yet — e.g. scope conflict with an in-flight lease — ack and note the blocker; the nudge will re-arm after the cooldown, up to the cap.)`,
 			requiresAck: true,
@@ -77,12 +77,12 @@ export async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string,
 	}
 }
 
-function ackOrchestratorNudgeLocked(st: SwarmState, key: string, nowMs: number, note: string): void {
-	const rec = findIdempotentMessage(st, "orchestrator", "orchestrator", key) || Object.values(st.messages || {}).find((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+function ackRootNudgeLocked(st: SwarmState, key: string, nowMs: number, note: string): void {
+	const rec = findIdempotentMessage(st, "root", "root", key) || Object.values(st.messages || {}).find((r) => r.to === "root" && r.idempotencyKey === key);
 	if (rec && rec.requiresAck && !rec.ackedAt) {
 		const at = new Date(nowMs).toISOString();
-		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "orchestrator", status: "done", note, at } };
-		st.delivered["orchestrator"] = Array.from(new Set([...(st.delivered["orchestrator"] || []), rec.id]));
+		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "root", status: "done", note, at } };
+		st.delivered["root"] = Array.from(new Set([...(st.delivered["root"] || []), rec.id]));
 	}
 }
 
@@ -90,20 +90,20 @@ function ackOrchestratorNudgeLocked(st: SwarmState, key: string, nowMs: number, 
 // to clear when a node leaves ready+unassigned — there can be up to NOTIFY_DEFAULT_MAX_NUDGES open
 // records (each at a different seq) for the same (taskId, nodeId). This helper auto-acks every open
 // seq-suffixed record for the pair. Idempotent w.r.t. already-acked records (the inner guard skips
-// records with `ackedAt`). Mirror of ackOrchestratorNudgeLocked but matching the seq-prefix set.
-function ackOrchestratorGraphAdvanceNudgesLocked(st: SwarmState, taskId: string, nodeId: string, nowMs: number, note: string): void {
+// records with `ackedAt`). Mirror of ackRootNudgeLocked but matching the seq-prefix set.
+function ackRootGraphAdvanceNudgesLocked(st: SwarmState, taskId: string, nodeId: string, nowMs: number, note: string): void {
 	const keyPrefix = `task:${taskId}:node:${nodeId}:nudge:assign:seq:`;
 	const at = new Date(nowMs).toISOString();
 	const ids: string[] = [];
 	for (const rec of Object.values(st.messages || {})) {
-		if (rec.to !== "orchestrator") continue;
+		if (rec.to !== "root") continue;
 		if (!(rec.idempotencyKey?.startsWith(keyPrefix) ?? false)) continue;
 		if (!rec.requiresAck || rec.ackedAt) continue;
-		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "orchestrator", status: "done", note, at } };
+		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "root", status: "done", note, at } };
 		ids.push(rec.id);
 	}
 	if (ids.length) {
-		st.delivered["orchestrator"] = Array.from(new Set([...(st.delivered["orchestrator"] || []), ...ids]));
+		st.delivered["root"] = Array.from(new Set([...(st.delivered["root"] || []), ...ids]));
 	}
 }
 
@@ -132,14 +132,14 @@ export async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string,
 				// Lifecycle-fencing (issue 9, site 4): per-node staleness check before emitting a graph-advance
 				// nudge. A node that has since become terminal / reassigned / closed must not be force-assigned
 				// from this safety-net (the historical "force-assign unready nodes" bug). The predicate also
-				// guards against nudging for a node whose assignee drifted (orchestrator pseudo-agent stays a
-				// fine notify target — no filter on agentId=orchestrator here, since this nudge is addressed
-				// to the orchestrator rather than a worker).
-				const staleCheck = checkStallNotificationStale(st, task, nodeId, node.assignee || "orchestrator", nowMs);
+				// guards against nudging for a node whose assignee drifted (root pseudo-agent stays a
+				// fine notify target — no filter on agentId=root here, since this nudge is addressed
+				// to the root rather than a worker).
+				const staleCheck = checkStallNotificationStale(st, task, nodeId, node.assignee || "root", nowMs);
 				if (staleCheck.stale) {
 					const keyForTrace = formatNotifyKey(NOTIFY_KEY_GRAPH_ADVANCE, { taskId, nodeId, seq: "1" });
 					await traceStaleSuppressedOnce(p, "reconcile.graph_advance_nudge", { messageId: keyForTrace, idempotencyKey: keyForTrace, reason: staleCheck.reason, evidence: staleCheck.evidence });
-					ackOrchestratorGraphAdvanceNudgesLocked(st, taskId, nodeId, nowMs, "auto-acked: node stale");
+					ackRootGraphAdvanceNudgesLocked(st, taskId, nodeId, nowMs, "auto-acked: node stale");
 					continue;
 				}
 				await sendGraphAdvanceNudgeLocked(pi, cwd, p, st, taskId, nodeId, node.role || "worker");
@@ -147,7 +147,7 @@ export async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string,
 				// Node assigned / terminal / not yet ready -> clear any outstanding assign nudges for it.
 				// Issue F2 (task-202608310422): clear ALL seq-suffixed records for this (taskId, nodeId),
 				// not just the static key — with the new key shape there is no single static key to clear.
-				ackOrchestratorGraphAdvanceNudgesLocked(st, taskId, nodeId, nowMs, "auto-acked: node assigned/left ready");
+				ackRootGraphAdvanceNudgesLocked(st, taskId, nodeId, nowMs, "auto-acked: node assigned/left ready");
 				// Stamp lastResolvedAt on the durable per-(task,node) seq store (seq survives; only the
 				// resolved marker is set). Keeps the store consistent with the auto-ack.
 				const graphAdvanceState = (st.graphAdvanceNudgeState ||= {});
@@ -161,7 +161,7 @@ export async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string,
 
 // Initial-ready watcher (reliability-roadmap Phase 1, P0 #2): for every freshly created task whose
 // start node remains READY + unassigned beyond TASK_INITIAL_READY_GRACE_MS, send exactly one
-// idempotent action-required nudge to the orchestrator. Never auto-assigns, never auto-spawns, and
+// idempotent action-required nudge to the root. Never auto-assigns, never auto-spawns, and
 // auto-clears as soon as the node leaves the `ready`+unassigned state. Honors the shared semantic
 // dedupe + per-task cap policy (NOTIFY_DEFAULT_MAX_NUDGES). Runs alongside the graph-advance watcher.
 
@@ -185,13 +185,13 @@ export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string,
 		const age = nowMs - createdAt;
 		const key = formatNotifyKey(NOTIFY_KEY_INITIAL_READY, { taskId });
 		if (age < TASK_INITIAL_READY_GRACE_MS) {
-			ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: still within grace period");
+			ackRootNudgeLocked(st, key, nowMs, "auto-acked: still within grace period");
 			continue;
 		}
-		// Cap: stop nudging once the orchestrator has ignored the same key MAX times.
-		const existing = Object.values(st.messages || {}).filter((r) => r.to === "orchestrator" && r.idempotencyKey === key);
+		// Cap: stop nudging once the root has ignored the same key MAX times.
+		const existing = Object.values(st.messages || {}).filter((r) => r.to === "root" && r.idempotencyKey === key);
 		if (existing.length >= NOTIFY_DEFAULT_MAX_NUDGES) continue;
-		if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) continue;
+		if (findIdempotentMessage(st, "root", "root", key)) continue;
 		// Cooldown: never re-send within NOTIFY_DEFAULT_COOLDOWN_MS of the last send for the same key.
 		const last = existing.map((r) => r.createdAt || "").sort().pop() || "";
 		if (last && nowMs - new Date(last).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) continue;
@@ -199,11 +199,11 @@ export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string,
 		// Task status="ready" already rules out conditions (1)/(2) — but we still run the predicate so a
 		// cancelled attempt, assignee drift, or agent-stopped transition can short-circuit the emit. The
 		// start node's "assignee" here is always undefined (filtered above), so the predicate agentId
-		// placeholder is "orchestrator" (the only recipient of this nudge anyway).
-		const staleCheck = checkStallNotificationStale(st, task, startId, startNode.assignee || "orchestrator", nowMs);
+		// placeholder is "root" (the only recipient of this nudge anyway).
+		const staleCheck = checkStallNotificationStale(st, task, startId, startNode.assignee || "root", nowMs);
 		if (staleCheck.stale) {
 			await traceStaleSuppressedOnce(p, "reconcile.initial_ready_nudge", { messageId: key, idempotencyKey: key, reason: staleCheck.reason, evidence: staleCheck.evidence });
-			ackOrchestratorNudgeLocked(st, key, nowMs, "auto-acked: node stale");
+			ackRootNudgeLocked(st, key, nowMs, "auto-acked: node stale");
 			continue;
 		}
 		await sendInitialReadyNudgeLocked(pi, cwd, p, st, task, startId, key);
@@ -216,9 +216,9 @@ async function sendInitialReadyNudgeLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	const role = startNode.role || "worker";
 	try {
 		await deliverMessageLocked(pi, cwd, p, st, {
-			to: "orchestrator",
+			to: "root",
 			subject: `Task ${taskId} start node is ready but unassigned`,
-			body: `Task ${taskId} ("${task.title || taskId}") was created ${Math.max(1, Math.round((Date.now() - new Date(task.createdAt || Date.now()).getTime()) / 60000))} minute(s) ago but its start node \`${startId}\` (${role}) is still ready and unassigned.\n\nAction required:\n  swarm_assign_task(taskId="${taskId}", nodeId="${startId}")\n\nAlternative actions:\n  swarm_assign_task(taskId="${taskId}", nodeId="${startId}", force=true)   # orchestrator-only override\n  swarm_update_task(taskId="${taskId}", nodeId="${startId}", cancelTask=true, force=true)   # orchestrator-only cancel\n\n(Auto-clears once ${startId} is assigned or the task leaves the ready state.)`,
+			body: `Task ${taskId} ("${task.title || taskId}") was created ${Math.max(1, Math.round((Date.now() - new Date(task.createdAt || Date.now()).getTime()) / 60000))} minute(s) ago but its start node \`${startId}\` (${role}) is still ready and unassigned.\n\nAction required:\n  swarm_assign_task(taskId="${taskId}", nodeId="${startId}")\n\nAlternative actions:\n  swarm_assign_task(taskId="${taskId}", nodeId="${startId}", force=true)   # root-only override\n  swarm_update_task(taskId="${taskId}", nodeId="${startId}", cancelTask=true, force=true)   # root-only cancel\n\n(Auto-clears once ${startId} is assigned or the task leaves the ready state.)`,
 			requiresAck: true,
 			idempotencyKey: key,
 		});
@@ -265,7 +265,7 @@ export async function evaluateTaskGraphStallNudgeLocked(
 	} catch { /* unreadable tasksDir === no active tasks */ }
 	if (!tasks.length) return { emitted: false, reason: "no_active_task" };
 
-	// Predicate 3: every non-orchestrator agent must be runtimeStatus === "idle".
+	// Predicate 3: every non-root agent must be runtimeStatus === "idle".
 	// Issue 27: mirrors evaluateIdleGoalNudgeLocked — only effectively-alive agents participate;
 	// stopped/stale ghost records must not starve this nudge either.
 	// Row 68: the shared idle-epoch update runs here (idempotent) so the busy→all-idle edge is
@@ -303,7 +303,7 @@ export async function evaluateTaskGraphStallNudgeLocked(
 		let graphAdvanceActive = false;
 		for (const nodeId of actionableNodes) {
 			const advanceKeyPrefix = `task:${taskId}:node:${nodeId}:nudge:assign:seq:`;
-			const hasActive = Object.values(st.messages || {}).some((r) => r.to === "orchestrator" && !r.ackedAt && (r.idempotencyKey?.startsWith(advanceKeyPrefix) ?? false));
+			const hasActive = Object.values(st.messages || {}).some((r) => r.to === "root" && !r.ackedAt && (r.idempotencyKey?.startsWith(advanceKeyPrefix) ?? false));
 			if (hasActive) { graphAdvanceActive = true; break; }
 		}
 		if (graphAdvanceActive) continue;
@@ -355,7 +355,7 @@ export async function evaluateTaskGraphStallNudgeLocked(
 		// while still blocking double-emits within a tick.
 		const nudgeSeq = (stallState.nudgeSeq ?? 0) + 1;
 		const key = formatNotifyKey(NOTIFY_KEY_TASK_GRAPH_STALL, { taskId, seq: String(nudgeSeq) });
-		if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) {
+		if (findIdempotentMessage(st, "root", "root", key)) {
 			return { emitted: false, reason: "duplicate_suppressed", taskId };
 		}
 
@@ -369,16 +369,16 @@ export async function evaluateTaskGraphStallNudgeLocked(
 		const body =
 			`Task ${taskId} ("${task.title || taskId}") is ${task.status || "in_progress"} but has ${actionableNodes.length} actionable-but-unassigned node(s):\n` +
 			`  - ${nodeList.join("\n  - ")}\n\n` +
-			`All ${idleAgents.length} non-orchestrator agent(s) are runtimeStatus=idle and no worker has claimed these nodes.\n\n` +
+			`All ${idleAgents.length} non-root agent(s) are runtimeStatus=idle and no worker has claimed these nodes.\n\n` +
 			`This is nudge ${nudgeNumber} of ${MAX_TASK_STALL_NUDGES} before back-off.\n\n` +
 			`Action:\n` +
 			`  swarm_assign_task(taskId="${taskId}", nodeId="${actionableNodes[0]}")\n\n` +
 			`Alternative actions:\n` +
-			`  swarm_assign_task(taskId="${taskId}", nodeId="${actionableNodes[0]}", force=true)   # orchestrator-only override\n` +
-			`  swarm_update_task(taskId="${taskId}", nodeId="${actionableNodes[0]}", cancelTask=true, force=true)   # orchestrator-only abandon\n\n` +
+			`  swarm_assign_task(taskId="${taskId}", nodeId="${actionableNodes[0]}", force=true)   # root-only override\n` +
+			`  swarm_update_task(taskId="${taskId}", nodeId="${actionableNodes[0]}", cancelTask=true, force=true)   # root-only abandon\n\n` +
 			`(Any reassignment of an actionable node — including a worker's claim of an unassigned node via swarm_update_task — resets the counter.)`;
 		await deliverMessageLocked(pi, cwd, p, st, {
-			to: "orchestrator",
+			to: "root",
 			subject,
 			body,
 			conversationId: `task:${taskId}:${actionableNodes[0]}`,
@@ -420,11 +420,11 @@ export async function evaluateTaskGraphStallNudgeLocked(
 // === R20 — artifact-progress self-nudge (Issue: "settled idle with open assignment") ===
 // Pump-tick phase. Detects when an agent has written an artifact (fs.stat mtime > baseline +
 // grace) but the task node is still open (status in {assigned, in_progress}). Delivers a high-
-// priority, action-oriented nudge to the agent itself (NOT the orchestrator) BEFORE it can
+// priority, action-oriented nudge to the agent itself (NOT the root) BEFORE it can
 // settle, naming the exact close-action triple:
 //
 //   swarm_update_task(taskId=..., nodeId=..., status=done|failed|blocked, outcome=...)
-//   swarm_send_message(to="orchestrator", replyTo="<assignment msg id>", subject=..., body=...)
+//   swarm_send_message(to="root", replyTo="<assignment msg id>", subject=..., body=...)
 //   swarm_ack_message(messageId="<assignment msg id>", status=done, resultMessageId=...)
 //
 // The triple is the canonical R16/R19 lesson: the failure mode that R20 fixes is the worker
@@ -435,7 +435,7 @@ export async function evaluateTaskGraphStallNudgeLocked(
 // Tunables (env-overridable via constants.ts):
 //   - ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS (default 5min): dedupe gate between consecutive nudges.
 //   - ARTIFACT_PROGRESS_NUDGE_CAP (default 3): per-node counter; once exceeded, escalate to the
-//     orchestrator (one-line `worker.artifact_progress_cap_exceeded` trace + stop nudging).
+//     root (one-line `worker.artifact_progress_cap_exceeded` trace + stop nudging).
 //   - ARTIFACT_PROGRESS_GRACE_MS (default 60s): mtime must exceed baseline by at least this.
 //   - ARTIFACT_PROGRESS_MAX_FILES (default 50): hard cap on allowedFiles fs.stat calls per node.
 //   - ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS (default 60s): skip when agent.lastToolAt is fresh.
@@ -463,9 +463,9 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 		for (const [nodeId, node] of Object.entries(task.nodes)) {
 			if (!node) continue;
 			if (node.status !== "assigned" && node.status !== "in_progress") continue;
-			// Orchestrator self-nudge suppression (OQ2): skip when the assignee is the orchestrator
-			// pseudo-agent (no real worker pane to nudge; the orchestrator drives its own work).
-			if (!node.assignee || node.assignee === "orchestrator") continue;
+			// Root self-nudge suppression (OQ2): skip when the assignee is the root
+			// pseudo-agent (no real worker pane to nudge; the root drives its own work).
+			if (!node.assignee || node.assignee === "root") continue;
 			// Skip when the node has no allowedFiles (OQ3 default: too noisy to track whole-project mtime).
 			const effectiveAllowed: string[] = node.allowedFiles && node.allowedFiles.length > 0 ? node.allowedFiles : (task.allowedFiles && task.allowedFiles.length > 0 ? task.allowedFiles : []);
 			if (effectiveAllowed.length === 0) continue;
@@ -496,22 +496,22 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 			if (!agent) continue;
 			const lastToolMs = agent.lastToolAt ? new Date(agent.lastToolAt).getTime() : 0;
 			if (lastToolMs && nowMs - lastToolMs <= ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS) continue;
-			// Cap exceeded: emit one-line orchestrator escalation + dedupe-gated trace.
+			// Cap exceeded: emit one-line root escalation + dedupe-gated trace.
 			// Cap-exceeded fires AT MOST ONCE per node per forward-progress cycle (the
 			// forward-transition reset in tools/tasks.ts clears artifactProgressNudgeAt). This
-			// keeps the orchestrator's mailbox uncluttered while still surfacing the cap breach.
+			// keeps the root's mailbox uncluttered while still surfacing the cap breach.
 			const priorCount = node.artifactProgressNudgeCount ?? 0;
 			if (priorCount >= ARTIFACT_PROGRESS_NUDGE_CAP) {
 				// Idempotent dedupe via a dedicated flag: only emit the cap-exceeded trace once per
 				// cycle. Subsequent ticks within the same stalled cycle stay silent — the
-				// orchestrator already has the escalation; more repeats would just clutter traces.
+				// root already has the escalation; more repeats would just clutter traces.
 				if (!node.artifactProgressCapSurfaced) {
 					await trace(p, TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED, { taskId: task.taskId, nodeId, assignee: node.assignee, nudgeCount: priorCount, cap: ARTIFACT_PROGRESS_NUDGE_CAP, contributingFile, maxMtimeMs, lastProgressAt: node.lastProgressAt ?? null, lastToolAt: agent.lastToolAt ?? null }).catch(() => {});
-					// Lightweight orchestrator escalation: durable mailbox delivery so the orchestrator
+					// Lightweight root escalation: durable mailbox delivery so the root
 					// sees the "node stalled with N ignored nudges" line on its next pump tick.
 					try {
 						await deliverMessageLocked(pi, cwd, p, st, {
-							to: "orchestrator",
+							to: "root",
 							priority: "high",
 							subject: `ARTIFACT-PROGRESS CAP: node ${nodeId} of ${task.taskId} stalled after ${priorCount} nudges`,
 							body: `Node \`${nodeId}\` of task \`${task.taskId}\` has artifact progress on disk (${contributingFile}, mtime ${new Date(maxMtimeMs).toISOString()}) but the worker has ignored ${priorCount} artifact-progress nudges (cap ${ARTIFACT_PROGRESS_NUDGE_CAP}). Worker \`${node.assignee}\` is still assigned. Recommend: restart the agent or force-close the node (swarm_update_task force=true).`,
@@ -541,7 +541,7 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 				`  swarm_update_task(taskId="${task.taskId}", nodeId="${nodeId}", status=done|failed|blocked, outcome=<one of: planned|implemented|tested|reviewed|approved|rejected|failed>)`,
 				``,
 				`  swarm_send_message(`,
-				`    to="orchestrator",`,
+				`    to="root",`,
 				`    replyTo="${assignmentMsgId}",`,
 				`    subject="${task.taskId}:${nodeId} done",`,
 				`    body="<1-line summary>"`,
@@ -550,7 +550,7 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 				`  swarm_ack_message(messageId="${assignmentMsgId}", status=done, resultMessageId="<result msg id>")`,
 				``,
 				`If the work is genuinely incomplete, call swarm_update_task(status=blocked, note=<reason>) instead.`,
-				`(Auto-backoff: ${Math.round(ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS / 60000)} min between nudges; cap ${ARTIFACT_PROGRESS_NUDGE_CAP} then escalate to orchestrator.)`,
+				`(Auto-backoff: ${Math.round(ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS / 60000)} min between nudges; cap ${ARTIFACT_PROGRESS_NUDGE_CAP} then escalate to root.)`,
 			].join("\n");
 			try {
 				await deliverMessageLocked(pi, cwd, p, st, {
@@ -592,9 +592,9 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 //   - tmux probes ONLY for agents whose lastHeartbeatAt is older than 2× the stale window
 //     (we can't tell from lastHeartbeatAt alone whether the pane is gone — we sample tmux).
 // Hard rules:
-//   - Orchestrator pseudo-agent is exempt (its heartbeat is owned by the leader lease).
+//   - Root pseudo-agent is exempt (its heartbeat is owned by the leader lease).
 //   - Paused agents: status/health untouched (they're dormant by design; the lease honors park).
-//   - Lease-valid agents (reuse): status/health untouched (orchestrator wants them around).
+//   - Lease-valid agents (reuse): status/health untouched (root wants them around).
 //   - When the tmux probe disagrees with the in-memory `tmuxAlive` field, we update the field
 //     and emit `agent.tmux_liveness_correction`. The field is otherwise stale-by-design (refreshed
 //     on tool calls / hook events; this GC pass picks up the stragglers).
@@ -607,11 +607,11 @@ export async function agentHeartbeatGCLocked(pi: ExtensionAPI, cwd: string, p: P
 	const probeAfterMs = staleWindow * 2;
 	let stopped = 0, stale = 0, corrected = 0, probesFired = 0, probesThrottled = 0, expiredParkFlipped = 0;
 	for (const agent of Object.values(st.agents)) {
-		if (agent.id === "orchestrator") continue;
+		if (agent.id === "root") continue;
 		const leaseKind = agent.leaseKind;
 		const leaseUntilMs = agent.leaseUntil ? new Date(agent.leaseUntil).getTime() : 0;
 		// Both `reuse` and `park` leases exempt the agent from the heartbeat GC: `reuse` because
-		// the orchestrator wants the worker kept alive for cross-task reuse; `park` because parking
+		// the root wants the worker kept alive for cross-task reuse; `park` because parking
 		// is the sweep's job (the GC must not flip a parked agent to stopped — the parked pane is
 		// intentionally dormant and may be revived by the operator). Lease validity requires both
 		// `leaseKind` set AND `leaseUntil > now`.
@@ -714,7 +714,7 @@ export async function agentHeartbeatGCLocked(pi: ExtensionAPI, cwd: string, p: P
 // consecutiveNoResolveNudges to 0, stamps lastResolvedAt, and emits `task_stall.nudge.resolved` for
 // trace visibility. Mirrors the goal-nudge reset hook (turn_end in hooks.ts:484-506) but lives next
 // to the mutation sites because the task-stall counter resolves on graph-mutation events, not on
-// orchestrator turn-end. Clearing nextStallNudgeAt means the next stall fires immediately (fresh
+// root turn-end. Clearing nextStallNudgeAt means the next stall fires immediately (fresh
 // stall → immediate nudge) rather than waiting out a stale interval window.
 export function resolveTaskStallLocked(p: Paths, st: SwarmState, taskId: string, reason: string): void {
 	const slot = st.taskStallState?.[taskId];
@@ -736,8 +736,8 @@ export function resolveTaskStallLocked(p: Paths, st: SwarmState, taskId: string,
 // === Issue 21 quota-reset-interval: slot recovery scan ===
 // When a slot's bench naturally expires (cooldownUntil < nowMs) AND lastBenchReason === "quota"
 // AND at least one agent on that slot has activeTaskIds, emit `pool.slot_recovered` so the
-// orchestrator's existing dashboard/trace surface can decide whether to resume (NO auto-resume —
-// the orchestrator-driven recovery contract). Manual benches (lastBenchReason undefined) and
+// root's existing dashboard/trace surface can decide whether to resume (NO auto-resume —
+// the root-driven recovery contract). Manual benches (lastBenchReason undefined) and
 // benches for non-quota reasons (auth/rate_limit/transient/unknown) NEVER emit recovery events —
 // the gate is strict on kind === "quota" so an auth-bench slot doesn't trigger a misleading
 // "recovered" trace.
@@ -753,7 +753,7 @@ export function resolveTaskStallLocked(p: Paths, st: SwarmState, taskId: string,
 // fine: the trace payload carries an agentIds[] list (a single agent is the common case; the
 // payload shape is array-typed to avoid future drift).
 //
-// File IO: pool-state.json reads/writes use the pool's own mutex (withPoolLock). The orchestrator
+// File IO: pool-state.json reads/writes use the pool's own mutex (withPoolLock). The root
 // pump already holds the SWARM lock (withLock(p)), and pool-state.json is independent — torn reads
 // are safe because cooldownUntil only ever moves forward and lastBenchReason/lastRecoveredAt are
 // write-only (never deleted except on a new bench, which we'd see). Helper is exported for direct
@@ -782,11 +782,11 @@ export async function evaluateSlotRecoveryLocked(
 			if (health.lastRecoveredAt) { reasons.deduped++; continue; }
 			// Find agents on this slot. The slot key is `${provider}/${model}`; agents carry their
 			// current model+provider. We do NOT filter on tmuxTarget=="unknown" — even a dead-tmux
-			// agent is a candidate for the trace (the orchestrator may want to know regardless).
+			// agent is a candidate for the trace (the root may want to know regardless).
 			// Use slotKey() for consistent key derivation (handles "(default)" provider case).
 			const slotAgentKey = slotKeyStr;
 			const matchingAgents = Object.values(st.agents).filter((a) => {
-				if (a.id === "orchestrator") return false; // orchestrator pseudo-agent never has active tasks for slot work
+				if (a.id === "root") return false; // root pseudo-agent never has active tasks for slot work
 				return slotKey({ model: a.model, provider: a.provider }) === slotAgentKey;
 			});
 			const busyAgents = matchingAgents.filter((a) => (a.activeTaskIds?.length || 0) > 0);
@@ -800,7 +800,7 @@ export async function evaluateSlotRecoveryLocked(
 			// payload comes from the slot's lastBenchMs stamped by recordProviderError at bench time.
 			const afterMs = Math.max(0, nowMs - cooldownEnd);
 			// Emit one trace per busy agent (a slot with multiple workers on it produces multiple
-			// events; the orchestrator can dedupe downstream if it cares).
+			// events; the root can dedupe downstream if it cares).
 			for (const agent of busyAgents) {
 				emitted.push({ agentId: agent.id, slot: slotKeyStr, afterMs, remainingTasks: agent.activeTaskIds.length, benchMs: health.lastBenchMs ?? Math.max(0, cooldownEnd - (cooldownEnd - afterMs)) });
 				reasons.expired_quota++;
@@ -826,6 +826,6 @@ export async function evaluateSlotRecoveryLocked(
 	return { emitted: emitted.length, reasons };
 }
 
-// === Issue 11: Orchestrator wake-up escalation + durable replay fencing ===
+// === Issue 11: Root wake-up escalation + durable replay fencing ===
 
 // Helper to parse taskId/nodeId from conversationId (format: "task:${taskId}:${nodeId}").

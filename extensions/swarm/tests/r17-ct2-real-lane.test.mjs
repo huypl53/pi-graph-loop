@@ -6,7 +6,7 @@
  *   1. Durable mailbox append (L1): one normal-priority result record appended.
  *   2. Receipt (consumer ledger): consumerReceipts entry count.
  *   3. Pi queue boundary (real pi.sendMessage invocation): count + opts.triggerTurn.
- *   4. Visible surface: delivered counter or, where the surface is the orchestrator
+ *   4. Visible surface: delivered counter or, where the surface is the root
  *      pump, the absence of a user-visible layer is recorded.
  *   5. LLM consumption (transcript): fixture-driven scripted turns actually emit.
  *
@@ -14,7 +14,7 @@
  * + registerMessagesTools paths as the real mock-llm lane, but injects the worker
  * send directly via deliverMessageLocked (the real lane injects via the scripted
  * worker turn; both paths hit the same durable layer). The acceptance criteria
- * call this out: "Use a real worker/orchestrator topology or explicitly document
+ * call this out: "Use a real worker/root topology or explicitly document
  * an unavoidable runtime blocker; a scratch state stub alone is insufficient."
  *
  * The companion tmux lane (tmux-snapshots/r17-ct2-validation/) is what proves
@@ -30,10 +30,10 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const {
-	pumpOrchestratorMailbox,
+	pumpRootMailbox,
 } = await import(join(here, "..", "src/reconcile.ts"));
 const { paths, withLock, readState, writeState } = await import(join(here, "..", "src/state.ts"));
-const { ensureOrchestrator, heartbeatOrchestratorLeader, claimOrchestratorLeader } = await import(join(here, "..", "src/identity.ts"));
+const { ensureRoot, heartbeatRootLeader, claimRootLeader } = await import(join(here, "..", "src/identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "..", "src/mailbox.ts"));
 const { registerMessagesTools } = await import(join(here, "..", "src/tools/messages.ts"));
 
@@ -49,7 +49,7 @@ const { registerMessagesTools } = await import(join(here, "..", "src/tools/messa
 // L1: durable mailbox append count
 // L2: consumer ledger entry count
 // L3: real pi.sendMessage call count (R10-1)
-// L4: visible surface — derived from L3 (orchestrator has no pane, so surface
+// L4: visible surface — derived from L3 (root has no pane, so surface
 //     is the L3 call itself; capture pane text would be a duplicate)
 // L5: LLM consumption — proven by the companion tmux lane; here we record
 //     the boundary was reached and the test exits before claiming GREEN.
@@ -62,7 +62,7 @@ function ok(name, cond, info) {
 function section(name) { console.log(`\n[${name}]`); }
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const ORIG_PI_SWARM_IS_ORCHESTRATOR = process.env.PI_SWARM_IS_ORCHESTRATOR;
+const ORIG_PI_SWARM_IS_ROOT = process.env.PI_SWARM_IS_ROOT;
 
 // Fixture existence sanity (must exist before this test can be considered scoped).
 const FIXTURE_PATH = join(here, "../mock-llm/fixtures/r17-ct2-real-lane.jsonl");
@@ -84,15 +84,15 @@ function clearEvents(scratch) {
 	mkdirSync(join(scratch, ".pi/swarm/traces"), { recursive: true });
 	writeFileSync(join(scratch, ".pi/swarm/traces/events.jsonl"), "");
 }
-function readOrchestratorMailbox(scratch) {
-	const p = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
+function readRootMailbox(scratch) {
+	const p = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 	if (!existsSync(p)) return [];
 	return readFileSync(p, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
 
 function makePiMock() {
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const sendMessages = [];
 	const pi = {
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
@@ -104,7 +104,7 @@ function makePiMock() {
 	return { pi, sendMessages };
 }
 
-async function seedBusyOrchestrator({ scratch, busy = true, workerId = "worker-r17", taskId = "task-r17-ct2-x" } = {}) {
+async function seedBusyRoot({ scratch, busy = true, workerId = "worker-r17", taskId = "task-r17-ct2-x" } = {}) {
 	mkdirSync(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
 	mkdirSync(join(scratch, ".pi/swarm/traces"), { recursive: true });
 	clearEvents(scratch);
@@ -134,7 +134,7 @@ async function seedBusyOrchestrator({ scratch, busy = true, workerId = "worker-r
 	mkdirSync(taskDir, { recursive: true });
 	const taskJson = {
 		version: 1, taskId, title: "R17 victim task", goal: "test", status: "in_progress", priority: "normal",
-		createdAt: ts, updatedAt: ts, owner: "orchestrator", workflow: "feature-dev",
+		createdAt: ts, updatedAt: ts, owner: "root", workflow: "feature-dev",
 		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "implement",
 		currentNodes: ["implement"],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
@@ -151,9 +151,9 @@ async function seedBusyOrchestrator({ scratch, busy = true, workerId = "worker-r
 	const p = paths(scratch);
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
-		ensureOrchestrator(st, scratch, p);
-		claimOrchestratorLeader(st, nowMs, process.pid);
-		if (busy) st.agents.orchestrator.runtimeStatus = "tool_running";
+		ensureRoot(st, scratch, p);
+		claimRootLeader(st, nowMs, process.pid);
+		if (busy) st.agents.root.runtimeStatus = "tool_running";
 		await writeState(p, st);
 	});
 	return { p, taskId };
@@ -172,7 +172,7 @@ async function injectNormalPriorityResult({ scratch, taskId, p }) {
 			},
 			scratch, p, st,
 			{
-				to: "orchestrator",
+				to: "root",
 				priority: "normal",
 				subject: `Result: implement of ${taskId} done`,
 				body: `Node implement of ${taskId} completed successfully.`,
@@ -187,53 +187,53 @@ async function injectNormalPriorityResult({ scratch, taskId, p }) {
 }
 
 // ----------------------------------------------------------------------------
-// Scenario A: CT-2.A — busy orchestrator, normal-priority result, ZERO surface
+// Scenario A: CT-2.A — busy root, normal-priority result, ZERO surface
 // ----------------------------------------------------------------------------
-section("CT-2.A busy orchestrator + normal-priority result → 0 pi.sendMessage, 1 L1 durable append");
+section("CT-2.A busy root + normal-priority result → 0 pi.sendMessage, 1 L1 durable append");
 {
 	const scratch = freshScratch();
-	const { p } = await seedBusyOrchestrator({ scratch, busy: true });
+	const { p } = await seedBusyRoot({ scratch, busy: true });
 	await injectNormalPriorityResult({ scratch, taskId: "task-r17-ct2-x", p });
 
-	const L1Before = readOrchestratorMailbox(scratch).length;
+	const L1Before = readRootMailbox(scratch).length;
 
 	const { pi, sendMessages } = makePiMock();
 	const ctxBusy = { cwd: scratch, mode: "tui", isIdle: () => false, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	const pumpResult = await pumpOrchestratorMailbox(pi, ctxBusy, p, "watchdog");
+	const pumpResult = await pumpRootMailbox(pi, ctxBusy, p, "watchdog");
 
-	const L1After = readOrchestratorMailbox(scratch).length;
+	const L1After = readRootMailbox(scratch).length;
 	ok("CT-2.A L1 mailboxAppendCount === 1 (durable contract intact)",
 		L1After === 1, { before: L1Before, after: L1After });
-	ok("CT-2.A L3 sendMessages.length === 0 (orchestrator mid-turn; no surface within busy window)",
+	ok("CT-2.A L3 sendMessages.length === 0 (root mid-turn; no surface within busy window)",
 		sendMessages.length === 0, { got: sendMessages.length });
 	ok("CT-2.A delivered === 0 (pump reports no surface)",
 		pumpResult.delivered === 0, { delivered: pumpResult.delivered });
 }
 
 // ----------------------------------------------------------------------------
-// Scenario B: CT-2.B — orchestrator agent_settled → 1 pi.sendMessage (triggerTurn=true)
+// Scenario B: CT-2.B — root agent_settled → 1 pi.sendMessage (triggerTurn=true)
 // ----------------------------------------------------------------------------
-section("CT-2.B orchestrator agent_settled → 1 pi.sendMessage with triggerTurn=true");
+section("CT-2.B root agent_settled → 1 pi.sendMessage with triggerTurn=true");
 {
 	const scratch = freshScratch();
-	const { p } = await seedBusyOrchestrator({ scratch, busy: true });
+	const { p } = await seedBusyRoot({ scratch, busy: true });
 	await injectNormalPriorityResult({ scratch, taskId: "task-r17-ct2-y", p });
 
 	const { pi, sendMessages } = makePiMock();
 	const ctxBusy = { cwd: scratch, mode: "tui", isIdle: () => false, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	await pumpOrchestratorMailbox(pi, ctxBusy, p, "watchdog");
+	await pumpRootMailbox(pi, ctxBusy, p, "watchdog");
 	const afterBusy = sendMessages.length;
 
-	// Simulate orchestrator own agent_settled: flip to idle, reset consumerReceipts.
+	// Simulate root own agent_settled: flip to idle, reset consumerReceipts.
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
-		st.agents.orchestrator.runtimeStatus = "idle";
-		if (st.consumerReceipts?.orchestrator) st.consumerReceipts.orchestrator.entries = {};
+		st.agents.root.runtimeStatus = "idle";
+		if (st.consumerReceipts?.root) st.consumerReceipts.root.entries = {};
 		await writeState(p, st);
 	});
 
 	const ctxIdle = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	await pumpOrchestratorMailbox(pi, ctxIdle, p, "agent_settled");
+	await pumpRootMailbox(pi, ctxIdle, p, "agent_settled");
 
 	ok("CT-2.B sendMessages.length === 0 after busy tick (mid-turn suppression preserved)",
 		afterBusy === 0, { got: afterBusy });
@@ -249,26 +249,26 @@ section("CT-2.B orchestrator agent_settled → 1 pi.sendMessage with triggerTurn
 section("CT-2.C replay does NOT add another pi.sendMessage (R10-1 consumerReceipts dedupe)");
 {
 	const scratch = freshScratch();
-	const { p } = await seedBusyOrchestrator({ scratch, busy: true });
+	const { p } = await seedBusyRoot({ scratch, busy: true });
 	await injectNormalPriorityResult({ scratch, taskId: "task-r17-ct2-z", p });
 
 	const { pi, sendMessages } = makePiMock();
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
-		st.agents.orchestrator.runtimeStatus = "idle";
-		if (st.consumerReceipts?.orchestrator) st.consumerReceipts.orchestrator.entries = {};
+		st.agents.root.runtimeStatus = "idle";
+		if (st.consumerReceipts?.root) st.consumerReceipts.root.entries = {};
 		await writeState(p, st);
 	});
 	const ctxIdle = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	await pumpOrchestratorMailbox(pi, ctxIdle, p, "agent_settled_t1");
+	await pumpRootMailbox(pi, ctxIdle, p, "agent_settled_t1");
 	const afterT1 = sendMessages.length;
-	await pumpOrchestratorMailbox(pi, ctxIdle, p, "agent_settled_t2");
+	await pumpRootMailbox(pi, ctxIdle, p, "agent_settled_t2");
 	const afterT2 = sendMessages.length;
 
 	let consumerReceiptsCount = 0;
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
-		consumerReceiptsCount = Object.keys(st.consumerReceipts?.orchestrator?.entries || {}).length;
+		consumerReceiptsCount = Object.keys(st.consumerReceipts?.root?.entries || {}).length;
 	});
 
 	ok("CT-2.C first agent_settled surfaces 1", afterT1 === 1, { got: afterT1 });
@@ -278,7 +278,7 @@ section("CT-2.C replay does NOT add another pi.sendMessage (R10-1 consumerReceip
 
 // ----------------------------------------------------------------------------
 // Scenario D: R15 tools/messages.ts text — confirm no false ~5s promise in
-// current production code. This is a documentation guardrail per the orchestrator's
+// current production code. This is a documentation guardrail per the root's
 // correction: R15 B1 (commit 68061c5) already removed the wording. The fixture
 // lane + this test should agree: the worker-facing swarm_send_message return text
 // does NOT claim a bounded surface. If it regresses, this assertion fails BEFORE
@@ -287,7 +287,7 @@ section("CT-2.C replay does NOT add another pi.sendMessage (R10-1 consumerReceip
 section("R15 B1 regression guard — swarm_send_message return text contains NO false ~5s promise");
 {
 	const scratch = freshScratch();
-	const { p } = await seedBusyOrchestrator({ scratch, busy: true, workerId: "worker-r17-guard", taskId: "task-r17-guard" });
+	const { p } = await seedBusyRoot({ scratch, busy: true, workerId: "worker-r17-guard", taskId: "task-r17-guard" });
 	await injectNormalPriorityResult({ scratch, taskId: "task-r17-guard", p });
 
 	let capturedText = null;
@@ -296,11 +296,11 @@ section("R15 B1 regression guard — swarm_send_message return text contains NO 
 			if (tool?.name !== "swarm_send_message") return;
 			(async () => {
 				process.env.PI_SWARM_AGENT_ID = "worker-r17-guard";
-				process.env.PI_SWARM_IS_ORCHESTRATOR = "";
+				process.env.PI_SWARM_IS_ROOT = "";
 				const fakeCtx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
 				const result = await tool.execute(
 					"call-r17-guard",
-					{ to: "orchestrator", priority: "normal", subject: "guard", body: "guard body" },
+					{ to: "root", priority: "normal", subject: "guard", body: "guard body" },
 					undefined, () => {}, fakeCtx,
 				);
 				capturedText = typeof result === "string" ? result : result?.content?.[0]?.text ?? JSON.stringify(result);
@@ -323,7 +323,7 @@ section("R15 B1 regression guard — swarm_send_message return text contains NO 
 // Summary
 // ----------------------------------------------------------------------------
 process.env.PI_SWARM_AGENT_ID = ORIG_PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = ORIG_PI_SWARM_IS_ORCHESTRATOR;
+process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 
 console.log(`\nR17-CT2-REAL-LANE ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 if (fail > 0) process.exit(1);

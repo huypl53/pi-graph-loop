@@ -27,7 +27,7 @@ export function isDeliveryFailureRetryable(rec: { status: string; lastAck?: unkn
 // Records are append-only JSONL; memory promotion is gated on file-backed evidence that exists + reads.
 
 export function formatSwarmMessageContent(msg: SwarmMessage) {
-	// Timestamp prefix: the orchestrator can queue messages for a long time before the pump
+	// Timestamp prefix: the root can queue messages for a long time before the pump
 	// surfaces them (busy deferral, back-off, restarts). Without a send-time stamp the recipient
 	// cannot tell a fresh directive from one that sat in the mailbox for an hour — operators
 	// repeatedly misread stale nudges as live events. Use the durable record's createdAt (fall

@@ -3,12 +3,12 @@
 // canonical assignment message via checkStallNotificationStale branch (6) — the branch was
 // designed for NUDGE staleness (surfacing an OLD assignment to a dead agent), but
 // swarm_assign_task reuses it for a FRESH assignment whose agent record is momentarily
-// `stopped` (the orchestrator restarts the pane right after assigning).
+// `stopped` (the root restarts the pane right after assigning).
 //
 // Live incident 2026-09-01 08:25:43 (task-202609010900-issue-84-audit-tooling):
 //   task.assign.fenced reason="agent_stopped" — the worker then received the FENCED
 //   information message instead of its brief, tried to self-assign
-//   (ORCHESTRATOR_AUTHORITY_REQUIRED), and settled idle → swarm deadlock (idle-lock #5).
+//   (ROOT_AUTHORITY_REQUIRED), and settled idle → swarm deadlock (idle-lock #5).
 //
 // Expected CORRECT behavior (assertions below): a fresh assignment to a stopped agent
 // must deliver the CANONICAL assignment message (subject "... assigned", not FENCED).
@@ -22,7 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = join(tmpdir(), `swarm-assign-fence-repro-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
+process.env.PI_SWARM_AGENT_ID = "root";
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 
@@ -58,11 +58,11 @@ const state = {
 	version: 1,
 	swarmId: "repro",
 	agents: {
-		orchestrator: { id: "orchestrator", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
+		root: { id: "root", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
 		"worker-x": { id: "worker-x", status: "stopped", runtimeStatus: "stopped", activeTaskIds: [], spawnedForTaskId: null, updatedAt: nowIso },
 	},
 	messages: {
-		"msg-old-assignment": { id: "msg-old-assignment", from: "orchestrator", to: "worker-x", subject: "Task prior / node n assigned", createdAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), requiresAck: true, status: "acked", ack: { status: "done", at: new Date(Date.now() - 59 * 60 * 1000).toISOString() } },
+		"msg-old-assignment": { id: "msg-old-assignment", from: "root", to: "worker-x", subject: "Task prior / node n assigned", createdAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), requiresAck: true, status: "acked", ack: { status: "done", at: new Date(Date.now() - 59 * 60 * 1000).toISOString() } },
 	},
 	updatedAt: nowIso,
 };
@@ -86,7 +86,7 @@ const createRes = await call("swarm_create_task", {
 });
 ok("task created", !createRes?.details?.error);
 
-// close plan (orchestrator force) so implement becomes ready
+// close plan (root force) so implement becomes ready
 await call("swarm_update_task", { taskId: "repro-r115", nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
 
 // seed the OLD canonical pointer + a completed prior attempt on implement (the reuse shape)

@@ -40,7 +40,7 @@ delegation (subagent).
   optional `mode: "pi"` later).
 - tmux-interactive tasks (no attachable shell; we capture logs, not panes).
 - Sandboxing / containerization of the command.
-- A periodic orchestrator pump / push notifications (V1 is pull-based: `background_status`).
+- A periodic root pump / push notifications (V1 is pull-based: `background_status`).
 
 ---
 
@@ -395,7 +395,7 @@ promptGuidelines: ["Use `background_stop` to terminate a running background task
 | **factory** | Only `pi.on(...)` registrations + `pi.registerTool(...)` + `pi.registerCommand(...)`. **No** processes started, no timers, no state files written. |
 | **`session_start`** | `ensureDirs(p)`; run reconcile (§3) under `withLock`; `trace("session.start", {…})`. If `ctx.hasUI` set a status line `ctx.ui.setStatus("bg", "bg:N")`. |
 | **`background_status`** | Lazily reconcile before returning (cheap, bounded). |
-| **`session_start` (TUI)** | After reconcile: if `ctx.mode === "tui"` start the **UI refresh interval** (`PI_BG_TASKS_UI_REFRESH_MS`, default 1000ms) that re-reads state and re-renders the widget + status line (§11). Mirrors swarm's `startOrchestratorMailboxPump` (TUI-gated interval started in `session_start`). |
+| **`session_start` (TUI)** | After reconcile: if `ctx.mode === "tui"` start the **UI refresh interval** (`PI_BG_TASKS_UI_REFRESH_MS`, default 1000ms) that re-reads state and re-renders the widget + status line (§11). Mirrors swarm's `startRootMailboxPump` (TUI-gated interval started in `session_start`). |
 | **`session_shutdown`** | If `PI_BG_TASKS_KILL_ON_SHUTDOWN==="1"`: for tasks with `spawnedByPid === process.pid`, `status==="running"`, and `survive !== true` (the watchdog-disabled daemons are always skipped), send group **SIGTERM synchronously**, then fire-and-forget a SIGKILL escalation after `graceMs` (**do NOT `await` the grace window in the shutdown hook** — children are already detached/unref'd, so shutdown must not block on the grace period). Best-effort finalize as `killed` via the live listener. Otherwise: do nothing. (Note: this hook cannot run on a crash/kill-9; the **parent-death watchdog** in the wrapper is the authoritative kill path for `survive:false` tasks and covers every exit. `/reload` does not fire this hook for the same process.) |
 | **config (settings.json + env)** | Same precedence as `compact-resume`: **env > `.pi/settings.json` extensions block > defaults.** Knobs: `PI_BG_TASKS` (enable/disable), `PI_BG_TASKS_KILL_ON_SHUTDOWN`, `PI_BG_TASKS_MAX` (max concurrent, default 8), `PI_BG_TASKS_LOG_MAX_BYTES` (default 5MB), `PI_BG_TASKS_WAIT_MAX_MS` (default 120000), `PI_BG_TASKS_STOP_GRACE_MS` (default 5000), `PI_BG_TASKS_WAIT_POLL_MS` (default 250), **UI:** `PI_BG_TASKS_UI` (default on in TUI), `PI_BG_TASKS_UI_REFRESH_MS` (default 1000), `PI_BG_TASKS_UI_MAX_ROWS` (default 8). Settings shape under `extensions["background-tasks"]` (with optional `.ui = { enabled, refreshMs, maxRows }`). |
 | **zombie detection** | `process.kill(pid, 0)` in reconcile; ESRCH ⇒ dead. Marker file ⇒ finalized with code. |
@@ -569,7 +569,7 @@ The extension is **not** "validated" unless this actually runs in tmux. Smallest
 
 ## 11. TUI / User-facing UI (mandatory)
 
-> Added per a hard requirement from the human (orchestrator relay): the extension must let the
+> Added per a hard requirement from the human (root relay): the extension must let the
 > **human user** see background tasks live in the TUI — not only tools for the agent. This whole
 > section is mandatory. Every `ctx.ui.*` call is guarded; print/json/rpc modes get zero UI and the
 > tools still work.
@@ -621,7 +621,7 @@ Rendering rules:
 ### 11.2 What drives live updates
 
 A **TUI-gated interval started in `session_start`**, exactly mirroring swarm's
-`startOrchestratorMailboxPump` (`extensions/swarm/src/hooks.ts`):
+`startRootMailboxPump` (`extensions/swarm/src/hooks.ts`):
 
 ```ts
 let uiTimer: NodeJS.Timeout | undefined;
@@ -733,7 +733,7 @@ Like swarm's pump, a captured `ctx` can go stale after `/reload`/session replace
  call may throw. The tick wraps `renderUi` in `try/catch`; on a stale-ctx error it
  `stopUiTimer()` once and traces, so a broken interval doesn't spam stderr every second — the next
  `session_start` restarts a fresh interval with a live `ctx` (same pattern as
- `pumpOrchestratorMailbox`'s `orchestratorMailboxPumpError` handling).
+ `pumpRootMailbox`'s `rootMailboxPumpError` handling).
 
 ---
 
@@ -793,7 +793,7 @@ tasks.watch.*` / `PI_BG_TASKS_WATCH*` env: `enabled`, `maxPerSession`, `refireMs
 | `shellQuote()` | `swarm/src/utils.ts` | quote-safe spawn argv (§2) |
 | `truncateHead`/`truncateTail`/`DEFAULT_MAX_*`/`formatSize`/`CONFIG_DIR_NAME` | pi-coding-agent exports | output truncation + `.pi/` root |
 | env > settings.json > defaults precedence | `compact-resume.ts` | config knobs |
-| `ctx.ui.setWidget`/`setStatus`/`notify` + TUI-gated interval in `session_start` (cleared on shutdown) | `widget-placement.ts`, `status-line.ts`, `notify.ts`, swarm `startOrchestratorMailboxPump` | §11 TUI |
+| `ctx.ui.setWidget`/`setStatus`/`notify` + TUI-gated interval in `session_start` (cleared on shutdown) | `widget-placement.ts`, `status-line.ts`, `notify.ts`, swarm `startRootMailboxPump` | §11 TUI |
 | `truncateToWidth`/`visibleWidth` | `@earendil-works/pi-tui` (`custom-footer.ts`) | widget row width-truncation (§11) |
 | `session_start` reconcile / `session_shutdown` cleanup | `swarm/src/hooks.ts` | lifecycle |
 | `pi.exec` (bounded) | swarm `tmux.ts`/`captureGitCommit` | **not** used for the task itself (spawn instead); used only for tiny helpers if needed |

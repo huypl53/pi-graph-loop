@@ -7,15 +7,15 @@ import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
 import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PI_SWARM_REASSIGN_RATE_LIMIT, PI_SWARM_REASSIGN_RATE_WINDOW_MS, PREFLIGHT_ASSIGN_GRACE_MS, REASSIGN_RATE_LIMITED, TERMINAL_NODE_STATUSES, TRACE_LATE_RESULT_REJECTED, TRACE_REASSIGN_RATE_LIMITED, TRACE_LIFECYCLE_DERIVED, TRACE_TASK_ATTEMPT_FORCE_REOPEN, LATE_RESULT_REFUSAL_REASON } from "../constants.ts";
-import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isGraphTerminalNode, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveCommitNodeEvidence, resolveNodeScope, scopesOverlap, suppressPriorAttemptForForceReopen, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
+import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseRootTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isGraphTerminalNode, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveCommitNodeEvidence, resolveNodeScope, scopesOverlap, suppressPriorAttemptForForceReopen, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
 import { resolveTaskStallLocked } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, deriveLifecycleFromTrigger, responseMissingRecords, supersedeOpenAssignments, supersedeTaskAssignmentMessages, validateResultMessage } from "../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, now, safeId, textResult } from "../utils.ts";
 import { ensureDirs, paths, readState, readTaskByRef, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
 import { attachGitDiffStat, registerEvidenceHooks, validateAttestations, writeBaselineCommit } from "../trace.ts";
-import { ensureOrchestrator, heartbeatOrchestratorLeader, isOrchestratorAuthority, requireOrchestratorAuthority } from "../identity.ts";
-import { findReusableAgent, spawnAgent, clearOrphanWatch, isSameOrchestratorLeader } from "../agents.ts";
+import { ensureRoot, heartbeatRootLeader, isRootAuthority, requireRootAuthority } from "../identity.ts";
+import { findReusableAgent, spawnAgent, clearOrphanWatch, isSameRootLeader } from "../agents.ts";
 import { reconcile, runtimeTaskWarnings } from "../reconcile.ts";
 import { tmux } from "../tmux.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
@@ -137,7 +137,7 @@ async function stampCloseEvidenceIfMissing(pi: ExtensionAPI, tp: ReturnType<type
 	const node = task.nodes[nodeId];
 	if (!node) return undefined;
 	let record: Record<string, unknown>;
-	if (inferRoleKind(nodeId, node.role) === "orchestrator" && isGraphTerminalNode(task, nodeId)) {
+	if (inferRoleKind(nodeId, node.role) === "root" && isGraphTerminalNode(task, nodeId)) {
 		const evidence = await resolveCommitNodeEvidence(pi, tp);
 		record = { status: evidence.verified ? "verified" : "unverified", reason: evidence.reason, baseline: evidence.baseline, head: evidence.head, at: now(), nodeId };
 	} else if (diffStat?.available || attestationReport) {
@@ -191,10 +191,10 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const p = paths(ctx.cwd);
 				await ensureDirs(p);
 				const me = currentAgentId();
-				requireOrchestratorAuthority(currentAgentId(), "swarm_create_task");
+				requireRootAuthority(currentAgentId(), "swarm_create_task");
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "create_task");
+				heartbeatRootLeader(st, Date.now(), process.pid, "create_task");
 				await writeState(p, st);
 				const ts = now();
 				const slug = safeId(params.title).slice(0, 24);
@@ -223,7 +223,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				await mkdir(tp.root, { recursive: true });
 				await mkdir(tp.artifacts, { recursive: true });
 				await writeBaselineCommit(pi, tp);
-				const autoClosed = await autoCloseOrchestratorTerminalNodes(pi, tp, task);
+				const autoClosed = await autoCloseRootTerminalNodes(pi, tp, task);
 				if (autoClosed.closed.length) {
 					createTaskStatusChange = applyTaskStatus(task);
 					task.currentNodes = computeReadyNodes(task).current;
@@ -233,14 +233,14 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// nodes flips it to done/failed/cancelled below).
 				if (createTaskStatusChange.terminal) resolveTaskStallLocked(p, st, taskId, "task_terminal");
 				// Issue 26 — task-close worker sweep (terminal transition site #1). A freshly-created task
-				// may auto-close via `autoCloseOrchestratorTerminalNodes` (e.g. a one-node graph); when
+				// may auto-close via `autoCloseRootTerminalNodes` (e.g. a one-node graph); when
 				// that happens the auto-close path already released assignments via releaseNodeAssignment,
 				// but workers spawned-for-task with empty active-task sets still linger. The sweep runs
 				// only on terminal transitions and is a no-op when nothing is eligible.
 				if (createTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, taskId, task);
 				// Actionable = newly-ready nodes PLUS already-ready unassigned nodes (e.g. a fresh task's start node,
 				// which is born status:"ready" and lands in `current`, not the raw `ready` set). Keeps the "Ready:"
-				// report consistent with swarm_next_nodes so orchestrators see what is assignable right now.
+				// report consistent with swarm_next_nodes so roots see what is assignable right now.
 				const actionable = Array.from(new Set([
 					...ready,
 					...current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
@@ -248,10 +248,10 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				await writeTaskState(tp, task);
 				await writeFile(tp.taskMd, buildTaskMarkdown(task), "utf8");
 				await traceTask(tp, "task.create", { taskId, title: task.title, workflow: task.workflow, owner: task.owner, start: task.start, nodeCount: Object.keys(task.nodes).length, ready, actionable, autoClosed: autoClosed.closed });
-				if (autoClosed.closed.length) await traceTask(tp, "task.autoclose.orchestrator", { taskId, nodeIds: autoClosed.closed, by: "engine" });
+				if (autoClosed.closed.length) await traceTask(tp, "task.autoclose.root", { taskId, nodeIds: autoClosed.closed, by: "engine" });
 				return { taskId, task, tp, ready, actionable, autoClosed: autoClosed.closed };
 			});
-			return textResult(`Created task ${result.taskId} at ${relative(ctx.cwd, result.tp.root)}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}${result.autoClosed?.length ? `\nAuto-closed orchestrator terminal nodes: ${result.autoClosed.join(", ")}` : ""}`, { taskId: result.taskId, task: result.task, taskMd: relative(ctx.cwd, result.tp.taskMd), taskJson: relative(ctx.cwd, result.tp.taskJson), autoClosed: result.autoClosed });
+			return textResult(`Created task ${result.taskId} at ${relative(ctx.cwd, result.tp.root)}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}${result.autoClosed?.length ? `\nAuto-closed root terminal nodes: ${result.autoClosed.join(", ")}` : ""}`, { taskId: result.taskId, task: result.task, taskMd: relative(ctx.cwd, result.tp.taskMd), taskJson: relative(ctx.cwd, result.tp.taskJson), autoClosed: result.autoClosed });
 		});
 		},
 	}))
@@ -395,7 +395,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "swarm_assign_task",
 		label: "Swarm Assign Task",
-		description: "Assign a task graph node to an agent: reuse an idle role-matching agent by default, optionally spawn, update node assignment state + activeTaskIds, and send a structured assignment message carrying taskId/nodeId/replyTarget. task.json is the source of truth. Orchestrator-level tool.",
+		description: "Assign a task graph node to an agent: reuse an idle role-matching agent by default, optionally spawn, update node assignment state + activeTaskIds, and send a structured assignment message carrying taskId/nodeId/replyTarget. task.json is the source of truth. Root-level tool.",
 		promptGuidelines: ["Use `swarm_assign_task` to assign a ready node; it reuses an idle role-matching agent unless autoSpawn/spawnIsolated is set. If it returns NODE_NOT_READY, call swarm_next_nodes first. If NO_AVAILABLE_AGENT, enable autoSpawn or pass an explicit agentId."],
 		parameters: Type.Object({
 			taskId: Type.String({ description: "Task id." }),
@@ -421,12 +421,12 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const p = paths(ctx.cwd);
 				await ensureDirs(p);
 				const me = currentAgentId();
-				requireOrchestratorAuthority(me, "swarm_assign_task");
+				requireRootAuthority(me, "swarm_assign_task");
 			const reusePolicy = params.reusePolicy || "prefer_idle_existing";
 			let spawned = false;
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				heartbeatOrchestratorLeader(st, Date.now(), process.pid, "assign_task");
+				heartbeatRootLeader(st, Date.now(), process.pid, "assign_task");
 				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
 				const taskId = task.taskId;
 				const node = task.nodes[params.nodeId];
@@ -435,9 +435,9 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// Readiness: assignable when actionable (ready, or unassigned ready-status current) or already active (reassign).
 				const cr = computeReadyNodes(task);
 				const actionable = new Set([...cr.ready, ...cr.current.filter((id) => task.nodes[id].status === "ready" && !task.nodes[id].assignee)]);
-				if (node.status === "pending" && !actionable.has(params.nodeId)) await failTaskTool(tp, p, "NODE_NOT_READY", `Node ${params.nodeId} is not ready yet (dependencies/gates not satisfied).`, { taskId, nodeId: params.nodeId, expected: { ready: cr.ready, current: cr.current }, received: { nodeStatus: node.status }, suggestedNextCall: { tool: "swarm_next_nodes", params: { taskId } }, actionableHint: "The node's dependencies have not all reached a terminal state. Run swarm_task_status to inspect the blocking nodes, or wait for the orchestrator to advance the graph." });
+				if (node.status === "pending" && !actionable.has(params.nodeId)) await failTaskTool(tp, p, "NODE_NOT_READY", `Node ${params.nodeId} is not ready yet (dependencies/gates not satisfied).`, { taskId, nodeId: params.nodeId, expected: { ready: cr.ready, current: cr.current }, received: { nodeStatus: node.status }, suggestedNextCall: { tool: "swarm_next_nodes", params: { taskId } }, actionableHint: "The node's dependencies have not all reached a terminal state. Run swarm_task_status to inspect the blocking nodes, or wait for the root to advance the graph." });
 
-				ensureOrchestrator(st, ctx.cwd, p);
+				ensureRoot(st, ctx.cwd, p);
 				const expectedKind = inferRoleKind(params.nodeId, node.role);
 				let candidates: ReusableAgentMatch[] = [];
 				let assigneeId: string | undefined;
@@ -445,9 +445,9 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					const aid = safeId(params.agentId);
 					if (!st.agents[aid]) await failTaskTool(tp, p, "AGENT_NOT_FOUND", `Agent ${aid} is not registered.`, { taskId, nodeId: params.nodeId, received: { agentId: aid }, suggestedNextCall: { tool: "swarm_spawn_agent", params: { id: aid, role: node.role } } });
 					assigneeId = aid;
-				} else if (expectedKind === "orchestrator") {
-					// Orchestrator-role nodes (e.g. commit) are owned by the orchestrator pseudo-agent.
-					assigneeId = "orchestrator";
+				} else if (expectedKind === "root") {
+					// Root-role nodes (e.g. commit) are owned by the root pseudo-agent.
+					assigneeId = "root";
 				} else {
 					const found = await findReusableAgent(pi, st, { roleKind: expectedKind, requireIdle: false, requireTmuxAlive: false, includeBusy: false, excludeTaskId: taskId });
 					candidates = found.matches;
@@ -466,9 +466,9 @@ export function registerTasksTools(pi: ExtensionAPI) {
 
 				// ---- Preflight auto-clear (Issue 16) ----
 				// When this assign resolves to a freshly-spawned agent AND the caller is the same
-				// orchestrator session that armed the spawn entry AND the spawn was within the grace
+				// root session that armed the spawn entry AND the spawn was within the grace
 				// window, cancel the orphan watchdog early so a slow assign never trips the warning.
-				// This is a no-op when any predicate fails — true orphans and cross-orchestrator
+				// This is a no-op when any predicate fails — true orphans and cross-root
 				// assigns fall through to the normal timer path. The delivery-side
 				// clearReason='swarm_assign_task' backstop inside deliverMessageLocked remains intact.
 				if (Array.isArray(st.recentSpawns) && st.recentSpawns.length > 0) {
@@ -476,7 +476,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					if (entry) {
 						const ageMs = Date.now() - new Date(entry.spawnedAt).getTime();
 						const callerLeader = { pid: process.pid, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || undefined };
-						if (ageMs < PREFLIGHT_ASSIGN_GRACE_MS && isSameOrchestratorLeader(entry, callerLeader)) {
+						if (ageMs < PREFLIGHT_ASSIGN_GRACE_MS && isSameRootLeader(entry, callerLeader)) {
 							await clearOrphanWatch(p, st, assignee.id, "swarm_assign_task", "preflight");
 						}
 					}
@@ -614,7 +614,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// now has an assignee, so the predicate is no longer satisfied).
 				resolveTaskStallLocked(p, st, task.taskId, "assigned");
 				// Issue 26 — task-close worker sweep (terminal transition site #2). Auto-closing an
-				// orchestrator terminal node via this assign (e.g. a one-node graph or terminal-edge
+				// root terminal node via this assign (e.g. a one-node graph or terminal-edge
 				// node) drives the task terminal; sweep the freshly-spawned exclusive workers.
 				if (assignTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId, task);
 
@@ -675,8 +675,8 @@ export function registerTasksTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "swarm_update_task",
 		label: "Swarm Update Task",
-		description: "Update an assigned task node's status/outcome/note/artifact/gate/sharedContext. Enforces ownership (current agent must be the node assignee, or orchestrator via force) and allowed lifecycle transitions; releases activeTaskIds + editLocks on terminal-ish node states. Validation precedes any write, so invalid calls leave task.json untouched.",
-		promptGuidelines: ["Use `swarm_update_task` to advance YOUR assigned node. If NODE_ASSIGNEE_MISMATCH, send a task message to the assignee instead of forcing. If OUTCOME_REQUIRED (node done with outgoing branches), retry with an outcome matching an edge `when`. If INVALID_TRANSITION, follow pending->ready->assigned->in_progress->done|failed|blocked; terminal states need the orchestrator force override."],
+		description: "Update an assigned task node's status/outcome/note/artifact/gate/sharedContext. Enforces ownership (current agent must be the node assignee, or root via force) and allowed lifecycle transitions; releases activeTaskIds + editLocks on terminal-ish node states. Validation precedes any write, so invalid calls leave task.json untouched.",
+		promptGuidelines: ["Use `swarm_update_task` to advance YOUR assigned node. If NODE_ASSIGNEE_MISMATCH, send a task message to the assignee instead of forcing. If OUTCOME_REQUIRED (node done with outgoing branches), retry with an outcome matching an edge `when`. If INVALID_TRANSITION, follow pending->ready->assigned->in_progress->done|failed|blocked; terminal states need the root force override."],
 		parameters: Type.Object({
 			taskId: Type.String({ description: "Task id." }),
 			nodeId: Type.String({ description: "Node id to update." }),
@@ -691,9 +691,9 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				risks: Type.Optional(Type.Array(Type.Object({ text: Type.String(), severity: Type.Optional(Type.String()) }))),
 				openQuestions: Type.Optional(Type.Array(Type.Object({ text: Type.String() }))),
 			})),
-			force: Type.Optional(Type.Boolean({ description: "Orchestrator override: skip ownership + transition checks. Defaults to false." })),
-			cancelTask: Type.Optional(Type.Boolean({ description: "Orchestrator-only (requires force): mark the whole task cancelled. Sticky: a cancelled task stays cancelled and releases all assignments. Defaults to false." })),
-			attemptId: Type.Optional(Type.String({ description: "Opaque attempt token received in assignment. Required for non-orchestrator callers when node has an active attempt. Prevents stale updates from superseded attempts." })),
+			force: Type.Optional(Type.Boolean({ description: "Root override: skip ownership + transition checks. Defaults to false." })),
+			cancelTask: Type.Optional(Type.Boolean({ description: "Root-only (requires force): mark the whole task cancelled. Sticky: a cancelled task stays cancelled and releases all assignments. Defaults to false." })),
+			attemptId: Type.Optional(Type.String({ description: "Opaque attempt token received in assignment. Required for non-root callers when node has an active attempt. Prevents stale updates from superseded attempts." })),
 			attestations: Type.Optional(Type.Array(Type.Object({ claim: Type.String(), tool: Type.String(), eventId: Type.String(), ts: Type.String() }))),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -701,32 +701,32 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const p = paths(ctx.cwd);
 				await ensureDirs(p);
 				const me = currentAgentId();
-				const isOrch = isOrchestratorAuthority(me);
+				const isOrch = isRootAuthority(me);
 				// Server-side RBAC (reliability-roadmap Phase 1, P0 #1): `force` and `cancelTask` are
-			// orchestrator-only escape hatches. Identity is checked against the live agent record; the
+			// root-only escape hatches. Identity is checked against the live agent record; the
 			// caller's params cannot grant authority. Validation precedes any state mutation.
 			if (params.cancelTask === true) {
-				if (!isOrchestratorAuthority(me)) {
+				if (!isRootAuthority(me)) {
 					await trace(p, "task.rbac.cancel_forbidden", { taskId: params.taskId, caller: me, by: me });
-					throw new Error(`CANCEL_FORBIDDEN: swarm_update_task(cancelTask=true) requires orchestrator authority (caller=${me}). Only the orchestrator may cancel a task.`);
+					throw new Error(`CANCEL_FORBIDDEN: swarm_update_task(cancelTask=true) requires root authority (caller=${me}). Only the root may cancel a task.`);
 				}
 				if (params.force !== true) {
-					throw new Error(`CANCEL_REQUIRES_FORCE: cancelTask=true must accompany force=true (orchestrator-only operation).`);
+					throw new Error(`CANCEL_REQUIRES_FORCE: cancelTask=true must accompany force=true (root-only operation).`);
 				}
 			}
-			if (params.force === true && !isOrchestratorAuthority(me)) {
+			if (params.force === true && !isRootAuthority(me)) {
 				await trace(p, "task.rbac.force_forbidden", { taskId: params.taskId, nodeId: params.nodeId, caller: me, by: me });
-				throw new Error(`FORCE_FORBIDDEN: swarm_update_task(force=true) requires orchestrator authority (caller=${me}). Only the orchestrator may bypass ownership/transition checks.`);
+				throw new Error(`FORCE_FORBIDDEN: swarm_update_task(force=true) requires root authority (caller=${me}). Only the root may bypass ownership/transition checks.`);
 			}
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				if (isOrch) heartbeatOrchestratorLeader(st, Date.now(), process.pid, "update_task");
+				if (isOrch) heartbeatRootLeader(st, Date.now(), process.pid, "update_task");
 				const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
 				const taskId = task.taskId;
 				const node = task.nodes[params.nodeId];
 				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId }, actionableHint: "Valid node ids are listed in task.json. Run swarm_task_status or swarm_graph to inspect." });
 				// Cancellation fence (issue 3, fix-1): once a task is cancelled, NO caller — not even the
-				// orchestrator — can mutate task or node state via this handler. The fence is the most
+				// root — can mutate task or node state via this handler. The fence is the most
 				// authoritative gate and runs BEFORE ownership/attempt checks so task cancellation
 				// deterministically wins for any late worker mutation (a worker that isn't even the
 				// assignee still gets TASK_CANCELLED, not NODE_ASSIGNEE_MISMATCH, on a cancelled task).
@@ -738,7 +738,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					const where = task.status === "cancelled" ? `Task ${taskId} is cancelled` : `Node ${params.nodeId} of task ${taskId} is cancelled`;
 					await traceTask(tp, "task.cancel.fenced", { taskId, nodeId: params.nodeId, by: me, requestedStatus: params.status });
 					await failTaskTool(tp, p, task.status === "cancelled" ? "TASK_CANCELLED" : "NODE_CANCELLED",
-						`${where}. No further task or node updates are accepted. To re-open, the orchestrator must explicitly restore the task via a separately-designed policy (out of scope).`,
+						`${where}. No further task or node updates are accepted. To re-open, the root must explicitly restore the task via a separately-designed policy (out of scope).`,
 						{ taskId, nodeId: params.nodeId, taskStatus: task.status, nodeStatus: node.status, blocked: true, suggestedNextCall: { tool: "swarm_task_status", params: { taskId } } }
 					);
 				}
@@ -780,7 +780,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						// that lack the array.
 						if (!st.agents[me]) {
 							// Worker claimed a node without ever being registered. Create a minimal
-							// agent record so capacity accounting + tool surfaces work; the orchestrator
+							// agent record so capacity accounting + tool surfaces work; the root
 							// can re-register with full details (model/provider/role) later.
 							st.agents[me] = {
 								id: me, role: "", roleKind: "worker", capabilities: [],
@@ -812,22 +812,22 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					} else if (node.assignee === undefined && node.status === "in_progress") {
 						// Issue 24.a — in-flight unassigned node: refuse with inline-string
 						// OWNERSHIP_REQUIRED. Per B2, this is scoped to one tool + one path, not a
-						// ERR_* engine-wide constant. The hint points the caller at the orchestrator.
-						await traceTask(tp, "task.update.ownership_reject", { taskId, nodeId: params.nodeId, attemptedBy: me, priorAssignee: null, priorStatus: node.status, isOrchestrator: false, remediation: "escalate_to_orchestrator", errorCode: "OWNERSHIP_REQUIRED" });
+						// ERR_* engine-wide constant. The hint points the caller at the root.
+						await traceTask(tp, "task.update.ownership_reject", { taskId, nodeId: params.nodeId, attemptedBy: me, priorAssignee: null, priorStatus: node.status, isRoot: false, remediation: "escalate_to_root", errorCode: "OWNERSHIP_REQUIRED" });
 						await failTaskTool(tp, p, "OWNERSHIP_REQUIRED",
 							`Node ${params.nodeId} is in_progress but has no assignee; claiming an in-flight node is forbidden.`,
 							{
 								taskId, nodeId: params.nodeId,
-								expected: { assigneeRequired: true, allowedAction: "ask orchestrator to reassign via swarm_assign_task(..., force=true) or close the in-flight node" },
+								expected: { assigneeRequired: true, allowedAction: "ask root to reassign via swarm_assign_task(..., force=true) or close the in-flight node" },
 								received: { agentId: me, requestedStatus: params.status, nodeStatus: node.status },
 								severity: "error",
-								suggestedNextCall: { tool: "swarm_send_message", params: { to: "orchestrator", subject: `Reassign in-flight node ${params.nodeId} of ${taskId}` } },
+								suggestedNextCall: { tool: "swarm_send_message", params: { to: "root", subject: `Reassign in-flight node ${params.nodeId} of ${taskId}` } },
 							}
 						);
 					} else {
 						// Existing reject path: node.assignee is set and !== me.
-						await traceTask(tp, "task.update.ownership_reject", { taskId, nodeId: params.nodeId, attemptedBy: me, priorAssignee: node.assignee || null, priorStatus: node.status, isOrchestrator: false, remediation: "escalate_to_orchestrator", errorCode: "NODE_ASSIGNEE_MISMATCH" });
-						const hint = `Send a task message to the assignee (${node.assignee}), or ask the orchestrator to reassign (swarm_assign_task, force=true).`;
+						await traceTask(tp, "task.update.ownership_reject", { taskId, nodeId: params.nodeId, attemptedBy: me, priorAssignee: node.assignee || null, priorStatus: node.status, isRoot: false, remediation: "escalate_to_root", errorCode: "NODE_ASSIGNEE_MISMATCH" });
+						const hint = `Send a task message to the assignee (${node.assignee}), or ask the root to reassign (swarm_assign_task, force=true).`;
 						await failTaskTool(tp, p, "NODE_ASSIGNEE_MISMATCH",
 							`Node ${params.nodeId} is assigned to ${node.assignee || "(unassigned)"}, but current agent is ${me}.`,
 							{ taskId, nodeId: params.nodeId, expected: { assignee: node.assignee || null, allowedAction: "update your own assigned node or send a task message" }, received: { agentId: me, requestedStatus: params.status }, actionableHint: hint }
@@ -839,7 +839,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// This is the critical fix: caller must present the active attempt token to fence stale updates
 				if (node.activeAttemptId) {
 					if (!isOrch) {
-						// Non-orchestrator callers must provide attempt token for nodes with active attempts
+						// Non-root callers must provide attempt token for nodes with active attempts
 						if (!params.attemptId) {
 							await failTaskTool(tp, p, "ATTEMPT_TOKEN_REQUIRED", `Node ${params.nodeId} has active attempt fencing. You must provide the attemptId parameter from your assignment contract.`, { taskId, nodeId: params.nodeId, expected: { attemptId: node.activeAttemptId }, received: { attemptId: params.attemptId || "(missing)" }, suggestedNextCall: { tool: "swarm_update_task", params: { ...params, attemptId: node.activeAttemptId } }, actionableHint: "The attempt token is delivered with your assignment message — check your mailbox if you don't have it." });
 						}
@@ -914,8 +914,8 @@ export function registerTasksTools(pi: ExtensionAPI) {
 							await failTaskTool(tp, p, "ATTEMPT_ASSIGNEE_MISMATCH", `Active attempt ${activeAttempt.attemptId} is assigned to ${activeAttempt.assignee}, not ${me}.`, { taskId, nodeId: params.nodeId, expected: { assignee: activeAttempt.assignee }, received: { agentId: me }, blocked: true });
 						}
 					} else {
-						// Orchestrator with force: attempt check is bypassed (force override)
-						await traceTask(tp, "task.attempt.bypassed", { taskId, nodeId: params.nodeId, activeAttemptId: node.activeAttemptId, by: me, reason: "orchestrator_force" });
+						// Root with force: attempt check is bypassed (force override)
+						await traceTask(tp, "task.attempt.bypassed", { taskId, nodeId: params.nodeId, activeAttemptId: node.activeAttemptId, by: me, reason: "root_force" });
 					}
 				} else if (!node.activeAttemptId && (!node.attemptHistory || node.attemptHistory.length === 0)) {
 					// Legacy task: no attempt fencing, fall back to existing assignee check only
@@ -928,7 +928,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 
 				const prevStatus = node.status;
 				const newStatus = (params.status as TaskNodeStatus | undefined) || prevStatus;
-				if (newStatus !== prevStatus && !isOrch && !isAllowedNodeTransition(prevStatus, newStatus)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} cannot move ${prevStatus} -> ${newStatus}.`, { taskId, nodeId: params.nodeId, expected: { lifecycle: "pending->ready->assigned->in_progress->done|failed|blocked; terminal states need orchestrator override" }, received: { from: prevStatus, to: newStatus }, actionableHint: "If you believe the transition should be allowed, escalate to the orchestrator (force=true)." });
+				if (newStatus !== prevStatus && !isOrch && !isAllowedNodeTransition(prevStatus, newStatus)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} cannot move ${prevStatus} -> ${newStatus}.`, { taskId, nodeId: params.nodeId, expected: { lifecycle: "pending->ready->assigned->in_progress->done|failed|blocked; terminal states need root override" }, received: { from: prevStatus, to: newStatus }, actionableHint: "If you believe the transition should be allowed, escalate to the root (force=true)." });
 				const outEdges = task.edges.filter((e) => e.from === params.nodeId);
 				if (newStatus === "done" && outEdges.length && !params.outcome && !node.outcome) await failTaskTool(tp, p, "OUTCOME_REQUIRED", `Node ${params.nodeId} has outgoing branches but no outcome was provided.`, { taskId, nodeId: params.nodeId, expected: { validOutcomes: [...new Set(outEdges.map((e) => e.when))] }, received: { outcome: params.outcome }, suggestedNextCall: { tool: "swarm_update_task", params: { taskId, nodeId: params.nodeId, status: "done", outcome: outEdges[0].when } } });
 				let attestationReport: Awaited<ReturnType<typeof validateAttestations>> | undefined;
@@ -977,7 +977,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						activeAttempt.lastActivityAt = now();
 						// Lease release audit (issue 4): terminal attempt ends its write-scope lease.
 						activeAttempt.releasedAt ||= now();
-						activeAttempt.releaseReason = isOrch ? "orchestrator_override" : "terminal";
+						activeAttempt.releaseReason = isOrch ? "root_override" : "terminal";
 						await traceTask(tp, "task.attempt.terminal", { taskId, nodeId: params.nodeId, attemptId: node.activeAttemptId, status: activeAttempt.status, outcome: activeAttempt.outcome });
 					}
 				}
@@ -988,7 +988,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				releaseNodeAssignment(st, task, params.nodeId);
 				const reopened = activateReworkNodes(task, tp);
 				const closingAssignee = node.assignee || undefined; // persisted on the node (not cleared by release)
-				// Orchestrator-explicit cancellation (issue 3): sticky terminal state. Strengthened to:
+				// Root-explicit cancellation (issue 3): sticky terminal state. Strengthened to:
 				//   1. mark every active attempt in the task as `cancelled` (revoke the lease)
 				//   2. supersede every assignment-class message (waive response debt; late ACKs rejected)
 				//   3. transition every non-terminal node to `cancelled` so worker-side attempts fencing
@@ -1039,7 +1039,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					// reopened (status=ready) and reassigned to a different agent.
 					const triggeringAssigneeMap = new Map<string, string>();
 					for (const [nId, n] of Object.entries(task.nodes)) {
-						if (n.assignee && n.assignee !== "orchestrator" && (n.status === "cancelled" || n.status === "assigned" || n.status === "in_progress")) {
+						if (n.assignee && n.assignee !== "root" && (n.status === "cancelled" || n.status === "assigned" || n.status === "in_progress")) {
 							triggeringAssigneeMap.set(n.assignee, nId);
 						}
 					}
@@ -1054,11 +1054,11 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					}
 					for (const assigneeId of notifiees) {
 						try {
-							ensureOrchestrator(st, ctx.cwd, p);
+							ensureRoot(st, ctx.cwd, p);
 							await deliverMessageLocked(pi, ctx.cwd, p, st, {
 								to: assigneeId,
 								subject: `Assignment cancelled: ${task.taskId}`,
-								body: `Your work on task ${task.taskId} has been cancelled by the orchestrator (${me}). All active attempts are revoked and assignment messages are superseded.\n\nAction:\n- Stop work on this task immediately.\n- Do NOT call swarm_update_task for any node in this task — it will be rejected with TASK_CANCELLED.\n- Informational only; no acknowledgement required.`,
+								body: `Your work on task ${task.taskId} has been cancelled by the root (${me}). All active attempts are revoked and assignment messages are superseded.\n\nAction:\n- Stop work on this task immediately.\n- Do NOT call swarm_update_task for any node in this task — it will be rejected with TASK_CANCELLED.\n- Informational only; no acknowledgement required.`,
 								conversationId: `cancel:${task.taskId}`,
 								requiresAck: false,
 								requiresResponse: false,
@@ -1112,7 +1112,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						}
 					}
 				}
-				const autoClosed = await autoCloseOrchestratorTerminalNodes(pi, tp, task);
+				const autoClosed = await autoCloseRootTerminalNodes(pi, tp, task);
 				for (const nodeId of autoClosed.closed) releaseNodeAssignment(st, task, nodeId);
 				if (autoClosed.closed.length) taskStatusChange = applyTaskStatus(task);
 				if (taskStatusChange.terminal) {
@@ -1140,14 +1140,14 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					diffStat = await attachGitDiffStat(pi, ctx.cwd, tp);
 					await traceTask(tp, "task.attestation.diffstat", { taskId, nodeId: params.nodeId, baseline: diffStat.baseline || null, stat: diffStat.stat || null, note: diffStat.note || null });
 				}
-				if (autoClosed.closed.length) await traceTask(tp, "task.autoclose.orchestrator", { taskId, nodeIds: autoClosed.closed, triggerNodeId: params.nodeId, by: "engine" });
+				if (autoClosed.closed.length) await traceTask(tp, "task.autoclose.root", { taskId, nodeIds: autoClosed.closed, triggerNodeId: params.nodeId, by: "engine" });
 				if (cancelled) await traceTask(tp, "task.cancel", { taskId, nodeId: params.nodeId, by: me });
 				if (taskStatusChange.terminal) await traceTask(tp, "task.close", { taskId, status: task.status, nodeId: params.nodeId, by: me });
 				// PM auto-notify (engine behavior): when a node transitions INTO a closure-ish status
 				// (done|failed|blocked) the PM no longer has to poll — enqueue a concise mailbox report to the
-				// mailbox-only orchestrator. On task-terminal (done|failed|cancelled) emit the stronger
+				// mailbox-only root. On task-terminal (done|failed|cancelled) emit the stronger
 				// task-close variant. Gated on the transition (not every update) so it isn't spammy;
-				// mailbox-only (no tmux inject); requiresAck=false (informational; orchestrator pump surfaces
+				// mailbox-only (no tmux inject); requiresAck=false (informational; root pump surfaces
 				// it). Best-effort: never fails the update. NB: node-status mutation already happened above;
 				// this only sends a message.
 				const closureIsh = (s: TaskNodeStatus | undefined): boolean => s === "done" || s === "failed" || s === "blocked" || s === "cancelled";
@@ -1161,7 +1161,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					if (closeStaleCheck.stale) {
 						await traceTask(tp, "notification.stale.suppressed", { site: "swarm_update_task.closure", taskId, nodeId: params.nodeId, reason: closeStaleCheck.reason, evidence: closeStaleCheck.evidence });
 					} else {
-						ensureOrchestrator(st, ctx.cwd, p);
+						ensureRoot(st, ctx.cwd, p);
 						const nextLabel = nextReady.ready.length ? nextReady.ready.join(", ") : "(none)";
 						const outcomeLabel = params.outcome ? ` (outcome=${params.outcome})` : "";
 						const who = closingAssignee ? ` assignee=${closingAssignee}.` : "";
@@ -1175,12 +1175,12 @@ export function registerTasksTools(pi: ExtensionAPI) {
 							body = `Node ${params.nodeId} of ${task.taskId} moved ${prevStatus} -> ${newStatus}${outcomeLabel} by ${me}.${who}${art} Task status=${task.status}. Next ready: ${nextLabel}.${newStatus === "blocked" ? " (blocked is resumable.)" : ""}`;
 						}
 						try {
-							await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "orchestrator", subject, body, conversationId: `task:${task.taskId}:${params.nodeId}`, requiresAck: false });
-							await traceTask(tp, "task.close.notify", { taskId, nodeId: params.nodeId, status: newStatus, taskStatus: task.status, to: "orchestrator" });
+							await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "root", subject, body, conversationId: `task:${task.taskId}:${params.nodeId}`, requiresAck: false });
+							await traceTask(tp, "task.close.notify", { taskId, nodeId: params.nodeId, status: newStatus, taskStatus: task.status, to: "root" });
 						} catch (err: any) {
 							await traceTask(tp, "task.close.notify_failed", { taskId, nodeId: params.nodeId, error: String(err?.message || err) });
 						}
-						await writeState(p, st); // persist the notify message record + orchestrator pseudo-agent
+						await writeState(p, st); // persist the notify message record + root pseudo-agent
 					}
 				}
 				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled, autoClosed: autoClosed.closed, reopened, diffStat };
@@ -1222,7 +1222,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			taskId: Type.String({ description: "Task id." }),
 			fromNode: Type.String({ description: "Node id the message originates from." }),
-			to: Type.String({ description: "Recipient agent id (or 'orchestrator')." }),
+			to: Type.String({ description: "Recipient agent id (or 'root')." }),
 			subject: Type.Optional(Type.String({ description: "Short subject." })),
 			body: Type.String({ description: "Message body." }),
 			toNode: Type.Optional(Type.String({ description: "Target node id, when this is a node-to-node handoff." })),
@@ -1242,7 +1242,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				if (!task.nodes[params.fromNode]) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `fromNode ${params.fromNode} does not exist in task ${taskId}.`, { taskId, nodeId: params.fromNode, received: { fromNode: params.fromNode } });
 				if (params.toNode && !task.nodes[params.toNode]) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `toNode ${params.toNode} does not exist in task ${taskId}.`, { taskId, nodeId: params.toNode, received: { toNode: params.toNode } });
 				for (const ref of params.artifactRefs || []) if (!isSafeRelativePath(ref)) await failTaskTool(tp, p, "PATH_OUTSIDE_TASK", `Artifact ref is unsafe (must be relative, no ..): ${ref}`, { taskId, nodeId: params.fromNode, received: { artifactRef: ref } });
-				ensureOrchestrator(st, ctx.cwd, p);
+				ensureRoot(st, ctx.cwd, p);
 				const toId = safeId(params.to);
 				if (!st.agents[toId]) await failTaskTool(tp, p, "AGENT_NOT_FOUND", `Recipient ${toId} is not registered.`, { taskId, nodeId: params.fromNode, received: { to: toId }, suggestedNextCall: { tool: "swarm_list_agents", params: {} } });
 

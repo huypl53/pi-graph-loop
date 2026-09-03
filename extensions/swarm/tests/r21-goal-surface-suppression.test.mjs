@@ -7,7 +7,7 @@
  * Bug shape:
  *   - terminal/abandoned tasks (failed/cancelled/blocked) with orphan ready nodes
  *     must NOT count as actionable graph work when suppressing a goal nudge at
- *     the orchestrator surface
+ *     the root surface
  *   - live tasks must still count, so the actionable_graph suppression remains
  *     intact for in_progress / ready graphs
  */
@@ -18,15 +18,15 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, writeState, ensureDirs, taskPaths } = await import(join(here, "..", "src", "state.ts"));
-const { staleSurfaceReason, pumpOrchestratorMailbox } = await import(join(here, "..", "src", "reconcile.ts"));
-const { ensureOrchestrator } = await import(join(here, "..", "src", "identity.ts"));
+const { staleSurfaceReason, pumpRootMailbox } = await import(join(here, "..", "src", "reconcile.ts"));
+const { ensureRoot } = await import(join(here, "..", "src", "identity.ts"));
 const prevAgentId = process.env.PI_SWARM_AGENT_ID;
-const prevIsOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
-process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+const prevIsOrch = process.env.PI_SWARM_IS_ROOT;
+process.env.PI_SWARM_AGENT_ID = "root";
+process.env.PI_SWARM_IS_ROOT = "1";
 process.on("exit", () => {
 	if (prevAgentId === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = prevAgentId;
-	if (prevIsOrch === undefined) delete process.env.PI_SWARM_IS_ORCHESTRATOR; else process.env.PI_SWARM_IS_ORCHESTRATOR = prevIsOrch;
+	if (prevIsOrch === undefined) delete process.env.PI_SWARM_IS_ROOT; else process.env.PI_SWARM_IS_ROOT = prevIsOrch;
 });
 
 const dir = await mkdtemp(join(tmpdir(), "r21-goal-surface-suppression-"));
@@ -50,7 +50,7 @@ function ok(name, cond, info = "") {
 
 async function seedState({ taskId, taskStatus, withMailbox = false, messageId = `msg-${taskId}` }) {
 	const st = await readState(p, dir);
-	ensureOrchestrator(st, dir, p);
+	ensureRoot(st, dir, p);
 	const ts = new Date().toISOString();
 	st.agents.worker = {
 		id: "worker",
@@ -78,12 +78,12 @@ async function seedState({ taskId, taskStatus, withMailbox = false, messageId = 
 		id: "goal-r21",
 		text: "R21 goal",
 		setAt: new Date(Date.now() - 5000).toISOString(),
-		setBy: "orchestrator",
+		setBy: "root",
 		consecutiveNoResolveNudges: 0,
 	};
-	st.delivered.orchestrator = [];
+	st.delivered.root = [];
 	st.consumerReceipts ||= {};
-	st.consumerReceipts.orchestrator = { entries: {}, revision: 1 };
+	st.consumerReceipts.root = { entries: {}, revision: 1 };
 
 	const task = {
 		version: 1,
@@ -94,7 +94,7 @@ async function seedState({ taskId, taskStatus, withMailbox = false, messageId = 
 		priority: "normal",
 		createdAt: ts,
 		updatedAt: ts,
-		owner: "orchestrator",
+		owner: "root",
 		workflow: "feature-dev",
 		allowedFiles: [],
 		acceptanceCriteria: [],
@@ -125,8 +125,8 @@ async function seedState({ taskId, taskStatus, withMailbox = false, messageId = 
 	if (withMailbox) {
 		const msg = {
 			id: messageId,
-			from: "orchestrator",
-			to: "orchestrator",
+			from: "root",
+			to: "root",
 			status: "injected",
 			createdAt: new Date(Date.now() - 20_000).toISOString(),
 			updatedAt: new Date(Date.now() - 20_000).toISOString(),
@@ -137,7 +137,7 @@ async function seedState({ taskId, taskStatus, withMailbox = false, messageId = 
 			idempotencyKey: `goal:${st.goal.id}:nudge:idle-streak:1`,
 		};
 		st.messages[messageId] = msg;
-		const mailboxPath = join(p.mailboxes, "orchestrator.jsonl");
+		const mailboxPath = join(p.mailboxes, "root.jsonl");
 		await writeFile(mailboxPath, `${JSON.stringify({ swarmId: st.swarmId, ...msg, type: "swarm.message", schemaVersion: 1, headers: {} })}\n`);
 	}
 
@@ -156,7 +156,7 @@ async function pumpScenario(taskId, taskStatus, withMailbox = true) {
 		ui: { setStatus: () => {}, notify: () => {}, setFooter: () => {}, setWidget: () => {} },
 		model: { id: "glm-5.1", provider: "zai-coding-cn" },
 	};
-	await pumpOrchestratorMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, `r21-${taskId}`);
+	await pumpRootMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, `r21-${taskId}`);
 	const after = await readState(p, dir);
 	let events = [];
 	try {

@@ -1,8 +1,8 @@
-// Tests for `/swarm register` identity adoption + orchestrator opt-in:
+// Tests for `/swarm register` identity adoption + root opt-in:
 //  - 'here <id>' adopts the identity in-process (env + footer) for a normal agent
-//  - 'here orchestrator' performs a FULL PM opt-in (env + mailbox-only record + pump + footer)
-//  - registering a DIFFERENT pane as orchestrator is refused
-//  - registerAgent itself refuses the reserved 'orchestrator' id (safety net for the tool path)
+//  - 'here root' performs a FULL PM opt-in (env + mailbox-only record + pump + footer)
+//  - registering a DIFFERENT pane as root is refused
+//  - registerAgent itself refuses the reserved 'root' id (safety net for the tool path)
 //
 // Run: node extensions/swarm/register-adopt.test.mjs
 import { rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
@@ -14,7 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 const { registerAgent } = await import(join(here, "..", "src", "agents.ts"));
-const { stopOrchestratorPump } = await import(join(here, "..", "src", "hooks.ts"));
+const { stopRootPump } = await import(join(here, "..", "src", "hooks.ts"));
 
 const scratch = join(tmpdir(), `swarm-adopt-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
@@ -56,7 +56,7 @@ const mkCtx = () => {
 	return { ctx, state };
 };
 
-const resetEnv = () => { delete process.env.PI_SWARM_AGENT_ID; delete process.env.PI_SWARM_IS_ORCHESTRATOR; delete process.env.TMUX; };
+const resetEnv = () => { delete process.env.PI_SWARM_AGENT_ID; delete process.env.PI_SWARM_IS_ROOT; delete process.env.TMUX; };
 const stateAgent = (id) => { try { return JSON.parse(readFileSync(join(scratch, ".pi", "swarm", "swarm-state.json"), "utf8")).agents[id]; } catch { return undefined; } };
 
 let pass = 0, fail = 0;
@@ -84,20 +84,20 @@ console.log("\n[2] alias '.' also adopts the identity");
 	ok("footer updated to swarm:planner", !!state.status && state.status[1] === "swarm:planner");
 }
 
-console.log("\n[3] 'register here orchestrator' performs a FULL PM opt-in (not just a record)");
+console.log("\n[3] 'register here root' performs a FULL PM opt-in (not just a record)");
 {
 	bind("%7"); resetEnv();
 	process.env.TMUX = "/tmp/tmux-501/default,1234,0";
 	const { ctx, state } = mkCtx();
-	await swarmCmd.handler("register here orchestrator Drive the swarm", ctx);
-	ok("PI_SWARM_IS_ORCHESTRATOR=1 set", process.env.PI_SWARM_IS_ORCHESTRATOR === "1");
-	ok("PI_SWARM_AGENT_ID=orchestrator set", process.env.PI_SWARM_AGENT_ID === "orchestrator");
-	ok("footer updated to swarm:orchestrator", !!state.status && state.status[1] === "swarm:orchestrator");
-	const orch = stateAgent("orchestrator");
-	ok("mailbox-only orchestrator record exists", !!orch);
+	await swarmCmd.handler("register here root Drive the swarm", ctx);
+	ok("PI_SWARM_IS_ROOT=1 set", process.env.PI_SWARM_IS_ROOT === "1");
+	ok("PI_SWARM_AGENT_ID=root set", process.env.PI_SWARM_AGENT_ID === "root");
+	ok("footer updated to swarm:root", !!state.status && state.status[1] === "swarm:root");
+	const orch = stateAgent("root");
+	ok("mailbox-only root record exists", !!orch);
 	ok("record is mailbox-only (no hijacked pane target)", orch.tmuxTarget === "unknown");
-	ok("notify announces PM role", !!state.notify && /orchestrator \(PM\)/.test(String(state.notify[0])));
-	stopOrchestratorPump(); // clean up the 5s interval the opt-in started
+	ok("notify announces PM role", !!state.notify && /root \(PM\)/.test(String(state.notify[0])));
+	stopRootPump(); // clean up the 5s interval the opt-in started
 }
 
 console.log("\n[4] explicit target that resolves to the current pane also adopts (pane-id match)");
@@ -121,44 +121,44 @@ console.log("\n[5] explicit target to a DIFFERENT pane does NOT re-identify this
 	ok("agent record still written for the other pane", !!stateAgent("builder"));
 }
 
-console.log("\n[6] registering a DIFFERENT pane as 'orchestrator' is refused (no half-state)");
+console.log("\n[6] registering a DIFFERENT pane as 'root' is refused (no half-state)");
 {
 	bind("%42"); resetEnv(); // no TMUX -> currentPaneTarget null -> isCurrent false -> refuse
 	const { ctx, state } = mkCtx();
-	await swarmCmd.handler("register other:0.0 orchestrator Drive the swarm", ctx);
-	ok("NOT opted in (no env)", process.env.PI_SWARM_IS_ORCHESTRATOR !== "1" && process.env.PI_SWARM_AGENT_ID !== "orchestrator");
-	ok("footer NOT swarm:orchestrator", !state.status || state.status[1] !== "swarm:orchestrator");
-	ok("refusal message guides to 'register here orchestrator'", !!state.notify && /register here orchestrator/.test(String(state.notify[0])));
+	await swarmCmd.handler("register other:0.0 root Drive the swarm", ctx);
+	ok("NOT opted in (no env)", process.env.PI_SWARM_IS_ROOT !== "1" && process.env.PI_SWARM_AGENT_ID !== "root");
+	ok("footer NOT swarm:root", !state.status || state.status[1] !== "swarm:root");
+	ok("refusal message guides to 'register here root'", !!state.notify && /register here root/.test(String(state.notify[0])));
 }
 
-console.log("\n[7] registerAgent itself refuses the reserved 'orchestrator' id (tool-path safety net)");
+console.log("\n[7] registerAgent itself refuses the reserved 'root' id (tool-path safety net)");
 {
 	resetEnv();
 	const pi0 = { exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
 	const st0 = { swarmId: "x", tmuxSession: "s", agents: {}, delivered: {}, messages: {} };
-	await throws("registerAgent throws on orchestrator id", registerAgent(pi0, scratch, {}, st0, { tmuxTarget: "s:0.0", id: "orchestrator", role: "pm" }));
-	ok("no orchestrator agent record created", !st0.agents.orchestrator);
+	await throws("registerAgent throws on root id", registerAgent(pi0, scratch, {}, st0, { tmuxTarget: "s:0.0", id: "root", role: "pm" }));
+	ok("no root agent record created", !st0.agents.root);
 }
 
-console.log("\n[8] ensureOrchestrator self-heals a 'misled' orchestrator record (real pane target -> mailbox-only)");
+console.log("\n[8] ensureRoot self-heals a 'misled' root record (real pane target -> mailbox-only)");
 {
 	bind("%7"); resetEnv();
 	process.env.TMUX = "/tmp/tmux-501/default,1234,0";
 	const stateFile = join(scratch, ".pi", "swarm", "swarm-state.json");
 	mkdirSync(join(scratch, ".pi", "swarm", "mailboxes"), { recursive: true });
-	// pre-seed a MISLED orchestrator record attached to a real tmux pane (the ship-crawl bug shape)
+	// pre-seed a MISLED root record attached to a real tmux pane (the ship-crawl bug shape)
 	writeFileSync(stateFile, JSON.stringify({
 		version: 1, swarmId: "swarm-test", cwd: scratch, tmuxSession: "pi-swarm-x",
-		agents: { orchestrator: { id: "orchestrator", role: "misled pm", roleKind: "orchestrator", status: "running", runtimeStatus: "idle", health: "healthy", tmuxTarget: "pi-swarm-x:3.0", tmuxSession: "pi-swarm-x", tmuxWindow: "3", mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", maxConcurrentTasks: 1, cwd: scratch, createdAt: "t", updatedAt: "t", lastHeartbeatAt: "t", capabilities: [], activeTaskIds: [] } },
+		agents: { root: { id: "root", role: "misled pm", roleKind: "root", status: "running", runtimeStatus: "idle", health: "healthy", tmuxTarget: "pi-swarm-x:3.0", tmuxSession: "pi-swarm-x", tmuxWindow: "3", mailbox: ".pi/swarm/mailboxes/root.jsonl", maxConcurrentTasks: 1, cwd: scratch, createdAt: "t", updatedAt: "t", lastHeartbeatAt: "t", capabilities: [], activeTaskIds: [] } },
 		delivered: {}, messages: {}, createdAt: "t", updatedAt: "t",
 	}, null, 2));
-	ok("pre-seed: orchestrator misled to a real pane target", stateAgent("orchestrator")?.tmuxTarget === "pi-swarm-x:3.0");
+	ok("pre-seed: root misled to a real pane target", stateAgent("root")?.tmuxTarget === "pi-swarm-x:3.0");
 	const { ctx } = mkCtx();
-	await swarmCmd.handler("register here orchestrator Drive the swarm", ctx);
-	const healed = stateAgent("orchestrator");
+	await swarmCmd.handler("register here root Drive the swarm", ctx);
+	const healed = stateAgent("root");
 	ok("self-healed: tmuxTarget reset to 'unknown' (mailbox-only)", healed?.tmuxTarget === "unknown");
-	ok("self-healed: roleKind re-normalized to orchestrator", healed?.roleKind === "orchestrator");
-	ok("self-healed: tmuxWindow re-normalized to orchestrator", healed?.tmuxWindow === "orchestrator");
+	ok("self-healed: roleKind re-normalized to root", healed?.roleKind === "root");
+	ok("self-healed: tmuxWindow re-normalized to root", healed?.tmuxWindow === "root");
 }
 
 resetEnv();

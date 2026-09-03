@@ -1,29 +1,29 @@
 #!/usr/bin/env node
 /**
- * R13 P0 — high-priority orchestrator nudges must surface when tmux target is unknown.
+ * R13 P0 — high-priority root nudges must surface when tmux target is unknown.
  *
  * Source incident: 2026-09-01T13:10:27 trace sequence (stale-open nudge durably enqueued,
- * mailbox_only, then `notification.stale.suppressed site=orchestrator_pump.surface
+ * mailbox_only, then `notification.stale.suppressed site=root_pump.surface
  * reason=agent_busy evidence=[effective-agent-set-not-idle]` from reconcile.ts:1665 —
  * no `pi.sendMessage` call at reconcile.ts:1765, so user never saw the safety nudge).
  *
- * Root cause (isolated, code-located): `pumpOrchestratorMailbox` (extensions/swarm/src/reconcile.ts)
- * processes `priority: "high"` orchestrator-bound nudges through the same `staleSurfaceReason` gate
- * as normal-priority nudges. When the orchestrator pseudo-agent has `tmuxTarget === "unknown"` AND
+ * Root cause (isolated, code-located): `pumpRootMailbox` (extensions/swarm/src/reconcile.ts)
+ * processes `priority: "high"` root-bound nudges through the same `staleSurfaceReason` gate
+ * as normal-priority nudges. When the root pseudo-agent has `tmuxTarget === "unknown"` AND
  * a worker is `runtimeStatus: "tool_running"` (or any `effective-agent-set-not-idle` condition),
  * the gate suppresses the message with `agent_busy` and the durable mailbox entry masquerades as
  * success while the user sees nothing.
  *
  * Invariants under test (RED→GREEN):
- *   R13-S1: priority-high stale-open nudge to unknown-target orchestrator + busy worker →
+ *   R13-S1: priority-high stale-open nudge to unknown-target root + busy worker →
  *           exactly ONE pi.sendMessage call (boundary counter). RED pre-fix: 0 calls.
  *   R13-S2: replay (same nudge, same pi session) → still exactly ONE pi.sendMessage call
  *           (R10-1 no-duplicate-surface guard via consumerReceipts).
- *   R13-S3: priority-normal nudge to unknown-target orchestrator + busy worker → 0 pi.sendMessage
+ *   R13-S3: priority-normal nudge to unknown-target root + busy worker → 0 pi.sendMessage
  *           calls (busy-suppression preserved for normal traffic; the bug only affects high-priority
  *           safety nudges).
  *   R13-S4: priority-high nudge to a known-target worker → 0 pi.sendMessage calls to the
- *           orchestrator (different path; not affected by this fix).
+ *           root (different path; not affected by this fix).
  *   R13-S5: durable mailbox semantics preserved — `mailboxOnlyCount === 1` after the nudge,
  *           `message.deliver.mailbox_only` trace present, mailbox file has the nudge once.
  *   R13-S6: stale_suppressed trace at reconcile.ts:1665 emitted ONCE per nudge in the
@@ -31,7 +31,7 @@
  *           shape but remains available for normal-priority traffic.
  *
  * ISOLATION CONTRACT — SCRATCH CWD ONLY.
- * Run: node extensions/swarm/r13-orchestrator-unknown-target.test.mjs
+ * Run: node extensions/swarm/r13-root-unknown-target.test.mjs
  */
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,9 +39,9 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const { pumpOrchestratorMailbox } = await import(join(here, "..", "src/reconcile.ts"));
+const { pumpRootMailbox } = await import(join(here, "..", "src/reconcile.ts"));
 const { paths, withLock, readState, writeState } = await import(join(here, "..", "src/state.ts"));
-const { ensureOrchestrator, heartbeatOrchestratorLeader } = await import(join(here, "..", "src/identity.ts"));
+const { ensureRoot, heartbeatRootLeader } = await import(join(here, "..", "src/identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "..", "src/mailbox.ts"));
 const { staleOpenNudgeLocked } = await import(join(here, "..", "src/taskgraph.ts"));
 
@@ -55,7 +55,7 @@ const ok = (name, cond, info) => {
 };
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const ORIG_PI_SWARM_IS_ORCHESTRATOR = process.env.PI_SWARM_IS_ORCHESTRATOR;
+const ORIG_PI_SWARM_IS_ROOT = process.env.PI_SWARM_IS_ROOT;
 
 function readEvents() {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
@@ -67,15 +67,15 @@ function clearEvents() {
 	mkdirSync(join(scratch, ".pi/swarm/traces"), { recursive: true });
 	writeFileSync(join(scratch, ".pi/swarm/traces/events.jsonl"), "");
 }
-function readOrchestratorMailbox() {
-	const p = join(scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
+function readRootMailbox() {
+	const p = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 	if (!existsSync(p)) return [];
 	const txt = readFileSync(p, "utf8").trim();
 	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
 
 // Build a scratch swarm state with the R13 incident shape:
-//   - orchestrator pseudo-agent with tmuxTarget === "unknown"
+//   - root pseudo-agent with tmuxTarget === "unknown"
 //   - one worker fs-implementer with runtimeStatus === "tool_running" (busy) AND activeTaskIds:[taskId]
 //   - taskId with node `implement` assigned to fs-implementer, lastActivityAt stale (>30s ago),
 //     staleOpenSurfacedAt set so the stale-open nudge path will fire when invoked.
@@ -109,7 +109,7 @@ async function seedIncidentShape({ taskId = "task-r13-x", workerId = "fs-impleme
 	mkdirSync(taskDir, { recursive: true });
 	const task = {
 		version: 1, taskId, title: "R13 victim task", goal: "test", status: "in_progress",
-		priority: "normal", createdAt: workerTs, updatedAt: workerTs, owner: "orchestrator",
+		priority: "normal", createdAt: workerTs, updatedAt: workerTs, owner: "root",
 		workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
 		start: "implement", currentNodes: ["implement"],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
@@ -125,24 +125,24 @@ async function seedIncidentShape({ taskId = "task-r13-x", workerId = "fs-impleme
 	};
 	writeFileSync(join(taskDir, "task.json"), JSON.stringify(task, null, 2));
 
-	// Ensure the orchestrator pseudo-agent (which sets tmuxTarget="unknown" by design) and
+	// Ensure the root pseudo-agent (which sets tmuxTarget="unknown" by design) and
 	// claim the leader so the pump's second-line defense doesn't deny the tick.
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
-		ensureOrchestrator(st, scratch, p);
-		heartbeatOrchestratorLeader(st, nowMs, process.pid, "r13_test_seed");
+		ensureRoot(st, scratch, p);
+		heartbeatRootLeader(st, nowMs, process.pid, "r13_test_seed");
 		// R13-S7 fix: clear the consumerReceipts ledger so a freshly fired nudge (with a new
 		// messageId) does not get deduped by an R13-S1 receipt from the same scratch. Also
-		// clear the per-pid surfaced set + retriggerCount on the orchestratorPumpSessions
+		// clear the per-pid surfaced set + retriggerCount on the rootPumpSessions
 		// entry so the new nudge enters the surface plan.
-		if (st.consumerReceipts?.orchestrator) {
-			st.consumerReceipts.orchestrator.entries = {};
+		if (st.consumerReceipts?.root) {
+			st.consumerReceipts.root.entries = {};
 		}
 		const pidKey = String(process.pid);
-		if (st.orchestratorPumpSessions?.[pidKey]) {
-			st.orchestratorPumpSessions[pidKey].ids = [];
-			st.orchestratorPumpSessions[pidKey].triggeredAt = {};
-			st.orchestratorPumpSessions[pidKey].retriggerCount = {};
+		if (st.rootPumpSessions?.[pidKey]) {
+			st.rootPumpSessions[pidKey].ids = [];
+			st.rootPumpSessions[pidKey].triggeredAt = {};
+			st.rootPumpSessions[pidKey].retriggerCount = {};
 		}
 		await writeState(p, st);
 	});
@@ -152,13 +152,13 @@ async function seedIncidentShape({ taskId = "task-r13-x", workerId = "fs-impleme
 
 // Fire the production stale-open nudge path via staleOpenNudgeLocked(priority:"high") so the
 // mailbox durable-append side AND the stale_open.nudge_emitted trace shape match the incident.
-// The nudge then sits in the orchestrator mailbox waiting for the next pump tick to surface it.
+// The nudge then sits in the root mailbox waiting for the next pump tick to surface it.
 async function fireStaleOpenNudge(taskId = "task-r13-x", workerId = "fs-implementer", priority = "high") {
-	// The pump short-circuits if the caller isn't the orchestrator pseudo-agent. Ensure the env
+	// The pump short-circuits if the caller isn't the root pseudo-agent. Ensure the env
 	// flag is set inside the call so per-test isolation is complete (each scenario seeds + nudges +
 	// pumps independently). Restored at file tail.
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const p = paths(scratch);
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
@@ -175,7 +175,7 @@ async function fireStaleOpenNudge(taskId = "task-r13-x", workerId = "fs-implemen
 				{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
 				scratch, p, st,
 				{
-					to: "orchestrator",
+					to: "root",
 					priority,
 					subject: `STALE OPEN: node implement of ${taskId} assigned but no progress — worker may have settled idle`,
 					body: `Node \`implement\` of task ${taskId} is assigned but has shown NO progress past the stale threshold.`,
@@ -191,8 +191,8 @@ async function fireStaleOpenNudge(taskId = "task-r13-x", workerId = "fs-implemen
 }
 
 function makePiMockWithCounters() {
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const sendMessages = [];
 	const pi = {
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
@@ -205,7 +205,7 @@ function makePiMockWithCounters() {
 }
 
 // =============================================================================
-// R13-S1: priority-high stale-open nudge to unknown-target orchestrator + busy
+// R13-S1: priority-high stale-open nudge to unknown-target root + busy
 //         worker → exactly ONE pi.sendMessage call (boundary counter).
 //         RED pre-fix: 0 calls. GREEN post-fix: 1 call.
 // =============================================================================
@@ -217,7 +217,7 @@ console.log("\n[R13-S1] priority-high nudge to unknown-target + busy worker → 
 	const { pi, sendMessages } = makePiMockWithCounters();
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
 	const p = paths(scratch);
-	const result = await pumpOrchestratorMailbox(pi, ctx, p, "test_r13_s1");
+	const result = await pumpRootMailbox(pi, ctx, p, "test_r13_s1");
 	ok("R13-S1 result.delivered >= 1", result.delivered >= 1, { delivered: result.delivered, ids: result.ids });
 	ok("R13-S1 sendMessages.length === 1 (R10-1 boundary counter)", sendMessages.length === 1, `got ${sendMessages.length}`);
 	if (sendMessages.length >= 1) {
@@ -235,13 +235,13 @@ console.log("\n[R13-S1] priority-high nudge to unknown-target + busy worker → 
 		ok("R13-S1 bypass trace.suppressedReason === 'agent_busy'", bypassTrace[0].suppressedReason === "agent_busy", `got ${bypassTrace[0].suppressedReason}`);
 		ok("R13-S1 bypass trace.by === 'R13 P0'", bypassTrace[0].by === "R13 P0", `got ${bypassTrace[0].by}`);
 	}
-	const staleSuppressed = events.filter((e) => e.event === "notification.stale.suppressed" && e.site === "orchestrator_pump.surface");
+	const staleSuppressed = events.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface");
 	ok("R13-S1 NO notification.stale.suppressed for priority-high nudge (post-fix)", staleSuppressed.length === 0, `got ${staleSuppressed.length}`);
 	const nudgeEmitted = events.filter((e) => e.event === "stale_open.nudge_emitted");
 	ok("R13-S1 stale_open.nudge_emitted trace present (bell rang)", nudgeEmitted.length >= 1, { count: nudgeEmitted.length });
 
-	const mailbox = readOrchestratorMailbox();
-	ok("R13-S1 orchestrator mailbox has exactly 1 nudge entry", mailbox.length === 1, `got ${mailbox.length}`);
+	const mailbox = readRootMailbox();
+	ok("R13-S1 root mailbox has exactly 1 nudge entry", mailbox.length === 1, `got ${mailbox.length}`);
 }
 
 // =============================================================================
@@ -255,11 +255,11 @@ console.log("\n[R13-S2] replay guard — no duplicate surface for the same nudge
 	const { pi, sendMessages } = makePiMockWithCounters();
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
 	const p = paths(scratch);
-	const r1 = await pumpOrchestratorMailbox(pi, ctx, p, "test_r13_s2_t1");
+	const r1 = await pumpRootMailbox(pi, ctx, p, "test_r13_s2_t1");
 	ok("R13-S2 first tick sendMessages.length === 1", sendMessages.length === 1, `got ${sendMessages.length}`);
 
 	// Second tick on the same mailbox state → the consumerReceipts ledger must dedupe.
-	const r2 = await pumpOrchestratorMailbox(pi, ctx, p, "test_r13_s2_t2");
+	const r2 = await pumpRootMailbox(pi, ctx, p, "test_r13_s2_t2");
 	ok("R13-S2 second tick did NOT add another sendMessage", sendMessages.length === 1, `got ${sendMessages.length}`);
 	ok("R13-S2 second tick result.delivered === 0", r2.delivered === 0, { delivered: r2.delivered });
 }
@@ -279,7 +279,7 @@ console.log("\n[R13-S3] normal-priority nudge preserves busy suppression (no reg
 			{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
 			scratch, p, st,
 			{
-				to: "orchestrator",
+				to: "root",
 				priority: "normal",
 				subject: "STALE OPEN: node implement of task-r13-x assigned but no progress (normal control)",
 				body: `Node implement of task-r13-x is assigned but has shown NO progress.`,
@@ -294,12 +294,12 @@ console.log("\n[R13-S3] normal-priority nudge preserves busy suppression (no reg
 
 	const { pi, sendMessages } = makePiMockWithCounters();
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	const result = await pumpOrchestratorMailbox(pi, ctx, p, "test_r13_s3");
+	const result = await pumpRootMailbox(pi, ctx, p, "test_r13_s3");
 	ok("R13-S3 sendMessages.length === 0 (normal priority stays suppressed)", sendMessages.length === 0, `got ${sendMessages.length}`);
 	ok("R13-S3 result.delivered === 0", result.delivered === 0, { delivered: result.delivered });
 
 	const events = readEvents();
-	const staleSuppressed = events.filter((e) => e.event === "notification.stale.suppressed" && e.site === "orchestrator_pump.surface");
+	const staleSuppressed = events.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface");
 	ok("R13-S3 normal-priority nudge DOES suppress with agent_busy", staleSuppressed.length >= 1, `got ${staleSuppressed.length} — events: ${events.map((e) => e.event).join(",")}`);
 	if (staleSuppressed.length >= 1) {
 		ok("R13-S3 stale_suppressed reason === 'agent_busy'", staleSuppressed[0].reason === "agent_busy", `got reason: ${staleSuppressed[0].reason}`);
@@ -307,13 +307,13 @@ console.log("\n[R13-S3] normal-priority nudge preserves busy suppression (no reg
 }
 
 // =============================================================================
-// R13-S4: priority-high nudge to a known-target worker → not surfaced via orchestrator path.
+// R13-S4: priority-high nudge to a known-target worker → not surfaced via root path.
 // =============================================================================
-console.log("\n[R13-S4] priority-high nudge to known-target worker → not via orchestrator surface");
+console.log("\n[R13-S4] priority-high nudge to known-target worker → not via root surface");
 {
 	const { taskId, workerId } = await seedIncidentShape();
-	// Send a priority-high nudge to the WORKER (not the orchestrator) — the busy worker
-	// cannot surface it either, but it MUST NOT surface via the orchestrator path either.
+	// Send a priority-high nudge to the WORKER (not the root) — the busy worker
+	// cannot surface it either, but it MUST NOT surface via the root path either.
 	const p = paths(scratch);
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
@@ -324,7 +324,7 @@ console.log("\n[R13-S4] priority-high nudge to known-target worker → not via o
 				to: workerId,
 				priority: "high",
 				subject: "Worker-bound nudge",
-				body: "This should not surface via the orchestrator.",
+				body: "This should not surface via the root.",
 				requiresAck: true,
 				conversationId: `task:${taskId}:node:implement:nudge:worker-direct`,
 				idempotencyKey: `task:${taskId}:node:implement:nudge:worker-direct:seq:1`,
@@ -335,19 +335,19 @@ console.log("\n[R13-S4] priority-high nudge to known-target worker → not via o
 
 	const { pi, sendMessages } = makePiMockWithCounters();
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	const result = await pumpOrchestratorMailbox(pi, ctx, p, "test_r13_s4");
-	ok("R13-S4 sendMessages.length === 0 (worker-bound not surfaced via orchestrator)", sendMessages.length === 0, `got ${sendMessages.length}`);
+	const result = await pumpRootMailbox(pi, ctx, p, "test_r13_s4");
+	ok("R13-S4 sendMessages.length === 0 (worker-bound not surfaced via root)", sendMessages.length === 0, `got ${sendMessages.length}`);
 	ok("R13-S4 result.delivered === 0", result.delivered === 0, { delivered: result.delivered });
 }
 
 // =============================================================================
 // R13-S7 (live 2026-09-02 backlog regression): a HIGH stale-open nudge that was
 // durably enqueued BEFORE the task/node became terminal must NOT surface to
-// the orchestrator after the R13 bypass. The bypass only rescues LIVE
+// the root after the R13 bypass. The bypass only rescues LIVE
 // actionable safety alerts; it MUST NOT replay historical alerts whose
 // referenced task/node is now terminal — that is the exact incident observed
 // on 2026-09-02 where 01/09 stale-open nudges (whose tasks/nodes closed
-// overnight) began surfacing to the orchestrator as fresh "action required"
+// overnight) began surfacing to the root as fresh "action required"
 // messages.
 //
 // Desired post-fix contract:
@@ -359,7 +359,7 @@ console.log("\n[R13-S4] priority-high nudge to known-target worker → not via o
 //
 // RED (current code, pre-fix-of-this-regression): pi.sendMessage IS called
 // because the bypass at reconcile.ts:1665 fires for any priority-high
-// unknown-target orchestrator nudge whose recipient.tmuxTarget === "unknown"
+// unknown-target root nudge whose recipient.tmuxTarget === "unknown"
 // AND v.reason === "agent_busy" — without checking whether the underlying
 // task/node is still live. The bypass falls through to the coalescing +
 // pi.sendMessage path and surfaces an alert for a closed task.
@@ -397,7 +397,7 @@ console.log("\n[R13-S7] RED: high stale-open nudge whose task/node is now termin
 	// priority=high AND unknown-target AND reason=agent_busy.
 	const { pi, sendMessages } = makePiMockWithCounters();
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
-	const result = await pumpOrchestratorMailbox(pi, ctx, p, "test_r13_s7");
+	const result = await pumpRootMailbox(pi, ctx, p, "test_r13_s7");
 
 	// RED assertions: these will FAIL under the current code (proving the regression),
 	// and must PASS after the fix-node repairs the bypass to also gate on
@@ -406,7 +406,7 @@ console.log("\n[R13-S7] RED: high stale-open nudge whose task/node is now termin
 	ok("R13-S7 result.delivered === 0", result.delivered === 0, { delivered: result.delivered });
 
 	const events = readEvents();
-	const staleSuppressed = events.filter((e) => e.event === "notification.stale.suppressed" && e.site === "orchestrator_pump.surface");
+	const staleSuppressed = events.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface");
 	const terminalTrace = events.filter((e) => e.event === "notification.surface.task_terminal" || (e.event === "notification.batch.suppressed" && (e.counts?.task_done >= 1 || e.counts?.node_terminal >= 1 || e.counts?.task_done || e.counts?.node_terminal)));
 	const batchSuppressed = events.find((e) => e.event === "notification.batch.suppressed");
 	const hasTaskDoneOrNodeTerminalInBatch = batchSuppressed && (Number(batchSuppressed.counts?.task_done ?? 0) >= 1 || Number(batchSuppressed.counts?.node_terminal ?? 0) >= 1);
@@ -416,10 +416,10 @@ console.log("\n[R13-S7] RED: high stale-open nudge whose task/node is now termin
 	// ticks see the receipt and classify it as informational_already_consumed rather than
 	// re-counting task_done in the per-tick batch counter. Both paths prove the predicate
 	// returned task_done and the message was NOT surfaced.
-	const mailboxPath = join(p.mailboxes, "orchestrator.jsonl");
+	const mailboxPath = join(p.mailboxes, "root.jsonl");
 	const allM = readFileSync(mailboxPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
 	const st2 = await readState(p, scratch);
-	const receiptsForS7 = Object.entries(st2.consumerReceipts?.orchestrator?.entries || {})
+	const receiptsForS7 = Object.entries(st2.consumerReceipts?.root?.entries || {})
 		.filter(([id]) => allM.some((m) => m.id === id && m.idempotencyKey?.startsWith("task:task-r13-x:node:implement:nudge:stale-open")));
 	ok("R13-S7 durable trace records terminal-task suppression (task_done/node_terminal/notification.surface.task_terminal OR consumerReceipt for terminal nudge)", terminalTrace.length >= 1 || hasTaskDoneOrNodeTerminalInBatch || receiptsForS7.length >= 1, `staleSuppressed=${staleSuppressed.length}, terminalTrace=${terminalTrace.length}, batch=${JSON.stringify(batchSuppressed?.counts ?? {})}, receiptsForS7=${receiptsForS7.length}`);
 }
@@ -428,11 +428,11 @@ console.log("\n[R13-S7] RED: high stale-open nudge whose task/node is now termin
 // Cleanup
 // =============================================================================
 process.env.PI_SWARM_AGENT_ID = ORIG_PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = ORIG_PI_SWARM_IS_ORCHESTRATOR;
+process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 
-console.log(`\nR13-ORCHESTRATOR-UNKNOWN-TARGET ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
+console.log(`\nR13-ROOT-UNKNOWN-TARGET ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 if (fail > 0) {
-	console.error("\n  ↳ RED regression reproduced — fix the busy-suppression site at reconcile.ts:1665/1763 to bypass for priority-high unknown-target orchestrator nudges.");
+	console.error("\n  ↳ RED regression reproduced — fix the busy-suppression site at reconcile.ts:1665/1763 to bypass for priority-high unknown-target root nudges.");
 	process.exit(1);
 }
 process.exit(0);

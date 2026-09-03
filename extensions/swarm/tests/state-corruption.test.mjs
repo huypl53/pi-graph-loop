@@ -84,13 +84,13 @@ console.log("\n[2] readTaskState throws a clear error on corrupt task.json");
 // --- [3] readMailbox ignores malformed JSONL lines instead of crashing the extension ---
 console.log("\n[3] readMailbox ignores malformed JSONL lines");
 {
-	const file = mailboxPath(p, "orchestrator");
+	const file = mailboxPath(p, "root");
 	writeFileSync(file, [
-		JSON.stringify({ id: "msg-good-1", swarmId: "swarm-x", from: "a", to: "orchestrator", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: "t1", body: "ok", requiresAck: false, headers: {} }),
+		JSON.stringify({ id: "msg-good-1", swarmId: "swarm-x", from: "a", to: "root", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: "t1", body: "ok", requiresAck: false, headers: {} }),
 		"msg-178619-bad-not-json",
-		JSON.stringify({ id: "msg-good-2", swarmId: "swarm-x", from: "b", to: "orchestrator", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: "t2", body: "ok2", requiresAck: true, headers: {} }),
+		JSON.stringify({ id: "msg-good-2", swarmId: "swarm-x", from: "b", to: "root", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: "t2", body: "ok2", requiresAck: true, headers: {} }),
 	].join("\n") + "\n", "utf8");
-	const msgs = await readMailbox(p, "orchestrator");
+	const msgs = await readMailbox(p, "root");
 	ok("readMailbox returns the valid records", msgs.length === 2 && msgs[0].id === "msg-good-1" && msgs[1].id === "msg-good-2");
 	const events = readFileSync(p.events, "utf8");
 	ok("malformed mailbox line traced and ignored", /mailbox\.corrupt_lines_ignored/.test(events) && events.includes("\"bad\":1") && events.includes("\"firstBadLine\":2"));
@@ -112,7 +112,7 @@ console.log("\n[4] normal valid parses still work");
 	writeFileSync(fp.state, JSON.stringify(validState), "utf8");
 	const parsed = await readState(fp, fresh);
 	ok("readState parses hand-written valid state", parsed.swarmId === "swarm-handwritten");
-	ok("readState back-fills orchestratorPumpSessions", parsed.orchestratorPumpSessions && typeof parsed.orchestratorPumpSessions === "object");
+	ok("readState back-fills rootPumpSessions", parsed.rootPumpSessions && typeof parsed.rootPumpSessions === "object");
 	ok("no spurious .corrupt.bak for valid state", !existsSync(`${fp.state}.corrupt.bak`));
 
 	// readTaskState: valid task.json parses and normalizes nodes.

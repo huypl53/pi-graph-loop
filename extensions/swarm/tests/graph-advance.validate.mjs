@@ -1,6 +1,6 @@
 // Logic-mirror validation for the graph-advance watcher (reconcileGraphAdvanceLocked +
 // sendGraphAdvanceNudgeLocked). Mid-graph counterpart to the loop watcher: detect a READY-but-unassigned
-// node in an in_progress task and nudge the orchestrator to assign it (idempotent per task:node; auto-acked
+// node in an in_progress task and nudge the root to assign it (idempotent per task:node; auto-acked
 // once assigned/terminal). The harness never assigns — it only surfaces the stall + the exact fix call.
 // Run: node extensions/swarm/graph-advance.validate.mjs
 

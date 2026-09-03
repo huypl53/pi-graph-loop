@@ -40,7 +40,7 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "release", description: "Release a task from an agent: <id> [<task-id>] [--force]" },
 	{ name: "mailbox", description: "Mailbox maintenance: reset <id> --yes" },
 	{ name: "send", description: "Send a message: <to> <body>" },
-	{ name: "goal", description: "show | set [-i <time>] <text> | update [-i <time>] [<text>] | done [<goalId>] (show read-only; set/update/done orchestrator-only; -i accepts ms/s/m/h)" },
+	{ name: "goal", description: "show | set [-i <time>] <text> | update [-i <time>] [<text>] | done [<goalId>] (show read-only; set/update/done root-only; -i accepts ms/s/m/h)" },
 	{ name: "trace", description: "Show trace file path" },
 	{ name: "capture", description: "Capture an agent's tmux pane: <id>" },
 	{ name: "identity", description: "reload|show an agent's identity" },
@@ -81,7 +81,7 @@ const GRAPH_FORMATS = ["text", "mermaid", "json"];
 const GOAL_SUBS = ["show", "set", "update", "done"];
 const PROTOCOL_SUBS = ["migrate"];
 const RUNTIME_FLAGS = ["runtime", "--runtime", "-r"];
-const ROLE_KINDS = ["orchestrator", "planner", "reviewer", "tester", "implementer", "worker", "observer"];
+const ROLE_KINDS = ["root", "planner", "reviewer", "tester", "implementer", "worker", "observer"];
 const IDENTITY_SUBS = ["reload", "show"];
 const MAILBOX_SUBS = ["reset"];
 const REGISTER_FLAGS = ["--kind", "--model", "--provider", "--inject", "--no-inject"];

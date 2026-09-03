@@ -93,7 +93,7 @@ export function _clearQuotaResetCacheForTests() {
 	quotaResetCache.clear();
 }
 
-// Health state lives next to swarm-state.json so every swarm process (orchestrator, workers,
+// Health state lives next to swarm-state.json so every swarm process (root, workers,
 // spawned agents) shares one view of which slots are benched.
 export function poolHealthFile(p: Paths) {
 	return join(p.root, "pool-state.json");
@@ -291,7 +291,7 @@ export function validateSwarmSettings(cwd = process.cwd()): { ok: boolean; error
 			// Issue 22: validate the optional roles allow-list (warning-grade, informational — the
 			// malformed value is treated as "no filter" by parseModelPool, but the operator should see it).
 			if (s.roles !== undefined && (!Array.isArray(s.roles) || !s.roles.every((r: any) => typeof r === "string" && r.length > 0))) {
-				errors.push({ kind: "slot_bad_roles", field: `modelPool[${idx}].roles`, message: `Slot #${idx + 1} roles must be a string array of role-kind names (see completion.ts ROLE_KINDS for the closed set: orchestrator, planner, reviewer, tester, implementer, worker, observer)` });
+				errors.push({ kind: "slot_bad_roles", field: `modelPool[${idx}].roles`, message: `Slot #${idx + 1} roles must be a string array of role-kind names (see completion.ts ROLE_KINDS for the closed set: root, planner, reviewer, tester, implementer, worker, observer)` });
 			}
 		});
 	}
@@ -427,7 +427,7 @@ export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: 
 // bad key); auth benches extra-long (6h floor) because keys do not self-heal; rate_limit/transient
 // follow the maxRetries streak before a normal cooldown. Quota benches honor slot.quotaResetMs
 // (effective = max(rotation.cooldownMs, slot.quotaResetMs)) and stamp lastBenchReason so the
-// orchestrator pump's recovery scan can detect quota benches specifically.
+// root pump's recovery scan can detect quota benches specifically.
 export async function recordProviderError(p: Paths, slot: ModelSlot, kind: ProviderErrorKind, error: string): Promise<PoolSlotHealth> {
 	const { rotation } = effectiveConfig();
 	return withPoolLock(p, async () => {

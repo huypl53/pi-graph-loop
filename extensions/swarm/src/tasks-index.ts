@@ -125,7 +125,7 @@ export async function listTasksIndexed(p: Paths): Promise<IndexedTask[]> {
 }
 
 export function renderTasksIndexedList(list: IndexedTask[]): string {
-	if (!list.length) return "No tasks found. Create one with swarm_create_task (or have the orchestrator plan one).";
+	if (!list.length) return "No tasks found. Create one with swarm_create_task (or have the root plan one).";
 	const lines: string[] = [`Tasks (${list.length}) — pick by # or task-id:  /swarm graph|task|next|validate <#|task-id>`];
 	lines.push("  #  task-id                                 status       age   updated          nodes    current → next");
 	for (const t of list) {

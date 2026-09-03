@@ -128,7 +128,7 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const beforeTs = new Date().toISOString();
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
 	await writeFile(join(scratch, ".pi/swarm/mailboxes/worker-a.jsonl"), JSON.stringify({
-		id: msgId, swarmId: "test", from: "orchestrator", to: "worker-a", subject: "hi",
+		id: msgId, swarmId: "test", from: "root", to: "worker-a", subject: "hi",
 		priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: beforeTs,
 		body: "hello", requiresAck: true, headers: {},
 	}) + "\n", "utf8");
@@ -137,18 +137,18 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const st = {
 		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
 		agents: {
-			"orchestrator": { id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
+			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
 			"worker-a": { id: "worker-a", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-a", tmuxTarget: "test:worker-a.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
 		},
 		delivered: { "worker-a": [] },
-		messages: { [msgId]: { id: msgId, from: "orchestrator", to: "worker-a", status: "queued", createdAt: beforeTs, updatedAt: beforeTs, attempts: 0, requiresAck: true } },
+		messages: { [msgId]: { id: msgId, from: "root", to: "worker-a", status: "queued", createdAt: beforeTs, updatedAt: beforeTs, attempts: 0, requiresAck: true } },
 	};
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(st, null, 2), "utf8");
 
 	const out = await tools.swarm_check_mailbox.execute("c3", { markDelivered: true }, undefined, undefined, { cwd: scratch });
 	ok("swarm_check_mailbox returned text result", typeof out?.content?.[0]?.text === "string");
 
-	// Record should NOT have v2 fields under gate=0 (except deliveredAt may stamp surfacedAt for orchestrator only)
+	// Record should NOT have v2 fields under gate=0 (except deliveredAt may stamp surfacedAt for root only)
 	const after = await readStateFile();
 	const rec = after?.messages?.[msgId];
 	ok("message record has NO seenAt under gate=0", !rec?.seenAt);

@@ -124,7 +124,7 @@ export async function renderUi(pi: ExtensionAPI, ctx: any, settings: BackgroundS
 	}
 
 	// --- AGENT NUDGE: wake the agent once when its tasks finish (the async counterpart to background_wait).
-	// Mirrors the swarm orchestrator pump: TUI-only (no live agent loop in print/rpc/json), gated on idle
+	// Mirrors the swarm root pump: TUI-only (no live agent loop in print/rpc/json), gated on idle
 	// so we never interrupt a streaming turn, deferred (not marked nudged) while busy so the next tick retries.
 	const toNudge = tasks.filter((t) => isTerminal(t.status) && t.agentNudgedStatus !== t.status);
 	if (toNudge.length > 0) {

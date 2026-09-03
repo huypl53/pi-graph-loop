@@ -3,7 +3,7 @@
 **Reviewer:** `protocol-ux-reviewer` (agent UX / tool-surface reduction / tool-gating)
 **Document:** `docs/swarm/minimal-agent-protocol-proposal.md` (draft, 2026-08-28; Revision v2 added after swarm review)
 **Scope of review:** whether removing explicit ACK is actually simpler, the proposed
-worker/orchestrator tool surfaces, candidates to merge/hide, failure/recovery
+worker/root tool surfaces, candidates to merge/hide, failure/recovery
 discoverability, slash vs tool boundary, and whether the proposed status surfaces
 replace `swarm_next_nodes` / `swarm_print_graph` / `swarm_message_status` adequately.
 **Mode:** review-only. No production code or proposal text changed.
@@ -35,14 +35,14 @@ Verified against the following sources:
   `swarm_next_nodes` / `swarm_assign_task` / `swarm_update_task` /
   `swarm_task_message` registration (8 task tools).
 - `extensions/swarm/src/tools/agents.ts` — 19 lifecycle/observability/recovery tools;
-  orchestrator-only server-side gates live on `swarm_prune`, `swarm_gc`,
+  root-only server-side gates live on `swarm_prune`, `swarm_gc`,
   `swarm_stop_agent`, `swarm_release_agent_task`, `swarm_set_goal`,
   `swarm_mark_goal_done`, `swarm_assign_task`, `swarm_create_task`,
   `swarm_update_task(force|cancelTask)`.
-- `extensions/swarm/src/tools/gc.ts` — `swarm_gc` (orchestrator-only).
+- `extensions/swarm/src/tools/gc.ts` — `swarm_gc` (root-only).
 - `extensions/swarm/src/tools/gating.ts` — current gating is binary
-  (guest vs registered/orchestrator). `setActiveTools` drops or ensures all 31
-  swarm tools; there is **no** worker-vs-orchestrator split in the active tool
+  (guest vs registered/root). `setActiveTools` drops or ensures all 31
+  swarm tools; there is **no** worker-vs-root split in the active tool
   set today.
 - `extensions/swarm/src/mailbox.ts` — durable `SwarmMessage` schema; lifecycle
   states `queued | mailbox_delivered | injected | intercepted | acked | failed |
@@ -62,8 +62,8 @@ Verified against the following sources:
   `flow`, `graph`, `attention`, `remind`. So moving the model-facing surface to
   slash/admin for the listed tools is consistent with what already exists.
 - `docs/swarm/tools.md` — current docs say all 31 swarm tools are active for any
-  registered agent or the orchestrator (visibility is identity-based, but there
-  is **no** worker tool-set distinct from an orchestrator tool-set).
+  registered agent or the root (visibility is identity-based, but there
+  is **no** worker tool-set distinct from an root tool-set).
 - `extensions/swarm/src/taskgraph.ts` / `tools/tasks.ts:199-237` —
   `swarm_next_nodes` writes `task.currentNodes` inside `withLock` as a side
   effect, plus returns `findReusableAgent` suggestions. `swarm_print_graph`
@@ -77,7 +77,7 @@ Verified against the following sources:
 The proposal is directionally correct: removing a five-state ACK ritual from the
 model prompt and substituting engine-derived evidence will reduce mechanical
 tool traffic and is consistent with how the durable state already evolves. The
-worker-surface count is realistic (≤4 tools), the orchestrator surface count is
+worker-surface count is realistic (≤4 tools), the root surface count is
 realistic (≤9 tools), the proposed merges are mostly compatible with the
 existing engine, and the slash-vs-tool boundary lines up with the slash command
 catalog that already exists.
@@ -89,7 +89,7 @@ under explicit implementation work that the proposal currently glosses over:
 (2) the proposed `expectResponse` / `responseDeadlineMs` / `escalateIfSilent`
 fields are net-new schema with no current equivalent and need a real scheduler,
 not just a flag rename; (3) gating today is binary — moving to a worker-vs-
-orchestrator split is a new gating dimension, not a refactor; (4) the
+root split is a new gating dimension, not a refactor; (4) the
 deliver-is-not-seen invariant is stated but not enforced (the proposal
 acknowledges this and recommends “either injection or mailbox surface” in §8,
 which means there is still ambiguity to resolve before code); (5) several
@@ -162,19 +162,19 @@ or `failed` and emits an `escalation` trace; (iii) keep the existing
 legacy durable messages reconcile correctly (the proposal mentions this in
 §6 phase 1 but the reconcile sweep changes need explicit list).
 
-### B3. The new gating dimension (worker vs orchestrator) is net-new infrastructure, not a refactor
+### B3. The new gating dimension (worker vs root) is net-new infrastructure, not a refactor
 
 **Finding.** Today’s `extensions/swarm/src/tools/gating.ts` implements
 `applySwarmToolGating` as a binary function: guest loses all swarm tools,
 everyone else gets all 31. The proposal §2.1-2.3 introduces three tiers
-(worker, orchestrator, admin). This is a new third axis on top of
+(worker, root, admin). This is a new third axis on top of
 identity-based gating and has no implementation today.
 
 **Why it matters.** “Hide from normal model registry” sounds like a config
 change but it actually requires: (a) deciding the rule that maps
 `roleKind` → tool-set (the `roleKind` field exists on agents but is not
 yet used for gating); (b) deciding the ordering — does the gating tier win,
-or does server-side `requireOrchestratorAuthority` still apply? (current
+or does server-side `requireRootAuthority` still apply? (current
 tools enforce authority at execution time, which is fine, but the active
 tool set is a separate concern); (c) ensuring slash commands remain
 reachable when the model surface is hidden (`/swarm attach` already exists
@@ -185,7 +185,7 @@ the `setActiveTools` rebuild does not flatten non-swarm tools.
 - Worker (`roleKind` ∈ `worker|planner|implementer|reviewer|tester|observer`):
   active tools = `swarm_check_mailbox`, `swarm_send_message`,
   `swarm_update_task`, `swarm_task_status`.
-- Orchestrator (`roleKind: orchestrator` or agent id `orchestrator`):
+- Root (`roleKind: root` or agent id `root`):
   active tools = the worker four + `swarm_agent_status`,
   `swarm_list_agents`, `swarm_spawn_agent`, `swarm_create_task`,
   `swarm_assign_task`, `swarm_reconcile`.
@@ -194,11 +194,11 @@ the `setActiveTools` rebuild does not flatten non-swarm tools.
 
 Decide and document the precedence between tier-gating and execution-time
 authority. The cleanest model is tier-gating determines what the model can
-*call*; server-side `requireOrchestratorAuthority` still rejects calls that
+*call*; server-side `requireRootAuthority` still rejects calls that
 slip through (defense in depth). State this explicitly so reviewers can
 verify the worker can never accidentally invoke `swarm_assign_task`.
 
-Also: `swarm_create_task` is currently orchestrator-only by execution but
+Also: `swarm_create_task` is currently root-only by execution but
 exposed to all registered agents in the active tool set. After this
 proposal, it should be hidden from the worker active set. The execution-
 time check stays; the model prompt stops suggesting it.
@@ -216,7 +216,7 @@ again, none of the latter three are in the worker four.
 
 **Why it matters.** When an assignment is dead-lettered, or when a node goes
 silent, the worker needs *some* tool path to detect it and ask for help.
-Without that path, workers either ignore symptoms or spam the orchestrator.
+Without that path, workers either ignore symptoms or spam the root.
 Both outcomes are worse than today.
 
 **Required.** Pick one of the following, and state it in the proposal:
@@ -265,7 +265,7 @@ stamped.
 normal senders do not need it — but the function is also used by
 `swarm_reconcile` (extensions/swarm/src/reconcile.ts:658, 691, 905) for
 internal recovery. Keep the implementation, just drop it from the active
-tool registry for worker and orchestrator.
+tool registry for worker and root.
 
 **Recommendation.** Move `swarm_message_status` to the admin tier. Add an
 `/swarm message <id>` slash command as the operator-facing equivalent, and
@@ -295,7 +295,7 @@ But “unused” is a weak signal: the same logs likely also under-represent
 `/swarm remind` and the bounded worker reminder path, which were just
 introduced.
 
-**Recommendation.** Keep both tools but move them to the orchestrator
+**Recommendation.** Keep both tools but move them to the root
 active set (they are already execution-time gated). Do not move them to
 admin. If the project later decides they were a premature addition,
 retire them in a separate change. Coupling retirement to this proposal
@@ -305,14 +305,14 @@ adds risk without a clear win.
 
 **Finding.** Proposal §6 phase 2 says “Hide `swarm_ack_message`,
 `swarm_task_message`, `swarm_next_nodes`, `swarm_print_graph` from
-default worker/orchestrator registries. Register aliases only in
+default worker/root registries. Register aliases only in
 compatibility/admin mode.”
 
 **Recommendation.** State in the proposal that hidden tools remain
 registered (so `getAllTools()` and the smoke test stay stable, as the
 current `gating.ts` rationale comments require), and that
 `applySwarmToolGating` is extended to consult `roleKind` against a
-worker/orchestrator/admin allow-list before calling `setActiveTools`.
+worker/root/admin allow-list before calling `setActiveTools`.
 This avoids the trap of accidentally removing tools that other extension
 code (tests, slash command handlers, reconcile) calls by name.
 
@@ -325,7 +325,7 @@ this proposal lands, all three become inaccurate.
 
 **Recommendation.** As part of the same change set:
 - Update the tool count to “33 registered, ≤4 in default worker surface,
-  ≤9 in default orchestrator surface, the rest admin/slash-only.”
+  ≤9 in default root surface, the rest admin/slash-only.”
 - Replace the “Message completion protocol” three-step recipe with a
   one-step recipe (“reply with `swarm_send_message(replyTo=...)`; engine
   derives the rest”).
@@ -346,7 +346,7 @@ in what the model actually does.
 - Spawn two workers, run a feature-dev task, count `swarm_ack_message`
   invocations across the session log. Target: zero.
 - Inject a stalled pane (worker pane alive but unresponsive), verify the
-  orchestrator’s `swarm_reconcile(dryRun=true)` surfaces the stale node
+  root’s `swarm_reconcile(dryRun=true)` surfaces the stale node
   through the runtime warnings of `swarm_task_status(runtime=true)`.
 - Replay a legacy durable message (existing `requiresAck: true` record)
   into a fresh pi and verify it is reconciled without manual ack.
@@ -401,9 +401,9 @@ Reviewers are asked to challenge the proposal on six points. Answers below.
    handoffs and graph inspection.** Mostly yes after **B1** is resolved. The
    proposal should commit to keeping the Mermaid and JSON graph views
    reachable through the merged `swarm_task_status`, not just the text view.
-5. **Whether default worker/orchestrator tool counts are realistic under
+5. **Whether default worker/root tool counts are realistic under
    current role gating.** Worker ≤4 + diagnostic reconcile = 5 is realistic;
-   orchestrator ≤9 is realistic given that `swarm_validate_graph`,
+   root ≤9 is realistic given that `swarm_validate_graph`,
    `swarm_print_graph`, and `swarm_next_nodes` move into a merged
    `swarm_task_status` view. See **B3** for the gating-tier implementation.
 6. **Whether the proposed phased migration is safe enough for an extension
@@ -449,15 +449,15 @@ v1 condition explicitly:
 |---|---|
 | **B1** (currentNodes side-effect) | §F.2: `currentNodes` becomes a derived view at read time; legacy field is either cached or deliberately removed. text/mermaid/json render formats preserved. |
 | **B2** (lifecycle schema + deadline scheduler) | §A: explicit field table with set-only-by/meaning; §B: terminal/response-verification rules; §C: deadline sweep is the reconcile scheduler, idempotent under lock, never dead-letters directly. |
-| **B3** (worker/orchestrator gating) | §D: feature gate `PI_SWARM_MINIMAL_PROTOCOL=0|1`; §E: role-profile gating is layered (guest → registered → role profile), execution-time authority remains authoritative. |
+| **B3** (worker/root gating) | §D: feature gate `PI_SWARM_MINIMAL_PROTOCOL=0|1`; §E: role-profile gating is layered (guest → registered → role profile), execution-time authority remains authoritative. |
 | **B4** (worker diagnostic path) | §E: worker surface is 5 tools (mailbox/send/update/status/reconcile(dryRun:true)). Acceptance criterion revised from "zero ACK calls" to "zero normal-workflow calls under gate=1". |
 | **N1** (deliver-is-not-seen invariant) | §A: explicit invariant; `seenAt` requires surface/read receipt, never injection alone. |
 | **N2** (downgrade message_status) | §F.4: admin/diagnostic only; sender visibility through task/status summaries and deadline evidence. |
 | **N3** (fold identity, keep reload) | §F.5: identity summary folded into agent_status; full identity file reader retained for admin/debug. Slash-equivalent for reload already exists. |
-| **N4** (retain goal tools) | §E: explicit — `swarm_set_goal` / `swarm_mark_goal_done` stay on orchestrator. |
+| **N4** (retain goal tools) | §E: explicit — `swarm_set_goal` / `swarm_mark_goal_done` stay on root. |
 | **N5** (hide ≠ de-registration) | §E: explicit — role-profile gating at registration + execution time, tools remain in `getAllTools()`. |
 | **N6** (docs update) | §I.5: documentation in the release gate; §E: regenerate identity cards under gate=1. |
-| **N7** (tmux UAT) | §H: explicit 10-row UAT matrix covering legacy ACK, zero-ACK new flow, dead pane, deadline, supersede fencing, unified send_message task metadata, worker tool discovery, orchestrator goal, legacy envelope migration idempotence, and graph render compatibility. |
+| **N7** (tmux UAT) | §H: explicit 10-row UAT matrix covering legacy ACK, zero-ACK new flow, dead pane, deadline, supersede fencing, unified send_message task metadata, worker tool discovery, root goal, legacy envelope migration idempotence, and graph render compatibility. |
 | **N8** (identity regeneration) | §E + §I.5: identity-card generation must stop instructing normal workers to call explicit ACK; reload/regenerate identities under gate=1. |
 
 ### 9.2 Verification against current code (v2 spot-checks)
@@ -488,10 +488,10 @@ v1 condition explicitly:
   with "Task " AND includes " assigned")`. The subject heuristic is fragile:
   any caller can auto-stamp an assignee by accident. v2 §F.1 replaces this with
   an explicit `taskAssignment` boolean/opaque token. **This is a behavior
-  change** that requires the orchestrator's `swarm_assign_task` to be updated
+  change** that requires the root's `swarm_assign_task` to be updated
   to pass the new token. Worth calling out so reviewers don't miss it; it is
   a hardening, not a regression. ✓ (with caveat: must keep `swarm_assign_task`
-  on the orchestrator surface so the token can always be set by an authorized
+  on the root surface so the token can always be set by an authorized
   caller.)
 - **Compatibility window is two stable releases, not one.** v2 §D commits to
   two stable releases plus a release-gate audit before deprecating

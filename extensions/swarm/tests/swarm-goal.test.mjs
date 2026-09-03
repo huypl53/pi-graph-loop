@@ -4,7 +4,7 @@
 // success for the subcommands these tools need. State lives under a unique temp scratch dir.
 // Tests cover:
 //   - set / re-set / clear lifecycle (durable shape, idempotent across reads)
-//   - authority gate: workers throw ORCHESTRATOR_AUTHORITY_REQUIRED
+//   - authority gate: workers throw ROOT_AUTHORITY_REQUIRED
 //   - durability across re-reads
 //   - goalId safety fence on mark_done
 //
@@ -57,21 +57,21 @@ const setAgentId = (id) => { if (id === undefined) delete process.env.PI_SWARM_A
 {
 	const seedDir = join(scratch, ".pi", "swarm");
 	mkdirSync(seedDir, { recursive: true });
-	const { ensureOrchestrator } = await import(join(here, "..", "src", "identity.ts"));
+	const { ensureRoot } = await import(join(here, "..", "src", "identity.ts"));
 	const { ensureDirs, readState, writeState, paths } = await import(join(here, "..", "src", "state.ts"));
 	const p0 = paths(scratch);
 	await ensureDirs(p0);
 	const st0 = await readState(p0, scratch);
-	ensureOrchestrator(st0, scratch, p0);
+	ensureRoot(st0, scratch, p0);
 	await writeState(p0, st0);
 }
 
 console.log("\n[1] swarm_set_goal stores durable goal with required shape");
 {
 	// Re-read state to get the seeded record.
-	setAgentId("orchestrator");
+	setAgentId("root");
 	const before = readSwarmState();
-	ok("precondition: orchestrator pseudo-agent seeded", !!before.agents?.orchestrator);
+	ok("precondition: root pseudo-agent seeded", !!before.agents?.root);
 	const r = await call("swarm_set_goal", { text: "Ship Issue 18", intervalMs: 15000, cwd: scratch });
 	const st = readSwarmState();
 	const goal = st.goal;
@@ -79,7 +79,7 @@ console.log("\n[1] swarm_set_goal stores durable goal with required shape");
 	ok("goal.id present (auto-generated)", typeof goal.id === "string" && goal.id.startsWith("goal-"));
 	ok("goal.text stored verbatim", goal.text === "Ship Issue 18");
 	ok("goal.setAt is ISO", typeof goal.setAt === "string" && goal.setAt.includes("T") && goal.setAt.endsWith("Z"));
-	ok("goal.setBy is orchestrator", goal.setBy === "orchestrator");
+	ok("goal.setBy is root", goal.setBy === "root");
 	ok("goal.nudgeIntervalMs persisted", goal.nudgeIntervalMs === 15000);
 	ok("goal.consecutiveNoResolveNudges is 0 on fresh set", goal.consecutiveNoResolveNudges === 0);
 	ok("goal.lastNudgeAt cleared on fresh set", goal.lastNudgeAt === undefined);
@@ -123,7 +123,7 @@ console.log("\n[4] swarm_set_goal rejects empty text");
 	await throws("missing text throws", call("swarm_set_goal", { text: "", cwd: scratch }), /text must be non-empty/);
 }
 
-console.log("\n[5] authority gate: non-orchestrator swarm_set_goal throws ORCHESTRATOR_AUTHORITY_REQUIRED");
+console.log("\n[5] authority gate: non-root swarm_set_goal throws ROOT_AUTHORITY_REQUIRED");
 {
 	setAgentId("worker-1");
 	// write a worker agent record (otherwise readState has no worker to find — but the gate fires before state reads)
@@ -136,9 +136,9 @@ console.log("\n[5] authority gate: non-orchestrator swarm_set_goal throws ORCHES
 		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 	};
 	writeSwarmState(st);
-	await throws("worker swarm_set_goal throws ORCHESTRATOR_AUTHORITY_REQUIRED", call("swarm_set_goal", { text: "should fail", cwd: scratch }), /ORCHESTRATOR_AUTHORITY_REQUIRED/);
+	await throws("worker swarm_set_goal throws ROOT_AUTHORITY_REQUIRED", call("swarm_set_goal", { text: "should fail", cwd: scratch }), /ROOT_AUTHORITY_REQUIRED/);
 	ok("worker swarm_set_goal did not mutate state.goal", readSwarmState().goal.id === "my-explicit-goal");
-	setAgentId("orchestrator");
+	setAgentId("root");
 }
 
 console.log("\n[6] swarm_mark_goal_done clears goal entry");
@@ -169,14 +169,14 @@ console.log("\n[8] swarm_mark_goal_done goalId safety fence");
 	ok("goal entry removed after matching clear", readSwarmState().goal === undefined);
 }
 
-console.log("\n[9] authority gate: non-orchestrator swarm_mark_goal_done throws");
+console.log("\n[9] authority gate: non-root swarm_mark_goal_done throws");
 {
-	// Set a goal first as orchestrator.
+	// Set a goal first as root.
 	await call("swarm_set_goal", { text: "authority-mark-done-test", cwd: scratch });
 	setAgentId("worker-1");
-	await throws("worker swarm_mark_goal_done throws ORCHESTRATOR_AUTHORITY_REQUIRED", call("swarm_mark_goal_done", { cwd: scratch }), /ORCHESTRATOR_AUTHORITY_REQUIRED/);
+	await throws("worker swarm_mark_goal_done throws ROOT_AUTHORITY_REQUIRED", call("swarm_mark_goal_done", { cwd: scratch }), /ROOT_AUTHORITY_REQUIRED/);
 	ok("worker swarm_mark_goal_done did NOT mutate state", !!readSwarmState().goal);
-	setAgentId("orchestrator");
+	setAgentId("root");
 	await call("swarm_mark_goal_done", { cwd: scratch }); // cleanup
 }
 
@@ -207,8 +207,8 @@ console.log("\n[10] durability across re-read (binding C-1: no st.goal back-fill
 
 console.log("\n[11] /swarm goal set -i parses human time and goal show/status surface the effective interval");
 {
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const notifications = [];
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
 	{
@@ -234,8 +234,8 @@ console.log("\n[11] /swarm goal set -i parses human time and goal show/status su
 
 console.log("\n[12] /swarm goal set --interval alias and invalid values");
 {
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const notifications = [];
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
 	await commands.swarm("goal set --interval 900000 alias test", ctx);
@@ -254,8 +254,8 @@ console.log("\n[12] /swarm goal set --interval alias and invalid values");
 
 console.log("\n[13] /swarm goal update preserves goalId and counters, and swarm_set_goal update=true updates in place");
 {
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const notifications = [];
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
 	await commands.swarm("goal set -i 45s initial update test", ctx);
@@ -290,8 +290,8 @@ console.log("\n[13] /swarm goal update preserves goalId and counters, and swarm_
 // =============================================================
 console.log("\n[14] swarm_set_goal inherits prior intervalMs on replace (Issue 85 bug #1)");
 {
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const notifications = [];
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
 	// Clear any leftover goal from previous sections.

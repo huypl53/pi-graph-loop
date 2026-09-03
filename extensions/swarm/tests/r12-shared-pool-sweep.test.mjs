@@ -5,7 +5,7 @@
  * Source incident: 2026-09-01T12:51:50 mass-sweep killed `fs-implementer`,
  * `r80-tester`, `r80-reviewer`, `r10-analyst` — all four `releaseReason ===
  * "sole_active_task"`, all four `spawnedForTaskId === null` (shared pool),
- * all four `leaseValidAtSweep === false`. ZERO non-orchestrator workers survived.
+ * all four `leaseValidAtSweep === false`. ZERO non-root workers survived.
  *
  * Root cause (isolated): `sweepTaskWorkersLocked` pre-release `priorActiveByAgent`
  * reconstruction synthesized `[taskId]` for any agent listed in `task.nodes[*].assignee`
@@ -26,7 +26,7 @@
  *
  * ISOLATION CONTRACT — SCRATCH CWD ONLY:
  *   - mkdtemp creates a unique temp dir; cwd passed to every tool is `scratch`, NEVER process.cwd().
- *   - PI_SWARM_AGENT_ID + PI_SWARM_IS_ORCHESTRATOR env vars restored at file tail.
+ *   - PI_SWARM_AGENT_ID + PI_SWARM_IS_ROOT env vars restored at file tail.
  *   - process.cwd() never used; the repo's real .pi/swarm state is never touched.
  *
  * Run: node extensions/swarm/r12-shared-pool-sweep.test.mjs
@@ -141,7 +141,7 @@ function buildTaskWithSharedAssignees(taskId, sharedIds) {
 }
 
 function buildStateWithSharedPool(taskId, sharedIds, extraAgents = {}) {
-	const agents = { orchestrator: makeAgent("orchestrator", { roleKind: "orchestrator", tmuxTarget: "r12:orchestrator.0" }) };
+	const agents = { root: makeAgent("root", { roleKind: "root", tmuxTarget: "r12:root.0" }) };
 	for (const id of sharedIds) {
 		const roleKind = ROLES.find((r) => r.id === id)?.roleKind ?? "worker";
 		// Shared-pool agent: no spawnedForTaskId link, empty activeTaskIds (post-release state).

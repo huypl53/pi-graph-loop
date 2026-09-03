@@ -18,7 +18,7 @@ Implementation modules:
 - `extensions/swarm/src/state.ts` — paths, locks, file IO, traces
 - `extensions/swarm/src/taskgraph.ts` — graph rules and closure logic
 - `extensions/swarm/src/delivery.ts` — message semantics and retryability
-- `extensions/swarm/src/session.ts` — orchestrator/model/session detection
+- `extensions/swarm/src/session.ts` — root/model/session detection
 - `extensions/swarm/src/identity.ts` — generated identity cards and overrides
 - `extensions/swarm/src/tmux.ts` — tmux integration and pane capture
 - `extensions/swarm/src/mailbox.ts` — mailbox append/read helpers
@@ -37,7 +37,7 @@ the original history. Imports of `./src/...` were rewritten to `../src/...`.
 
 - Run a single suite: `node extensions/swarm/tests/<name>.test.mjs`
 - Run the swarm inventory: `npm run test:swarm` (sets
-  `PI_SWARM_AGENT_ID=orchestrator PI_SWARM_IS_ORCHESTRATOR=1` so the
+  `PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1` so the
   authority-gated suites do not crash)
 - Run the mock-llm inventory: `npm run test:mockllm`
 
@@ -48,7 +48,7 @@ refactor; record new R-rows for fixes):
 ct-contract-probes.test.mjs         19 passed / 4 failed       (CT-2.B/C known)
 minimal-protocol-authoritative      29 pass / 18 fail
 model-routing.test.mjs              4 passed / 1 failed
-orchestrator-wake.test.mjs          31 passed / 3 failed
+root-wake.test.mjs          31 passed / 3 failed
 functional.test.mjs                 env-crash (caller=implementer-01)
 pool-config.test.mjs                TypeError (provider-config-dependent)
 row75-graph-guardrails.test.mjs     assertion crash
@@ -108,7 +108,7 @@ Checklist:
 3. update task status/print/validation behavior as needed
 4. document branch/outcome semantics in `docs/swarm-task-graph.md`
 5. if the rule re-opens failed work via a declared `rework` edge, keep the reopened node state explicit (`ready`) rather than inventing a hidden reset path
-6. if the rule adds a forced/authoritative mutation, gate it through `isOrchestratorAuthority()` at the real mutation boundary — never trust caller-supplied parameters as authority
+6. if the rule adds a forced/authoritative mutation, gate it through `isRootAuthority()` at the real mutation boundary — never trust caller-supplied parameters as authority
 7. add scenario or regression coverage
 
 ### If you add a new runtime file
@@ -126,7 +126,7 @@ with a deterministic glob predicate. Pattern semantics (`normalizeScopePattern`)
 
 - **Trailing slash = directory subtree** — `dir/` ≡ `dir/**`. It covers the directory node
   itself and every descendant. This is the ONLY form the task-default scope generator
-  emits (the orchestrator writes `artifacts/`, `extensions/swarm/src/`, `extensions/swarm/tests/`,
+  emits (the root writes `artifacts/`, `extensions/swarm/src/`, `extensions/swarm/tests/`,
   …). **Prefer trailing slash for directory scopes in plans** so two disjoint dirs are seen
   as non-overlapping and can run in parallel.
   - `('a/b/', 'c/d/')` → `false` (disjoint dirs coexist)
@@ -154,17 +154,17 @@ was treated as unknown syntax and blocked ALL parallel assignment of dir-scoped 
 - Do not handwave evidence rules for run/memory promotion.
 - Do not let `/swarm` command help become the only documentation of a feature.
 
-## Orchestrator-authoritative mutations
+## Root-authoritative mutations
 
-Some mutations are only safe when the current identity is the active orchestrator leader.
+Some mutations are only safe when the current identity is the active root leader.
 The check is two-part:
 
-1. **authority** — `isOrchestratorAuthority(currentAgentId())` must be true for the caller;
-2. **leadership** — the durable `SwarmState.orchestratorLeader` record must be claimed/heartbeated
+1. **authority** — `isRootAuthority(currentAgentId())` must be true for the caller;
+2. **leadership** — the durable `SwarmState.rootLeader` record must be claimed/heartbeated
    by the current pid before the mutation proceeds.
 
 Apply the gate at the real mutation boundary, not just in UI wrappers.
-Create-only paths can materialize the orchestrator record without refreshing heartbeat; that is
+Create-only paths can materialize the root record without refreshing heartbeat; that is
 how a fresh PM session becomes visible without claiming extra authority.
 
 Required examples in this issue family:
@@ -173,8 +173,8 @@ Required examples in this issue family:
 - `swarm_stop_agent`
 - `swarm_release_agent_task`
 - `swarm_reconcile(mark=true)`
-- `swarm_prune` (Issue 10: added to the orchestrator-only set; previously description-only)
-- `swarm_gc` (Issue 10: added to the orchestrator-only set; previously description-only)
+- `swarm_prune` (Issue 10: added to the root-only set; previously description-only)
+- `swarm_gc` (Issue 10: added to the root-only set; previously description-only)
 - `/swarm stop`
 - `/swarm release`
 
@@ -229,7 +229,7 @@ For docs-only changes, it is acceptable to skip interactive validation, but say 
 
 Every swarm behavior change ships a mock-LLM fixture (AGENTS.md makes this compulsory). The philosophy behind it:
 
-- **The engine is never mocked.** A fixture lane runs a real `pi` process with the real swarm extension: hooks fire, the orchestrator pump ticks, reconcile walks task.json, mailbox delivery + tmux injection + idempotency dedupe are all production code paths. Only the model is replaced by a scripted stream (`extensions/mock-llm/`, one JSONL turn per request; when the script runs out the provider returns `script_exhausted` rather than hanging).
+- **The engine is never mocked.** A fixture lane runs a real `pi` process with the real swarm extension: hooks fire, the root pump ticks, reconcile walks task.json, mailbox delivery + tmux injection + idempotency dedupe are all production code paths. Only the model is replaced by a scripted stream (`extensions/mock-llm/`, one JSONL turn per request; when the script runs out the provider returns `script_exhausted` rather than hanging).
 - **Engine-side behavior is driven by seeding, not scripting.** Pumps, nudges, cooldowns, caps, and fences react to *state on disk*. To test them you seed the precondition (a stale `allIdleSinceAt`, an acked deferral message older than the cooldown, a ready-but-unassigned node) and then assert the engine's side effects: trace events in `events.jsonl`, new mailbox records with distinct ids, task.json node transitions.
 - **Assertions read disk, not console.** Evidence is what the engine wrote: `.pi/mock-llm/transcripts/<fixture>/` (ordered tool calls + stopReasons), `swarm-state.json` ledgers (delivered/acked/idempotency keys/seq counters), `events.jsonl` traces, mailbox JSONL. A deterministic fixture replayed twice must produce semantically identical output (same final statuses, same ordered tool-call sequence, same boundary values).
 - **Deterministic and offline.** Milliseconds, no network, no provider keys. `delayMs` values are part of the contract; no hidden randomness or environment-sensitive branching. This is what makes a fixture a regression test rather than a demo.

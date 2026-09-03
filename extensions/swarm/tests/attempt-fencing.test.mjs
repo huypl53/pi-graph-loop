@@ -24,9 +24,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = join(tmpdir(), `swarm-attempt-fencing-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
-// Identity control: the harness is the orchestrator (may assign); workers are simulated by
+// Identity control: the harness is the root (may assign); workers are simulated by
 // switching PI_SWARM_AGENT_ID before each update call. currentAgentId() reads it live.
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
+process.env.PI_SWARM_AGENT_ID = "root";
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 
@@ -125,10 +125,10 @@ await awaitAs("worker-a", "swarm_update_task", { taskId, nodeId: "plan", status:
 const n1c = readNode(taskId, "plan");
 ok("in_progress with active token succeeds", n1c.status === "in_progress");
 
-// True same-agent reassign (from non-"assigned" state? in_progress) — force it as orchestrator-free:
+// True same-agent reassign (from non-"assigned" state? in_progress) — force it as root-free:
 // swarm_assign_task on an in_progress node assigned to same agent is still the same active assignment
-// (retry). To model a genuine same-agent reassign, release first via orchestrator update to blocked.
-await awaitAs("orchestrator", "swarm_update_task", { taskId, nodeId: "plan", status: "blocked", force: true, cwd: scratch });
+// (retry). To model a genuine same-agent reassign, release first via root update to blocked.
+await awaitAs("root", "swarm_update_task", { taskId, nodeId: "plan", status: "blocked", force: true, cwd: scratch });
 await call("swarm_assign_task", { taskId, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 const n2 = readNode(taskId, "plan");
 const attempt2 = n2.activeAttemptId;
@@ -241,9 +241,9 @@ t2.nodes.plan.status = "assigned";
 t2.nodes.plan.assignee = "worker-a";
 const { writeFileSync } = await import("node:fs");
 writeFileSync(t2path, JSON.stringify(t2, null, 2));
-// plan is terminal done; orchestrator force-moves it to in_progress, then worker-a (still the
+// plan is terminal done; root force-moves it to in_progress, then worker-a (still the
 // stamped assignee, no attempt fields) updates it back to done WITHOUT an attempt token.
-await awaitAs("orchestrator", "swarm_update_task", { taskId: taskId2, nodeId: "plan", status: "in_progress", force: true, cwd: scratch });
+await awaitAs("root", "swarm_update_task", { taskId: taskId2, nodeId: "plan", status: "in_progress", force: true, cwd: scratch });
 await awaitAs("worker-a", "swarm_update_task", { taskId: taskId2, nodeId: "plan", status: "done", outcome: "planned", cwd: scratch });
 ok("legacy node (no attempt fields) updateable without token", readNode(taskId2, "plan").status === "done");
 

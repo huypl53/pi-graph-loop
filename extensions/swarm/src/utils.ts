@@ -30,13 +30,13 @@ export function inferRoleKind(id: string, role: string) {
 	// back to the combined id+role text so node-role matching (inferRoleKind(nodeId, nodeRole)) and
 	// ids without a role keyword still classify via the role text.
 	const idHas = (kw: string) => lid.includes(kw);
-	if (idHas("orchestrator")) return "orchestrator";
+	if (idHas("root")) return "root";
 	if (idHas("planner")) return "planner";
 	if (idHas("reviewer")) return "reviewer";
 	if (idHas("tester") || idHas("qa")) return "tester";
 	if (idHas("observer")) return "observer";
 	if (idHas("implementer") || idHas("coder") || idHas("developer")) return "implementer";
-	if (text.includes("orchestrator")) return "orchestrator";
+	if (text.includes("root")) return "root";
 	if (text.includes("planner") || text.includes("plan")) return "planner";
 	if (text.includes("reviewer") || text.includes("review")) return "reviewer";
 	if (text.includes("tester") || text.includes("test") || text.includes("qa")) return "tester";
@@ -51,7 +51,7 @@ export function ensureAgentDefaults(agent: SwarmAgent): SwarmAgent {
 	if (!agent.roleKindExplicit) agent.roleKind = inferRoleKind(agent.id, agent.role);
 	agent.capabilities ||= [];
 	agent.activeTaskIds ||= [];
-	agent.maxConcurrentTasks ||= agent.roleKind === "orchestrator" ? 99 : 1;
+	agent.maxConcurrentTasks ||= agent.roleKind === "root" ? 99 : 1;
 	return agent;
 }
 
@@ -85,18 +85,18 @@ export async function readJsonSafe(file: string): Promise<any | undefined> {
 	}
 }
 
-// Returns the CURRENT orchestrator process's surfaced-id ledger (keyed by process.pid), creating it if
-// needed. Returns null when the caller is not an orchestrator session — non-orchestrator callers then
+// Returns the CURRENT root process's surfaced-id ledger (keyed by process.pid), creating it if
+// needed. Returns null when the caller is not an root session — non-root callers then
 // fall back to the shared `st.delivered[agentId]` ledger.
 //
-// WHY process.pid (NOT PI_SESSION_ID): each orchestrator-context pi PROCESS has its own pump instance
+// WHY process.pid (NOT PI_SESSION_ID): each root-context pi PROCESS has its own pump instance
 // and its own TUI to surface into, and process.pid is guaranteed distinct per process. PI_SESSION_ID is
 // NOT a safe key: a child `pi -p` validation run spawned from an agent's bash INHERITS the parent's
 // PI_SESSION_ID (pi's bash tool strips then re-exposes the current session id), so two distinct
 // processes can share one session id — keying on it would let a validation run starve the PM. The
-// per-pid ledger is what makes the orchestrator auto-pump session-safe AND read-safe: every
-// orchestrator process surfaces each notification once, regardless of what any other orchestrator
-// process, swarm_check_mailbox, or swarm_ack_message writes to st.delivered.orchestrator (which the
+// per-pid ledger is what makes the root auto-pump session-safe AND read-safe: every
+// root process surfaces each notification once, regardless of what any other root
+// process, swarm_check_mailbox, or swarm_ack_message writes to st.delivered.root (which the
 // pump never reads). PI_SESSION_ID is still recorded as `sid` in the pump trace for attribution.
 export function capMap<T>(map: Record<string, T>, cap: number): Record<string, T> {
 	const keys = Object.keys(map);

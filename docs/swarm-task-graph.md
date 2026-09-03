@@ -2,7 +2,7 @@
 
 This document proposes the next architecture layer for `pi-swarm`: task management and workflow orchestration. The current swarm already has agents, tmux transport, mailbox messaging, lifecycle traces, acknowledgements, reconcile/dead-letter handling, idempotency, and runtime status. What is missing is a durable model for **what work exists**, **who owns each piece**, **which node is ready next**, and **what evidence proves completion**.
 
-> **Implementation status.** This is the original design doc; the graph layer is now **implemented** as a subset of it. The implemented graph tools are `swarm_create_task`, `swarm_assign_task`, `swarm_update_task`, `swarm_task_message`, `swarm_task_status`, `swarm_validate_graph`, `swarm_print_graph`, and `swarm_next_nodes`, plus engine-enforced closure (`computeTaskStatus`), the `swarm_reconcile` task sweep, PM auto-notify, the session/read-safe orchestrator mailbox pump, and the `/swarm graph` slash command. Current runtime behavior is documented in [`docs/swarm.md`](./swarm.md) ("Task graph and closure").
+> **Implementation status.** This is the original design doc; the graph layer is now **implemented** as a subset of it. The implemented graph tools are `swarm_create_task`, `swarm_assign_task`, `swarm_update_task`, `swarm_task_message`, `swarm_task_status`, `swarm_validate_graph`, `swarm_print_graph`, and `swarm_next_nodes`, plus engine-enforced closure (`computeTaskStatus`), the `swarm_reconcile` task sweep, PM auto-notify, the session/read-safe root mailbox pump, and the `/swarm graph` slash command. Current runtime behavior is documented in [`docs/swarm.md`](./swarm.md) ("Task graph and closure").
 >
 > **Not implemented (still design proposals).** There is no `swarm_write_task_artifact` tool — artifacts are written by agents with their normal file tools and tracked through `swarm_update_task(artifact=...)`. There are no `swarm_claim_file_lock` / `swarm_release_file_lock` tools — advisory `editLocks` are maintained internally on `task.json` only. The agent lifecycle tools `swarm_stop_agent`, `swarm_release_agent_task`, `swarm_register_agent`, `swarm_restart_agent`, `swarm_set_role`, `swarm_set_agent_paused`, `swarm_send_keys`, and `swarm_attach_agent` are now **implemented** (mirrored as `/swarm stop|release|register|restart|role|pause|resume|sendkey|attach`); only `swarm_gc_agents` remains deferred (use batch `swarm_stop_agent` + admin `swarm_prune`). Graph validation/printing ships as tools + `/swarm graph`, **not** as standalone `scripts/*.js`.
 
@@ -28,9 +28,9 @@ Missing answers:
 - What artifacts/evidence prove the node is complete?
 - Which gates must pass before commit?
 
-Without this layer, orchestration depends too much on long prompts from the human/orchestrator. Agents can communicate, but they do not yet have a shared task graph to organize around.
+Without this layer, orchestration depends too much on long prompts from the human/root. Agents can communicate, but they do not yet have a shared task graph to organize around.
 
-For terminal workflow closure, the graph also needs an **autonomous closer**. A terminal orchestrator-owned node such as `commit` must not require the human PM to notice a reviewer mailbox message and manually poke the final node. The runtime now auto-closes a ready **orchestrator-owned graph-terminal node** inside the same locked update that made it reachable, so a path like `review --approved--> commit` can finish without a separate human intervention turn.
+For terminal workflow closure, the graph also needs an **autonomous closer**. A terminal root-owned node such as `commit` must not require the human PM to notice a reviewer mailbox message and manually poke the final node. The runtime now auto-closes a ready **root-owned graph-terminal node** inside the same locked update that made it reachable, so a path like `review --approved--> commit` can finish without a separate human intervention turn.
 
 ## Design goals
 
@@ -109,7 +109,7 @@ On each turn:
    - relevant prior artifacts.
 5. Work only within the task scope and allowed files.
 6. Write/update required artifacts.
-7. Send a result message to the sender/orchestrator.
+7. Send a result message to the sender/root.
 8. Return to idle.
 
 Do not ask the human to relay inter-agent messages. Use swarm tools.
@@ -130,11 +130,11 @@ Example:
 
 Task ID: `task-20260802-runtime-status`
 Workflow: `feature-dev`
-Owner: `orchestrator`
+Owner: `root`
 
 ## Goal
 
-Add runtime/liveness/status tracking to the swarm extension so the orchestrator can inspect whether agents are starting, busy, idle, tool-running, stopped, and tmux-alive.
+Add runtime/liveness/status tracking to the swarm extension so the root can inspect whether agents are starting, busy, idle, tool-running, stopped, and tmux-alive.
 
 ## Background
 
@@ -162,7 +162,7 @@ Out of scope:
 - Typecheck passes.
 - At least one real spawned agent validates status transitions.
 - Reviewer approves.
-- Orchestrator commits.
+- Root commits.
 
 ## Validation Commands
 
@@ -194,7 +194,7 @@ Example:
   "priority": "normal",
   "createdAt": "2026-08-02T15:30:00.000Z",
   "updatedAt": "2026-08-02T15:45:00.000Z",
-  "owner": "orchestrator",
+  "owner": "root",
   "workflow": "feature-dev",
   "allowedFiles": [
     "extensions/swarm/index.ts",
@@ -208,7 +208,7 @@ Example:
     "decisions": [
       {
         "id": "decision-001",
-        "by": "orchestrator",
+        "by": "root",
         "at": "2026-08-02T15:31:00.000Z",
         "text": "Keep the implementation file-based and tmux-backed; do not introduce a daemon for this task."
       }
@@ -290,8 +290,8 @@ Example:
     "commit": {
       "status": "pending",
       "outcome": null,
-      "role": "orchestrator",
-      "assignee": "orchestrator",
+      "role": "root",
+      "assignee": "root",
       "dependsOn": ["review"],
       "terminal": true,
       "writeArtifacts": ["artifacts/final-summary.md"],
@@ -404,11 +404,11 @@ Examples:
 
 Assignment (`swarm_assign_task`) is **idempotent per task/node/assignee/attempt**: an exact retry of the same assignment reuses the existing message (no duplicate, `message.idempotent_reuse` trace) and the node records the canonical current assignment as `node.assignmentMessageId`. When a new assignment supersedes prior open ones for the same task/node (e.g. a reassign after stale-status repair bumped the attempt), the older still-open assignment messages are stamped `superseded` and their `response.status` becomes `waived` (`message.superseded` trace) — so they are excluded from `response_missing` nagging and reuse blocking without special-case reconcile code. `node.messageIds[]` keeps the full audit history; `assignmentMessageId` is the single completable current assignment. If an assignment initially fails tmux delivery but the worker later surfaces it or acks `processing`, the message stays response-tracked until the worker sends a verified result and acks `done` with `resultMessageId`.
 
-**Retries do not require a duplicate response.** `swarm_ack_message` rejects a `done`/`processing` ack on a superseded assignment with `ASSIGNMENT_SUPERSEDED` (it points at the current assignment), so an implementer replying to an old assignment cannot double-complete. A `failed` ack is always allowed (informational); the orchestrator can override with `waive=true` to accept a superseded assignment as `waived`. `requiresResponse` semantics remain intact on the current assignment.
+**Retries do not require a duplicate response.** `swarm_ack_message` rejects a `done`/`processing` ack on a superseded assignment with `ASSIGNMENT_SUPERSEDED` (it points at the current assignment), so an implementer replying to an old assignment cannot double-complete. A `failed` ack is always allowed (informational); the root can override with `waive=true` to accept a superseded assignment as `waived`. `requiresResponse` semantics remain intact on the current assignment.
 
 ### Stale & reassignment cleanup
 
-**Reassign semantics.** When a node is reassigned, the harness clears the prior owner's state so it cannot pollute the new assignment: a fresh `swarm_assign_task` deletes any prior `node.staleAt` (`task.stale.cleared` trace; `swarm_update_task` also clears it on active re-entry to `assigned`/`in_progress`/`ready`); the old assignment message is superseded + waived (excluded from `response_missing` and reuse blocking); the old assignee's `activeTaskIds` is released. Declared rework edges also re-enter work without an orchestrator force-reset: when a terminal `failed`/`skipped` node is the target of a satisfied `rework` edge, the engine can reopen it as `ready` so the next assignment is a normal graph transition, not a manual task reset. The shutdown/settle dying-agent scan only claims a node while the agent is its **canonical** owner — it skips nodes where `node.assignee !== agentId`, where the canonical `assignmentMessageId` is missing/superseded, or where that canonical message is addressed to a different agent. Thus an old owner that shuts down or settles after a reassign is not reported as still holding the node and does not stamp `staleAt` onto the new owner. `staleAt` is advisory only; `swarm_reconcile` may re-stamp it if the new owner actually goes idle.
+**Reassign semantics.** When a node is reassigned, the harness clears the prior owner's state so it cannot pollute the new assignment: a fresh `swarm_assign_task` deletes any prior `node.staleAt` (`task.stale.cleared` trace; `swarm_update_task` also clears it on active re-entry to `assigned`/`in_progress`/`ready`); the old assignment message is superseded + waived (excluded from `response_missing` and reuse blocking); the old assignee's `activeTaskIds` is released. Declared rework edges also re-enter work without an root force-reset: when a terminal `failed`/`skipped` node is the target of a satisfied `rework` edge, the engine can reopen it as `ready` so the next assignment is a normal graph transition, not a manual task reset. The shutdown/settle dying-agent scan only claims a node while the agent is its **canonical** owner — it skips nodes where `node.assignee !== agentId`, where the canonical `assignmentMessageId` is missing/superseded, or where that canonical message is addressed to a different agent. Thus an old owner that shuts down or settles after a reassign is not reported as still holding the node and does not stamp `staleAt` onto the new owner. `staleAt` is advisory only; `swarm_reconcile` may re-stamp it if the new owner actually goes idle.
 
 ## Shared task state
 
@@ -433,7 +433,7 @@ Rules:
 1. Agents should update `sharedContext` only with durable facts, not chatty commentary.
 2. Free-form discussion belongs in mailbox messages and task artifacts.
 3. `task.json` should remain compact; large output goes under `artifacts/`.
-4. Updates must be scoped: an agent may update its assigned node, write declared artifacts, and add evidence/risks/questions related to that node. Cross-node changes require orchestrator authority or a dedicated graph tool transition.
+4. Updates must be scoped: an agent may update its assigned node, write declared artifacts, and add evidence/risks/questions related to that node. Cross-node changes require root authority or a dedicated graph tool transition.
 5. Downstream agents should read prior node artifacts plus `sharedContext` before acting.
 
 **Legacy note.** The file-backed metric/run/memory and iteration-session material below is retained for historical context only. The packaged swarm core no longer exposes the experimentation tools or `/swarm loop`, so treat the passages that follow as archived design notes rather than current supported behavior.
@@ -452,7 +452,7 @@ The role identity card says what the agent may do generally. Example: a reviewer
 
 ### 2. Node scope
 
-A node names the exact `assignee`, role, files, and artifacts. Tools should reject updates when the current swarm agent id (from `PI_SWARM_AGENT_ID`, exposed internally by `currentAgentId()`) is not the node assignee, unless the current agent is the orchestrator or an override is explicitly allowed.
+A node names the exact `assignee`, role, files, and artifacts. Tools should reject updates when the current swarm agent id (from `PI_SWARM_AGENT_ID`, exposed internally by `currentAgentId()`) is not the node assignee, unless the current agent is the root or an override is explicitly allowed.
 
 Example rejection:
 
@@ -475,7 +475,7 @@ id: feature-dev
 description: Standard feature development workflow
 
 roles:
-  orchestrator:
+  root:
     responsibility: Own task graph, assign work, decide commit.
   planner:
     responsibility: Clarify approach and split work.
@@ -529,7 +529,7 @@ nodes:
       - artifacts/test-report.md
 
   commit:
-    role: orchestrator
+    role: root
     dependsOn:
       - review
       - test
@@ -542,7 +542,7 @@ nodes:
 
 ## Tool surface and automatic resource management
 
-Do not expose every internal resource operation as a normal worker tool. Too many tools confuse agents and invite unsafe calls. V1 should prefer **high-level task tools** plus internal helper functions. Resource management should happen automatically inside task lifecycle operations, with manual destructive controls reserved for the orchestrator/admin.
+Do not expose every internal resource operation as a normal worker tool. Too many tools confuse agents and invite unsafe calls. V1 should prefer **high-level task tools** plus internal helper functions. Resource management should happen automatically inside task lifecycle operations, with manual destructive controls reserved for the root/admin.
 
 ### Worker core tools
 
@@ -560,9 +560,9 @@ swarm_task_message
 
 These let workers receive work, acknowledge it, inspect assigned state, write evidence, and ask task-scoped clarifying questions.
 
-### Orchestrator task tools
+### Root task tools
 
-The orchestrator should use high-level graph operations:
+The root should use high-level graph operations:
 
 ```text
 swarm_create_task
@@ -574,11 +574,11 @@ swarm_validate_graph
 swarm_next_nodes
 ```
 
-`swarm_assign_task` should encapsulate role lookup, reuse, optional spawn, assignment state update, task message send, and active-task bookkeeping. The orchestrator should not need to manually chain low-level find/spawn/send/update operations for normal task flow.
+`swarm_assign_task` should encapsulate role lookup, reuse, optional spawn, assignment state update, task message send, and active-task bookkeeping. The root should not need to manually chain low-level find/spawn/send/update operations for normal task flow.
 
 ### Admin/resource controls
 
-Admin controls should be orchestrator-only and not part of the normal worker toolbox:
+Admin controls should be root-only and not part of the normal worker toolbox:
 
 ```text
 swarm_spawn_agent
@@ -591,7 +591,7 @@ swarm_trace
 swarm_capture_agent_pane
 ```
 
-`swarm_send_message` remains the low-level messaging primitive used by orchestrators and by `swarm_task_message`; normal task workers should prefer `swarm_task_message` once task tools exist, so task metadata and handoffs are recorded consistently.
+`swarm_send_message` remains the low-level messaging primitive used by roots and by `swarm_task_message`; normal task workers should prefer `swarm_task_message` once task tools exist, so task metadata and handoffs are recorded consistently.
 
 `swarm_reconcile` is the recovery entrypoint for both mail and tasks: it retries failed/queued message injections, dead-letters expired/max-attempt messages, surfaces `ack_missing`, AND sweeps every `task.json` for closure drift + stale/nudge signals (mark-only; `mark=true` repairs status drift). It never auto-fails a node.
 
@@ -603,7 +603,7 @@ swarm_capture_agent_pane
 
 **Overlap predicate** is a pure, deterministic path/glob comparison — no filesystem enumeration. Grammar: `/`-separated project-relative segments; `**` = zero-or-more segments; a segment `*` = any single segment; intra-segment `*` (e.g. `*.ts`) matches within one segment. Literals overlap only on exact equality (`a` vs `a/b` is DISJOINT). Unsupported syntax (absolute, `..`, `?[]{}!`) returns `unknown` and is conservatively treated as overlap.
 
-**Lease lifecycle** (attempt-fenced, auditable via `releasedAt`/`releaseReason` on the attempt record): terminal node states release with `terminal` (or `orchestrator_override` when forced), reassign supersedes the prior holder with `reassign`, rework reopen releases the reopened node with `rework`, task cancellation revokes all live attempts with `cancel`. A stale/terminal/revoked attempt can never release or overwrite a newer holder (attempt fencing, see assignment-attempt-lease-fencing).
+**Lease lifecycle** (attempt-fenced, auditable via `releasedAt`/`releaseReason` on the attempt record): terminal node states release with `terminal` (or `root_override` when forced), reassign supersedes the prior holder with `reassign`, rework reopen releases the reopened node with `rework`, task cancellation revokes all live attempts with `cancel`. A stale/terminal/revoked attempt can never release or overwrite a newer holder (attempt fencing, see assignment-attempt-lease-fencing).
 
 **Legacy tasks** without `activeAttemptId`/`attemptHistory`/stamped scope remain readable; their scopes re-resolve live at preflight. `swarm_reconcile` reports such nodes as advisory `task_node_ownership_legacy` drift and never fabricates ownership metadata.
 
@@ -709,7 +709,7 @@ Input fields:
 
 ### Internal `findReusableAgent` helper
 
-Do not register `swarm_find_agent` as a public worker tool in V1. Implement agent lookup as an internal helper used by `swarm_assign_task` and optionally exposed later only to orchestrator/debug contexts.
+Do not register `swarm_find_agent` as a public worker tool in V1. Implement agent lookup as an internal helper used by `swarm_assign_task` and optionally exposed later only to root/debug contexts.
 
 Internal inputs:
 
@@ -820,10 +820,10 @@ Nodes and gates must not duplicate each other semantically. Recommended rule:
 For example, review node `done` means the reviewer finished writing a review artifact; `gates.reviewApproved=passed|failed` says whether the review approves commit.
 
 If a newly-ready node is both:
-- orchestrator-owned (`inferRoleKind(nodeId, node.role) === "orchestrator"`), and
+- root-owned (`inferRoleKind(nodeId, node.role) === "root"`), and
 - graph-terminal (`terminal:true` or no outgoing edges),
 
-then the engine may auto-close it to `done` immediately instead of waiting for a separate PM/manual task update. This is specifically to avoid a dead-end where all worker/reviewer agents are idle and the task still remains `in_progress` only because the pseudo-orchestrator final node has no executor.
+then the engine may auto-close it to `done` immediately instead of waiting for a separate PM/manual task update. This is specifically to avoid a dead-end where all worker/reviewer agents are idle and the task still remains `in_progress` only because the pseudo-root final node has no executor.
 
 Dependency semantics are AND-join by default: a node becomes ready only when all `dependsOn` nodes are `done` and no relevant gate is failed.
 
@@ -836,19 +836,19 @@ Failure propagation for V1:
   to `cancelled`, every active attempt is revoked, and every assignment message is superseded.
   Already-terminal nodes (done/failed/skipped) are NOT mutated. After cancellation, all subsequent
   `swarm_update_task` calls are rejected with `TASK_CANCELLED` (or `NODE_CANCELLED`), even from
-  the orchestrator. Re-open requires a separately-designed policy and is out of scope for this PR.
+  the root. Re-open requires a separately-designed policy and is out of scope for this PR.
 
-`swarm_update_task` should enforce basic transitions, for example `pending -> assigned -> in_progress -> done|failed|blocked`; terminal states (including `cancelled`) should not regress without an orchestrator override.
+`swarm_update_task` should enforce basic transitions, for example `pending -> assigned -> in_progress -> done|failed|blocked`; terminal states (including `cancelled`) should not regress without an root override.
 
-## Orchestrator-directed replies
+## Root-directed replies
 
-The runtime now registers `orchestrator` as a routable pseudo-agent with its own mailbox. Child agents can call `swarm_send_message(to="orchestrator")` without hitting `Unknown swarm agent`; `ensureOrchestrator()` lazily creates/refreshes the record (also on `session_start` for the orchestrator's own session). Because the orchestrator has no dedicated swarm tmux pane, delivery to it is **mailbox-only**: the message is appended to `.pi/swarm/mailboxes/orchestrator.jsonl`, kept in lifecycle status `queued`, and surfaced by an orchestrator auto-pump (`pumpOrchestratorMailbox`, on `session_start`/`agent_settled`/interval) in addition to `swarm_check_mailbox` / `swarm_agent_status`. It is not treated as a tmux injection failure, and `swarm_reconcile` reports such messages as `awaiting_mailbox_pickup` rather than retrying injection.
+The runtime now registers `root` as a routable pseudo-agent with its own mailbox. Child agents can call `swarm_send_message(to="root")` without hitting `Unknown swarm agent`; `ensureRoot()` lazily creates/refreshes the record (also on `session_start` for the root's own session). Because the root has no dedicated swarm tmux pane, delivery to it is **mailbox-only**: the message is appended to `.pi/swarm/mailboxes/root.jsonl`, kept in lifecycle status `queued`, and surfaced by an root auto-pump (`pumpRootMailbox`, on `session_start`/`agent_settled`/interval) in addition to `swarm_check_mailbox` / `swarm_agent_status`. It is not treated as a tmux injection failure, and `swarm_reconcile` reports such messages as `awaiting_mailbox_pickup` rather than retrying injection.
 
-**The auto-pump is session-safe and read-safe.** It tracks "already surfaced" **per process** (`st.orchestratorPumpSessions`, keyed by `process.pid`), so each orchestrator-context process surfaces each notification once — a second orchestrator lane or a validation `pi -p` run cannot starve the primary PM session. It does **not** key on `PI_SESSION_ID` (a child `pi -p` spawned from an agent's bash inherits the parent's `PI_SESSION_ID`, which would reintroduce starvation), and it never reads the shared `st.delivered.orchestrator` ledger — that set is written by `swarm_check_mailbox(markDelivered=true)` and `swarm_ack_message`, so neither a manual mailbox read nor an explicit ack can pre-empt a later pump surface. The surfaced set is bounded (`PUMP_SESSION_ID_CAP`) and stale dead processes are pruned (`PUMP_SESSION_TTL_MS`, 1h); recent work is bounded by `PUMP_SCAN_WINDOW`. The `mailbox.orchestrator_pump` trace carries `cid` (pid) and `sid` (`PI_SESSION_ID`) for attribution. The repeatable proof is section 12 of `scripts/swarm_task_uat.sh` (two distinct orchestrator sessions each surface one notification; `check_mailbox(markDelivered)` does not pre-empt a later pump surface). The pump splits decision from delivery: the **surfacing decision** (per-pid set update + `mailbox.orchestrator_pump` trace) is ctx-free file IO and runs in **every** orchestrator session including `pi -p` UAT runs (the `session_start` one-shot is awaited so it completes before a print-mode turn exits); the **TUI delivery** (`pi.sendMessage`/`ctx.isIdle()`) is mode-gated to the live interactive orchestrator session and is a no-op in print mode. The 5s polling **interval** is tui-only — its long-lived captured ctx is the real source of the `This extension ctx is stale after session replacement or reload` error — and on any ctx error the pump stops itself cleanly (traced `mailbox.orchestrator_pump_error`) instead of retrying into a stale ctx. **Reload contract:** extension code is not hot-applied to a running orchestrator session — `/reload` (or restart) is required to load an edited pump; the pump is multi-process-safe (pid-keyed), and on `/reload` (new pid) it re-surfaces recent un-acked notifications (bounded by the scan window) as the recovery path for a stale session, while already-acked messages are not re-surfaced.
+**The auto-pump is session-safe and read-safe.** It tracks "already surfaced" **per process** (`st.rootPumpSessions`, keyed by `process.pid`), so each root-context process surfaces each notification once — a second root lane or a validation `pi -p` run cannot starve the primary PM session. It does **not** key on `PI_SESSION_ID` (a child `pi -p` spawned from an agent's bash inherits the parent's `PI_SESSION_ID`, which would reintroduce starvation), and it never reads the shared `st.delivered.root` ledger — that set is written by `swarm_check_mailbox(markDelivered=true)` and `swarm_ack_message`, so neither a manual mailbox read nor an explicit ack can pre-empt a later pump surface. The surfaced set is bounded (`PUMP_SESSION_ID_CAP`) and stale dead processes are pruned (`PUMP_SESSION_TTL_MS`, 1h); recent work is bounded by `PUMP_SCAN_WINDOW`. The `mailbox.root_pump` trace carries `cid` (pid) and `sid` (`PI_SESSION_ID`) for attribution. The repeatable proof is section 12 of `scripts/swarm_task_uat.sh` (two distinct root sessions each surface one notification; `check_mailbox(markDelivered)` does not pre-empt a later pump surface). The pump splits decision from delivery: the **surfacing decision** (per-pid set update + `mailbox.root_pump` trace) is ctx-free file IO and runs in **every** root session including `pi -p` UAT runs (the `session_start` one-shot is awaited so it completes before a print-mode turn exits); the **TUI delivery** (`pi.sendMessage`/`ctx.isIdle()`) is mode-gated to the live interactive root session and is a no-op in print mode. The 5s polling **interval** is tui-only — its long-lived captured ctx is the real source of the `This extension ctx is stale after session replacement or reload` error — and on any ctx error the pump stops itself cleanly (traced `mailbox.root_pump_error`) instead of retrying into a stale ctx. **Reload contract:** extension code is not hot-applied to a running root session — `/reload` (or restart) is required to load an edited pump; the pump is multi-process-safe (pid-keyed), and on `/reload` (new pid) it re-surfaces recent un-acked notifications (bounded by the scan window) as the recovery path for a stale session, while already-acked messages are not re-surfaced.
 
-**PM auto-notify on closure/settle.** The orchestrator must not have to poll to learn a node closed or a worker settled idle with open work. When `swarm_update_task` transitions a node into a closure-ish status (`done`/`failed`/`blocked`) — i.e. a genuine transition, not every update — it enqueues a concise mailbox report to `orchestrator` (taskId/nodeId, prev→new, outcome, assignee, artifact, task status, next-ready nodes), and emits the stronger `task <id> closed (<status>)` variant when the task itself goes terminal (`done`/`failed`/`cancelled`). When a worker's `agent_settled` fires while it still holds open assignment(s), the engine enqueues an `agent <id> settled idle with open assignment(s)` nudge to `orchestrator`. Both are mailbox-only to `orchestrator`, `requiresAck=false`, and the settle nudge is cooldown-guarded per agent via persisted `lastSettleNotifyAt` so repeated settles in a window don't multiply (loop-safe: it targets the mailbox-only orchestrator, never the worker, and mutates no node status). This is engine behavior, not prompt convention.
+**PM auto-notify on closure/settle.** The root must not have to poll to learn a node closed or a worker settled idle with open work. When `swarm_update_task` transitions a node into a closure-ish status (`done`/`failed`/`blocked`) — i.e. a genuine transition, not every update — it enqueues a concise mailbox report to `root` (taskId/nodeId, prev→new, outcome, assignee, artifact, task status, next-ready nodes), and emits the stronger `task <id> closed (<status>)` variant when the task itself goes terminal (`done`/`failed`/`cancelled`). When a worker's `agent_settled` fires while it still holds open assignment(s), the engine enqueues an `agent <id> settled idle with open assignment(s)` nudge to `root`. Both are mailbox-only to `root`, `requiresAck=false`, and the settle nudge is cooldown-guarded per agent via persisted `lastSettleNotifyAt` so repeated settles in a window don't multiply (loop-safe: it targets the mailbox-only root, never the worker, and mutates no node status). This is engine behavior, not prompt convention.
 
-Historically the runtime rejected unknown recipients, so earlier reviewers could not reliably reply to `orchestrator`. That gap is closed; task design can simply reply to `orchestrator`, or assign a real coordinator agent id as the reply target per task if preferred.
+Historically the runtime rejected unknown recipients, so earlier reviewers could not reliably reply to `root`. That gap is closed; task design can simply reply to `root`, or assign a real coordinator agent id as the reply target per task if preferred.
 
 ## Agent reuse and role pools
 
@@ -898,13 +898,13 @@ When assigning a node, use this order:
    - `tmuxAlive` is true,
    - active task count is below `maxConcurrentTasks`.
 3. If one match exists, assign to it.
-4. If multiple matches exist, choose the least-loaded agent or return choices to the orchestrator.
+4. If multiple matches exist, choose the least-loaded agent or return choices to the root.
 5. If no match exists and `autoSpawn=true`, call `swarm_spawn_agent` once to create a new long-lived role agent.
 6. If no match exists and `autoSpawn=false`, return a corrective error such as `NO_AVAILABLE_AGENT` with suggested existing candidates or spawn parameters.
 
 ### Internal agent lookup helper
 
-Agent lookup should be an internal helper used by `swarm_assign_task`, not a default public worker tool. The implementation can expose it later only to orchestrator/debug contexts if needed.
+Agent lookup should be an internal helper used by `swarm_assign_task`, not a default public worker tool. The implementation can expose it later only to root/debug contexts if needed.
 
 ```text
 findReusableAgent(...)
@@ -965,12 +965,12 @@ Resource bookkeeping happens as part of task operations (all engine-enforced in 
 - `swarm_create_task`, `swarm_assign_task`, and `swarm_update_task` each recompute task status inside the same locked write via `applyTaskStatus`/`computeTaskStatus`. Closure is a deterministic consequence of the last node transition — there is no polling loop and no mini server.
 - `swarm_assign_task` resolves/reuses/spawns the assignee and adds the task/node to `activeTaskIds`.
 - `swarm_update_task` removes finished node assignments from `activeTaskIds` when status reaches `done`, `failed`, `blocked`, or `skipped`; terminal task transitions (`done`/`failed`/`cancelled`) release every agent's `activeTaskIds` pointer for that task and clear advisory `editLocks`.
-- Orchestrator `force` + `cancelTask=true` marks a task `cancelled` (sticky; releases all assignments).
-- `session_shutdown` of an agent that still owns `assigned`/`in_progress` nodes stamps `node.staleAt` and nudges the orchestrator (mailbox-only) instead of orphaning the nodes.
+- Root `force` + `cancelTask=true` marks a task `cancelled` (sticky; releases all assignments).
+- `session_shutdown` of an agent that still owns `assigned`/`in_progress` nodes stamps `node.staleAt` and nudges the root (mailbox-only) instead of orphaning the nodes.
 - `swarm_reconcile` now sweeps `tasksDir` in addition to the mailbox: it reports stored-vs-derived status drift, surfaces stale/nudge signals (dead assignee, tmux-dead pane, dead-lettered assignment, `in_progress` past the stale/nudge thresholds, `ack_missing`), and stamps advisory `node.staleAt`. Mark-only by default; pass `mark=true` to also persist the recomputed `task.status`. It never auto-fails a node.
 - `/swarm status` and `swarm_task_status(runtime=true)` emit a structured PM rollup (per-task status/current/next/unacked, agent counts, closure line) so graph health is readable from tool output without capturing panes.
 
-Do not auto-kill tmux windows in V1. Reconcile/status may mark stale/idle/eligible resources and surface warnings, but destructive cleanup requires an orchestrator/admin action.
+Do not auto-kill tmux windows in V1. Reconcile/status may mark stale/idle/eligible resources and surface warnings, but destructive cleanup requires an root/admin action.
 
 ### Task closure rules (`computeTaskStatus`)
 
@@ -982,14 +982,14 @@ Do not auto-kill tmux windows in V1. Reconcile/status may mark stale/idle/eligib
 - otherwise, if any node has started (`assigned`/`in_progress`/`blocked`/`done`/`failed`/`skipped`) → `in_progress`;
 - otherwise → `ready`.
 
-`cancelled` is orchestrator-explicit and sticky: `applyTaskStatus` preserves an existing `cancelled` and never re-derives over it. Stored-vs-derived drift is surfaced by `swarm_reconcile` and the closure block of `swarm_task_status(runtime=true)` rather than silently repaired.
+`cancelled` is root-explicit and sticky: `applyTaskStatus` preserves an existing `cancelled` and never re-derives over it. Stored-vs-derived drift is surfaced by `swarm_reconcile` and the closure block of `swarm_task_status(runtime=true)` rather than silently repaired.
 
 ### Stale / nudge ladder (advisory, no daemon)
 
 - **nudge** — `assigned`/`in_progress` node whose assignment message is delivered-but-unacked past the 5-min `ack_missing` window, or `in_progress` with no `lastActivityAt` bump past ~30 min. Reconcile traces `task.nudge` and surfaces the node in actions/PM summary.
 - **stale** — `in_progress` past 24h, or the assignee is `stopped`/`unhealthy`/tmux-dead/missing while the node is active. Reconcile stamps `node.staleAt` and traces `task.stale.reconcile`; nothing is released or failed.
 - **blocked** — the existing `status=blocked` node path (resumable; releases `activeTaskIds`/`editLocks`).
-- **fail/reassign** — `maxAttempts` (guarded) or orchestrator force-fail → `failed`, which recomputes closure.
+- **fail/reassign** — `maxAttempts` (guarded) or root force-fail → `failed`, which recomputes closure.
 
 Reminder re-injection of reminder messages is intentionally **deferred** (kept reconcile idempotent and storm-free); the PM summary + `swarm_task_status` make these signals visible without re-injection.
 
@@ -1013,7 +1013,7 @@ The agent lifecycle surface is now **implemented** (not deferred). These first-c
 - `swarm_send_keys` / `swarm_attach_agent`: raw tmux keys / attach commands for a pane.
 - `swarm_release_agent_task`: remove an active-task pointer after done/failed/cancelled when automatic release needs repair; **refuses non-terminal tasks unless `force=true`**.
 
-Only `swarm_gc_agents` (batch list/stop stale agents + clean stale active-task pointers) remains **deferred**; use batch `swarm_stop_agent` plus `swarm_reconcile` (mark-only, or `mark=true` to repair drift) and `swarm_prune` (admin/orchestrator dry-run-first cleanup) meanwhile.
+Only `swarm_gc_agents` (batch list/stop stale agents + clean stale active-task pointers) remains **deferred**; use batch `swarm_stop_agent` plus `swarm_reconcile` (mark-only, or `mark=true` to repair drift) and `swarm_prune` (admin/root dry-run-first cleanup) meanwhile.
 
 ## Graph start, edges, and branching
 
@@ -1026,7 +1026,7 @@ Every workflow instance must have an explicit start node:
 }
 ```
 
-Graph execution begins when the human/orchestrator creates a task and assigns the start node. V1 is orchestrator-driven; no daemon automatically starts work.
+Graph execution begins when the human/root creates a task and assigns the start node. V1 is root-driven; no daemon automatically starts work.
 
 `currentNodes` is a cached/derived convenience field, not the source of truth. The authoritative state is the per-node `status`, `outcome`, gates, and edges. `swarm_next_nodes` should recompute ready/current nodes and refresh `currentNodes` under lock. It is an array because multiple branches may be ready concurrently in later workflows.
 
@@ -1068,12 +1068,12 @@ Different failures have different owners:
 | Situation | Node status | Node outcome | Next owner |
 | --- | --- | --- | --- |
 | Tests ran and feature failed | `done` | `failed` | Implementer/fix node |
-| Tester could not run due environment | `blocked` | `environment_blocked` | Orchestrator |
+| Tester could not run due environment | `blocked` | `environment_blocked` | Root |
 | Reviewer completed review but rejects diff | `done` | `rejected` or `changes_requested` | Implementer/fix node |
-| Developer cannot proceed due unclear requirement | `blocked` | `needs_clarification` | Orchestrator/planner |
-| Agent died or stopped responding | node unchanged/stale | n/a | Orchestrator/reconcile |
-| Assignment message dead-lettered | node `assigned` stale | n/a | Orchestrator/reconcile |
-| File lock conflict | `blocked` or unchanged | `lock_conflict` | Orchestrator |
+| Developer cannot proceed due unclear requirement | `blocked` | `needs_clarification` | Root/planner |
+| Agent died or stopped responding | node unchanged/stale | n/a | Root/reconcile |
+| Assignment message dead-lettered | node `assigned` stale | n/a | Root/reconcile |
+| File lock conflict | `blocked` or unchanged | `lock_conflict` | Root |
 
 The important distinction is: a node can successfully complete its work and still produce a failing outcome. Example: tester node `status=done, outcome=failed` means the tester did its job and the feature needs a fix.
 
@@ -1114,7 +1114,7 @@ Example flow after test failure:
 
 1. Tester writes `artifacts/test-report.md`.
 2. Tester updates node `test` with `status=done, outcome=failed`.
-3. Orchestrator or `swarm_next_nodes` activates `fix`.
+3. Root or `swarm_next_nodes` activates `fix`.
 4. `swarm_assign_task` sends `fix` to the implementer with the test report artifact reference.
 5. Developer may ask tester clarification via `swarm_task_message`, but the graph advances only after `swarm_update_task` changes node state.
 
@@ -1148,7 +1148,7 @@ Nodes:
   ● test        tester-01     in_progress
   ○ fix         dev-01        pending
   ○ review      reviewer-01   pending
-  ○ commit      orchestrator  pending
+  ○ commit      root  pending
 
 Edges:
   plan      --planned-----> implement
@@ -1208,10 +1208,10 @@ Structural:
 
 Role/agent:
 
-- assigned agents exist in `swarm-state.json.agents`, except pseudo-agent `orchestrator` if enabled.
+- assigned agents exist in `swarm-state.json.agents`, except pseudo-agent `root` if enabled.
 - assigned agent role matches node role or an override is recorded.
 - no stopped/dead agent is assigned a ready/in-progress node without a warning.
-- no node assignment exceeds the agent's `maxConcurrentTasks` without an orchestrator override.
+- no node assignment exceeds the agent's `maxConcurrentTasks` without an root override.
 - no terminal task leaves stale `activeTaskIds` without a cleanup warning.
 
 Scope/artifact:
@@ -1315,7 +1315,7 @@ Expected evidence:
 
 - `swarm_reconcile` reports retry/dead-letter action.
 - `swarm_task_status` warns assignment agent not alive or message dead-lettered.
-- orchestrator can reassign the node to another tester.
+- root can reassign the node to another tester.
 
 ### Scenario 5: bad tool call recovery
 
@@ -1388,18 +1388,18 @@ Template:
 
 | Code | Meaning | Suggested recovery |
 | --- | --- | --- |
-| `TASK_NOT_FOUND` | Unknown task id. | Call `swarm_task_status` without id/list tasks, or ask orchestrator for task id. |
+| `TASK_NOT_FOUND` | Unknown task id. | Call `swarm_task_status` without id/list tasks, or ask root for task id. |
 | `TASK_NODE_NOT_FOUND` | Unknown node id for task. | Call `swarm_print_graph` or `swarm_task_status`. |
-| `AGENT_NOT_FOUND` | Assignee/reply target is not registered. | Spawn/reuse a valid agent or configure pseudo-agent `orchestrator`. |
+| `AGENT_NOT_FOUND` | Assignee/reply target is not registered. | Spawn/reuse a valid agent or configure pseudo-agent `root`. |
 | `NO_AVAILABLE_AGENT` | No registered agent satisfies role/capability/idle/liveness constraints. | Relax reuse constraints, choose a busy agent explicitly, or call `swarm_spawn_agent`/enable `autoSpawn`. |
 | `NODE_NOT_READY` | Dependencies/gates do not allow assignment yet. | Call `swarm_next_nodes` and assign one of the ready nodes. |
 | `NODE_ASSIGNEE_MISMATCH` | Current agent is not node assignee. | Update your assigned node or send a task message to the assignee. |
-| `INVALID_TRANSITION` | Requested status/outcome transition is not allowed. | Follow lifecycle sequence or use orchestrator override. |
+| `INVALID_TRANSITION` | Requested status/outcome transition is not allowed. | Follow lifecycle sequence or use root override. |
 | `OUTCOME_REQUIRED` | Node has outgoing branches but no outcome was supplied. | Retry with a valid `outcome` matching an edge `when`. |
 | `NO_EDGE_FOR_OUTCOME` | Outcome has no matching next edge. | Use a valid outcome or update workflow. |
 | `PATH_OUTSIDE_TASK` | Artifact path escapes task artifacts directory. | Use `artifacts/<name>.md` or another allowed relative artifact path. |
-| `FILE_OUT_OF_SCOPE` | Agent/node tried to claim/edit a file outside allowed files. | Restrict to node `allowedFiles` or ask orchestrator to expand scope. |
-| `EDIT_LOCK_HELD` | Another active node holds the advisory edit lock. | Wait, ask orchestrator, or use stale-lock reclaim if expired. |
+| `FILE_OUT_OF_SCOPE` | Agent/node tried to claim/edit a file outside allowed files. | Restrict to node `allowedFiles` or ask root to expand scope. |
+| `EDIT_LOCK_HELD` | Another active node holds the advisory edit lock. | Wait, ask root, or use stale-lock reclaim if expired. |
 | `MESSAGE_DEAD_LETTERED` | Assignment/handoff message failed permanently. | Reassign node or reconcile/requeue. |
 
 ### Corrective prompting in tool descriptions
@@ -1407,16 +1407,16 @@ Template:
 Each task tool should include prompt guidelines that tell the agent what to do after errors. Example:
 
 ```text
-If `swarm_update_task` returns `OUTCOME_REQUIRED`, retry the same node update with an outcome matching one of the outgoing edges shown in the error. If it returns `NODE_ASSIGNEE_MISMATCH`, do not force the update; send a task message to the assigned agent or ask orchestrator.
+If `swarm_update_task` returns `OUTCOME_REQUIRED`, retry the same node update with an outcome matching one of the outgoing edges shown in the error. If it returns `NODE_ASSIGNEE_MISMATCH`, do not force the update; send a task message to the assigned agent or ask root.
 ```
 
 ### No mutation on invalid call
 
 Validation should happen before any write. If validation fails, the tool must not partially update task state, append artifacts, or send messages. Trace the invalid attempt as `task.tool.invalid` with the error code and sanitized parameters.
 
-## Orchestrator-driven graph loop
+## Root-driven graph loop
 
-Version 1 should not implement a daemon. The orchestrator should drive the graph through tools:
+Version 1 should not implement a daemon. The root should drive the graph through tools:
 
 ```text
 1. swarm_create_task
@@ -1464,7 +1464,7 @@ Read from `.pi/swarm/agents/<agent-id>.md`.
 
 Examples:
 
-- orchestrator owns graph and commits.
+- root owns graph and commits.
 - implementer edits allowed files and writes implementation reports.
 - reviewer reviews diff, does not edit files unless explicitly assigned.
 - tester runs validation and captures evidence.
@@ -1498,7 +1498,7 @@ Pass criteria:
 10. Failure/rework scenarios route back to the correct owner.
 11. Bad tool calls return structured corrective errors without mutating state.
 12. Trace contains `task.create`, `task.assign`, `task.update`, `task.artifact.write`, `task.tool.invalid`, `task.gate.*`, and `task.lock.*`.
-13. Orchestrator prompting is measurably short: assignment messages include task metadata instead of restating the whole task brief.
+13. Root prompting is measurably short: assignment messages include task metadata instead of restating the whole task brief.
 
 ## Incremental implementation plan
 
@@ -1562,18 +1562,18 @@ Pass criteria:
 
 ## Archived task-graph iteration proposal loop (V1.5)
 
-> Distinct from the **metric-contract iteration loop V1** (`swarm_iteration_*`, which optimizes runs against a metric contract). This V1.5 layer is a **task-graph** wrapper: after a loop-enabled task closes terminal-done, it collects improvement proposals from a fixed agent pool and lets the orchestrator record the next-iteration plan.
+> Distinct from the **metric-contract iteration loop V1** (`swarm_iteration_*`, which optimizes runs against a metric contract). This V1.5 layer is a **task-graph** wrapper: after a loop-enabled task closes terminal-done, it collects improvement proposals from a fixed agent pool and lets the root record the next-iteration plan.
 
 ### What it is
 
 An **opt-in** post-iteration wrapper. When a task carries an enabled `loop` config and reaches terminal **done** completion, the engine:
 
 1. kicks off a **proposal round** — sends `requiresResponse` proposal requests to a fixed agent pool;
-2. pauses in `collecting_proposals` / `awaiting_plan` for the orchestrator to synthesize;
+2. pauses in `collecting_proposals` / `awaiting_plan` for the root to synthesize;
 3. records the next plan to a file-backed artifact + loop history;
 4. optionally **best-effort refreshes** configured agents (`tmux /new` + identity reload).
 
-It is metadata only: it does **not** change node routing, branch logic, closure rules, or readiness. Tasks without `loop` config behave exactly as before. There is **no daemon, no automatic graph cycle, and no per-iteration agent spawning** — the next iteration is a new task the orchestrator creates after reading the prior `next-plan.md`.
+It is metadata only: it does **not** change node routing, branch logic, closure rules, or readiness. Tasks without `loop` config behave exactly as before. There is **no daemon, no automatic graph cycle, and no per-iteration agent spawning** — the next iteration is a new task the root creates after reading the prior `next-plan.md`.
 
 ### Opt-in config (`task.json`)
 
@@ -1611,8 +1611,8 @@ Loop `phase` transitions: `idle → collecting_proposals → awaiting_plan → p
 
 1. **Terminal-done close hook** — inside `swarm_update_task`, when a loop-enabled task becomes terminal **done**, `kickoffLoopIfEnabled` runs as a post-close side effect (atomic with the close; failures are traced, never thrown). It is a strict no-op when `loop` is absent/disabled, the task is not `done`, an active round already exists, or `maxRounds` is reached.
 2. **Proposal fanout** — one `requiresResponse`+`requiresAck` message per configured proposal agent (`conversationId = task:<taskId>:loop:<round>`), with a deterministic idempotency key. Unknown agents are recorded as `skipped` (never throw). Mailbox-only recipients (e.g. agents with no tmux pane) are delivered mailbox-only.
-3. **Orchestrator nudge** — immediately after fanout, an informational, mailbox-only, no-ack message is sent to the orchestrator stating the round started and that the proposal loop is in progress. (There is no event hook for "all replies received", so this nudge was necessary in the legacy design.)
-4. **Orchestrator synthesis pause** — the orchestrator waited for all proposals to return, then recorded the next plan.
+3. **Root nudge** — immediately after fanout, an informational, mailbox-only, no-ack message is sent to the root stating the round started and that the proposal loop is in progress. (There is no event hook for "all replies received", so this nudge was necessary in the legacy design.)
+4. **Root synthesis pause** — the root waited for all proposals to return, then recorded the next plan.
 5. **Plan recording** — the legacy write path wrote `artifacts/next-plan.md`, advanced loop state to `planned`, and appended `history.jsonl`.
 6. **Best-effort refresh (internal)** — the legacy plan step also refreshed configured agents. Failures were captured per-agent and never corrupted loop state.
 
@@ -1628,7 +1628,7 @@ design.
 - No automatic infinite-loop runner or watcher process.
 - No default change for tasks without `loop` config.
 - No per-iteration agent spawning (fixed pool only).
-- No auto-solving the next plan from proposals without orchestrator input.
+- No auto-solving the next plan from proposals without root input.
 
 ## Recommendation
 
@@ -1641,4 +1641,4 @@ YAML for reusable graph templates.
 JSONL for events.
 ```
 
-This keeps the swarm transparent to humans while giving tools a reliable state model. It is the smallest step from the current working prototype toward a more natural swarm where agents coordinate around durable tasks instead of long orchestrator prompts.
+This keeps the swarm transparent to humans while giving tools a reliable state model. It is the smallest step from the current working prototype toward a more natural swarm where agents coordinate around durable tasks instead of long root prompts.

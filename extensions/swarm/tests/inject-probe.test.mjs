@@ -21,7 +21,7 @@ const pi = {
 	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 	registerTool: () => {}, registerCommand: () => {}, on: () => {},
 };
-const mkMsg = (id, to) => ({ id, swarmId: "s", from: "orchestrator", to, priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date().toISOString(), body: "x", requiresAck: true, headers: {} });
+const mkMsg = (id, to) => ({ id, swarmId: "s", from: "root", to, priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date().toISOString(), body: "x", requiresAck: true, headers: {} });
 
 const probes = () => {
 	try {
@@ -55,8 +55,8 @@ const probes = () => {
 	const st = await readState(p, scratch);
 	st.agents["w1"] = { id: "w1", role: "r", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "stopped", runtimeStatus: "stopped", health: "unknown", tmuxSession: "s", tmuxWindow: "w", tmuxTarget: "s:w.0", model: "m", provider: "o", cwd: scratch, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 	// seed one historical failure + one historical success for w1 so rates are non-trivial
-	st.messages["old-f"] = { id: "old-f", from: "orchestrator", to: "w1", status: "failed", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 1, requiresAck: true };
-	st.messages["old-s"] = { id: "old-s", from: "orchestrator", to: "w1", status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 1, requiresAck: true };
+	st.messages["old-f"] = { id: "old-f", from: "root", to: "w1", status: "failed", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 1, requiresAck: true };
+	st.messages["old-s"] = { id: "old-s", from: "root", to: "w1", status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 1, requiresAck: true };
 	const r = await deliver(pi, p, st, mkMsg("m3", "w1"));
 	ok("not-running: behavior unchanged (delivered=false)", r.delivered === false && r.reason === "target agent not running");
 	const pr = probes();

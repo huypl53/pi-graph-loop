@@ -1,22 +1,22 @@
 
 ## Surface / pump — src/surface.ts
 
-The orchestrator-facing message surface machinery lives in
+The root-facing message surface machinery lives in
 `extensions/swarm/src/surface.ts`. It owns:
 
 - `orchSession` — per-process session gate + retrigger counter source-of-truth
 - `runtimeTaskWarnings` — task.json closure/warning extractor
-- `isActionableOrchestratorMessage` — predicate gating orchestrator-visible PM surfacing
+- `isActionableRootMessage` — predicate gating root-visible PM surfacing
 - `staleSurfaceReason` — actionable→stale edge reasoning (fingerprint + reason code)
-- `pumpOrchestratorMailbox` — **the per-tick surface pump (R10-1 boundary)** — the
-  one place where the orchestrator's mailbox is consulted, deduplicated against the
+- `pumpRootMailbox` — **the per-tick surface pump (R10-1 boundary)** — the
+  one place where the root's mailbox is consulted, deduplicated against the
   per-pid surfaced set + durable consumerReceipts, and (if idle) flushed to the
   real `pi.sendMessage` boundary
 - `traceStaleSuppressedOnce` — dedupe helper for the stale→suppressed transition
 
 This module is the seam between the swarm state (mailbox + tasks) and the
 Pi-runtime engine boundary. Everything that crosses the "visible surface" goes
-through `pumpOrchestratorMailbox`; the R10-1 counting assertion in
+through `pumpRootMailbox`; the R10-1 counting assertion in
 `idle-nudge.test.mjs` measures calls at that boundary, not at internal helpers.
 
 
@@ -47,9 +47,9 @@ was a separate persistence layer and is no longer part of the core surface.
 
 ## Configuration
 
-### Model pool auto-scaffold on first orchestrator session (Issue 20)
+### Model pool auto-scaffold on first root session (Issue 20)
 
-When the orchestrator (`PI_SWARM_IS_ORCHESTRATOR=1`) starts a session, the
+When the root (`PI_SWARM_IS_ROOT=1`) starts a session, the
 extension checks `.pi/settings.json`. If neither `swarm.modelPool` nor
 `extensions.swarm.modelPool` (runtime precedence: extensions wins per
 `extensions/swarm/src/session.ts:readSwarmSettings`) is declared, the
@@ -61,14 +61,14 @@ user is steered toward replacing it with a real slot.
 A one-shot TUI notify fires ONLY when (a) the scaffold actually wrote AND
 (b) the durable flag `SwarmState.poolScaffoldNotifiedAt` is absent. After the
 notify, the flag is stamped inside the same `withLock` block that creates
-the orchestrator session record, so subsequent session_starts (and `/reload`
+the root session record, so subsequent session_starts (and `/reload`
 invocations) suppress the notify until the entire `.pi/swarm` directory is
 cleared (clean-slate re-notify). The notify text is:
 
 > Created swarm.modelPool placeholder in .pi/settings.json — fill in your
 > model/provider. See docs/swarm/tools.md.
 
-See [operations.md § Model pool auto-scaffold](./operations.md#model-pool-auto-scaffold-on-first-orchestrator-session-issue-20)
+See [operations.md § Model pool auto-scaffold](./operations.md#model-pool-auto-scaffold-on-first-root-session-issue-20)
 for the durable-flag contract, skip paths, and trace event reference.
 
 ## Identity, visibility, and authority
@@ -77,20 +77,20 @@ for the durable-flag contract, skip paths, and trace event reference.
 
 A session resolves to one of three identities:
 
-- **Guest**: neither `PI_SWARM_AGENT_ID` nor `PI_SWARM_IS_ORCHESTRATOR` is set.
+- **Guest**: neither `PI_SWARM_AGENT_ID` nor `PI_SWARM_IS_ROOT` is set.
   All `swarm_*` tools are removed from its active tool set. Built-in tools are
   unaffected.
 - **Registered agent**: `PI_SWARM_AGENT_ID=<id>` is set. All 31 swarm tools are
   active.
-- **Orchestrator**: `PI_SWARM_IS_ORCHESTRATOR=1` is set, or the agent id is
-  explicitly `orchestrator`. All 31 swarm tools are active.
+- **Root**: `PI_SWARM_IS_ROOT=1` is set, or the agent id is
+  explicitly `root`. All 31 swarm tools are active.
 
 **Issue 25 Phase 2 profile gating (gate=1 only):** under
 `PI_SWARM_MINIMAL_PROTOCOL=1`, identity gating is further narrowed by role
 profile allowlists — a worker's active set is exactly 5 tools and the
-orchestrator's is 12 distinct tool names (13 capabilities). All 31 tools stay
+root's is 12 distinct tool names (13 capabilities). All 31 tools stay
 *registered*; only the active set is filtered, and execution-time authority
-(`ORCHESTRATOR_AUTHORITY_REQUIRED`) remains the real gate. Gate=0 (default)
+(`ROOT_AUTHORITY_REQUIRED`) remains the real gate. Gate=0 (default)
 keeps the full 31-tool active set for registered agents.
 
 This is identity gating implemented with `pi.setActiveTools` in
@@ -104,7 +104,7 @@ Visibility is identity-based (see above) but several destructive tools also enfo
 server-side authority at execution time. As of Issue 10 the destructive subset
 (`swarm_prune`, `swarm_gc`, `swarm_assign_task`, `swarm_update_task(force=true)`,
 `swarm_update_task(cancelTask=true)`, `swarm_stop_agent`, `swarm_release_agent_task`)
-rejects non-orchestrator callers with `ORCHESTRATOR_AUTHORITY_REQUIRED` (or the
+rejects non-root callers with `ROOT_AUTHORITY_REQUIRED` (or the
 specialized `FORCE_FORBIDDEN`/`CANCEL_FORBIDDEN` for the `force`/`cancelTask` paths
 on `swarm_update_task`) before any state mutation. Other swarm tools remain open to
 any registered agent and use the description / `promptGuidelines` as the contract.
@@ -112,7 +112,7 @@ any registered agent and use the description / `promptGuidelines` as the contrac
 The following identity checks are also enforced today:
 
 - `swarm_ack_message` normally lets only the message recipient acknowledge a
-  message; the orchestrator may act on another recipient's message and may
+  message; the root may act on another recipient's message and may
   waive a superseded assignment.
 - `swarm_update_task` normally requires the current agent to own the assigned
   node.
@@ -121,7 +121,7 @@ The following identity checks are also enforced today:
 
 ### Destructive or high-impact operations
 
-Run these from the orchestrator after inspecting state first:
+Run these from the root after inspecting state first:
 
 - process/pane control: `swarm_spawn_agent`, `swarm_register_agent`,
   `swarm_stop_agent`, `swarm_restart_agent`, `swarm_set_role`,
@@ -130,8 +130,8 @@ Run these from the orchestrator after inspecting state first:
   `swarm_reconcile(mark=true)`, `swarm_prune`, `swarm_gc(dryRun=false)`;
 - destructive task cancellation: `swarm_update_task(cancelTask=true, force=true)`.
 
-Both `swarm_prune` and `swarm_gc` are orchestrator-only after Issue 10 (server-side
-`requireOrchestratorAuthority`); other listed tools are operator-led by description
+Both `swarm_prune` and `swarm_gc` are root-only after Issue 10 (server-side
+`requireRootAuthority`); other listed tools are operator-led by description
 but not currently hard-gated. Prefer the non-mutating inspection tool before every
 one of these operations.
 
@@ -151,7 +151,7 @@ needs structured parameters or machine-readable results.
 - `/swarm graph <task-id> [text|mermaid|json]`
 - `/swarm flow <task-id> [--events N]` — read-only task graph, agent lanes, and
   recent events; opens an interactive Flow dialog in TUI mode.
-- `/swarm metrics` — orchestrator-only, read-only proxy metric snapshot (hung-but-alive,
+- `/swarm metrics` — root-only, read-only proxy metric snapshot (hung-but-alive,
   stale-open, supersession-churn); surfaces `SwarmState.proxyMetrics` without mutating state.
 
 ### Lifecycle commands
@@ -169,9 +169,9 @@ needs structured parameters or machine-readable results.
   mailbox, clears the mailbox JSONL and its delivered ledger, but preserves
   message records in `swarm-state.json`.
 - `/swarm send <to> <message>`
-- `/swarm attention [<#|task-id>]` — orchestrator-only, read-only durable recovery attention report
+- `/swarm attention [<#|task-id>]` — root-only, read-only durable recovery attention report
   (task graph + assignment attempts + mailbox state; never tmux/pane state). Advisory only.
-- `/swarm remind <task-id> <node-id>` — orchestrator-only; the ONLY sending surface for the bounded
+- `/swarm remind <task-id> <node-id>` — root-only; the ONLY sending surface for the bounded
   worker reminder. One per attempt, permanently; requires durable receipt ack (`seen`/`processing`),
   the `REMINDER_NO_PROGRESS_MS` (60 min) no-progress interval, and the current active attempt.
   `requiresAck:false`/`requiresResponse:false` — no ack/response debt; never mutates node state.
@@ -189,10 +189,10 @@ needs structured parameters or machine-readable results.
 - `/swarm pool help` — canonical pool format reference
 - `/swarm pool preview-preflight [model] [provider]` — dry-run the spawn gate; reports classified errors before commit
 - `/swarm pool cooldown <provider/model> <ms>` / `/swarm pool clear <provider/model>` — manual bench control
-- `/swarm pool rotate now` — orchestrator-only; force-swap the current slot to a healthy alternative via `pi.setModel()`. Bypasses the Issue 17 engine-retry gate, the gate's streak count, AND any `modelPool[i].roles` filter (operator escape hatch); traces `pool.swap_forced_by_manual_override` with `rolesIgnored: true` and `agentRoleKind`. Bumps the swap-chain counter (`MAX_SWAP_CHAIN=2`). Refuses (with a warning notify) if every alternative is benched or the picked slot has no resolvable model registry entry. No new public tool — slash command only.
-- `/swarm pool rotate next` — orchestrator-only; bench the current slot for `rotation.cooldownMs` so the next normal `pickSlot()` skips it. Does NOT call `setModel()` — the agent keeps its current model for this turn and the next `turn_end` advances organically. Traces `pool.bench_forced_by_manual_override`. Does NOT bump the swap-chain counter (no swap happened) and does NOT call `recordProviderError` (operator bench is a deliberate decision, not a provider error). Reuses `setSlotCooldown` with the operator-configured `rotation.cooldownMs`; idempotent over re-cooldown (extends the window). No new public tool — slash command only.
-- `/swarm goal set <text>` — orchestrator-only; durably records the swarm's current goal (`st.goal`); while set, the orchestrator pump emits an idempotent idle-streak nudge whenever every non-orchestrator agent is `runtimeStatus: "idle"` with zero assigned/in-progress task nodes.
-- `/swarm goal done [<goalId>]` — orchestrator-only; clears the swarm goal and stops the idle-streak nudge loop entirely. Optional `<goalId>` argument is a safety fence (the call fails if it does not match the current goal).
+- `/swarm pool rotate now` — root-only; force-swap the current slot to a healthy alternative via `pi.setModel()`. Bypasses the Issue 17 engine-retry gate, the gate's streak count, AND any `modelPool[i].roles` filter (operator escape hatch); traces `pool.swap_forced_by_manual_override` with `rolesIgnored: true` and `agentRoleKind`. Bumps the swap-chain counter (`MAX_SWAP_CHAIN=2`). Refuses (with a warning notify) if every alternative is benched or the picked slot has no resolvable model registry entry. No new public tool — slash command only.
+- `/swarm pool rotate next` — root-only; bench the current slot for `rotation.cooldownMs` so the next normal `pickSlot()` skips it. Does NOT call `setModel()` — the agent keeps its current model for this turn and the next `turn_end` advances organically. Traces `pool.bench_forced_by_manual_override`. Does NOT bump the swap-chain counter (no swap happened) and does NOT call `recordProviderError` (operator bench is a deliberate decision, not a provider error). Reuses `setSlotCooldown` with the operator-configured `rotation.cooldownMs`; idempotent over re-cooldown (extends the window). No new public tool — slash command only.
+- `/swarm goal set <text>` — root-only; durably records the swarm's current goal (`st.goal`); while set, the root pump emits an idempotent idle-streak nudge whenever every non-root agent is `runtimeStatus: "idle"` with zero assigned/in-progress task nodes.
+- `/swarm goal done [<goalId>]` — root-only; clears the swarm goal and stops the idle-streak nudge loop entirely. Optional `<goalId>` argument is a safety fence (the call fails if it does not match the current goal).
 
 ### Grouped aliases
 
@@ -210,12 +210,12 @@ state or authorization path.
 | `swarm_agent_status` | Reports lifecycle, tmux liveness, health, active work, and mailbox counters. | Optional `agentId`. First call when diagnosing a worker. |
 | `swarm_list_agents` | Lists persisted agent records, targets, models, roles, and mailboxes. | Read-only. Verify an id before sending or changing it. |
 | `swarm_spawn_agent` | Starts a fresh pi worker in a swarm tmux window. | `role` required; optional `id`, `roleKind`, model/provider, initial prompt. Uses configured model pool/defaults. When the pool has `modelPool[i].roles` set, the spawned agent's roleKind filters eligible slots; if no slot matches, a warning trace (`pool.role_filter_all_filtered_fallback`) is emitted and the worker still starts on the next available slot. |
-| `swarm_register_agent` | Adopts or retargets an existing tmux pane. | `tmuxTarget` and `role` required. Cannot register the reserved `orchestrator` id through this tool. |
+| `swarm_register_agent` | Adopts or retargets an existing tmux pane. | `tmuxTarget` and `role` required. Cannot register the reserved `root` id through this tool. |
 | `swarm_stop_agent` | Marks an agent stopped and normally kills its pane/window. | Refuses active work unless `force=true`; use `killPane=false` to keep the pane. |
 | `swarm_restart_agent` | Stops then respawns at the same stable id. | Preserves mailbox and identity history; may release active task pointers. Default kills the pane; pass `killPane=false` to keep it alive (the agent record still flips to `running`). The freshly started pi reuses the same id, mailbox, and identity. |
 | `swarm_set_role` | Changes role, role kind, and capabilities; regenerates identity. | At least one of role, role kind, or capabilities is required. |
 | `swarm_set_agent_paused` | Drains an agent from reuse without killing it. | `paused=true` prevents assignment selection; `false` resumes. |
-| `swarm_send_keys` | Sends raw tmux keys to a registered pane. | Escape hatch for interrupt/dismiss/type. Use `literal` and `enter` deliberately. The tool refuses to send keys if the resolved tmux target equals the orchestrator record's `tmuxTarget` (typically `"unknown"`), throwing `ORCHESTRATOR_PANE_REJECTED`. This is a principle-based guard: it fires on target equality, not on `agentId`, so it stays correct if any agent's record is ever mis-stamped to the orchestrator's target. |
+| `swarm_send_keys` | Sends raw tmux keys to a registered pane. | Escape hatch for interrupt/dismiss/type. Use `literal` and `enter` deliberately. The tool refuses to send keys if the resolved tmux target equals the root record's `tmuxTarget` (typically `"unknown"`), throwing `ROOT_PANE_REJECTED`. This is a principle-based guard: it fires on target equality, not on `agentId`, so it stays correct if any agent's record is ever mis-stamped to the root's target. |
 | `swarm_attach_agent` | Returns tmux attach/select commands for a pane. | Read-only convenience output. |
 | `swarm_release_agent_task` | Removes stale `activeTaskIds` pointers. | Only terminal/missing task pointers are released unless `force=true`; does not change task nodes. |
 | `swarm_agent_identity` | Reads or regenerates an effective agent identity card. | Optional `agentId`, `refresh`; generated card plus optional override. |
@@ -223,9 +223,9 @@ state or authorization path.
 | `swarm_trace` | Reads structured swarm trace events. | Optional `limit`; inspect delivery/spawn failures. |
 | `swarm_capture_agent_pane` | Captures pane history to `.pi/swarm/traces/tmux/`. | `agentId` required; use for runtime evidence/debugging. |
 | `swarm_dead_letters` | Lists terminal delivery failures. | Optional recipient/message filters and limit. |
-| `swarm_prune` | Marks dead panes stopped and can remove old stopped records. | **Orchestrator-only** (server-side `requireOrchestratorAuthority`); defaults to `dryRun=true`; run dry first. Does not delete mailboxes/traces. The Issue 82 heartbeat GC (`agentHeartbeatGCLocked`) now flips dead-pane running records to `stopped` automatically inside `pumpOrchestratorMailbox`; `swarm_prune` remains the orchestrator escape hatch for already-stopped records. |
-| `swarm_set_goal` | Persists a swarm-level goal to `swarm-state.json.goal`. | **Orchestrator-only** (server-side `requireOrchestratorAuthority`). `text` required, `id` optional. Replaces any current goal and resets `consecutiveNoResolveNudges` + clears back-off. While set, the orchestrator pump emits an idempotent idle-streak nudge when every non-orchestrator agent is `runtimeStatus: "idle"` with zero assigned/in_progress task nodes. Pair with `swarm_mark_goal_done` when finished. |
-| `swarm_mark_goal_done` | Clears the swarm goal and stops the idle nudge loop entirely. | **Orchestrator-only** (server-side `requireOrchestratorAuthority`). Optional `goalId` is a safety fence (clear fails if it does not match the current goal). Idempotent: a clear with no active goal is a `noop`. |
+| `swarm_prune` | Marks dead panes stopped and can remove old stopped records. | **Root-only** (server-side `requireRootAuthority`); defaults to `dryRun=true`; run dry first. Does not delete mailboxes/traces. The Issue 82 heartbeat GC (`agentHeartbeatGCLocked`) now flips dead-pane running records to `stopped` automatically inside `pumpRootMailbox`; `swarm_prune` remains the root escape hatch for already-stopped records. |
+| `swarm_set_goal` | Persists a swarm-level goal to `swarm-state.json.goal`. | **Root-only** (server-side `requireRootAuthority`). `text` required, `id` optional. Replaces any current goal and resets `consecutiveNoResolveNudges` + clears back-off. While set, the root pump emits an idempotent idle-streak nudge when every non-root agent is `runtimeStatus: "idle"` with zero assigned/in_progress task nodes. Pair with `swarm_mark_goal_done` when finished. |
+| `swarm_mark_goal_done` | Clears the swarm goal and stops the idle nudge loop entirely. | **Root-only** (server-side `requireRootAuthority`). Optional `goalId` is a safety fence (clear fails if it does not match the current goal). Idempotent: a clear with no active goal is a `noop`. |
 
 ## Messaging and reconcile (6)
 
@@ -267,17 +267,17 @@ mail tools for discussion without advancing a graph.
 | `swarm_validate_graph` | Validates graph structure and optionally runtime consistency. | Supply `taskId` or direct task file path; `runtime=true` checks agents/messages. |
 | `swarm_print_graph` | Prints text, Mermaid, or JSON graph view. | Select `format=text|mermaid|json`. Read-only. |
 | `swarm_next_nodes` | Computes ready/current nodes and suggests reusable agents. | Read-only; `autoAssign` is reserved and does not mutate. |
-| `swarm_assign_task` | Assigns a ready node, updates assignment bookkeeping, and delivers an assignment message. | `taskId`, `nodeId`; optional exact agent, `autoSpawn`, isolated spawn, reply target, and `lease: { kind: "reuse"\|"park", until?, reason? }` (Issue 82: stamp a reuse/park lease on the assignee at assignment time so the task-close sweep honors it). Orchestrator operation. Runs the file-scope ownership preflight: an overlapping active write scope across any task fails atomically with `ACTIVE_SCOPE_CONFLICT` (no state mutated). |
-| `swarm_update_task` | Updates an assigned node, outcome, evidence artifact, gates, or shared context. | Normal path requires the assigned agent and legal lifecycle transition. `done` with outgoing edges requires a matching `outcome`. `force=true` and `cancelTask` are **orchestrator-only** (server-side identity check; a non-orchestrator caller is rejected with `FORCE_FORBIDDEN` / `CANCEL_FORBIDDEN` before any mutation). `cancelTask=true` (with force) cancels the whole task: revokes every active attempt, transitions non-terminal nodes to `cancelled`, supersedes every assignment message, and releases agent `activeTaskIds` + advisory edit locks. A cancelled task rejects all later updates with `TASK_CANCELLED` (or `NODE_CANCELLED`) even from the orchestrator — re-open is a separately-designed policy. After cancellation, later ACKs on superseded assignment records are rejected with `ASSIGNMENT_SUPERSEDED`. **Issue 24.a:** non-terminal unassigned nodes may be **CLAIMED** by the caller via `mintNodeAttempt` (assignee becomes the caller, status moves to `assigned`, an attempt fence is minted); the claimer's `activeTaskIds` is updated. **In-flight unassigned nodes** (`in_progress`+`null`) are refused with the inline-string `OWNERSHIP_REQUIRED` error code — escalate to the orchestrator (`force=true`) or close the in-flight node. Remediation hints are present on every reject listed in the §24.c coverage table (full 21-site audit deferred to follow-up `task-graph-reject-hints-coverage-audit`). |
+| `swarm_assign_task` | Assigns a ready node, updates assignment bookkeeping, and delivers an assignment message. | `taskId`, `nodeId`; optional exact agent, `autoSpawn`, isolated spawn, reply target, and `lease: { kind: "reuse"\|"park", until?, reason? }` (Issue 82: stamp a reuse/park lease on the assignee at assignment time so the task-close sweep honors it). Root operation. Runs the file-scope ownership preflight: an overlapping active write scope across any task fails atomically with `ACTIVE_SCOPE_CONFLICT` (no state mutated). |
+| `swarm_update_task` | Updates an assigned node, outcome, evidence artifact, gates, or shared context. | Normal path requires the assigned agent and legal lifecycle transition. `done` with outgoing edges requires a matching `outcome`. `force=true` and `cancelTask` are **root-only** (server-side identity check; a non-root caller is rejected with `FORCE_FORBIDDEN` / `CANCEL_FORBIDDEN` before any mutation). `cancelTask=true` (with force) cancels the whole task: revokes every active attempt, transitions non-terminal nodes to `cancelled`, supersedes every assignment message, and releases agent `activeTaskIds` + advisory edit locks. A cancelled task rejects all later updates with `TASK_CANCELLED` (or `NODE_CANCELLED`) even from the root — re-open is a separately-designed policy. After cancellation, later ACKs on superseded assignment records are rejected with `ASSIGNMENT_SUPERSEDED`. **Issue 24.a:** non-terminal unassigned nodes may be **CLAIMED** by the caller via `mintNodeAttempt` (assignee becomes the caller, status moves to `assigned`, an attempt fence is minted); the claimer's `activeTaskIds` is updated. **In-flight unassigned nodes** (`in_progress`+`null`) are refused with the inline-string `OWNERSHIP_REQUIRED` error code — escalate to the root (`force=true`) or close the in-flight node. Remediation hints are present on every reject listed in the §24.c coverage table (full 21-site audit deferred to follow-up `task-graph-reject-hints-coverage-audit`). |
 | `swarm_task_message` | Sends a task-scoped handoff/discussion and records it. | `taskId`, `fromNode`, `to`, `body`; optional target node and artifact refs. It does **not** advance a node. |
 
 ### Normal graph execution
 
-1. Orchestrator creates a task with `swarm_create_task`.
+1. Root creates a task with `swarm_create_task`.
 2. Inspect `swarm_next_nodes` and assign a ready node with `swarm_assign_task`.
 3. Assignee acknowledges the delivery, performs the work, and calls
    `swarm_update_task` for its own node.
-4. Orchestrator inspects `swarm_next_nodes` again and assigns the newly-ready
+4. Root inspects `swarm_next_nodes` again and assigns the newly-ready
    work.
 5. Use `swarm_task_status(runtime=true)`, `swarm_validate_graph`, then
    `swarm_reconcile(dryRun=true)` if execution stalls.
@@ -289,7 +289,7 @@ gates, closure, and rework semantics.
 
 | Tool | What it does | Key inputs / operating notes |
 | --- | --- | --- |
-| `swarm_gc` | Prunes only terminal messages beyond a retained recent window and caps delivered ledgers. | **Orchestrator-only** after Issue 10. Defaults to `dryRun=true`; use `keepMessages` to retain the newest messages. It never drops queued, injected, failed, or ACK-incomplete messages. |
+| `swarm_gc` | Prunes only terminal messages beyond a retained recent window and caps delivered ledgers. | **Root-only** after Issue 10. Defaults to `dryRun=true`; use `keepMessages` to retain the newest messages. It never drops queued, injected, failed, or ACK-incomplete messages. |
 
 `swarm_gc` is bounded maintenance, not an incident-repair tool. Use
 `swarm_reconcile` first when delivery or task state is actionable.
@@ -322,4 +322,4 @@ gates, closure, and rework semantics.
 3. `swarm_next_nodes(taskId)`.
 4. `swarm_reconcile(dryRun=true)`.
 5. Use `swarm_release_agent_task` only after reconcile confirms stale task
-   pointers; reassign from the orchestrator.
+   pointers; reassign from the root.

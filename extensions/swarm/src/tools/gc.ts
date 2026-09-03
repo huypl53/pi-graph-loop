@@ -5,7 +5,7 @@ import { paths, readState, trace, withLock, writeState } from "../state.ts";
 import { pruneState, DEFAULT_KEEP_MESSAGES, type PruneOptions } from "../gc.ts";
 import { textResult } from "../utils.ts";
 import { currentAgentId } from "../session.ts";
-import { requireOrchestratorAuthority } from "../identity.ts";
+import { requireRootAuthority } from "../identity.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
 
 export function registerGcTools(pi: ExtensionAPI) {
@@ -14,7 +14,7 @@ export function registerGcTools(pi: ExtensionAPI) {
 		label: "Swarm GC",
 		description: "Bounded retention / garbage collection for swarm state. Under the swarm lock, drops only TERMINAL messages that fall outside the most-recent keepMessages window — dead_letter, acked-done (ackedAt with last ack status 'done'), or a verified/waived response. NEVER drops actionable messages (queued, mailbox_delivered, injected, intercepted, failed, acked-but-not-done). Also caps each delivered[agentId] ledger to the most-recent keepMessages ids (intersection-safe). dryRun defaults to true: pass dryRun:false to persist.",
 		promptGuidelines: [
-			"Orchestrator/admin maintenance tool. Run with dryRun:true (the default) FIRST to preview what would be removed before applying.",
+			"Root/admin maintenance tool. Run with dryRun:true (the default) FIRST to preview what would be removed before applying.",
 			"Safe by construction: only prunes the terminal tail beyond keepMessages; in-flight/actionable coordination state is never dropped.",
 		],
 		parameters: Type.Object({
@@ -24,7 +24,7 @@ export function registerGcTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_gc", async () => {
 				const p = paths(ctx.cwd);
-				requireOrchestratorAuthority(currentAgentId(), "swarm_gc");
+				requireRootAuthority(currentAgentId(), "swarm_gc");
 			const dryRun = params.dryRun !== false; // default true
 			const opts: PruneOptions = { keepMessages: typeof params.keepMessages === "number" ? params.keepMessages : DEFAULT_KEEP_MESSAGES };
 			const result = await withLock(p, async () => {

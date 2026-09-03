@@ -4,30 +4,30 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Paths, SwarmAgent, SwarmState } from "./types.ts";
-import { ERR_ORCHESTRATOR_AUTHORITY_REQUIRED, ERR_ORCHESTRATOR_LEADER_DENIED, MEMORY_POLICY_DOC, ORCHESTRATOR_LEADER_STALE_MS, PI_SWARM_MINIMAL_PROTOCOL } from "./constants.ts";
+import { ERR_ROOT_AUTHORITY_REQUIRED, ERR_ROOT_LEADER_DENIED, MEMORY_POLICY_DOC, ROOT_LEADER_STALE_MS, PI_SWARM_MINIMAL_PROTOCOL } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { identityPath, mailboxPath, paths, trace } from "./state.ts";
 import { now, safeId } from "./utils.ts";
 import { tmux } from "./tmux.ts";
 
 // Centralized authority check used by every server-side mutation that depends on identity. Phase 1
-// deliberately keeps this strict (orchestrator-only); expanded admin roles live in a later roadmap
+// deliberately keeps this strict (root-only); expanded admin roles live in a later roadmap
 // issue. Any tool that allows `force`/cancellation must consult this helper instead of trusting
 // caller-supplied parameters.
-export function isOrchestratorAuthority(agentId: string = currentAgentId()): boolean {
-	return agentId === "orchestrator";
+export function isRootAuthority(agentId: string = currentAgentId()): boolean {
+	return agentId === "root";
 }
 
-export type OrchestratorLeaderState =
+export type RootLeaderState =
 	| { kind: "claimed"; leader: { pid: number; sessionStartedAt: string; claimedAt: string; lastHeartbeatAt: string; agentRecordId?: string }; ageMs: number }
 	| { kind: "stale"; leader: { pid: number; sessionStartedAt: string; claimedAt: string; lastHeartbeatAt: string; agentRecordId?: string }; ageMs: number }
 	| { kind: "vacant" };
 
-export function readOrchestratorLeader(st: SwarmState, nowMs: number): OrchestratorLeaderState {
-	const l = st.orchestratorLeader;
+export function readRootLeader(st: SwarmState, nowMs: number): RootLeaderState {
+	const l = st.rootLeader;
 	if (!l) return { kind: "vacant" };
 	const ageMs = nowMs - new Date(l.lastHeartbeatAt).getTime();
-	if (ageMs > ORCHESTRATOR_LEADER_STALE_MS) return { kind: "stale", leader: l, ageMs };
+	if (ageMs > ROOT_LEADER_STALE_MS) return { kind: "stale", leader: l, ageMs };
 	// R11-4: pid-liveness probe. A leader whose process is gone is dead regardless of heartbeat
 	// age — an orphaned leader (pid survives pane close, pump kept the lease fresh) or a
 	// freshly-killed one must not lock out a new claim. Only heartbeat staleness OR a dead pid
@@ -44,43 +44,43 @@ function isPidAlive(pid: number): boolean {
 	try { process.kill(pid, 0); return true; } catch (err: any) { return err?.code === "EPERM"; }
 }
 
-export function claimOrchestratorLeader(st: SwarmState, nowMs: number, me: number) {
-	const cur = readOrchestratorLeader(st, nowMs);
+export function claimRootLeader(st: SwarmState, nowMs: number, me: number) {
+	const cur = readRootLeader(st, nowMs);
 	if (cur.kind === "claimed" && cur.leader.pid !== me) return { kind: "denied" as const, currentLeader: cur.leader, ageMs: cur.ageMs };
 	const ts = new Date(nowMs).toISOString();
-	st.orchestratorLeader = { pid: me, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || ts, claimedAt: ts, lastHeartbeatAt: ts, agentRecordId: "orchestrator" };
-	return { kind: "claimed" as const, leader: st.orchestratorLeader };
+	st.rootLeader = { pid: me, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || ts, claimedAt: ts, lastHeartbeatAt: ts, agentRecordId: "root" };
+	return { kind: "claimed" as const, leader: st.rootLeader };
 }
 
-export function heartbeatOrchestratorLeader(st: SwarmState, nowMs: number, me: number, _source: string) {
-	const cur = readOrchestratorLeader(st, nowMs);
-	if (cur.kind === "claimed" && cur.leader.pid !== me) throw new Error(`${ERR_ORCHESTRATOR_LEADER_DENIED}: live orchestrator leader pid=${cur.leader.pid} (heartbeat ${cur.ageMs}ms ago). Refusing to mutate from pid=${me}.`);
+export function heartbeatRootLeader(st: SwarmState, nowMs: number, me: number, _source: string) {
+	const cur = readRootLeader(st, nowMs);
+	if (cur.kind === "claimed" && cur.leader.pid !== me) throw new Error(`${ERR_ROOT_LEADER_DENIED}: live root leader pid=${cur.leader.pid} (heartbeat ${cur.ageMs}ms ago). Refusing to mutate from pid=${me}.`);
 	const ts = new Date(nowMs).toISOString();
-	st.orchestratorLeader = { pid: me, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || (cur.kind === "vacant" ? ts : cur.leader.sessionStartedAt), claimedAt: cur.kind === "vacant" ? ts : cur.leader.claimedAt, lastHeartbeatAt: ts, agentRecordId: "orchestrator" };
+	st.rootLeader = { pid: me, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || (cur.kind === "vacant" ? ts : cur.leader.sessionStartedAt), claimedAt: cur.kind === "vacant" ? ts : cur.leader.claimedAt, lastHeartbeatAt: ts, agentRecordId: "root" };
 }
 
-export function requireOrchestratorAuthority(me: string, action: string): void {
-	if (!isOrchestratorAuthority(me)) throw new Error(`${ERR_ORCHESTRATOR_AUTHORITY_REQUIRED}: ${action} requires orchestrator authority (caller=${me}).`);
+export function requireRootAuthority(me: string, action: string): void {
+	if (!isRootAuthority(me)) throw new Error(`${ERR_ROOT_AUTHORITY_REQUIRED}: ${action} requires root authority (caller=${me}).`);
 }
 
-// The orchestrator is a human-driven coordinating session with no dedicated swarm tmux pane.
-// Ensure it always has a routable pseudo-agent record + mailbox so swarm_send_message(to=orchestrator)
+// The root is a human-driven coordinating session with no dedicated swarm tmux pane.
+// Ensure it always has a routable pseudo-agent record + mailbox so swarm_send_message(to=root)
 // works from any peer, and so delivery to it is treated as mailbox-only rather than a tmux failure.
-export function ensureOrchestrator(st: SwarmState, cwd: string, p: Paths): SwarmAgent {
+export function ensureRoot(st: SwarmState, cwd: string, p: Paths): SwarmAgent {
 	const ts = now();
-	const existing = st.agents["orchestrator"];
+	const existing = st.agents["root"];
 	if (existing) {
-		// Self-heal the mailbox-only contract on every refresh. The orchestrator is a pseudo-agent with
+		// Self-heal the mailbox-only contract on every refresh. The root is a pseudo-agent with
 		// NO dedicated swarm pane, so delivery must always be mailbox-only. An older code version (or a
-		// manually-edited state) could have left the orchestrator attached to a real tmux pane target,
+		// manually-edited state) could have left the root attached to a real tmux pane target,
 		// which makes peer messages get tmux-injected into that pane instead of delivered to the mailbox.
 		// Re-normalize the structural fields so any such "misled" record is corrected on the next
 		// session_start/ensure. A custom role/role-text is preserved.
-		existing.roleKind = "orchestrator";
+		existing.roleKind = "root";
 		existing.tmuxTarget = "unknown";
 		existing.tmuxSession = st.tmuxSession;
-		existing.tmuxWindow = "orchestrator";
-		existing.mailbox = relative(cwd, mailboxPath(p, "orchestrator"));
+		existing.tmuxWindow = "root";
+		existing.mailbox = relative(cwd, mailboxPath(p, "root"));
 		existing.maxConcurrentTasks = 99;
 		existing.lastHeartbeatAt = ts;
 		existing.lastSessionStartAt = ts;
@@ -90,9 +90,9 @@ export function ensureOrchestrator(st: SwarmState, cwd: string, p: Paths): Swarm
 		return existing;
 	}
 	const agent: SwarmAgent = {
-		id: "orchestrator",
-		role: "Swarm orchestrator (human-driven coordinating session). Receives messages via mailbox; no dedicated swarm tmux pane, so delivery is mailbox-only.",
-		roleKind: "orchestrator",
+		id: "root",
+		role: "Swarm root (human-driven coordinating session). Receives messages via mailbox; no dedicated swarm tmux pane, so delivery is mailbox-only.",
+		roleKind: "root",
 		capabilities: [],
 		activeTaskIds: [],
 		maxConcurrentTasks: 99,
@@ -102,17 +102,17 @@ export function ensureOrchestrator(st: SwarmState, cwd: string, p: Paths): Swarm
 		lastHeartbeatAt: ts,
 		lastSessionStartAt: ts,
 		tmuxSession: st.tmuxSession,
-		tmuxWindow: "orchestrator",
+		tmuxWindow: "root",
 		tmuxTarget: "unknown",
 		model: currentModel(),
 		provider: currentProvider(),
 		cwd,
-		mailbox: relative(cwd, mailboxPath(p, "orchestrator")),
+		mailbox: relative(cwd, mailboxPath(p, "root")),
 		createdAt: ts,
 		updatedAt: ts,
 	};
-	st.agents["orchestrator"] = agent;
-	st.delivered["orchestrator"] ||= [];
+	st.agents["root"] = agent;
+	st.delivered["root"] ||= [];
 	return agent;
 }
 
@@ -138,7 +138,7 @@ export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 		`3. Check your mailbox with \`swarm_check_mailbox\` when idle or after receiving swarm traffic. Here, idle means you have no active tool calls or immediate task steps; if you are waiting more than ~10 seconds, poll pending mailbox messages.\n` +
 		`4. Use \`swarm_list_agents\` before messaging a peer whose existence you have not verified.\n` +
 		`5. Use \`swarm_trace\` and \`swarm_capture_agent_pane\` when debugging coordination issues.\n` +
-		`6. Stay within your role unless the orchestrator explicitly changes your assignment.\n\n` +
+		`6. Stay within your role unless the root explicitly changes your assignment.\n\n` +
 		`## ACK Protocol\n\n` +
 		`- For every swarm message with \`requiresAck=true\`, you MUST acknowledge it with \`swarm_ack_message\`.\n` +
 		`- As soon as you start work, call \`swarm_ack_message\` with the message id and \`status=seen\` or \`status=processing\`.\n` +
@@ -154,8 +154,8 @@ export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 		`## Lifecycle\n\n` +
 		`- Start by reading this identity when role details are unclear.\n` +
 		`- If an initial task is present, begin it after reading identity; do not wait indefinitely for another instruction.\n` +
-		`- If no task is present, poll your mailbox periodically and remain available until the orchestrator stops or reassigns you.\n` +
-		`- Report completion, blockers, and role conflicts to the coordinating agent named in your task or to the orchestrator.\n\n` +
+		`- If no task is present, poll your mailbox periodically and remain available until the root stops or reassigns you.\n` +
+		`- Report completion, blockers, and role conflicts to the coordinating agent named in your task or to the root.\n\n` +
 		`## Peer Discovery\n\n` +
 		`- Use \`swarm_list_agents\` to verify peer IDs and tmux targets.\n` +
 		`- Use \`swarm_agent_identity\` to inspect your own or a peer's durable role card.\n` +

@@ -109,7 +109,7 @@ The scripted turns only need to respond to engine output (ack a nudge, verify th
 
 ### Pattern 3 — parallel real lanes (for delivery machinery itself)
 
-When the *transport* is under test — tmux injection, reconcile retry, dead-lettering — run two real pi processes with different fixtures/scripts (see the issue-11 UAT: an orchestrator lane with `PI_SWARM_IS_ORCHESTRATOR=1` and a worker lane with a scripted `swarm_send_message`). Coordinate with explicit sleeps and by mutating the mailbox file between turns from outside the processes. Accept the timing races — that is the point: the engine must be robust to them. Reserve this pattern for delivery/injection paths that patterns 1-2 cannot reach.
+When the *transport* is under test — tmux injection, reconcile retry, dead-lettering — run two real pi processes with different fixtures/scripts (see the issue-11 UAT: an root lane with `PI_SWARM_IS_ROOT=1` and a worker lane with a scripted `swarm_send_message`). Coordinate with explicit sleeps and by mutating the mailbox file between turns from outside the processes. Accept the timing races — that is the point: the engine must be robust to them. Reserve this pattern for delivery/injection paths that patterns 1-2 cannot reach.
 
 ### Choosing a pattern
 

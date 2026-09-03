@@ -14,10 +14,10 @@ import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { enqueueAndDeliver, deliverMessageLocked, findIdempotentMessage } from "./mailbox.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
-import { classifyGoalClearAuthority, GOAL_ORIGIN_ORCHESTRATOR, GOAL_ORIGIN_VALUES } from "./goals.ts";
+import { classifyGoalClearAuthority, GOAL_ORIGIN_ROOT, GOAL_ORIGIN_VALUES } from "./goals.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
-import { claimOrchestratorLeader, ensureOrchestrator, overridePath } from "./identity.ts";
-import { startOrchestratorPump, bumpSwapChain } from "./hooks.ts";
+import { claimRootLeader, ensureRoot, overridePath } from "./identity.ts";
+import { startRootPump, bumpSwapChain } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError, pickSlot, slotKey, effectiveConfig } from "./pool.ts";
 import { MAX_CONSECUTIVE_NUDGES_DEFAULT, TRACE_AGENT_LEASE_CLEARED, TRACE_AGENT_LEASE_SET, TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
@@ -61,7 +61,7 @@ function parseGoalSetInterval(raw: string): { ok: true; ms: number } | { ok: fal
 	if (!Number.isFinite(ms) || ms <= 0) return { ok: false, error: `invalid interval "${raw}"` };
 	return { ok: true, ms: Math.floor(ms) };
 }
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | lease <id> [--reuse|--park] [--until <iso>] [--reason <text>] [--clear] (orchestrator-only) | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set [-i|--interval <time>] <text> | goal update [-i|--interval <time>] [<text>] | goal done [<goalId>] (show read-only; set/update/done orchestrator-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (root-only: durable recovery attention report) | remind <task-id> <node-id> (root-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | lease <id> [--reuse|--park] [--until <iso>] [--reason <text>] [--clear] (root-only) | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set [-i|--interval <time>] <text> | goal update [-i|--interval <time>] [<text>] | goal done [<goalId>] (show read-only; set/update/done root-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -353,10 +353,10 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					return;
 				}
 				if (cmd === "attention") {
-				// Orchestrator-gated, READ-ONLY recovery attention report (roadmap issue 5). Pure durable
+				// Root-gated, READ-ONLY recovery attention report (roadmap issue 5). Pure durable
 				// derivation from task graph + assignment attempts + mailbox state; never sends, never mutates.
-				if (currentAgentId() !== "orchestrator") {
-					ctx.ui.notify("attention is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+				if (currentAgentId() !== "root") {
+					ctx.ui.notify("attention is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning");
 					return;
 				}
 				const arg = rest.shift();
@@ -378,30 +378,30 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						const att = deriveNodeAttention(st, task, nodeId, nowMs);
 						if (att.category === "none" || att.category === "terminal") continue;
 						if (att.workerReminderEligible) reminders++;
-						if (att.orchestratorDecision) escalations++;
+						if (att.rootDecision) escalations++;
 						actionable++;
 						nodeLines.push(`  ${nodeId} (${node.status}, assignee ${node.assignee || "-"}) → ${att.category}${att.workerReminderEligible ? ` — /swarm remind ${task.taskId} ${nodeId}` : ""}`);
 						for (const e of att.evidence) nodeLines.push(`      • ${e}`);
 					}
 					if (nodeLines.length) lines.push(``, `${task.taskId} (${task.status}):`, ...nodeLines);
 				}
-				lines.push("", `Summary: ${actionable} node signal(s); reminder-eligible: ${reminders}; orchestrator decisions: ${escalations}. Advisory only — nothing is auto-reassigned, cancelled, or completed.`);
+				lines.push("", `Summary: ${actionable} node signal(s); reminder-eligible: ${reminders}; root decisions: ${escalations}. Advisory only — nothing is auto-reassigned, cancelled, or completed.`);
 				await trace(p, "swarm.attention", { by: currentAgentId(), tasks: scope.length, actionable, reminders, escalations });
 				ctx.ui.notify(lines.join("\n"), "info");
 				return;
 				}
 				if (cmd === "remind") {
-				// Orchestrator-gated, the ONLY sending surface for bounded worker reminders (issue 5).
+				// Root-gated, the ONLY sending surface for bounded worker reminders (issue 5).
 				// Idempotent + attempt-fenced: at most one reminder per attempt, permanently; requires
 				// confirmed receipt (durable ack seen/processing) + no-progress interval; never mutates node
 				// status/outcome/readiness and creates no ack/response debt.
-				if (currentAgentId() !== "orchestrator") {
-					ctx.ui.notify("remind is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+				if (currentAgentId() !== "root") {
+					ctx.ui.notify("remind is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning");
 					return;
 				}
 				const taskIdRaw = rest.shift();
 				const nodeId = rest.shift();
-				if (!taskIdRaw || !nodeId) { ctx.ui.notify("Usage: /swarm remind <task-id> <node-id> (orchestrator-only; see /swarm attention for eligibility)", "warning"); return; }
+				if (!taskIdRaw || !nodeId) { ctx.ui.notify("Usage: /swarm remind <task-id> <node-id> (root-only; see /swarm attention for eligibility)", "warning"); return; }
 				const taskId = safeId(taskIdRaw);
 				const tp = taskPaths(p, taskId);
 				if (!existsSync(tp.taskJson)) { ctx.ui.notify(`No task ${taskId}`, "warning"); return; }
@@ -438,7 +438,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					// Idempotency fence: one reminder message per attempt, ever. Crash between the mailbox append
 					// and the task.json write is repaired here on the next invocation.
 					const key = `task:${taskId}:node:${nodeId}:attempt:${attemptId}:reminder`;
-					const existing = findIdempotentMessage(st, "orchestrator", assignee, key);
+					const existing = findIdempotentMessage(st, "root", assignee, key);
 					if (existing || attempt.reminder) {
 						const reminderId = attempt.reminder?.reminderId || existing?.id || "unknown";
 						let repaired = false;
@@ -496,9 +496,9 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				return;
 				}
 				if (cmd === "metrics") {
-					// Orchestrator-only, read-only proxy metric snapshot for Issue 83c.
-					if (currentAgentId() !== "orchestrator") {
-						ctx.ui.notify("/swarm metrics is orchestrator-only", "warning");
+					// Root-only, read-only proxy metric snapshot for Issue 83c.
+					if (currentAgentId() !== "root") {
+						ctx.ui.notify("/swarm metrics is root-only", "warning");
 						return;
 					}
 					const st = await readState(p, ctx.cwd);
@@ -571,10 +571,10 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const flags = parseFlags(rest);
 					const roleText = flags.rest.join(" ");
 					const agentId = safeId(id);
-					// The orchestrator is a human-driven coordinating role, not a generic pane agent. Registering THIS
-					// pane as "orchestrator" is an explicit PM opt-in (env + mailbox-only record + PM pump). Registering
-					// a DIFFERENT pane as orchestrator is refused (the orchestrator has no dedicated pane).
-					if (agentId === "orchestrator") {
+					// The root is a human-driven coordinating role, not a generic pane agent. Registering THIS
+					// pane as "root" is an explicit PM opt-in (env + mailbox-only record + PM pump). Registering
+					// a DIFFERENT pane as root is refused (the root has no dedicated pane).
+					if (agentId === "root") {
 						const isHere = isHereToken(tmuxTarget);
 						let isCurrent = isHere;
 						if (!isHere) {
@@ -586,33 +586,33 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							}
 						}
 						if (isCurrent) {
-							// Explicit PM opt-in: gate BEFORE setting env vars so a second live orchestrator cannot
+							// Explicit PM opt-in: gate BEFORE setting env vars so a second live root cannot
 							// steal the role. The leader claim is state-backed; on denial we keep the pane inert.
 							const claim = await withLock(p, async () => {
 								const st = await readState(p, ctx.cwd);
-								return claimOrchestratorLeader(st, Date.now(), process.pid);
+								return claimRootLeader(st, Date.now(), process.pid);
 							});
 							if (claim.kind === "denied") {
-								ctx.ui.notify(`Orchestrator already active on pid ${claim.currentLeader.pid} (heartbeat ${Math.round(claim.ageMs / 1000)}s ago); this pane cannot become the PM.`, "warning");
-								await trace(p, "agent.orchestrator_optin.denied", { currentLeaderPid: claim.currentLeader.pid, ageMs: claim.ageMs });
+								ctx.ui.notify(`Root already active on pid ${claim.currentLeader.pid} (heartbeat ${Math.round(claim.ageMs / 1000)}s ago); this pane cannot become the PM.`, "warning");
+								await trace(p, "agent.root_optin.denied", { currentLeaderPid: claim.currentLeader.pid, ageMs: claim.ageMs });
 								return;
 							}
-							process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
-							process.env.PI_SWARM_AGENT_ID = "orchestrator";
+							process.env.PI_SWARM_IS_ROOT = "1";
+							process.env.PI_SWARM_AGENT_ID = "root";
 							applySwarmToolGating(pi); // re-enable the swarm tool surface now that this pane is the PM
 							await withLock(p, async () => {
 								const st = await readState(p, ctx.cwd);
-								ensureOrchestrator(st, ctx.cwd, p);
-								await trace(p, "agent.orchestrator_optin", { via: "register-command", role: roleText || null });
+								ensureRoot(st, ctx.cwd, p);
+								await trace(p, "agent.root_optin", { via: "register-command", role: roleText || null });
 								await writeState(p, st);
 							});
-							if (ctx.hasUI) ctx.ui.setStatus("swarm", "swarm:orchestrator");
-							try { await startOrchestratorPump(ctx, "register-orchestrator"); }
-							catch (err: any) { await trace(p, "agent.orchestrator_optin.pump_failed", { error: String((err as Error)?.message || err) }); }
-							ctx.ui.notify("This pane is now the swarm orchestrator (PM): orchestrator-scoped tools now act here, pending orchestrator mail has been surfaced, and the PM mailbox pump is active for this session.", "info");
+							if (ctx.hasUI) ctx.ui.setStatus("swarm", "swarm:root");
+							try { await startRootPump(ctx, "register-root"); }
+							catch (err: any) { await trace(p, "agent.root_optin.pump_failed", { error: String((err as Error)?.message || err) }); }
+							ctx.ui.notify("This pane is now the swarm root (PM): root-scoped tools now act here, pending root mail has been surfaced, and the PM mailbox pump is active for this session.", "info");
 							return;
 						}
-						ctx.ui.notify("The orchestrator is a human-driven coordinating role with no dedicated swarm pane — it cannot be attached to another pane. To make THIS pane the orchestrator (PM), run:\n  /swarm register here orchestrator [role]\nor relaunch pi with PI_SWARM_IS_ORCHESTRATOR=1.", "warning");
+						ctx.ui.notify("The root is a human-driven coordinating role with no dedicated swarm pane — it cannot be attached to another pane. To make THIS pane the root (PM), run:\n  /swarm register here root [role]\nor relaunch pi with PI_SWARM_IS_ROOT=1.", "warning");
 						return;
 					}
 					const result = await withLock(p, async () => {
@@ -624,10 +624,10 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					// If we registered THIS pane (via 'here' or by naming the current pane), adopt the agent
 					// identity in-process so the footer/title reflects the new id and subsequent hooks heartbeat
 					// the right record. Setting PI_SWARM_AGENT_ID makes currentAgentId() resolve to it; we re-emit
-					// the status line immediately. The reserved "orchestrator" id is skipped (that identity must
+					// the status line immediately. The reserved "root" id is skipped (that identity must
 					// come from explicit opt-in, not registration).
 					let adopted = false;
-					if (result.agent.id !== "orchestrator") {
+					if (result.agent.id !== "root") {
 						let isCurrent = isHereToken(tmuxTarget);
 						if (!isCurrent) {
 							const cur = await currentPaneTarget(pi);
@@ -651,7 +651,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				if (cmd === "stop") {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm stop <id> [--force] [--no-kill]", "warning"); return; }
-					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("stop is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
+					if (currentAgentId() !== "root") { ctx.ui.notify("stop is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning"); return; }
 					const flags = parseFlags(rest);
 					try {
 						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await stopAgent(pi, ctx.cwd, p, st, safeId(id), { force: flags.force, killPane: flags.kill }); await writeState(p, st); return r; });
@@ -849,7 +849,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					}
 					if (sub === "rotate") {
 					// === Issue 19: manual /swarm pool rotate override ===
-					// Orchestrator-only escape hatch for the engine-retry gate (Issue 17). Two subcommands:
+					// Root-only escape hatch for the engine-retry gate (Issue 17). Two subcommands:
 					//   `now`  — bypass the gate and force-swap the current slot to a healthy alternative.
 					//            Traces pool.swap_forced_by_manual_override and bumps the swap-chain counter
 					//            via bumpSwapChain(agentId) from hooks.ts (a swap happened — operator is
@@ -859,8 +859,8 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					//            Traces pool.bench_forced_by_manual_override. Does NOT call setModel.
 					// Authority gate mirrors `/swarm goal|attention|remind|stop|release`. Guest sessions
 					// (PI_SWARM_AGENT_ID=swarm-guest) are naturally refused by the currentAgentId() check.
-					if (currentAgentId() !== "orchestrator") {
-						ctx.ui.notify("rotate is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+					if (currentAgentId() !== "root") {
+						ctx.ui.notify("rotate is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning");
 						return;
 					}
 					const action = rest.shift();
@@ -950,11 +950,11 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					ctx.ui.notify(`${agent.id} ${paused ? "paused" : "resumed"}`, "info");
 					return;
 				}
-				// === Issue 82: explicit reuse lease + park mechanism (orchestrator-only) ===
+				// === Issue 82: explicit reuse lease + park mechanism (root-only) ===
 				// Usage: /swarm agent lease <id> [--reuse | --park] [--until <iso>] [--reason <text>] [--clear]
 				// Default flags: --reuse, --until now+1h, --reason "operator lease". Cleared with --clear.
 				if (cmd === "lease") {
-					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("lease is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
+					if (currentAgentId() !== "root") { ctx.ui.notify("lease is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning"); return; }
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm lease <id> [--reuse|--park] [--until <iso>] [--reason <text...>] [--clear]", "warning"); return; }
 					const clear = rest.includes("--clear");
@@ -1029,7 +1029,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				if (cmd === "release") {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm release <id> [<task-id>] [--force]", "warning"); return; }
-					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("release is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
+					if (currentAgentId() !== "root") { ctx.ui.notify("release is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning"); return; }
 					const flags = parseFlags(rest);
 					const taskId = flags.rest[0];
 					let failed: string | null = null;
@@ -1110,7 +1110,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const requestedId = id;
 					const resolvedHere = isHereToken(requestedId) ? currentAgentId() : undefined;
 					if (isHereToken(requestedId) && (!resolvedHere || resolvedHere === "swarm-guest")) {
-						ctx.ui.notify("Cannot resolve 'here' to a swarm agent mailbox in this pane. Register this pane first (for an agent: /swarm register here <id> [role]; for PM: /swarm register here orchestrator), or pass an explicit agent id.", "warning");
+						ctx.ui.notify("Cannot resolve 'here' to a swarm agent mailbox in this pane. Register this pane first (for an agent: /swarm register here <id> [role]; for PM: /swarm register here root), or pass an explicit agent id.", "warning");
 						return;
 					}
 					const targetId = resolvedHere || requestedId;
@@ -1150,12 +1150,12 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					return;
 				}
 				if (cmd === "goal") {
-					// Orchestrator-only goal lifecycle command (mirror of swarm_set_goal / swarm_mark_goal_done).
-					// Goal is the durable record the orchestrator's pump emits idle-streak nudges against
+					// Root-only goal lifecycle command (mirror of swarm_set_goal / swarm_mark_goal_done).
+					// Goal is the durable record the root's pump emits idle-streak nudges against
 					// (see docs/swarm/operations.md "Recovery nudges > Goal idle-streak nudge"). Setting a goal
 					// resets consecutiveNoResolveNudges + clears back-off. Marking done clears the entry.
-					if (currentAgentId() !== "orchestrator") {
-						ctx.ui.notify("goal is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+					if (currentAgentId() !== "root") {
+						ctx.ui.notify("goal is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning");
 						return;
 					}
 					const sub = rest.shift();
@@ -1190,7 +1190,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							ctx.ui.notify(`/swarm goal set --origin must be one of: ${[...GOAL_ORIGIN_VALUES].join(", ")}`, "warning");
 							return;
 						}
-						const newOrigin = (requestedOrigin ?? GOAL_ORIGIN_ORCHESTRATOR) as import("./goals.ts").GoalOrigin;
+						const newOrigin = (requestedOrigin ?? GOAL_ORIGIN_ROOT) as import("./goals.ts").GoalOrigin;
 						const requestedSetByScope = flags["set-by-scope"] ? String(flags["set-by-scope"]).trim() : undefined;
 						if (hasInterval && !parsedInterval?.ok) { ctx.ui.notify(`Usage: /swarm goal ${isUpdate ? "update" : "set"} [-i|--interval <time>] [<text>] (${parsedInterval?.error}; time accepts raw ms, s, m, h)`, "warning"); return; }
 						if (!isUpdate && !text) {
@@ -1264,7 +1264,7 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 								const guard = classifyGoalClearAuthority({
 									currentGoal: s.goal,
 									action: "replace",
-									actor: "orchestrator",
+									actor: "root",
 									params: { origin: newOrigin },
 								});
 								if (!guard.allowed) {
@@ -1272,7 +1272,7 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 										goalId: s.goal.id,
 										origin: guard.origin,
 										reason: guard.reason,
-										actor: "orchestrator",
+										actor: "root",
 										action: "replace",
 										via: "command",
 									});
@@ -1301,7 +1301,7 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 								id: goalId,
 								text,
 								setAt: ts,
-								setBy: "orchestrator",
+								setBy: "root",
 								origin: newOrigin,
 								setByScope: requestedSetByScope,
 								consecutiveNoResolveNudges: 0,
@@ -1336,7 +1336,7 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 							const guard = classifyGoalClearAuthority({
 								currentGoal: s.goal,
 								action: "clear",
-								actor: "orchestrator",
+								actor: "root",
 								params: { approvedByUser: forceUserClear },
 							});
 							if (!guard.allowed) {
@@ -1344,7 +1344,7 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 									goalId: s.goal.id,
 									origin: guard.origin,
 									reason: guard.reason,
-									actor: "orchestrator",
+									actor: "root",
 									action: "clear",
 									via: "command",
 									approvedByUser: forceUserClear,

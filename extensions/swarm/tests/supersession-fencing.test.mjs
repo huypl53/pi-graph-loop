@@ -255,7 +255,7 @@ console.log("C7/C8: KR5 rec-level trace + lateResultRejectionCount stamping");
 	const fs = await import("node:fs");
 	const reconcileSrc = fs.readFileSync(join(here, "..", "src/reconcile.ts"), "utf8");
 
-	// Extract the rec.superseded block from isActionableOrchestratorMessage (best-effort regex).
+	// Extract the rec.superseded block from isActionableRootMessage (best-effort regex).
 	const blockMatch = reconcileSrc.match(/if \(rec\.superseded\) \{([\s\S]*?)\n\t\}/);
 	const block = blockMatch ? blockMatch[1] : "";
 
@@ -270,9 +270,9 @@ console.log("C7/C8: KR5 rec-level trace + lateResultRejectionCount stamping");
 	ok("C7.c: rec-level guard does NOT have outer try/catch swallowing all errors (KR5)", !hasOuterTryCatchSwallow, "");
 
 	// C7.d: the function signature accepts a `Paths` parameter so the real path can be threaded in.
-	const sigMatch = reconcileSrc.match(/export function isActionableOrchestratorMessage\(([\s\S]*?)\)/);
+	const sigMatch = reconcileSrc.match(/export function isActionableRootMessage\(([\s\S]*?)\)/);
 	const sig = sigMatch ? sigMatch[1] : "";
-	ok("C7.d: isActionableOrchestratorMessage signature accepts Paths parameter", /p\??:\s*Paths/.test(sig), `sig: ${sig.slice(0, 200)}`);
+	ok("C7.d: isActionableRootMessage signature accepts Paths parameter", /p\??:\s*Paths/.test(sig), `sig: ${sig.slice(0, 200)}`);
 
 	// C7.e: when traceTask fails, a `swarm.rec_late_result_trace_failed` trace is emitted (KR5
 	// surface the failure instead of silent swallow).

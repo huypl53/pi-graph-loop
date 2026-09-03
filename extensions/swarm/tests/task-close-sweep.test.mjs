@@ -14,7 +14,7 @@
  *
  * ISOLATION CONTRACT — SCRATCH CWD ONLY (Phase-2 postmortem fix):
  *   - mkdtemp creates a unique temp dir; cwd passed to every tool is `scratch`, NEVER process.cwd().
- *   - PI_SWARM_AGENT_ID + PI_SWARM_IS_ORCHESTRATOR env vars restored at file tail.
+ *   - PI_SWARM_AGENT_ID + PI_SWARM_IS_ROOT env vars restored at file tail.
  *   - process.cwd() never used; the repo's real .pi/swarm state is never touched.
  *
  * Run: node extensions/swarm/task-close-sweep.test.mjs
@@ -59,10 +59,10 @@ async function identityExists(agentId) {
 
 // ===== loadExtension with deterministic identity + isolation =====
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const ORIG_PI_SWARM_IS_ORCHESTRATOR = process.env.PI_SWARM_IS_ORCHESTRATOR;
-async function loadExtension({ identity = "orchestrator", isOrchestrator = true } = {}) {
+const ORIG_PI_SWARM_IS_ROOT = process.env.PI_SWARM_IS_ROOT;
+async function loadExtension({ identity = "root", isRoot = true } = {}) {
 	process.env.PI_SWARM_AGENT_ID = identity;
-	process.env.PI_SWARM_IS_ORCHESTRATOR = isOrchestrator ? "1" : "";
+	process.env.PI_SWARM_IS_ROOT = isRoot ? "1" : "";
 	const tools = {};
 	const commands = {};
 	const handlers = {};
@@ -86,7 +86,7 @@ async function loadExtension({ identity = "orchestrator", isOrchestrator = true 
 	return { pi, tools, commands, handlers, ctx };
 }
 
-// ===== fixture: a tiny graph that the orchestrator can drive to terminal with one update =====
+// ===== fixture: a tiny graph that the root can drive to terminal with one update =====
 function tinyGraph() {
 	return {
 		nodes: {
@@ -124,7 +124,7 @@ async function seedAgentRecord(agentId, { activeTaskIds = [], spawnedForTaskId, 
 	}
 	const baseAgent = {
 		id: agentId, role: agentId, roleKind, roleKindExplicit: roleKind !== "worker",
-		capabilities: [], activeTaskIds: [...activeTaskIds], maxConcurrentTasks: roleKind === "orchestrator" ? 99 : 1,
+		capabilities: [], activeTaskIds: [...activeTaskIds], maxConcurrentTasks: roleKind === "root" ? 99 : 1,
 		status, runtimeStatus: "idle", health: "healthy",
 		tmuxSession: "test", tmuxWindow: agentId, tmuxTarget: `test:${agentId}.0`,
 		model: "glm-5.1", provider: "zai-coding-cn",
@@ -163,7 +163,7 @@ function withKeep(value) {
 }
 function resetIsolation() {
 	process.env.PI_SWARM_AGENT_ID = ORIG_PI_SWARM_AGENT_ID;
-	process.env.PI_SWARM_IS_ORCHESTRATOR = ORIG_PI_SWARM_IS_ORCHESTRATOR;
+	process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 	withKeep(ORIG_KEEP);
 }
 
@@ -176,7 +176,7 @@ function resetIsolation() {
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	withKeep(undefined); // opt-out NOT set -> sweep runs
 
-	const { tools, ctx } = await loadExtension({ identity: "orchestrator", isOrchestrator: true });
+	const { tools, ctx } = await loadExtension({ identity: "root", isRoot: true });
 	const call = async (name, params) => tools[name].execute("c1", params, undefined, undefined, ctx(params));
 
 	// Seed a worker stamped spawnedForTaskId with activeTaskIds=[taskId].
@@ -193,7 +193,7 @@ function resetIsolation() {
 	const st = await readStateFile();
 	ok("implementer-01 stopped by sweep", st.agents["implementer-01"]?.status === "stopped");
 	ok("reviewer-01 stopped by sweep",   st.agents["reviewer-01"]?.status === "stopped");
-	ok("orchestrator untouched",         st.agents["orchestrator"]?.status === "running");
+	ok("root untouched",         st.agents["root"]?.status === "running");
 
 	// Trace shape: 2 per-agent + 1 summary (the terminal transition is site #4 — single sweep).
 	const events = await readGlobalEvents();
@@ -234,7 +234,7 @@ function resetIsolation() {
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	withKeep(undefined);
 
-	const { tools, ctx } = await loadExtension({ identity: "orchestrator", isOrchestrator: true });
+	const { tools, ctx } = await loadExtension({ identity: "root", isRoot: true });
 	const call = async (name, params) => tools[name].execute("c2", params, undefined, undefined, ctx(params));
 
 	const taskA = "task-sweep-s2a";
@@ -283,7 +283,7 @@ function resetIsolation() {
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	withKeep(undefined);
 
-	const { tools, ctx } = await loadExtension({ identity: "orchestrator", isOrchestrator: true });
+	const { tools, ctx } = await loadExtension({ identity: "root", isRoot: true });
 	const call = async (name, params) => tools[name].execute("c3", params, undefined, undefined, ctx(params));
 
 	const taskId = "task-sweep-s3";
@@ -316,7 +316,7 @@ function resetIsolation() {
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	withKeep("1");
 
-	const { tools, ctx } = await loadExtension({ identity: "orchestrator", isOrchestrator: true });
+	const { tools, ctx } = await loadExtension({ identity: "root", isRoot: true });
 	const call = async (name, params) => tools[name].execute("c4", params, undefined, undefined, ctx(params));
 
 	const taskId = "task-sweep-s4";
@@ -348,7 +348,7 @@ function resetIsolation() {
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	withKeep(undefined);
 
-	const { tools, ctx } = await loadExtension({ identity: "orchestrator", isOrchestrator: true });
+	const { tools, ctx } = await loadExtension({ identity: "root", isRoot: true });
 	const call = async (name, params) => tools[name].execute("c5", params, undefined, undefined, ctx(params));
 
 	const taskId = "task-sweep-s5";
@@ -395,7 +395,7 @@ function resetIsolation() {
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	withKeep(undefined);
 
-	const { tools, ctx } = await loadExtension({ identity: "orchestrator", isOrchestrator: true });
+	const { tools, ctx } = await loadExtension({ identity: "root", isRoot: true });
 	const call = async (name, params) => tools[name].execute("c6", params, undefined, undefined, ctx(params));
 
 	const taskId = "task-sweep-s6";
@@ -435,14 +435,14 @@ function resetIsolation() {
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	withKeep(undefined);
 
-	const { tools, ctx } = await loadExtension({ identity: "orchestrator", isOrchestrator: true });
+	const { tools, ctx } = await loadExtension({ identity: "root", isRoot: true });
 	const call = async (name, params) => tools[name].execute("c7", params, undefined, undefined, ctx(params));
 
 	const taskId = "task-sweep-s7";
 	await createTask(call, taskId);
 	await seedAgentRecord("cancel-worker-01", { activeTaskIds: [taskId], spawnedForTaskId: taskId });
 
-	// Cancel the task: swarm_update_task(cancelTask=true) is the orchestrator-explicit terminal path.
+	// Cancel the task: swarm_update_task(cancelTask=true) is the root-explicit terminal path.
 	await call("swarm_update_task", { taskId, nodeId: "implement", force: true, cancelTask: true, cwd: scratch });
 	// A second cancel attempt is ALLOWED by the cancel fence (redundant cancel on an already-cancelled
 	// task is a documented no-op), but the sweep MUST NOT double-stop: the worker is already
@@ -474,7 +474,7 @@ function resetIsolation() {
 	const st = {
 		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
 		agents: {
-			"orchestrator": { id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", roleKindExplicit: true, capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "x", provider: "y", cwd: scratch, mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", createdAt: ts, updatedAt: ts },
+			"root": { id: "root", role: "root", roleKind: "root", roleKindExplicit: true, capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "x", provider: "y", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: ts, updatedAt: ts },
 			"helper-worker": { id: "helper-worker", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: ["task-x"], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "helper-worker", tmuxTarget: "test:helper-worker.0", model: "x", provider: "y", cwd: scratch, mailbox: ".pi/swarm/mailboxes/helper-worker.jsonl", createdAt: ts, updatedAt: ts, spawnedForTaskId: "task-x" },
 		},
 		delivered: {},
@@ -483,7 +483,7 @@ function resetIsolation() {
 	const r1 = await sweepTaskWorkersLocked(fakePi, scratch, st, "task-x");
 	ok("first sweep returns object outcome", typeof r1 === "object" && Array.isArray(r1.stopped));
 	ok("first sweep stops the eligible worker", r1.stopped.includes("helper-worker"));
-	ok("first sweep ignores orchestrator (skipped)", r1.skipped.some((s) => s.agentId === "orchestrator" && s.reason === "orchestrator"));
+	ok("first sweep ignores root (skipped)", r1.skipped.some((s) => s.agentId === "root" && s.reason === "root"));
 	const r2 = await sweepTaskWorkersLocked(fakePi, scratch, st, "task-x");
 	ok("second sweep returns same shape", typeof r2 === "object" && Array.isArray(r2.stopped));
 	ok("second sweep stops ZERO agents (idempotent)", r2.stopped.length === 0, `got ${r2.stopped.length}`);

@@ -84,7 +84,7 @@ async function writeEvents(scratch, events) {
 	await writeFile(join(scratch, ".pi/swarm/traces/events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
 }
 
-function buildSwarmMsg({ id, from = "orchestrator", to, priority = "normal", subject = "test", body = "test body" }) {
+function buildSwarmMsg({ id, from = "root", to, priority = "normal", subject = "test", body = "test body" }) {
 	return {
 		id,
 		swarmId: "test",

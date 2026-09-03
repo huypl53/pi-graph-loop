@@ -178,7 +178,7 @@ def render_iterations(ctx, args):
     return "\n".join(out)
 
 
-ROLE_LANE_ORDER = ["planner", "implementer", "reviewer", "tester", "orchestrator"]
+ROLE_LANE_ORDER = ["planner", "implementer", "reviewer", "tester", "root"]
 
 
 def _linear_nodes(task):

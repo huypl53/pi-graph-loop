@@ -69,8 +69,8 @@ export function agentIsEffectivelyAlive(a: { status?: string; runtimeStatus?: st
 }
 
 export function allEffectiveIdleAgents(st: SwarmState, nowMs: number) {
-	const idleAgents = Object.values(st.agents).filter((a) => a.id !== "orchestrator" && agentIsEffectivelyAlive(a, nowMs));
-	// Issue 85 (task-202608310905, bug #3): when zero effective non-orchestrator agents remain (post-prune,
+	const idleAgents = Object.values(st.agents).filter((a) => a.id !== "root" && agentIsEffectivelyAlive(a, nowMs));
+	// Issue 85 (task-202608310905, bug #3): when zero effective non-root agents remain (post-prune,
 	// all stopped, all stale), there's nothing to nudge about. Vacuous-idle: report allIdle=false so the
 	// pump short-circuits the goal nudge with reason "no_live_workers" (see evaluateIdleGoalNudgeLocked
 	// below) instead of firing forever into an empty swarm. `vacuous: true` lets callers distinguish
@@ -168,11 +168,11 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 				if (slot?.nextStallNudgeAt) { delete slot.nextStallNudgeAt; stallSlotsReset.push(slot.taskId); }
 			}
 			// === R23B (2026-09-02) — stamp the cause of every anchor-clearing ===
-			// The cap-branch reset is gated on `lastEpochBusyAgents?.some(id => id !== "orchestrator")`
-			// so the breaker can tell a worker-driven fresh epoch (qualifies) from orchestrator-turn
+			// The cap-branch reset is gated on `lastEpochBusyAgents?.some(id => id !== "root")`
+			// so the breaker can tell a worker-driven fresh epoch (qualifies) from root-turn
 			// churn that briefly flipped a worker busy/idle (does NOT qualify). `busyAgents` is the
 			// same array already passed to the `idle.epoch.reset` trace below; persisting it lets the
-			// next fresh-epoch evaluator distinguish worker-busy breaks from orchestrator-driven
+			// next fresh-epoch evaluator distinguish worker-busy breaks from root-driven
 			// ones without a second scan over `st.agents`.
 			const busyAgents = idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id);
 			await trace(p, "idle.epoch.reset", {
@@ -205,10 +205,10 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 		// function (when `if (!idleState.allIdleSinceAt)` was true and the goal was
 		// saturated). That edge site never consulted the `r23LastEpochAnchor` memo, so
 		// it fired on EVERY busy→idle edge while saturated — defeating MAX+backoff in
-		// real sessions where `agent_settled` re-stamps the anchor at every orchestrator
+		// real sessions where `agent_settled` re-stamps the anchor at every root
 		// turn boundary. Live: implementer lane 2026-09-02T15:19:06..15:21:46Z —
 		// `goal.nudge.saturation_reset_on_epoch` ×12, `goal.idle_nudge` seq 4→38,
-		// `mailbox.orchestrator_pump_stuck_escalated` ×34. The cap branch (memo-checked)
+		// `mailbox.root_pump_stuck_escalated` ×34. The cap branch (memo-checked)
 		// is now the SOLE reset site; the edge site only stamps the memo.
 		//
 		// The fresh nudge still emits on the first eligible tick past the cap because
@@ -230,7 +230,7 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 		// Clear sites that stamp:
 		//   - busy edge in `updateIdleEpochLocked` (`!allIdle` branch, above) → stamps real worker
 		//     agent ids → legitimate R23 re-arm preserved.
-		//   - `hooks.ts` turn_start → now stamps `["orchestrator"]` → orchestrator-turn churn
+		//   - `hooks.ts` turn_start → now stamps `["root"]` → root-turn churn
 		//     rejected by the breaker guard.
 		// Anything else (legacy state file, fresh seed) → breaker absent → absent→reset default
 		// (probe C semantics preserved).
@@ -241,7 +241,7 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 		// in production (R23 starvation returns). Clear at mint instead: the first
 		// atCap-eligible tick past the cap then sees `memo !== anchor` → reset+emit exactly
 		// once per fresh epoch; later ticks in the same epoch see `memo === anchor` → no
-		// reset; orchestrator-turn churn anchors are also rejected by the worker-breaker
+		// reset; root-turn churn anchors are also rejected by the worker-breaker
 		// guard above. Probe evidence: tester-memo-probe.{mjs,out.txt}.
 		delete (idleState as { r23LastEpochAnchor?: string }).r23LastEpochAnchor;
 		await trace(p, "idle.epoch.started", { allIdleSinceAt: idleState.allIdleSinceAt, idleAgents: idleAgents.length }).catch(() =>{});
@@ -269,7 +269,7 @@ async function hasActionableGraphWork(p: Paths, excludeTerminalTaskOrphans?: boo
 			// Path A is defined by NON-TERMINAL task + actionable ready/unassigned node.
 			if (!isStallNudgeEligibleTaskStatus(task.status)) continue;
 			// Row R19 (Fix B): when excludeTerminalTaskOrphans is true, skip terminal/abandoned tasks
-			// whose orphan rework nodes can never auto-advance without orchestrator force-reopen.
+			// whose orphan rework nodes can never auto-advance without root force-reopen.
 			// The graph-stall call site (Row 75) preserves `failed` admission; only the goal-fallback
 			// call site excludes terminal tasks.
 			if (excludeTerminalTaskOrphans && isTerminalOrAbandonedTaskStatus(task.status)) continue;
@@ -289,15 +289,15 @@ async function hasActionableGraphWork(p: Paths, excludeTerminalTaskOrphans?: boo
 }
 
 // === Issue 18: Swarm goal + idle-streak nudge ===
-// When the orchestrator has set a goal AND every non-orchestrator agent is runtimeStatus="idle" AND
+// When the root has set a goal AND every non-root agent is runtimeStatus="idle" AND
 // no task nodes are assigned/in_progress, this function emits an idempotent structured nudge to the
-// orchestrator's own mailbox. Anti-loop: the consecutiveNoResolveNudges counter resets on ANY
-// orchestrator turn that ends stopReason="stop" (hooks.ts turn_end branch — runs after the model-
+// root's own mailbox. Anti-loop: the consecutiveNoResolveNudges counter resets on ANY
+// root turn that ends stopReason="stop" (hooks.ts turn_end branch — runs after the model-
 // pool swap branch per binding C-2). Once the counter reaches MAX_CONSECUTIVE_NUDGES_DEFAULT, the
 // pump enters a GOAL_NUDGE_BACKOFF_TICKS-tick back-off: each subsequent tick decrements the counter
 // without emitting; the tick that hits 0 does NOT emit (it is the back-off exit gate); the FOLLOWING
 // tick may re-enter the max-nudges branch and re-arm the back-off. Idle predicate filters out the
-// orchestrator pseudo-agent (matches the issue 18 brief + plan §3.4). MUST be called under the
+// root pseudo-agent (matches the issue 18 brief + plan §3.4). MUST be called under the
 // same withLock(p) the pump already holds; never acquire the lock inside this function.
 //
 // Exported for direct unit testing by idle-nudge.test.mjs. Tests pass synthetic nowMs / st /
@@ -320,22 +320,22 @@ export async function evaluateIdleGoalNudgeLocked(
 	// Issue 85 (task-202608310905, bug #2 + bug #3): `updateIdleEpochLocked` (via `allEffectiveIdleAgents`)
 	// now also flips `allIdle=false` when (a) zero effective agents remain (vacuous — bug #3) or (b) any
 	// effective agent carries an assignment pointer (bug #2). The pump evaluator distinguishes the two
-	// with distinct reasons + traces so the orchestrator sees WHY the nudge was held.
+	// with distinct reasons + traces so the root sees WHY the nudge was held.
 	const idleState: SwarmIdleNudgeState = st.idleNudgeState ||= {};
 	const epoch = await updateIdleEpochLocked(p, st, nowMs);
 	const { idleAgents, allIdle, vacuous } = epoch;
 	if (vacuous) {
-		// Bug #3 evidence: hold the goal nudge when zero effective non-orchestrator agents remain.
+		// Bug #3 evidence: hold the goal nudge when zero effective non-root agents remain.
 		// R14 Fix B (2026-09-02): trace fires only on the `idleAgents.length > 0` → `0`
 		// transition (the once-per-transition promise in the comment above was never
 		// enforced — the code fired every tick of vacuous state, producing 7_278 spam
 		// traces for goal-1788266039522-6eae40 over ~16h). The transition flag lives on
-		// `idleNudgeState.lastWasVacuous` so it persists across the swarm→orchestrator
+		// `idleNudgeState.lastWasVacuous` so it persists across the swarm→root
 		// restarts. Cleared in updateIdleEpochLocked's not-all-idle branch (the
 		// pool-recovered edge).
 		//
 		// R16 Fix B (2026-09-02): decouple the dedupe flag's persistence from the pump tail
-		// writeState (reconcile.ts:1929). Even after the orchestrator /reload's, the
+		// writeState (reconcile.ts:1929). Even after the root /reload's, the
 		// `lastWasVacuous` + `lastPoolEmptyEscalationAt` mutations MUST survive an immediate
 		// readState. We persist via the dedicated writeState at the end of this vacuous
 		// branch (added below) so the dedupe survives independently of whether the pump
@@ -347,21 +347,21 @@ export async function evaluateIdleGoalNudgeLocked(
 			await trace(p, "goal.nudge.held_no_live_workers", { goalId: goal.id, effectiveAgentCount: 0 }).catch(() => {});
 		}
 		idleStateVac.lastWasVacuous = true;
-		// R14 Fix C (2026-09-02): bounded, durable, high-priority orchestrator recovery
+		// R14 Fix C (2026-09-02): bounded, durable, high-priority root recovery
 		// nudge for an active USER-ORIGIN goal whose pool is genuinely vacuous. Cooldown-
 		// bounded by NOTIFY_DEFAULT_COOLDOWN_MS (5min). Stops emitting when the goal
 		// clears/cancels (consult `st.goal` at the top of the evaluator; the no_goal
 		// guard short-circuits before this branch). Bypasses idle gates via the R13 P0
-		// high-priority surface — the orchestrator's tmuxTarget is `unknown` so the
+		// high-priority surface — the root's tmuxTarget is `unknown` so the
 		// message is durably enqueued in the mailbox and the pump surfaces it once the
-		// orchestrator is idle (R13 P0 path; unchanged).
+		// root is idle (R13 P0 path; unchanged).
 		if (goal.origin === "user" || goal.origin === "system" || goal.origin === "batch") {
 			const cooldownUntilMs = idleStateVac.lastPoolEmptyEscalationAt
 				? new Date(idleStateVac.lastPoolEmptyEscalationAt).getTime() + NOTIFY_DEFAULT_COOLDOWN_MS
 				: 0;
 			if (nowMs >= cooldownUntilMs) {
 				const poolDiag = Object.values(st.agents)
-					.filter((a) => a.id !== "orchestrator")
+					.filter((a) => a.id !== "root")
 					.map((a) => {
 						const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
 						const ageSec = Number.isFinite(hb) ? Math.round((nowMs - hb) / 1000) : null;
@@ -377,7 +377,7 @@ export async function evaluateIdleGoalNudgeLocked(
 				idleStateVac.lastPoolEmptyEscalationAt = new Date(nowMs).toISOString();
 				// === R16 Fix C (2026-09-02): action-oriented nudge body ===
 				// Replace the generic diagnostic dump with condition-specific next-action hints
-				// per the orchestrator's note: "Nudges must be action-oriented per user direction:
+				// per the root's note: "Nudges must be action-oriented per user direction:
 				// condition-specific next-action hints." The poolDiag already classifies agents
 				// by tmuxAlive/runtimeStatus/heartbeatAgeSec; we classify the actionable subset
 				// into the four hint buckets and join the relevant ones into the body.
@@ -402,7 +402,7 @@ export async function evaluateIdleGoalNudgeLocked(
 				hints.push(`Or scope a step: \`swarm_create_task(title=..., goal=..., workflow=feature-dev)\` and assign to a fresh worker.`);
 				hints.push(`Or clear the goal if it is no longer relevant: \`swarm_mark_goal_done(goalId="${goal.id}")\`.`);
 				await deliverMessageLocked(pi, cwd, p, st, {
-					to: "orchestrator",
+					to: "root",
 					priority: "high",
 					subject: `Goal escalation: worker pool empty (goal ${goal.id})`,
 					body: `User-origin goal is held with zero effective live workers (cooldown: ${Math.round(NOTIFY_DEFAULT_COOLDOWN_MS / 1000)}s).\n` +
@@ -420,7 +420,7 @@ export async function evaluateIdleGoalNudgeLocked(
 
 		// R16 Fix B (2026-09-02): persist the vacuous-branch mutations IMMEDIATELY so the
 		// dedupe flag + cooldown timestamp survive an immediate readState (e.g., an
-		// orchestrator /reload right after the pump). The pump tail writeState at
+		// root /reload right after the pump). The pump tail writeState at
 		// reconcile.ts:1929 still runs (it's the source of truth for ALL pump mutations),
 		// but this explicit write closes the persistence gap discovered by R16: the
 		// pre-R14-+-no-tail shape meant a re-entering pump saw lastWasVacuous=undefined
@@ -554,7 +554,7 @@ export async function evaluateIdleGoalNudgeLocked(
 		// === R23 (2026-09-02) — post-saturation fresh-epoch re-arm (cap branch) ===
 		// When the current all-idle anchor POSTDATES the last goal emission, the prior epoch's
 		// nudges are already invalidated at surface time (`idle_epoch_advanced`, R21) and no
-		// orchestrator turn_end resolve could fire while the floor was starved (the cap loop
+		// root turn_end resolve could fire while the floor was starved (the cap loop
 		// emits nothing, so there was no turn to resolve) — the "unresolved" count is stale
 		// saturation carried across an epoch boundary (live 2026-09-02T14:44:37..14:45:17Z,
 		// goal goal-1788350610025-7efafe: backoff.skip → backoff_just_exhausted → max_nudges
@@ -565,12 +565,12 @@ export async function evaluateIdleGoalNudgeLocked(
 		//
 		// === R23B (2026-09-02) — worker-breaker guard ===
 		// The reset is ONLY applied when the most recent anchor-clearing busy edge was
-		// caused by a WORKER (any busy agent id !== "orchestrator"). This stops orchestrator-
+		// caused by a WORKER (any busy agent id !== "root"). This stops root-
 		// turn churn (the worker briefly flipping busy between turns, then back to idle)
 		// from minting a fresh anchor that defeats MAX+backoff. Live storm:
 		// 2026-09-02T15:19:06..15:21:46Z — reset ×12, seq 4→38. With this guard, only the
 		// first edge (worker-a taking the R23 incident's task) qualifies; later
-		// orchestrator-churn edges are rejected and the cap+backoff loop re-engages.
+		// root-churn edges are rejected and the cap+backoff loop re-engages.
 		const anchorR23 = idleState.allIdleSinceAt ?? null;
 		const memoR23 = idleState;
 		const lastEmitR23 = idleState.lastGoalNudgeAt ? Date.parse(idleState.lastGoalNudgeAt) : (goal.lastNudgeAt ? Date.parse(goal.lastNudgeAt) : NaN);
@@ -597,10 +597,10 @@ export async function evaluateIdleGoalNudgeLocked(
 		// ONLY edge that clears the anchor). Absent (== legacy state, never seen a busy
 		// edge) → the R23 incident default is to RESET, matching pre-R23B behavior for
 		// uninterrupted no-resolve epochs that crossed a worker break. Present and
-		// contains ONLY orchestrator ids → REJECT (storm guard). Present and contains a
-		// non-orchestrator id → worker-driven break, RESET.
+		// contains ONLY root ids → REJECT (storm guard). Present and contains a
+		// non-root id → worker-driven break, RESET.
 		const breakerAgents = idleState.lastEpochBusyAgents;
-		const workerCaused = !breakerAgents || breakerAgents.some((id) => id !== "orchestrator");
+		const workerCaused = !breakerAgents || breakerAgents.some((id) => id !== "root");
 		if (anchorIsFreshR23 && notYetAppliedR23 && workerCaused) {
 			await trace(p, "goal.nudge.saturation_reset_on_epoch", {
 				goalId: goal.id,
@@ -640,12 +640,12 @@ export async function evaluateIdleGoalNudgeLocked(
 	// same tick / streak (seq only advances on a successful emit), while a fresh nudge gets a fresh slot.
 	const nudgeSeq = (goal.nudgeSeq ?? 0) + 1;
 	const key = formatNotifyKey(NOTIFY_KEY_GOAL_IDLE_NUDGE, { goalId: goal.id, seq: String(nudgeSeq) });
-	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key)) {
+	if (findIdempotentMessage(st, "root", "root", key)) {
 		return { emitted: false, reason: "duplicate_suppressed" };
 	}
 
 	// Emit the nudge via the standard mailbox path. deliverMessageLocked mutates st (upserts the
-	// message record, appends to mailbox JSONL, returns { msg, delivery }). The orchestrator's own
+	// message record, appends to mailbox JSONL, returns { msg, delivery }). The root's own
 	// pump on the NEXT tick surfaces it to the TUI via the existing customType:"swarm-message" path.
 	const sinceSetMs = nowMs - new Date(goal.setAt).getTime();
 	const subjectText = goal.text.slice(0, 60);
@@ -656,13 +656,13 @@ export async function evaluateIdleGoalNudgeLocked(
 	const subject = `Idle streak: goal "${subjectText}" has no active work`;
 	const body =
 		`Goal ${goal.id} was set ${sinceSec}s ago: "${bodyText}".\n\n` +
-		`All ${idleCount} non-orchestrator agent(s) are runtimeStatus=idle and no task nodes are assigned/in_progress.\n\n` +
+		`All ${idleCount} non-root agent(s) are runtimeStatus=idle and no task nodes are assigned/in_progress.\n\n` +
 		`This is nudge ${nudgeNumber} of ${MAX_CONSECUTIVE_NUDGES_DEFAULT} before back-off.\n\n` +
 		`Action: either spawn / assign work to advance the goal, or mark it done:\n` +
 		`  swarm_mark_goal_done(goalId="${goal.id}")\n\n` +
 		`(Any reply you produce — including a plain /swarm status, a tool call, or an explanation — is treated as a "resolve": the consecutive counter resets and the back-off clears. Only a silent ignore keeps the counter climbing.)`;
 	await deliverMessageLocked(pi, cwd, p, st, {
-		to: "orchestrator",
+		to: "root",
 		subject,
 		body,
 		requiresAck: true,
@@ -699,7 +699,7 @@ export async function evaluateIdleGoalNudgeLocked(
 //   (1) At least one `in_progress` task exists in `p.tasksDir`.
 //   (2) At least one of its nodes has `status === "ready"` AND `assignee === undefined` (the same
 //       actionable set as `reconcileGraphAdvanceLocked`).
-//   (3) Every non-orchestrator agent is `runtimeStatus === "idle"`.
+//   (3) Every non-root agent is `runtimeStatus === "idle"`.
 //   (4) The task has existed for at least TASK_INITIAL_READY_GRACE_MS (60s).
 //   (5) NOT firing the existing `reconcileGraphAdvanceLocked` nudge for the same node already (any
 //       unacked record in the seq-suffixed NOTIFY_KEY_GRAPH_ADVANCE set for that (taskId, nodeId))

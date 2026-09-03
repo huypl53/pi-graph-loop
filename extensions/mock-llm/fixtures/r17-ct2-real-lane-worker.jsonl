@@ -1,12 +1,12 @@
 # r17-ct2-real-lane-worker: worker side of the CT-2 real-lane reproduction.
 #
-# The worker boots, emits a `swarm_send_message` tool call to the orchestrator
+# The worker boots, emits a `swarm_send_message` tool call to the root
 # with priority=normal and a body containing a 16-char nonce. This is the
 # L5 (fixture-model LLM consumption) boundary — the scripted fixture's turn
 # actually drives a real swarm tool call through the worker's pi process.
 #
 # Deterministic: scripted turn with delayMs gates; the tool call arguments
-# include the nonce so the orchestrator's transcript (and the durable
+# include the nonce so the root's transcript (and the durable
 # mailbox JSONL) carry the marker for L1/L5 correlation.
-{"name":"r17 worker turn 0 send normal-priority result to orchestrator","events":[{"type":"text","delayMs":20,"text":"R17 worker turn 0 — I am the r17-ct2-worker. I am sending a normal-priority result to the orchestrator with a known nonce so the lane can correlate L1 (durable append) and L5 (LLM consumption).","chunks":["R17 worker turn 0 ","— I am the r17-ct2-worker."," I am sending a normal-priority result ","to the orchestrator ","with a known nonce ","so the lane can correlate L1 (durable append) ","and L5 (LLM consumption)."]},{"type":"toolcall","delayMs":25,"name":"swarm_send_message","id":"r17-worker-send","arguments":{"to":"orchestrator","priority":"normal","subject":"r17-ct2-normal-result","body":"R17 retry worker result. NONCE=nonce-r17ct2-a1b2c3. The orchestrator's post-settled surface bound should fire pi.sendMessage once after agent_settled."}}]}
+{"name":"r17 worker turn 0 send normal-priority result to root","events":[{"type":"text","delayMs":20,"text":"R17 worker turn 0 — I am the r17-ct2-worker. I am sending a normal-priority result to the root with a known nonce so the lane can correlate L1 (durable append) and L5 (LLM consumption).","chunks":["R17 worker turn 0 ","— I am the r17-ct2-worker."," I am sending a normal-priority result ","to the root ","with a known nonce ","so the lane can correlate L1 (durable append) ","and L5 (LLM consumption)."]},{"type":"toolcall","delayMs":25,"name":"swarm_send_message","id":"r17-worker-send","arguments":{"to":"root","priority":"normal","subject":"r17-ct2-normal-result","body":"R17 retry worker result. NONCE=nonce-r17ct2-a1b2c3. The root's post-settled surface bound should fire pi.sendMessage once after agent_settled."}}]}
 {"name":"r17 worker turn 1 settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"R17 worker lane complete: I sent the normal-priority result and the fixture consumed its scripted turn.","chunks":["R17 worker lane complete: ","I sent the normal-priority result ","and the fixture consumed its scripted turn."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

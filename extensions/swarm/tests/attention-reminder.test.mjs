@@ -16,7 +16,7 @@
  *   5. Reassign/rework fences (new attempt -> eligible again; old attempt never)
  *   6. No response/ack debt (requiresAck:false / requiresResponse:false)
  *   7. Attention classification categories + evidence
- *   8. Orchestrator gate on /swarm remind and /swarm attention
+ *   8. Root gate on /swarm remind and /swarm attention
  *   9. Legacy compatibility (no attempt metadata -> readable, never reminder-eligible)
  *  10. No state mutation: task.json unchanged modulo the attempt.reminder record
  */
@@ -46,7 +46,7 @@ const pi = {
 	sendMessage: () => {},
 };
 
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
+process.env.PI_SWARM_AGENT_ID = "root";
 const mod = await import(join(here, "..", "index.ts"));
 mod.default(pi);
 
@@ -69,7 +69,7 @@ const ctx = () => ({
 	cwd: scratch, mode: "test", hasUI: false, isIdle: () => true,
 	ui: { notify: (text, level) => { notify = { text, level }; }, setStatus: () => {} },
 });
-const runSwarm = async (args, agentId = "orchestrator") => {
+const runSwarm = async (args, agentId = "root") => {
 	const prev = process.env.PI_SWARM_AGENT_ID;
 	process.env.PI_SWARM_AGENT_ID = agentId;
 	notify = null;
@@ -124,7 +124,7 @@ const buildTask = async (label) => {
 const ensureWorker = (agentId, roleKind) =>
 	awaitAs(agentId, "swarm_register_agent", { tmuxTarget: "unknown", role: `test ${roleKind}`, roleKind, id: agentId, inject: false });
 
-// workers register with themselves as sender id; do it once as orchestrator-run tool
+// workers register with themselves as sender id; do it once as root-run tool
 await ensureWorker("worker-a", "planner");
 await ensureWorker("impl-a", "implementer");
 
@@ -253,7 +253,7 @@ await ensureWorker("impl-a", "implementer");
 	const taskId = await buildTask("cancel");
 	await call("swarm_assign_task", { taskId, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 	ageAssignment(taskId, "plan");
-	await awaitAs("orchestrator", "swarm_update_task", { taskId, nodeId: "plan", cancelTask: true, force: true, cwd: scratch });
+	await awaitAs("root", "swarm_update_task", { taskId, nodeId: "plan", cancelTask: true, force: true, cwd: scratch });
 	let n = await runSwarm(`remind ${taskId} plan`);
 	ok("4a cancelled task refused", /NOT sent/.test(n.text), n?.text);
 	// (b) terminal node
@@ -299,7 +299,7 @@ await ensureWorker("impl-a", "implementer");
 	// move node to in_progress, then reassign to another planner
 	await ensureWorker("worker-b", "planner");
 	await awaitAs("worker-a", "swarm_update_task", { taskId, nodeId: "plan", status: "in_progress", attemptId: att1, cwd: scratch });
-	await awaitAs("orchestrator", "swarm_update_task", { taskId, nodeId: "plan", status: "blocked", force: true, cwd: scratch });
+	await awaitAs("root", "swarm_update_task", { taskId, nodeId: "plan", status: "blocked", force: true, cwd: scratch });
 	await call("swarm_assign_task", { taskId, nodeId: "plan", agentId: "worker-b", cwd: scratch });
 	const att2 = readNode(taskId, "plan").activeAttemptId;
 	ok("5b reassign mints new attempt", att2 && att2 !== att1);
@@ -326,7 +326,7 @@ await ensureWorker("impl-a", "implementer");
 // ============ 7. Attention classification ============
 {
 	const taskId = await buildTask("classify");
-	// unassigned ready -> unassigned_ready, orchestratorDecision
+	// unassigned ready -> unassigned_ready, rootDecision
 	let n = await runSwarm(`attention ${taskId}`);
 	ok("7a unassigned_ready surfaced", /unassigned_ready/.test(n.text), n?.text);
 	// assigned + aged + unacked -> ack_missing
@@ -351,15 +351,15 @@ await ensureWorker("impl-a", "implementer");
 	ok("7e no reminder_eligible after send", !/reminder_eligible/.test(n.text), n?.text);
 }
 
-// ============ 8. Orchestrator gate ============
+// ============ 8. Root gate ============
 {
 	const taskId = await buildTask("gate");
 	let n = await runSwarm(`remind ${taskId} plan`, "worker-a");
-	ok("8a remind refused for non-orchestrator", /orchestrator-only/.test(n.text), n?.text);
+	ok("8a remind refused for non-root", /root-only/.test(n.text), n?.text);
 	n = await runSwarm(`attention ${taskId}`, "worker-a");
-	ok("8b attention refused for non-orchestrator", /orchestrator-only/.test(n.text), n?.text);
+	ok("8b attention refused for non-root", /root-only/.test(n.text), n?.text);
 	n = await runSwarm(`remind ${taskId} plan`, "swarm-guest");
-	ok("8c remind refused for anonymous guest", /orchestrator-only/.test(n.text), n?.text);
+	ok("8c remind refused for anonymous guest", /root-only/.test(n.text), n?.text);
 }
 
 // ============ 9. Legacy compatibility ============

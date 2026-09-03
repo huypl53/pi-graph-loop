@@ -135,8 +135,8 @@ ok("stop planner --f -> --force", JSON.stringify(await vals("stop planner --f"))
 ok("stop planner --no -> --no-kill", JSON.stringify(await vals("stop planner --no")) === JSON.stringify(["stop planner --no-kill"]));
 
 // 14. role: agent, role-kind, then --kind value + flags.
-ok("role rev <space> -> role kinds", JSON.stringify((await vals("role reviewer ")).slice(0, 1)) === JSON.stringify(["role reviewer orchestrator"]));
-ok("role r planner --kind <space> -> role kinds", JSON.stringify((await vals("role reviewer planner --kind ")).slice(0, 1)) === JSON.stringify(["role reviewer planner --kind orchestrator"]));
+ok("role rev <space> -> role kinds", JSON.stringify((await vals("role reviewer ")).slice(0, 1)) === JSON.stringify(["role reviewer root"]));
+ok("role r planner --kind <space> -> role kinds", JSON.stringify((await vals("role reviewer planner --kind ")).slice(0, 1)) === JSON.stringify(["role reviewer planner --kind root"]));
 ok("role r planner <space> -> flags", JSON.stringify((await vals("role reviewer planner ")).sort()) === JSON.stringify(["role reviewer planner --caps", "role reviewer planner --kind"]));
 
 // 15. sendkey: agent then flags only (keys are free text).

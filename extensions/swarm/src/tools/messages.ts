@@ -7,8 +7,8 @@ import { currentAgentId } from "../session.ts";
 import { enqueueAndDeliver, readMailbox, validateResultMessage } from "../mailbox.ts";
 import { mailboxPath, paths, readState, trace, withLock, writeState } from "../state.ts";
 import { now, safeId, textResult } from "../utils.ts";
-import { pumpOrchestratorMailbox, reconcile } from "../reconcile.ts";
-import { heartbeatOrchestratorLeader, requireOrchestratorAuthority } from "../identity.ts";
+import { pumpRootMailbox, reconcile } from "../reconcile.ts";
+import { heartbeatRootLeader, requireRootAuthority } from "../identity.ts";
 import { tmux } from "../tmux.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
 import { ERR_RECONCILE_RATE_LIMITED, ERR_SCOPE_FORBIDDEN, PI_SWARM_MINIMAL_PROTOCOL, PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW } from "../constants.ts";
@@ -38,23 +38,23 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				const { msg, delivery } = await enqueueAndDeliver(pi, ctx.cwd, p, params);
 				const injected = Boolean(delivery?.delivered) && !delivery?.mailboxOnly;
 				const mailboxOnly = Boolean(delivery?.mailboxOnly);
-				// Mailbox-only is NORMAL for the orchestrator (by design it has no swarm tmux pane; its
+				// Mailbox-only is NORMAL for the root (by design it has no swarm tmux pane; its
 				// pump surfaces mailbox messages within one 5s tick). Reporting it as a bare "no tmux
-				// pane" warning made senders misread delivery as failed. Only non-orchestrator recipients
+				// pane" warning made senders misread delivery as failed. Only non-root recipients
 				// without a live pane get the genuine-warning phrasing.
 				const mailboxOnlyNote = mailboxOnly
-					? (msg.to === "orchestrator"
+					? (msg.to === "root"
 						// R15 P0 (2026-09-01): the previous text claimed a bounded ~5s surface; the
-						// orchestrator's own pump defers while the orchestrator is busy
+						// root's own pump defers while the root is busy
 						// (reconcile.ts:1617-1626) and the busy-suppression at reconcile.ts:1665
 						// drops the message from the surface plan entirely. The bounded promise
-						// is false for any worker result arriving while the orchestrator is
+						// is false for any worker result arriving while the root is
 						// mid-turn, which is the dominant real-world case. Be honest: the
 						// message is durably in the mailbox; no time-bound surface is
-						// promised; the surface fires when the orchestrator's own
+						// promised; the surface fires when the root's own
 						// `agent_settled` or its next idle watchdog tick processes the
 						// mailbox (R10-1 counter at the real pi.sendMessage boundary).
-						? " (mailbox-only delivery — NORMAL for the orchestrator: no tmux pane by design; durable in mailbox; no time-bound surface guarantee; surfaces when the orchestrator's own agent_settled fires or its next idle watchdog tick processes the mailbox)"
+						? " (mailbox-only delivery — NORMAL for the root: no tmux pane by design; durable in mailbox; no time-bound surface guarantee; surfaces when the root's own agent_settled fires or its next idle watchdog tick processes the mailbox)"
 						: " (mailbox-only delivery; recipient has no live tmux pane — will surface via reconcile/pump once it restarts)")
 					: "";
 				return textResult(`Sent ${msg.id} to ${msg.to}. Injected: ${injected}${mailboxOnlyNote}`, { message: msg, delivery });
@@ -72,7 +72,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			status: Type.String({ description: "Ack status: seen, processing, done, failed." }),
 			note: Type.Optional(Type.String({ description: "Short note about what happened." })),
 			resultMessageId: Type.Optional(Type.String({ description: "Optional reply/result message id produced from this message." })),
-			waive: Type.Optional(Type.Boolean({ description: "Orchestrator-only: accept ack of a superseded assignment as waived." })),
+			waive: Type.Optional(Type.Boolean({ description: "Root-only: accept ack of a superseded assignment as waived." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_ack_message", async () => {
@@ -85,7 +85,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 					const seededAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 					rec = {
 						id: params.messageId,
-						from: "orchestrator",
+						from: "root",
 						to: agentId,
 						status: "queued",
 						createdAt: seededAt,
@@ -97,18 +97,18 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 					st.messages[params.messageId] = rec;
 				}
 				if (!rec) throw new Error(`Unknown message id: ${params.messageId}`);
-				if (rec.to !== agentId && agentId !== "orchestrator") throw new Error(`Message ${params.messageId} belongs to ${rec.to}, not ${agentId}`);
+				if (rec.to !== agentId && agentId !== "root") throw new Error(`Message ${params.messageId} belongs to ${rec.to}, not ${agentId}`);
 				const ackAt = now();
 				const failed = params.status === "failed";
 				const done = params.status === "done";
-				const isOrch = agentId === "orchestrator";
+				const isOrch = agentId === "root";
 				// Supersede guard: a superseded assignment must not be (re)completed as valid work, and a
 				// progress ack is rejected so workers don't silently grind a stale assignment. `failed` is
-				// always allowed (informational). Orchestrator may waive to accept it as waived.
+				// always allowed (informational). Root may waive to accept it as waived.
 				if (rec.superseded) {
 					const progressing = params.status === "seen" || params.status === "processing" || done;
 					if (progressing && !(done && isOrch && params.waive)) {
-						throw new Error(`ASSIGNMENT_SUPERSEDED: message ${params.messageId} was superseded by ${rec.superseded.supersededBy}. Complete the current assignment instead. (Orchestrator may pass waive=true to accept.)`);
+						throw new Error(`ASSIGNMENT_SUPERSEDED: message ${params.messageId} was superseded by ${rec.superseded.supersededBy}. Complete the current assignment instead. (Root may pass waive=true to accept.)`);
 					}
 				}
 				const waiveAccept = Boolean(rec.superseded && isOrch && params.waive && (done || failed));
@@ -181,7 +181,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 		description: "Read pending or recent messages from a swarm agent mailbox JSONL. Defaults to the current PI_SWARM_AGENT_ID.",
 		promptGuidelines: ["Use `swarm_check_mailbox` when you are a swarm agent and need to read messages sent by other agents."],
 		parameters: Type.Object({
-			agentId: Type.Optional(Type.String({ description: "Agent id. Defaults to current PI_SWARM_AGENT_ID or orchestrator." })),
+			agentId: Type.Optional(Type.String({ description: "Agent id. Defaults to current PI_SWARM_AGENT_ID or root." })),
 			limit: Type.Optional(Type.Number({ description: "Maximum messages to return. Defaults to 20." })),
 			pendingOnly: Type.Optional(Type.Boolean({ description: "Only return messages not marked delivered in swarm state. Defaults to false." })),
 			markDelivered: Type.Optional(Type.Boolean({ description: "Mark returned messages as delivered/read. Defaults to false." })),
@@ -193,13 +193,13 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				const limit = Math.max(1, Math.min(100, params.limit || 20));
 				const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				// DELIBERATELY DECOUPLED from the orchestrator auto-pump: check_mailbox keys "already read" on the
+				// DELIBERATELY DECOUPLED from the root auto-pump: check_mailbox keys "already read" on the
 				// shared st.delivered[agentId] ledger, NOT on the pump's per-process surfaced set
-				// (st.orchestratorPumpSessions). Because pumpOrchestratorMailbox never reads
-				// st.delivered.orchestrator, a check_mailbox(markDelivered:true) here does not affect
-				// action-expected re-trigger logic. The ONE exception is explicit orchestrator reads of
+				// (st.rootPumpSessions). Because pumpRootMailbox never reads
+				// st.delivered.root, a check_mailbox(markDelivered:true) here does not affect
+				// action-expected re-trigger logic. The ONE exception is explicit root reads of
 				// informational messages (requiresAck:false): when the PM asks to mark those delivered here,
-				// stamp surfacedAt so a later orchestrator session does not replay already-read history.
+				// stamp surfacedAt so a later root session does not replay already-read history.
 				const ledgerIds = st.delivered[agentId] || [];
 				const deliveredIds = new Set(ledgerIds);
 				let messages = await readMailbox(p, agentId);
@@ -209,11 +209,11 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 					// Mark the whole matched set before applying the display limit so a small
 					// limit does not leave older pending messages to be reprocessed forever.
 					st.delivered[agentId] = Array.from(new Set([...ledgerIds, ...messages.map((m) => m.id)]));
-					if (agentId === "orchestrator") {
+					if (agentId === "root") {
 						const ts = now();
 						for (const m of messages) {
 							const rec = st.messages[m.id];
-							if (!rec || rec.to !== "orchestrator" || rec.requiresAck !== false || rec.surfacedAt) continue;
+							if (!rec || rec.to !== "root" || rec.requiresAck !== false || rec.surfacedAt) continue;
 							rec.surfacedAt = ts;
 							rec.updatedAt = ts;
 						}
@@ -286,7 +286,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			agentId: Type.Optional(Type.String({ description: "Optional agent id to reconcile only that agent's messages. Task sweep is skipped when scoped to one agent." })),
 			dryRun: Type.Optional(Type.Boolean({ description: "If true, inspect and report actions without modifying state. Defaults to false." })),
 			mark: Type.Optional(Type.Boolean({ description: "Persist the recomputed task.status when stored/derived drift is detected (repairs closure). Still never auto-fails nodes. Defaults to false." })),
-			scope: Type.Optional(Type.Union([Type.Literal("self"), Type.Literal("all")], { description: "Reconcile scope: 'self' restricts to the caller's mailbox; 'all' walks the whole swarm. Workers are forced to 'self'; orchestrator/admin may select either. Defaults to caller-tier (worker=self, orchestrator=all)." })),
+			scope: Type.Optional(Type.Union([Type.Literal("self"), Type.Literal("all")], { description: "Reconcile scope: 'self' restricts to the caller's mailbox; 'all' walks the whole swarm. Workers are forced to 'self'; root/admin may select either. Defaults to caller-tier (worker=self, root=all)." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_reconcile", async () => {
@@ -294,11 +294,11 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				// === Issue 25 Phase 2: worker rate-limit + scope gate (proposal §K.1, plan §2.6(b) + §2.10) ===
 				// Workers calling swarm_reconcile are forced to scope:"self" and rate-limited to
 				// PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS between invocations (declared Phase 1, consumed
-				// here in Phase 2). Orchestrator/admin are exempt. mark=true remains orchestrator-only
+				// here in Phase 2). Root/admin are exempt. mark=true remains root-only
 				// (existing authority check, unchanged). The rate-limit ledger is persisted on the
 				// agent record (lastReconcileDryRunAt) under the same withLock — no nested lock.
 				const me = currentAgentId();
-				const isOrch = me === "orchestrator";
+				const isOrch = me === "root";
 				const isAdmin = process.env.PI_SWARM_ADMIN_MODE === "1" || me === "admin";
 				const isPrivileged = isOrch || isAdmin;
 				const requestedScope = params.scope || (isPrivileged ? "all" : "self");
@@ -327,12 +327,12 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 						}
 					});
 				}
-				// mark=true persists task.status writes — an orchestrator-authoritative mutation gated
+				// mark=true persists task.status writes — an root-authoritative mutation gated
 				// on leader heartbeat (plan §4.4.7). Advisory paths (mark=false/dryRun=true) stay ungated.
 				if (params.mark) {
 					await withLock(p, async () => {
 						const st = await readState(p, ctx.cwd);
-						heartbeatOrchestratorLeader(st, Date.now(), process.pid, "reconcile_mark");
+						heartbeatRootLeader(st, Date.now(), process.pid, "reconcile_mark");
 						await writeState(p, st);
 					});
 				}

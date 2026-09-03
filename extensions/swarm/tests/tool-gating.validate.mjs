@@ -58,9 +58,9 @@ const runSessionStart = async () => {
 // Re-gating helper mirroring what `/swarm register here` does in command.ts (set env then gate).
 const { applySwarmToolGating } = await import(join(here, "..", "src", "tools", "gating.ts"));
 
-console.log("\n[1] GUEST session (no PI_SWARM_AGENT_ID, no PI_SWARM_IS_ORCHESTRATOR) loses swarm tools");
+console.log("\n[1] GUEST session (no PI_SWARM_AGENT_ID, no PI_SWARM_IS_ROOT) loses swarm tools");
 delete process.env.PI_SWARM_AGENT_ID;
-delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+delete process.env.PI_SWARM_IS_ROOT;
 await runSessionStart();
 ok("guest: zero swarm tools active", swarmActive().length === 0, `leftover=[${swarmActive().join(",")}]`);
 ok("guest: non-swarm tools preserved", nonSwarmSample().sort().join(",") === "bash,edit,read", `[${nonSwarmSample().join(",")}]`);
@@ -71,20 +71,20 @@ ok("guest: still zero swarm tools after re-run", swarmActive().length === 0);
 
 console.log("\n[3] REGISTERED AGENT session keeps swarm tools active");
 process.env.PI_SWARM_AGENT_ID = "worker";
-delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+delete process.env.PI_SWARM_IS_ROOT;
 await runSessionStart();
 ok("agent: swarm tools present", swarmActive().length === swarmCount, `${swarmActive().length}/${swarmCount}`);
 ok("agent: non-swarm tools preserved", nonSwarmSample().sort().join(",") === "bash,edit,read");
 
-console.log("\n[4] ORCHESTRATOR session (explicit opt-in) keeps swarm tools active");
+console.log("\n[4] ROOT session (explicit opt-in) keeps swarm tools active");
 delete process.env.PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+process.env.PI_SWARM_IS_ROOT = "1";
 await runSessionStart();
-ok("orchestrator: swarm tools present", swarmActive().length === swarmCount, `${swarmActive().length}/${swarmCount}`);
+ok("root: swarm tools present", swarmActive().length === swarmCount, `${swarmActive().length}/${swarmCount}`);
 
 console.log("\n[5] Opt-in escape hatch: guest -> register here -> tools re-enabled in-process");
 delete process.env.PI_SWARM_AGENT_ID;
-delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+delete process.env.PI_SWARM_IS_ROOT;
 await runSessionStart();                                  // back to guest: tools off
 ok("opt-in start: guest has no swarm tools", swarmActive().length === 0);
 process.env.PI_SWARM_AGENT_ID = "worker";                 // mimic `/swarm register here worker`
@@ -99,50 +99,50 @@ ok("scoped /swarm-* commands registered", ["swarm-agents", "swarm-tasks", "swarm
 const gateScratch = mkdtempSync(join(tmpdir(), "swarm-gate-prune-"));
 const mkGateCtx = () => ({ cwd: gateScratch, mode: "tui", hasUI: false, ui: { setStatus() {} }, isIdle: () => false });
 
-console.log("\n[7] ROLE-GATED destructive tools (Issue 10) reject non-orchestrator callers");
+console.log("\n[7] ROLE-GATED destructive tools (Issue 10) reject non-root callers");
 {
 	const savedId = process.env.PI_SWARM_AGENT_ID;
-	const savedOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+	const savedOrch = process.env.PI_SWARM_IS_ROOT;
 
 	// Seed a minimal swarm-state.json so prune/gc can read+write it.
 	await import("node:fs/promises").then((fs) => fs.mkdir(join(gateScratch, ".pi/swarm"), { recursive: true }));
-	const seedState = { version: 1, swarmId: "swarm-test", cwd: gateScratch, tmuxSession: "test", agents: {}, delivered: {}, messages: {}, orchestratorPumpSessions: {} };
+	const seedState = { version: 1, swarmId: "swarm-test", cwd: gateScratch, tmuxSession: "test", agents: {}, delivered: {}, messages: {}, rootPumpSessions: {} };
 	await import("node:fs/promises").then((fs) => fs.writeFile(join(gateScratch, ".pi/swarm/swarm-state.json"), JSON.stringify(seedState, null, 2)));
 
 	const pruneTool = toolDefs.get("swarm_prune");
 	const gcTool = toolDefs.get("swarm_gc");
 
-	// --- (a) non-orchestrator caller is rejected BEFORE any state mutation ---
+	// --- (a) non-root caller is rejected BEFORE any state mutation ---
 	process.env.PI_SWARM_AGENT_ID = "worker";
-	delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+	delete process.env.PI_SWARM_IS_ROOT;
 	const denyPrune = await pruneTool.execute("call", { dryRun: false, removeStopped: false, markDead: false }, undefined, undefined, mkGateCtx()).then(
 		() => "ALLOWED",
 		(err) => String(err?.message || err),
 	);
-	ok("non-orchestrator: swarm_prune rejected with ORCHESTRATOR_AUTHORITY_REQUIRED", denyPrune.includes("ORCHESTRATOR_AUTHORITY_REQUIRED"), denyPrune);
+	ok("non-root: swarm_prune rejected with ROOT_AUTHORITY_REQUIRED", denyPrune.includes("ROOT_AUTHORITY_REQUIRED"), denyPrune);
 	const denyGc = await gcTool.execute("call", { dryRun: false }, undefined, undefined, mkGateCtx()).then(
 		() => "ALLOWED",
 		(err) => String(err?.message || err),
 	);
-	ok("non-orchestrator: swarm_gc rejected with ORCHESTRATOR_AUTHORITY_REQUIRED", denyGc.includes("ORCHESTRATOR_AUTHORITY_REQUIRED"), denyGc);
+	ok("non-root: swarm_gc rejected with ROOT_AUTHORITY_REQUIRED", denyGc.includes("ROOT_AUTHORITY_REQUIRED"), denyGc);
 
-	// --- (b) orchestrator caller is allowed (dry-run default) ---
+	// --- (b) root caller is allowed (dry-run default) ---
 	delete process.env.PI_SWARM_AGENT_ID;
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const allowPrune = await pruneTool.execute("call", {}, undefined, undefined, mkGateCtx()).then(
 		(r) => r?.content?.[0]?.text || "ALLOWED",
 		(err) => `DENIED:${String(err?.message || err)}`,
 	);
-	ok("orchestrator: swarm_prune dry-run default succeeds", /Swarm Prune|dryRun/.test(allowPrune), allowPrune.slice(0, 80));
+	ok("root: swarm_prune dry-run default succeeds", /Swarm Prune|dryRun/.test(allowPrune), allowPrune.slice(0, 80));
 	const allowGc = await gcTool.execute("call", {}, undefined, undefined, mkGateCtx()).then(
 		(r) => r?.content?.[0]?.text || "ALLOWED",
 		(err) => `DENIED:${String(err?.message || err)}`,
 	);
-	ok("orchestrator: swarm_gc dry-run default succeeds", /dry run|applied/.test(allowGc), allowGc.slice(0, 80));
+	ok("root: swarm_gc dry-run default succeeds", /dry run|applied/.test(allowGc), allowGc.slice(0, 80));
 
 	// Restore
 	if (savedId === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = savedId;
-	if (savedOrch === undefined) delete process.env.PI_SWARM_IS_ORCHESTRATOR; else process.env.PI_SWARM_IS_ORCHESTRATOR = savedOrch;
+	if (savedOrch === undefined) delete process.env.PI_SWARM_IS_ROOT; else process.env.PI_SWARM_IS_ROOT = savedOrch;
 	rmSync(gateScratch, { recursive: true, force: true });
 }
 

@@ -6,14 +6,14 @@
 // `goal.clear_refused` trace and translating the refusal into the tool/command refusal result.
 //
 // Pre-policy default is LENIENT: a goal with no `origin` field (legacy swarms from before this
-// change) is treated as origin="orchestrator" for the guard. This keeps existing swarms working
+// change) is treated as origin="root" for the guard. This keeps existing swarms working
 // and makes the guard tight only on NEW user-origin goals going forward. New `swarm_set_goal`
-// calls stamp `origin` explicitly via the new optional `origin` parameter (default "orchestrator").
+// calls stamp `origin` explicitly via the new optional `origin` parameter (default "root").
 
-export type GoalOrigin = "user" | "orchestrator" | "system" | "batch";
+export type GoalOrigin = "user" | "root" | "system" | "batch";
 
 export const GOAL_ORIGIN_USER: GoalOrigin = "user";
-export const GOAL_ORIGIN_ORCHESTRATOR: GoalOrigin = "orchestrator";
+export const GOAL_ORIGIN_ROOT: GoalOrigin = "root";
 export const GOAL_ORIGIN_SYSTEM: GoalOrigin = "system";
 export const GOAL_ORIGIN_BATCH: GoalOrigin = "batch";
 
@@ -21,7 +21,7 @@ export const GOAL_ORIGIN_BATCH: GoalOrigin = "batch";
 // goal set. Kept as a Set so callers can validate against a single source of truth.
 export const GOAL_ORIGIN_VALUES: ReadonlySet<GoalOrigin> = new Set([
 	GOAL_ORIGIN_USER,
-	GOAL_ORIGIN_ORCHESTRATOR,
+	GOAL_ORIGIN_ROOT,
 	GOAL_ORIGIN_SYSTEM,
 	GOAL_ORIGIN_BATCH,
 ]);
@@ -35,7 +35,7 @@ export type RefuseClearReason =
 export type ClassifyGoalClearInput = {
 	currentGoal: Pick<{ id: string; origin?: GoalOrigin }, "id" | "origin"> | null | undefined;
 	action: "clear" | "replace";
-	actor: string;                 // agentId of the caller (orchestrator in practice)
+	actor: string;                 // agentId of the caller (root in practice)
 	params: {
 		approvedByUser?: boolean;  // explicit user-approval signal on clear
 		origin?: GoalOrigin;       // NEW origin being set on replace (informational only — the replace is what triggers the guard, not the new origin value)
@@ -47,8 +47,8 @@ export type ClassifyGoalClearResult =
 	| { allowed: false; reason: RefuseClearReason; origin?: GoalOrigin };
 
 export function classifyGoalClearAuthority(input: ClassifyGoalClearInput): ClassifyGoalClearResult {
-	const origin: GoalOrigin = input.currentGoal?.origin ?? GOAL_ORIGIN_ORCHESTRATOR;
-	// Non-user-origin goals are freely clearable / replaceable by the orchestrator.
+	const origin: GoalOrigin = input.currentGoal?.origin ?? GOAL_ORIGIN_ROOT;
+	// Non-user-origin goals are freely clearable / replaceable by the root.
 	if (origin !== GOAL_ORIGIN_USER) return { allowed: true, origin };
 	// User-origin clear with explicit approval: bypass.
 	if (input.action === "clear" && input.params.approvedByUser === true) return { allowed: true, origin };

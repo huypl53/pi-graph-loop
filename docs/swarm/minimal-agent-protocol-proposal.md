@@ -44,9 +44,9 @@ swarm_task_status
 
 Workers do not need direct lifecycle, tmux, graph-creation, repair, or explicit acknowledgement APIs.
 
-### 2.2 Orchestrator surface: thirteen tools
+### 2.2 Root surface: thirteen tools
 
-The normal orchestrator surface is **13 tools** (the five worker tools plus six orchestration tools plus two goal tools):
+The normal root surface is **13 tools** (the five worker tools plus six orchestration tools plus two goal tools):
 
 ```text
 # inherited worker tools (5)
@@ -62,14 +62,14 @@ swarm_list_agents
 swarm_spawn_agent
 swarm_create_task
 swarm_assign_task
-swarm_reconcile                    # mutation mode, orchestrator-only
+swarm_reconcile                    # mutation mode, root-only
 
 # no-task goal controls (2)
 swarm_set_goal
 swarm_mark_goal_done
 ```
 
-`swarm_reconcile` is one tool with role-dependent execution mode and is counted once in the active set. The exact normal orchestrator registry therefore has **12 distinct tool names**: 5 worker tools + 5 additional orchestration tools + 2 goal tools. The former eight-to-nine estimate is superseded; if reporting capabilities rather than registrations, dry-run and mutation reconcile are two separate capabilities (13 capabilities total).
+`swarm_reconcile` is one tool with role-dependent execution mode and is counted once in the active set. The exact normal root registry therefore has **12 distinct tool names**: 5 worker tools + 5 additional orchestration tools + 2 goal tools. The former eight-to-nine estimate is superseded; if reporting capabilities rather than registrations, dry-run and mutation reconcile are two separate capabilities (13 capabilities total).
 
 ### 2.3 Admin/debug surface: hidden by default
 
@@ -196,7 +196,7 @@ The proposal should **not** collapse these responsibilities:
 
 ### Phase 2 — simplify normal tool registry
 
-1. Hide `swarm_ack_message`, `swarm_task_message`, `swarm_next_nodes`, and `swarm_print_graph` from default worker/orchestrator registries.
+1. Hide `swarm_ack_message`, `swarm_task_message`, `swarm_next_nodes`, and `swarm_print_graph` from default worker/root registries.
 2. Register aliases only in compatibility/admin mode.
 3. Hide lifecycle/debug tools from default model-facing surfaces while keeping slash-command/operator access.
 
@@ -213,7 +213,7 @@ lifecycle derivations (`seenAt`/`respondedAt`/`terminalAt`/`mailboxDeliveredAt`)
 inside the existing `withLock`; reply auto-verify with supersession fencing
 (`message.reply_rejected_superseded`); terminal-update response validation +
 debt release in the same lock; worker reconcile rate-limit + `scope: self|all`;
-role-profile allowlists filtering the active tool set (worker 5 / orchestrator 12,
+role-profile allowlists filtering the active tool set (worker 5 / root 12,
 all 31 still registered); ACK banner removal from delivered bodies under gate=1.
 Validation: `minimal-protocol-authoritative.test.mjs` 36 assertions (deterministic
 under scratch-cwd isolation), shadow 34, migration 23, tsc clean. The tool-registry
@@ -235,7 +235,7 @@ The implementation must preserve these invariants:
 
 Suggested measurable acceptance criteria:
 
-- Default worker sees ≤4 swarm tools; default orchestrator sees ≤9.
+- Default worker sees ≤4 swarm tools; default root sees ≤9.
 - `swarm_ack_message` calls drop to zero in a fresh normal workflow.
 - A task pipeline closes successfully from assignment → report/result → node terminal state without an explicit ACK call.
 - An expected response that never materializes is surfaced by deadline/reconcile with actionable evidence.
@@ -250,7 +250,7 @@ Suggested measurable acceptance criteria:
 | Does any task tool set `processing`? | any tool; matching task/node only | Matching assignment/task only, with trace evidence. |
 | Does a reply always terminally satisfy the request? | yes; reply plus semantic classification | Reply marks response received; assignment lifecycle becomes terminal only when its task node reaches terminal status, unless the message is non-task and expects a response only. |
 | How long is the compatibility window? | one release; two releases; date-based | At least one stable release plus a state migration/reconcile audit. |
-| Who can access hidden admin tools? | slash-only; explicit `PI_SWARM_ADMIN_MODE`; role gate | Slash/admin mode plus strict orchestrator/operator gate. |
+| Who can access hidden admin tools? | slash-only; explicit `PI_SWARM_ADMIN_MODE`; role gate | Slash/admin mode plus strict root/operator gate. |
 
 ## 9. Proposed work breakdown
 
@@ -259,7 +259,7 @@ This is a design proposal, not an implementation commitment. If approved, split 
 1. **Message lifecycle inference:** durable schema, evidence derivation, legacy compatibility, deadlines/reconcile, tests.
 2. **Message/tool consolidation:** `send_message` task fields; compatibility aliases; handoff audit tests.
 3. **Task/agent read-surface consolidation:** enhanced `task_status` and `agent_status`; alias migration.
-4. **Tool-gating simplification:** worker/orchestrator/admin registry profiles; docs and validation.
+4. **Tool-gating simplification:** worker/root/admin registry profiles; docs and validation.
 5. **Migration/UAT:** old durable states, normal task pipeline with zero ACK calls, stale response escalation, fresh interactive tmux UAT.
 
 ## 10. Initial inventory: candidates to hide, merge, or retain
@@ -277,7 +277,7 @@ This is a design proposal, not an implementation commitment. If approved, split 
 | tmux/recovery/admin tools | Hide from normal surface | Retain implementation for operator recovery, but do not burden worker prompts. |
 | `swarm_assign_task` | Retain | Ownership, attempt lease, scope guard, and delivery are authoritative. |
 | `swarm_update_task` | Retain | Authoritative fenced graph mutation. |
-| `swarm_reconcile` | Retain for orchestrator/admin | Recovery is deliberate and operationally distinct. |
+| `swarm_reconcile` | Retain for root/admin | Recovery is deliberate and operationally distinct. |
 
 ## 11. Review request
 
@@ -287,7 +287,7 @@ Reviewers should specifically challenge:
 2. Whether backward compatibility for durable messages is sufficiently explicit.
 3. Whether hiding tools reduces model error without harming emergency recovery.
 4. Whether tool consolidation leaves a clean, discoverable path for task handoffs and graph inspection.
-5. Whether default worker/orchestrator tool counts are realistic under current role gating.
+5. Whether default worker/root tool counts are realistic under current role gating.
 6. Whether the proposed phased migration is safe enough for an extension with active on-disk task/mailbox state.
 
 ---
@@ -304,7 +304,7 @@ The v2 `MessageRecord` gains evidence fields; it does **not** overload the prese
 |---|---|---|---|
 | `injectedAt` (existing) | successful tmux injection | `delivered[to]` | Pane transport succeeded; **never** means seen. |
 | `mailboxDeliveredAt` | durable mailbox append | message delivery record | Recipient mailbox has an envelope; **never** means seen. |
-| `surfacedAt` (existing, generalized) | successful `swarm_check_mailbox` result or explicit receiver tool activity | current orchestrator informational surfacing | The API surfaced the envelope to the recipient. |
+| `surfacedAt` (existing, generalized) | successful `swarm_check_mailbox` result or explicit receiver tool activity | current root informational surfacing | The API surfaced the envelope to the recipient. |
 | `seenAt` | receipt derivation after `surfacedAt` | new | The recipient has an API-level read/surface receipt. Pane injection alone cannot set this. |
 | `processingAt` | a recipient action scoped to the matching task/node or message | new | Work evidence exists; it remains non-terminal. |
 | `respondedAt` | accepted, non-superseded `replyTo` response | `response.status`, `response.messageId` | A result response was received; for assignment messages this is not by itself task completion. |
@@ -360,10 +360,10 @@ At the end of the two-release window, the release gate must explicitly review: m
 | Profile | Normal model-facing surface |
 |---|---|
 | Worker | `swarm_check_mailbox`, `swarm_send_message`, `swarm_update_task`, `swarm_task_status`, `swarm_reconcile({dryRun:true, scope:"self"})` (**5 tools**, not 4). Worker dry-run reconcile is rate-limited by `PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS` (default 60,000 ms), may inspect only its own task/message scope, and returns a rate-limit error rather than running an unbounded sweep. |
-| Orchestrator | Worker tools plus `swarm_agent_status`, `swarm_list_agents`, `swarm_spawn_agent`, `swarm_create_task`, `swarm_assign_task`, `swarm_reconcile` mutation mode, and goal tools. |
+| Root | Worker tools plus `swarm_agent_status`, `swarm_list_agents`, `swarm_spawn_agent`, `swarm_create_task`, `swarm_assign_task`, `swarm_reconcile` mutation mode, and goal tools. |
 | Admin/operator | Recovery/debug tools only through explicit admin mode and slash commands, while retaining existing authority checks. |
 
-`swarm_set_goal` and `swarm_mark_goal_done` remain orchestrator tools: they retain the legitimate idle-no-task goal-nudge use case. Their current low use is not a basis for removal.
+`swarm_set_goal` and `swarm_mark_goal_done` remain root tools: they retain the legitimate idle-no-task goal-nudge use case. Their current low use is not a basis for removal.
 
 Document and test each operator recovery workflow: release stale assignment, waive/supersede legacy response debt, prune/dead-letter inspection, capture/attach/send keys, restart/register agent, reload identity, role/pause changes, and GC. Identity-card generation must stop instructing normal workers to call explicit ACK; reload/regenerate identities under gate=1.
 
@@ -389,7 +389,7 @@ In addition to earlier invariants, implementation cannot ship until the followin
 - role profile and execution-time authorization agree for every normal/admin tool;
 - worker normal flow uses zero `swarm_ack_message` calls under gate=1, measured via `tool.invoked`;
 - all inferred lifecycle transitions are traceable;
-- goal nudge remains usable by orchestrator;
+- goal nudge remains usable by root;
 - task-status replacement preserves ready/current/graph render semantics.
 
 ## H. Mandatory tmux UAT matrix
@@ -403,7 +403,7 @@ In addition to earlier invariants, implementation cannot ship until the followin
 | 5 | Assignment superseded; stale worker replies and attempts update | 1 | Reply fenced/audited; current attempt untouched; fencing rejection trace. |
 | 6 | Task handoff through unified `send_message` | 1 | Explicit task metadata preserves handoff/artifact audit; no accidental assignment auto-stamp. |
 | 7 | Worker tool discovery and denial | 1 | Worker has 5 normal tools; admin calls denied with actionable route. |
-| 8 | Orchestrator goal with no task | 1 | Goal tools available; goal-nudge behavior still works. |
+| 8 | Root goal with no task | 1 | Goal tools available; goal-nudge behavior still works. |
 | 9 | Legacy envelope migration run twice | 1 | Second run idempotent; `protocol.migration.completed` provenance/traces correct. |
 | 10 | Status graph render/current-node projection | 1 | Ready/current data and text/Mermaid/JSON views match legacy behavior. |
 
@@ -430,12 +430,12 @@ The following are mandatory bindings for the eventual implementation plan:
 
 ## K. Binding operational details from operations delta review
 
-1. **Worker reconcile containment:** implement `PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS` (default 60,000 ms) and a `scope: "self" | "all"` parameter. Workers are forced to `dryRun:true, scope:"self"`; orchestrator/admin may use `scope:"all"` subject to existing authority. This prevents cross-task information leakage and repeated whole-swarm scans.
+1. **Worker reconcile containment:** implement `PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS` (default 60,000 ms) and a `scope: "self" | "all"` parameter. Workers are forced to `dryRun:true, scope:"self"`; root/admin may use `scope:"all"` subject to existing authority. This prevents cross-task information leakage and repeated whole-swarm scans.
 2. **Derived attention trace:** all derived attention must emit `message.attention.derived` with `source: "responseDeadlineMs" | "transportStale" | "legacyAckMissing"`, message/task/node identity, and evidence timestamp. `message.response.deadline_exceeded` remains the specific deadline event; the attention trace provides a stable consumer-facing category.
 3. **Identity/runtime hint migration:** update all five explicit-ACK instruction sites: four identity-generation sites and the `formatSwarmMessageContent` runtime body in `delivery.ts`. Gate=1 worker messages must not render `[PI-SWARM ACK REQUIRED]`; legacy gate=0 messages retain it.
 4. **Alias policy alignment:** `swarm_next_nodes` and `swarm_print_graph` compatibility aliases stay available for the same two-stable-release window as durable-envelope compatibility, including the second-release UAT lane.
 5. **UAT model lanes:** each of the ten §H scenarios runs once under `glm-5.1`/`zai-coding-cn` and once under `gpt-5.4-mini`/`openai`; report each result separately. A single-model UAT is insufficient.
-6. **Worker reconcile schema:** add `scope: "self" | "all"` to `swarm_reconcile`. A worker defaults to, and is forcibly constrained to, `scope:"self"`; any other requested scope fails `SCOPE_FORBIDDEN`. Orchestrator/admin may select either scope. Internally reuse the existing `agentId` reconciliation path by resolving `scope:"self"` to the calling agent id.
+6. **Worker reconcile schema:** add `scope: "self" | "all"` to `swarm_reconcile`. A worker defaults to, and is forcibly constrained to, `scope:"self"`; any other requested scope fails `SCOPE_FORBIDDEN`. Root/admin may select either scope. Internally reuse the existing `agentId` reconciliation path by resolving `scope:"self"` to the calling agent id.
 
 ## Phase 1 status (2026-08-28)
 
@@ -452,7 +452,7 @@ Implemented (gate=0 behavior-preserving):
 Deferred to Phase 2/3 (unchanged):
 
 - Authoritative inferred lifecycle transitions under gate=1.
-- Worker 5-tool / orchestrator 12-tool profile gating (Phase 2 §E).
+- Worker 5-tool / root 12-tool profile gating (Phase 2 §E).
 - `expectResponse` / `responseDeadlineMs` exposed in normal tool schemas (Phase 2 §B / §F).
 - Removal of `[PI-SWARM ACK REQUIRED]` from `formatSwarmMessageContent` body (Phase 2 §K.3).
 - Alias policy alignment for `swarm_next_nodes` / `swarm_print_graph` (Phase 2 §K.4).

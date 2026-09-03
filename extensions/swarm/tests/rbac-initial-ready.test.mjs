@@ -29,23 +29,23 @@ const call = async (name, params) => tools[name].execute("call", params, undefin
 // --- RBAC server-side checks (regular worker identity) ---
 {
   const prevAgent = process.env.PI_SWARM_AGENT_ID;
-  const prevOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+  const prevOrch = process.env.PI_SWARM_IS_ROOT;
   process.env.PI_SWARM_AGENT_ID = "worker-01";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "";
+  process.env.PI_SWARM_IS_ROOT = "";
 
   let thrown = null;
   try {
     await call("swarm_create_task", { title: "rbac-fixture", goal: "x", priority: "normal", cwd: scratch });
   } catch (err) { thrown = err; }
-  ok("worker create_task is rejected (ORCHESTRATOR_AUTHORITY_REQUIRED)", thrown && /ORCHESTRATOR_AUTHORITY_REQUIRED/.test(thrown.message || String(thrown)));
+  ok("worker create_task is rejected (ROOT_AUTHORITY_REQUIRED)", thrown && /ROOT_AUTHORITY_REQUIRED/.test(thrown.message || String(thrown)));
 
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   const ct = await call("swarm_create_task", { title: "rbac-fixture", goal: "x", priority: "normal", cwd: scratch });
   const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 
   process.env.PI_SWARM_AGENT_ID = "worker-01";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "";
+  process.env.PI_SWARM_IS_ROOT = "";
 
   thrown = null;
   try {
@@ -66,12 +66,12 @@ const call = async (name, params) => tools[name].execute("call", params, undefin
   ok("worker cancelTask without force rejected (CANCEL_FORBIDDEN)", thrown && /CANCEL_FORBIDDEN/.test(thrown.message || String(thrown)));
 }
 
-// --- Orchestrator can use force=true (simulated by direct env identity switch) ---
+// --- Root can use force=true (simulated by direct env identity switch) ---
 {
   const prevAgent = process.env.PI_SWARM_AGENT_ID;
-  const prevOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+  const prevOrch = process.env.PI_SWARM_IS_ROOT;
   process.env.PI_SWARM_AGENT_ID = "";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_IS_ROOT = "1";
   try {
     const ct = await call("swarm_create_task", { title: "rbac-orch", goal: "x", priority: "normal", cwd: scratch });
     const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
@@ -79,17 +79,17 @@ const call = async (name, params) => tools[name].execute("call", params, undefin
     try {
       await call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
     } catch (err) { threw = err; }
-    ok("orchestrator force=true is accepted", !threw);
+    ok("root force=true is accepted", !threw);
   } finally {
     process.env.PI_SWARM_AGENT_ID = prevAgent || "implementer-01";
-    process.env.PI_SWARM_IS_ORCHESTRATOR = prevOrch || "";
+    process.env.PI_SWARM_IS_ROOT = prevOrch || "";
   }
 }
 
 // --- Initial-ready nudge fires after grace, never auto-assigns ---
 {
-  process.env.PI_SWARM_AGENT_ID = "orchestrator";
-  process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+  process.env.PI_SWARM_AGENT_ID = "root";
+  process.env.PI_SWARM_IS_ROOT = "1";
   const ct = await call("swarm_create_task", { title: "initial-ready", goal: "x", priority: "normal", cwd: scratch });
   const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
   const taskPath = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
@@ -108,9 +108,9 @@ const call = async (name, params) => tools[name].execute("call", params, undefin
   const stateAfter = await readState(p, scratch);
   const nudgesAfter = Object.values(stateAfter.messages || {}).filter((m) => m.idempotencyKey === `task:${taskId}:nudge:initial-ready`);
   ok("initial-ready nudge fires after grace", nudgesAfter.length === 1);
-  ok("nudge addressed to orchestrator", nudgesAfter[0]?.to === "orchestrator");
+  ok("nudge addressed to root", nudgesAfter[0]?.to === "root");
   // The full body lives in the durable mailbox, not the lifecycle record in state.
-  const mailbox = readFileSync(mailboxPath(p, "orchestrator"), "utf8");
+  const mailbox = readFileSync(mailboxPath(p, "root"), "utf8");
   const nudgle = JSON.parse(mailbox.split(/\n+/).filter(Boolean).reverse().find((l) => l.includes(`nudge:initial-ready`)) || "{}");
   ok("nudge contains concrete next-action", /swarm_assign_task/.test(nudgle.body || ""));
 

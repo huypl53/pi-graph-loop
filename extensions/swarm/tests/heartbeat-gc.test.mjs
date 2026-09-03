@@ -6,7 +6,7 @@
 //   3. Stale heartbeat + busy record → untouched (no trace, no mutation)
 //   4. Lease-valid (reuse) agent → untouched even when stale (no trace)
 //   5. Lease-valid (park) agent → untouched in heartbeat GC (park is sweep's job)
-//   6. Orchestrator pseudo-agent → skipped
+//   6. Root pseudo-agent → skipped
 //   7. Paused agent → skipped (paused is dormant by design)
 //   8. Probe-after-probe: cached tmuxAlive=true + heartbeat past 2× stale window →
 //      GC issues a tmux probe; if probe returns false → flipped to stopped +
@@ -101,7 +101,7 @@ function makeState(agents) {
 
 // --- run GC under test (uses the real factory for `paths`/`writeState`/`trace`) ---
 async function runGC(st, nowMs, pi, probeTargets) {
-	process.env.PI_SWARM_AGENT_ID = "orchestrator"; // make trace events route correctly
+	process.env.PI_SWARM_AGENT_ID = "root"; // make trace events route correctly
 	// Use real `withLock` + `paths` from state.ts; just inject the mock pi via the factory
 	factory(pi);
 	const pathsMod = await import(join(here, "..", "src/state.ts"));
@@ -124,7 +124,7 @@ console.log("\n[C1] dead pane + running record → status=stopped, reason='tmux_
 	const now = Date.now();
 	const nowIso = new Date(now).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { status: "running", runtimeStatus: "idle", tmuxTarget: "s:orchestrator.0" }),
+		root: makeAgent("root", { status: "running", runtimeStatus: "idle", tmuxTarget: "s:root.0" }),
 		"worker-a": makeAgent("worker-a", { status: "running", runtimeStatus: "idle", tmuxAlive: false, lastHeartbeatAt: nowIso }),
 	});
 	await writeStateFile(state);
@@ -139,7 +139,7 @@ console.log("\n[C1] dead pane + running record → status=stopped, reason='tmux_
 	const trace = events.find((e) => e.event === "agent.heartbeat_gc.stopped" && e.agentId === "worker-a");
 	ok("C1 trace emitted", !!trace, JSON.stringify(events.map((e) => e.event)));
 	ok("C1 trace.reason === 'tmux_dead'", trace?.reason === "tmux_dead");
-	ok("C1 orchestrator untouched", finalState.agents["orchestrator"].status === "running");
+	ok("C1 root untouched", finalState.agents["root"].status === "running");
 }
 
 // =============================================================================
@@ -151,7 +151,7 @@ console.log("\n[C2] stale heartbeat + idle → health='stale' (downgrade; status
 	const now = Date.now();
 	const staleIso = new Date(now - (700_000)).toISOString(); // 700s ago (> 600s stale window)
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { status: "running", tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { status: "running", tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"worker-b": makeAgent("worker-b", { status: "running", runtimeStatus: "idle", health: "healthy", tmuxAlive: true, lastHeartbeatAt: staleIso, tmuxTarget: "s:worker-b.0" }),
 	});
 	await writeStateFile(state);
@@ -177,7 +177,7 @@ console.log("\n[C3] stale heartbeat + busy record → untouched");
 	const now = Date.now();
 	const staleIso = new Date(now - (700_000)).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"worker-c": makeAgent("worker-c", { status: "running", runtimeStatus: "busy", tmuxAlive: true, lastHeartbeatAt: staleIso, tmuxTarget: "s:worker-c.0" }),
 	});
 	await writeStateFile(state);
@@ -200,7 +200,7 @@ console.log("\n[C4] lease-valid reuse agent → untouched");
 	const now = Date.now();
 	const staleIso = new Date(now - (700_000)).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"worker-d": makeAgent("worker-d", {
 			status: "running", runtimeStatus: "idle", tmuxAlive: false, lastHeartbeatAt: staleIso, // would otherwise be flagged stopped
 			leaseKind: "reuse", leaseUntil: new Date(now + 3_600_000).toISOString(), leaseReason: "test",
@@ -227,7 +227,7 @@ console.log("\n[C5] lease-valid park agent → untouched in heartbeat GC (park i
 	const now = Date.now();
 	const staleIso = new Date(now - (700_000)).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"worker-e": makeAgent("worker-e", {
 			status: "running", runtimeStatus: "idle", tmuxAlive: false, lastHeartbeatAt: staleIso,
 			leaseKind: "park", leaseUntil: new Date(now + 3_600_000).toISOString(), leaseReason: "test",
@@ -243,21 +243,21 @@ console.log("\n[C5] lease-valid park agent → untouched in heartbeat GC (park i
 }
 
 // =============================================================================
-// CASE 6: orchestrator pseudo-agent → skipped
+// CASE 6: root pseudo-agent → skipped
 // =============================================================================
-console.log("\n[C6] orchestrator pseudo-agent → skipped");
+console.log("\n[C6] root pseudo-agent → skipped");
 {
 	await clearEvents();
 	const now = Date.now();
 	const staleIso = new Date(now - (700_000)).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { status: "running", tmuxAlive: false, lastHeartbeatAt: staleIso }),
+		root: makeAgent("root", { status: "running", tmuxAlive: false, lastHeartbeatAt: staleIso }),
 	});
 	await writeStateFile(state);
 	const { pi } = makePiMock();
 	const { result, finalState } = await runGC(state, now, pi);
-	ok("C6 orchestrator.status unchanged ('running')", finalState.agents["orchestrator"].status === "running");
-	ok("C6 no traces fired for orchestrator", !(await readEvents()).some((e) => e.agentId === "orchestrator" && e.event?.startsWith?.("agent.heartbeat_gc")));
+	ok("C6 root.status unchanged ('running')", finalState.agents["root"].status === "running");
+	ok("C6 no traces fired for root", !(await readEvents()).some((e) => e.agentId === "root" && e.event?.startsWith?.("agent.heartbeat_gc")));
 }
 
 // =============================================================================
@@ -269,7 +269,7 @@ console.log("\n[C7] paused agent → skipped");
 	const now = Date.now();
 	const staleIso = new Date(now - (700_000)).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"worker-g": makeAgent("worker-g", {
 			paused: true, status: "running", runtimeStatus: "idle", tmuxAlive: false, lastHeartbeatAt: staleIso,
 			tmuxTarget: "s:worker-g.0",
@@ -292,7 +292,7 @@ console.log("\n[C8] probe-after-probe: cached tmuxAlive=true + heartbeat past 2�
 	const now = Date.now();
 	const veryStaleIso = new Date(now - (1_300_000)).toISOString(); // 1300s ago (> 2× 600s)
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"worker-h": makeAgent("worker-h", { status: "running", runtimeStatus: "idle", tmuxAlive: true, lastHeartbeatAt: veryStaleIso, tmuxTarget: "s:worker-h.0" }),
 	});
 	await writeStateFile(state);
@@ -321,7 +321,7 @@ console.log("\n[C9] idempotent re-tick: second pass produces no extra mutations"
 	const now = Date.now();
 	const staleIso = new Date(now - (700_000)).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"worker-i": makeAgent("worker-i", { status: "running", runtimeStatus: "idle", tmuxAlive: false, lastHeartbeatAt: staleIso }),
 	});
 	await writeStateFile(state);
@@ -361,7 +361,7 @@ console.log("\n[C10] review-item-1: stopped agent with stale heartbeat + tmuxTar
 		return { ...wrapped, pi: piMock };
 	};
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"graveyard-z": makeAgent("graveyard-z", {
 			status: "stopped", // already stopped — the post-fix code must NOT probe this
 			runtimeStatus: "stopped", tmuxAlive: false,
@@ -408,7 +408,7 @@ console.log("\n[C11] review-item-1: running agent with fresh lastProbeAt is thro
 		return { ...wrapped, pi: piMock };
 	};
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"worker-j": makeAgent("worker-j", {
 			status: "running", runtimeStatus: "idle", tmuxAlive: true,
 			lastHeartbeatAt: staleIso,
@@ -441,7 +441,7 @@ console.log("\n[C12] review-item-3: paused agent with expired-park lease + dead 
 	const staleIso = new Date(now - 1_800_000).toISOString();
 	const expiredIso = new Date(now - 60_000).toISOString(); // expired 60s ago
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"zombie-k": makeAgent("zombie-k", {
 			status: "running", runtimeStatus: "idle", tmuxAlive: false, lastHeartbeatAt: staleIso,
 			paused: true, // paused — would normally be skipped
@@ -473,7 +473,7 @@ console.log("\n[C13] review-item-3 inverse: paused agent with VALID park lease +
 	const now = Date.now();
 	const staleIso = new Date(now - 1_800_000).toISOString();
 	const state = makeState({
-		orchestrator: makeAgent("orchestrator", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
+		root: makeAgent("root", { tmuxAlive: true, lastHeartbeatAt: new Date(now).toISOString() }),
 		"valid-l": makeAgent("valid-l", {
 			status: "running", runtimeStatus: "idle", tmuxAlive: false, lastHeartbeatAt: staleIso,
 			paused: true,

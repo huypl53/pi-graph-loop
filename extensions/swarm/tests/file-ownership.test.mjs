@@ -28,7 +28,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = join(tmpdir(), `swarm-ownership-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
+process.env.PI_SWARM_AGENT_ID = "root";
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 
@@ -187,7 +187,7 @@ ok("scope freed after terminal release", readNode("task-own-b", "m1").assignee =
 
 // ============ 5. reassign supersedes old lease (releaseReason=reassign) ============
 // task-own-st n1 is active on shared.md; reassign to worker-b (node in assigned state -> genuine reassign via different agent)
-// first move n1 to in_progress so this is a real reassign, then orchestrator force-reassigns
+// first move n1 to in_progress so this is a real reassign, then root force-reassigns
 const stNode = readNode("task-own-st", "n1");
 await awaitAs("worker-a", "swarm_update_task", { taskId: "task-own-st", nodeId: "n1", status: "in_progress", attemptId: stNode.activeAttemptId });
 await call("swarm_assign_task", { taskId: "task-own-st", nodeId: "n1", agentId: "worker-b" });
@@ -245,7 +245,7 @@ await call("swarm_create_task", {
 	start: "m1", nodes: { m1: { role: "implementer", allowedFiles: ["docs/swarm/rw.md"], terminal: true } }, edges: [],
 });
 await expectErrorCode("swarm_assign_task", { taskId: "task-own-rwc", nodeId: "m1", agentId: "worker-a" }, "ACTIVE_SCOPE_CONFLICT");
-// rework reopen of fix: orchestrator marks fix failed -> rework edge test->fix may reopen later; instead
+// rework reopen of fix: root marks fix failed -> rework edge test->fix may reopen later; instead
 // directly test rework lease release: mark test done/implemented again after fix finishes is complex.
 // Simpler rework-release check: fix fails -> (fix failed) its lease releases with terminal reason.
 const fixAttempt = readNode("task-own-rw2", "fix").activeAttemptId;
@@ -277,7 +277,7 @@ await (await import("node:fs/promises")).mkdir(join(legacyDir, "artifacts"), { r
 const legacyTask = {
 	version: 1, taskId: "task-own-legacy", title: "Legacy", goal: "g", status: "in_progress",
 	priority: "normal", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-	owner: "orchestrator", workflow: "feature-dev", allowedFiles: ["docs/swarm/legacy.md"],
+	owner: "root", workflow: "feature-dev", allowedFiles: ["docs/swarm/legacy.md"],
 	acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: ["n1"],
 	sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 	nodes: { n1: { status: "in_progress", role: "implementer", assignee: "worker-a", dependsOn: [], messageIds: [], attempts: 1 } },

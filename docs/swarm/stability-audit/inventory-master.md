@@ -32,19 +32,19 @@ Surface legend:
 | F9 | Task graph creation and inspection: create task, show status, print graph, validate structure, and compute ready/next nodes | T | P1 | Foundational workflow entrypoints |
 | F10 | Task node execution semantics: pending/ready/assigned/in_progress/done/failed/blocked/skipped transitions, branch outcomes, shared context, artifacts | T | P1 | The normal task lifecycle surface |
 | F11 | Task-scoped discussion/handoffs: `swarm_task_message` / node-to-node coordination without advancing state | T, M | P1 | Clarification channel, not a state transition |
-| F12 | Task cancellation and supersession: orchestrator-only cancel, revocation of active attempts, rejection of late updates/acks | T, M, L | P1 | Important safety rail, but not one of the core P0 flows |
+| F12 | Task cancellation and supersession: root-only cancel, revocation of active attempts, rejection of late updates/acks | T, M, L | P1 | Important safety rail, but not one of the core P0 flows |
 | F13 | Agent lifecycle operations: spawn, register/adopt, stop, restart, pause/resume | L, C | P1 | Common ops; high value but not usually engine-critical |
 | F14 | Identity and role management: `set_role`, capability remap, identity reload, stable identity cards | L, C | P1 | Needed for repurposing agents safely |
 | F15 | tmux-backed observability and control: status, attach, capture, sendkeys, pane liveness, trace capture | L, C | P1 | Debugging and incident response surface |
-| F16 | Orchestrator authority and leadership gating: destructive tool gating, leader claims, stale-leader recovery, and admin-only mutation fences | L, C | P1 | Safety-critical, but more guardrail than core workflow |
+| F16 | Root authority and leadership gating: destructive tool gating, leader claims, stale-leader recovery, and admin-only mutation fences | L, C | P1 | Safety-critical, but more guardrail than core workflow |
 | F17 | Model pool selection / preflight / rotation: slot validation, provider/model pick, cooldown, and manual rotate/bench | L, C | P1 | Relevant when validating spawn/restart lanes |
 | F18 | Protocol migration: upgrade durable message envelopes to v2 evidence fields without inventing facts | M, C | P1 | One-time operator maintenance, not streaming-heavy |
 | F19 | Retention / garbage collection: bounded prune of terminal messages and delivered-ledger capping | M, C | P1 | Maintenance surface; dry-run first |
-| F20 | Swarm goal / idle-streak loop: durable goal set/done plus orchestrator idle nudges | L, C | P0 | This is part of wake/escalation and deserves P0 coverage |
+| F20 | Swarm goal / idle-streak loop: durable goal set/done plus root idle nudges | L, C | P0 | This is part of wake/escalation and deserves P0 coverage |
 | F21 | Read-only recovery and status views: attention reports, list/status/trace/graph views, dead-letter inspection | L, M, T, C | P2 | Mostly UX and operator visibility |
 | F22 | Slash-command aliasing and command discoverability: `/swarm-*` aliases, short wrappers, and command ergonomics | C | P2 | Pure convenience/UX; low risk |
 | F23 | Mailbox reset emergency repair: archive/reset live mailbox state while preserving durable message records | M, C | P2 | Incident-only operator escape hatch |
-| F24 | Initial-ready recovery nudge: fresh task left ready/unassigned long enough gets surfaced to orchestrator | T, L | P0 | A wake-up signal that prevents silent stalls |
+| F24 | Initial-ready recovery nudge: fresh task left ready/unassigned long enough gets surfaced to root | T, L | P0 | A wake-up signal that prevents silent stalls |
 
 ### Dedup notes
 - `swarm_send_message`, `swarm_check_mailbox`, `swarm_ack_message`, `swarm_message_status`, and `swarm_reconcile` overlap in a single messaging lifecycle, so they are grouped into F6–F8 rather than split per tool.
@@ -115,7 +115,7 @@ The existing five fixtures establish the style to match:
    ```
 2. **Turn 2** — worker sends a result message that replies to the original assignment thread.
    ```json
-   {"type":"toolcall","delayMs":20,"name":"swarm_send_message","id":"msg-1","arguments":{"to":"orchestrator","body":"Result: the node is ready to close.","replyTo":"<assignment-id>","conversationId":"task:<task-id>:<node-id>","requiresAck":true}}
+   {"type":"toolcall","delayMs":20,"name":"swarm_send_message","id":"msg-1","arguments":{"to":"root","body":"Result: the node is ready to close.","replyTo":"<assignment-id>","conversationId":"task:<task-id>:<node-id>","requiresAck":true}}
    {"type":"text","delayMs":10,"text":"I’ve sent the result message and am closing the response loop.","chunks":["I’ve sent the result message ","and am closing the response loop."]}
    ```
 3. **Turn 3** — worker credits the result and finishes.
@@ -148,7 +148,7 @@ The existing five fixtures establish the style to match:
 1. **Turn 1** — agent gathers evidence and reports a near-finish state.
    ```json
    {"type":"text","delayMs":15,"text":"I’m at the finish line and checking the closing requirements.","chunks":["I’m at the finish line ","and checking the closing requirements."]}
-   {"type":"toolcall","delayMs":15,"name":"swarm_task_message","id":"tm-1","arguments":{"taskId":"<task-id>","fromNode":"<node-id>","to":"orchestrator","subject":"Closure evidence check","body":"I have the implementation artifact and I’m validating the terminal outcome.","artifactRefs":["artifacts/proof.md"],"replyExpected":true}}
+   {"type":"toolcall","delayMs":15,"name":"swarm_task_message","id":"tm-1","arguments":{"taskId":"<task-id>","fromNode":"<node-id>","to":"root","subject":"Closure evidence check","body":"I have the implementation artifact and I’m validating the terminal outcome.","artifactRefs":["artifacts/proof.md"],"replyExpected":true}}
    ```
 2. **Turn 2** — agent attempts to close without an outcome and is corrected by the script or by the tool response.
    ```json
@@ -195,7 +195,7 @@ The existing five fixtures establish the style to match:
    ```
 3. **Turn 3** — worker proceeds to a clean close or a well-formed handoff, depending on the recovered state.
    ```json
-   {"type":"toolcall","delayMs":15,"name":"swarm_send_message","id":"msg-1","arguments":{"to":"orchestrator","body":"Recovered after reconcile; continuing with the assignment.","replyTo":"<assignment-id>","conversationId":"task:<task-id>:<node-id>","requiresAck":true}}
+   {"type":"toolcall","delayMs":15,"name":"swarm_send_message","id":"msg-1","arguments":{"to":"root","body":"Recovered after reconcile; continuing with the assignment.","replyTo":"<assignment-id>","conversationId":"task:<task-id>:<node-id>","requiresAck":true}}
    {"type":"stop","delayMs":5,"reason":"stop"}
    ```
 
@@ -232,7 +232,7 @@ The existing five fixtures establish the style to match:
    ```
 3. **Turn 3** — worker sends a real progress/result update tied to the original thread.
    ```json
-   {"type":"toolcall","delayMs":15,"name":"swarm_send_message","id":"msg-1","arguments":{"to":"orchestrator","body":"Wake-up complete; I’ve resumed and made forward progress.","replyTo":"<assignment-id>","conversationId":"task:<task-id>:<node-id>","requiresAck":true}}
+   {"type":"toolcall","delayMs":15,"name":"swarm_send_message","id":"msg-1","arguments":{"to":"root","body":"Wake-up complete; I’ve resumed and made forward progress.","replyTo":"<assignment-id>","conversationId":"task:<task-id>:<node-id>","requiresAck":true}}
    {"type":"toolcall","delayMs":10,"name":"swarm_ack_message","id":"ack-2","arguments":{"messageId":"<assignment-id>","status":"processing"}}
    ```
 4. **Turn 4** — if the work is now complete, the worker closes the loop.

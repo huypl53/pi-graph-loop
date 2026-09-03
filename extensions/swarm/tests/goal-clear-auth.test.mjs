@@ -1,7 +1,7 @@
 // Issue 81 goal-clear-auth: guard predicate + tool/command integration. R9 a2 incident
 // (`"chỉ dùng khi user yêu cầu"` standing goal cleared twice by batch workflow without
 // user intent). Goal origin metadata now fences swarm_mark_goal_done / goal replacement.
-// Pre-policy default is lenient (origin defaults to "orchestrator" when absent); new
+// Pre-policy default is lenient (origin defaults to "root" when absent); new
 // user-origin goals going forward refuse without explicit `approvedByUser: true`.
 //
 // Strategy: import the real predicate (no I/O), then build the tool set from the real factory
@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const { classifyGoalClearAuthority, GOAL_ORIGIN_USER, GOAL_ORIGIN_ORCHESTRATOR, GOAL_ORIGIN_SYSTEM, GOAL_ORIGIN_BATCH } = await import(join(here, "..", "src", "goals.ts"));
+const { classifyGoalClearAuthority, GOAL_ORIGIN_USER, GOAL_ORIGIN_ROOT, GOAL_ORIGIN_SYSTEM, GOAL_ORIGIN_BATCH } = await import(join(here, "..", "src", "goals.ts"));
 const { registerAgentsTools } = await import(join(here, "..", "src", "tools", "agents.ts"));
 
 const scratch = join(tmpdir(), `swarm-goal-clear-auth-${process.pid}-${Date.now()}`);
@@ -57,12 +57,12 @@ const setAgentId = (id) => { if (id === undefined) delete process.env.PI_SWARM_A
 {
 	const seedDir = join(scratch, ".pi", "swarm");
 	mkdirSync(seedDir, { recursive: true });
-	const { ensureOrchestrator } = await import(join(here, "..", "src", "identity.ts"));
+	const { ensureRoot } = await import(join(here, "..", "src", "identity.ts"));
 	const { ensureDirs, readState, writeState, paths } = await import(join(here, "..", "src", "state.ts"));
 	const p0 = paths(scratch);
 	await ensureDirs(p0);
 	const st0 = await readState(p0, scratch);
-	ensureOrchestrator(st0, scratch, p0);
+	ensureRoot(st0, scratch, p0);
 	await writeState(p0, st0);
 }
 
@@ -73,9 +73,9 @@ const setAgentId = (id) => { if (id === undefined) delete process.env.PI_SWARM_A
 console.log("\n[P1] non-user-origin clear: allowed, no reason");
 {
 	const r = classifyGoalClearAuthority({
-		currentGoal: { id: "g1", origin: GOAL_ORIGIN_ORCHESTRATOR },
+		currentGoal: { id: "g1", origin: GOAL_ORIGIN_ROOT },
 		action: "clear",
-		actor: "orchestrator",
+		actor: "root",
 		params: {},
 	});
 	eq("allowed: true", r.allowed, true);
@@ -87,7 +87,7 @@ console.log("\n[P2] user-origin clear without approvedByUser: refused");
 	const r = classifyGoalClearAuthority({
 		currentGoal: { id: "g2", origin: GOAL_ORIGIN_USER },
 		action: "clear",
-		actor: "orchestrator",
+		actor: "root",
 		params: {},
 	});
 	eq("allowed: false", r.allowed, false);
@@ -99,7 +99,7 @@ console.log("\n[P3] user-origin clear WITH approvedByUser: allowed");
 	const r = classifyGoalClearAuthority({
 		currentGoal: { id: "g3", origin: GOAL_ORIGIN_USER },
 		action: "clear",
-		actor: "orchestrator",
+		actor: "root",
 		params: { approvedByUser: true },
 	});
 	eq("allowed: true", r.allowed, true);
@@ -111,20 +111,20 @@ console.log("\n[P4] user-origin replace without approval: refused (user_origin_r
 	const r = classifyGoalClearAuthority({
 		currentGoal: { id: "g4", origin: GOAL_ORIGIN_USER },
 		action: "replace",
-		actor: "orchestrator",
+		actor: "root",
 		params: { origin: GOAL_ORIGIN_BATCH },
 	});
 	eq("allowed: false", r.allowed, false);
 	eq("reason: user_origin_replace_blocked", r.reason, "user_origin_replace_blocked");
 }
 
-console.log("\n[P5] user-origin replace with new origin (orchestrator): still refused (replace is what fires the guard)");
+console.log("\n[P5] user-origin replace with new origin (root): still refused (replace is what fires the guard)");
 {
 	const r = classifyGoalClearAuthority({
 		currentGoal: { id: "g5", origin: GOAL_ORIGIN_USER },
 		action: "replace",
-		actor: "orchestrator",
-		params: { origin: GOAL_ORIGIN_ORCHESTRATOR },
+		actor: "root",
+		params: { origin: GOAL_ORIGIN_ROOT },
 	});
 	eq("allowed: false (replace triggers guard, not the new origin value)", r.allowed, false);
 	eq("reason: user_origin_replace_blocked", r.reason, "user_origin_replace_blocked");
@@ -135,11 +135,11 @@ console.log("\n[P6] pre-policy goal (no origin field): allowed (lenient default)
 	const r = classifyGoalClearAuthority({
 		currentGoal: { id: "g6" }, // no origin
 		action: "clear",
-		actor: "orchestrator",
+		actor: "root",
 		params: {},
 	});
-	eq("allowed: true (legacy default = orchestrator)", r.allowed, true);
-	eq("origin resolved to orchestrator", r.origin, GOAL_ORIGIN_ORCHESTRATOR);
+	eq("allowed: true (legacy default = root)", r.allowed, true);
+	eq("origin resolved to root", r.origin, GOAL_ORIGIN_ROOT);
 }
 
 console.log("\n[P7] origin:batch clear: allowed");
@@ -147,7 +147,7 @@ console.log("\n[P7] origin:batch clear: allowed");
 	const r = classifyGoalClearAuthority({
 		currentGoal: { id: "g7", origin: GOAL_ORIGIN_BATCH },
 		action: "clear",
-		actor: "orchestrator",
+		actor: "root",
 		params: {},
 	});
 	eq("allowed: true", r.allowed, true);
@@ -163,21 +163,21 @@ const seedUserGoal = (text = "chỉ dùng khi user yêu cầu") => {
 		id: `goal-userorigin-${Date.now()}`,
 		text,
 		setAt: new Date().toISOString(),
-		setBy: "orchestrator",
+		setBy: "root",
 		origin: GOAL_ORIGIN_USER,
 		consecutiveNoResolveNudges: 0,
 	};
 	writeSwarmState(st);
 };
 
-const seedOrchestratorGoal = (text = "batch-scoped") => {
+const seedRootGoal = (text = "batch-scoped") => {
 	const st = readSwarmState();
 	st.goal = {
 		id: `goal-orchorigin-${Date.now()}`,
 		text,
 		setAt: new Date().toISOString(),
-		setBy: "orchestrator",
-		origin: GOAL_ORIGIN_ORCHESTRATOR,
+		setBy: "root",
+		origin: GOAL_ORIGIN_ROOT,
 		consecutiveNoResolveNudges: 0,
 	};
 	writeSwarmState(st);
@@ -185,7 +185,7 @@ const seedOrchestratorGoal = (text = "batch-scoped") => {
 
 console.log("\n[T8] swarm_mark_goal_done REFUSES on user-origin active goal without approval");
 {
-	setAgentId("orchestrator");
+	setAgentId("root");
 	seedUserGoal();
 	const r = await call("swarm_mark_goal_done", {}, scratch);
 	const d = r.details || {};
@@ -200,7 +200,7 @@ console.log("\n[T8] swarm_mark_goal_done REFUSES on user-origin active goal with
 
 console.log("\n[T9] swarm_mark_goal_done SUCCEEDS on user-origin with approvedByUser: true");
 {
-	setAgentId("orchestrator");
+	setAgentId("root");
 	seedUserGoal();
 	const r = await call("swarm_mark_goal_done", { approvedByUser: true }, scratch);
 	const d = r.details || {};
@@ -212,8 +212,8 @@ console.log("\n[T9] swarm_mark_goal_done SUCCEEDS on user-origin with approvedBy
 
 console.log("\n[T10] swarm_mark_goal_done succeeds on non-user-origin (existing behavior)");
 {
-	setAgentId("orchestrator");
-	seedOrchestratorGoal();
+	setAgentId("root");
+	seedRootGoal();
 	const r = await call("swarm_mark_goal_done", {}, scratch);
 	const d = r.details || {};
 	eq("tool returned cleared: true", d.cleared, true);
@@ -223,7 +223,7 @@ console.log("\n[T10] swarm_mark_goal_done succeeds on non-user-origin (existing 
 
 console.log("\n[T11] swarm_set_goal (replace) REFUSES on user-origin active goal");
 {
-	setAgentId("orchestrator");
+	setAgentId("root");
 	seedUserGoal();
 	const before = readSwarmState();
 	const beforeId = before.goal?.id;
@@ -239,7 +239,7 @@ console.log("\n[T11] swarm_set_goal (replace) REFUSES on user-origin active goal
 
 console.log("\n[T12] /swarm goal done refuses on user-origin active goal");
 {
-	setAgentId("orchestrator");
+	setAgentId("root");
 	seedUserGoal();
 	const notifs = [];
 	const fakeUi = { notify: (msg, level) => { notifs.push({ msg, level }); } };
@@ -256,7 +256,7 @@ console.log("\n[T12] /swarm goal done refuses on user-origin active goal");
 
 console.log("\n[T13] /swarm goal done --force-user-clear succeeds on user-origin active goal");
 {
-	setAgentId("orchestrator");
+	setAgentId("root");
 	seedUserGoal();
 	const notifs = [];
 	const fakeUi = { notify: (msg, level) => { notifs.push({ msg, level }); } };

@@ -1,8 +1,8 @@
 # goal-nudge-surface-starve: R22. Goal nudges emitted under the all-idle gate must still be
-# surfaced by the orchestrator pump when a worker turns busy AFTER emission (the nudge's own
+# surfaced by the root pump when a worker turns busy AFTER emission (the nudge's own
 # requested action succeeding). Pre-R22 the pump's staleSurfaceReason goal-key agent_busy leg
-# dropped them forever: notification.stale.suppressed site=orchestrator_pump.surface
-# reason=agent_busy, mailbox.orchestrator_pump_stuck_escalated every tick, zero pi.sendMessage.
+# dropped them forever: notification.stale.suppressed site=root_pump.surface
+# reason=agent_busy, mailbox.root_pump_stuck_escalated every tick, zero pi.sendMessage.
 #
 # Pattern 2 (seeded world + single-actor script) per .agents/skills/mock-llm-scenarios/SKILL.md:
 # the launch script seeds the EXACT live-incident snapshot (2026-09-02T12:04:08Z) — worker-a
@@ -12,8 +12,8 @@
 # "worker turns busy mid-scenario" timing (Pattern 3) is deliberately avoided: it is the
 # non-determinism this fixture must not have; the seeded snapshot is the deterministic proxy
 # declared in the R22 plan §6. The engine (pump) runs for real on its watchdog tick: POST-R22
-# the pump surfaces the nudges (pi.sendMessage at the boundary, mailbox.orchestrator_pump
-# count>=1, notification.stale.suppressed ABSENT for goal keys); the scripted orchestrator
+# the pump surfaces the nudges (pi.sendMessage at the boundary, mailbox.root_pump
+# count>=1, notification.stale.suppressed ABSENT for goal keys); the scripted root
 # then verifies the nudge is actionable + acks the lifecycle closed.
 {"name":"r22 starve surface verify","events":[{"type":"text","delayMs":200,"text":"Resuming after the starvation window: the queued goal nudges must have been surfaced by the pump despite worker-a being busy — surface-time revalidation agrees with the emission gate.","chunks":["Resuming after the starvation window: ","the queued goal nudges must have been surfaced ","by the pump despite worker-a being busy."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"limit":10}}]}
 {"name":"r22 starve ack nudge","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Closing the lifecycle on the freshest surfaced nudge: ack done so the anti-loop counter resets instead of burning to max on unseen messages.","chunks":["Closing the lifecycle on the freshest surfaced nudge: ","ack done so the anti-loop counter resets ","instead of burning to max on unseen messages."]},{"type":"toolcall","delayMs":15,"name":"swarm_ack_message","id":"ack-1","arguments":{"messageId":"msg-r22-starve-3","status":"done","note":"surfaced post-R22; goal work assigned"}},{"type":"stop","delayMs":5,"reason":"stop"}]}

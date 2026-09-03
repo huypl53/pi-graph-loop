@@ -20,7 +20,7 @@ src/taskgraph.ts     graph algorithms, status/closure/transitions, rendering
 src/observability.ts read-only text flow snapshot renderer for `/swarm flow`
 src/flow-dialog.ts   interactive TUI picker/dialog for `/swarm flow`
 src/delivery.ts      message parsing + retry predicate
-src/session.ts       model/orchestrator detection
+src/session.ts       model/root detection
 src/identity.ts      identity markdown generation + write
 src/tmux.ts          tmux wrappers
 src/mailbox.ts       mailbox read/deliver helpers
@@ -28,11 +28,11 @@ src/agents.ts        spawn/reuse/reload
 src/nudges/goal-epoch.ts       swarm-level idle epoch + goal-floor emission
 src/nudges/graph-advance.ts    graph-advance / stall / artifact / heartbeat GC nudges
 src/nudges/status-predicates.ts pure predicates over TaskState["status"]
-src/surface.ts                 orchestrator-facing message surface machinery
+src/surface.ts                 root-facing message surface machinery
 src/tasks-index.ts             PM-facing rollup + task indexer
 src/reconcile-core.ts          reconcile runner (entry points)
 src/reconcile.ts               **barrel re-export** — backward-compat surface for hooks/command/tools/tests
-src/hooks.ts         event hooks + orchestrator mailbox pump
+src/hooks.ts         event hooks + root mailbox pump
 src/command.ts       /swarm slash command
 src/tools/*.ts       the tool registrations, grouped by domain
 src/pool.ts          model slot picker + quota bench
@@ -79,7 +79,7 @@ unproven claims about Pi runtime semantics.
 Quick start:
 
 ```bash
-PI_SWARM_IS_ORCHESTRATOR=1 pi --model glm-5.1 --provider zai-coding-cn -e extensions/swarm/index.ts
+PI_SWARM_IS_ROOT=1 pi --model glm-5.1 --provider zai-coding-cn -e extensions/swarm/index.ts
 ```
 
 Project-local swarm defaults can be set in `.pi/settings.json`:
@@ -145,21 +145,21 @@ Useful tools:
 - `swarm_ack_message`
 - `swarm_message_status`
 - `swarm_reconcile` (mail + task sweep; `mark=true` repairs task status drift)
-- `swarm_prune` (orchestrator-only after Issue 10; dry-run by default)
+- `swarm_prune` (root-only after Issue 10; dry-run by default)
 - `swarm_dead_letters`
 - `swarm_trace`
 - `swarm_capture_agent_pane`
 - `swarm_agent_identity`
 
-> Tools marked **orchestrator-only** in `docs/swarm/tools.md` (e.g. `swarm_prune`,
-> `swarm_gc`) reject non-orchestrator callers with a server-side error before any state
+> Tools marked **root-only** in `docs/swarm/tools.md` (e.g. `swarm_prune`,
+> `swarm_gc`) reject non-root callers with a server-side error before any state
 > mutation.
 
 Task-graph tools:
 
 - `swarm_create_task`, `swarm_assign_task`, `swarm_update_task`, `swarm_task_message`
 - `swarm_task_status`, `swarm_validate_graph`, `swarm_print_graph`, `swarm_next_nodes`
-- Rework edges are first-class: a declared `rework: true` edge can re-open a failed/skipped node as `ready` so follow-up validation is a normal graph transition, not an orchestrator force-reset.
+- Rework edges are first-class: a declared `rework: true` edge can re-open a failed/skipped node as `ready` so follow-up validation is a normal graph transition, not an root force-reset.
 - `/swarm flow <#|task-id> [--events N]` — read-only observatory snapshot (task graph, agent lanes, recent events)
 
 Runtime state is written under `.pi/swarm/` and ignored by git.
@@ -172,14 +172,14 @@ ACK/idempotency/dead-letter; engine-enforced task closure (`computeTaskStatus`
 create/assign/update, `cancelled` sticky); `swarm_reconcile` sweeping both mail
 and tasks (mark-only; `mark=true` repairs drift; stamps advisory `node.staleAt`);
 a stale/nudge ladder surfaced via reconcile, `session_shutdown` nudge, `/swarm
-status` PM rollup, and **PM auto-notify** (node-close → orchestrator mailbox on a
-closure-ish transition; worker settled with open work → orchestrator mailbox;
+status` PM rollup, and **PM auto-notify** (node-close → root mailbox on a
+closure-ish transition; worker settled with open work → root mailbox;
 settle nudge cooldown-guarded per agent) surfaced by a **session-safe + read-safe
-orchestrator auto-pump** (per-process surfaced set; `check_mailbox(markDelivered)`/ack
-cannot pre-empt a pump surface; a second orchestrator lane or validation `pi -p`
+root auto-pump** (per-process surfaced set; `check_mailbox(markDelivered)`/ack
+cannot pre-empt a pump surface; a second root lane or validation `pi -p`
 run cannot starve the PM); **server-side RBAC**: `swarm_update_task(force=true)`
-and `cancelTask` are orchestrator-only (a non-orchestrator caller is rejected
-before any mutation); **orchestrator-explicit task cancellation** via
+and `cancelTask` are root-only (a non-root caller is rejected
+before any mutation); **root-explicit task cancellation** via
 `swarm_update_task(force=true, cancelTask=true)` — revokes every active attempt,
 transitions non-terminal nodes to `cancelled`, supersedes every assignment
 message, releases agent `activeTaskIds` + advisory edit locks, sends
@@ -194,7 +194,7 @@ leases release with audit `releasedAt`/`releaseReason` on terminal/reassign/rewo
 (`file-ownership.test.mjs`); an **initial-ready recovery
 nudge** that surfaces a fresh
 task whose start node stays ready+unassigned past a short grace period to the
-orchestrator (bounded, idempotent, never auto-assigns); a repeatable
+root (bounded, idempotent, never auto-assigns); a repeatable
 **task-graph UAT** entrypoint at `scripts/swarm_task_uat.sh`; and a full **agent
 lifecycle** surface —
 `swarm_register_agent` (adopt/retarget an existing tmux pane),

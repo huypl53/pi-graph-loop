@@ -87,7 +87,7 @@ and appends a `task.flow.read` audit event. It does not mutate `task.json` or `s
 
 ## 4. Primary users and their jobs-to-be-done
 
-### A. Orchestrator / PM
+### A. Root / PM
 
 **Goal:** run multi-agent work without constantly opening panes or parsing JSON.
 
@@ -387,7 +387,7 @@ This preserves the existing source-of-truth and ownership invariants.
 
 ## 11. Review questions / decisions requested
 
-1. **Primary user:** is the first target the PM/orchestrator, individual agent operator, or a stakeholder observer?
+1. **Primary user:** is the first target the PM/root, individual agent operator, or a stakeholder observer?
 2. **Default scope:** should `/swarm flow` focus one inferred active task, always show a picker, or show a portfolio board?
 3. **Interaction level:** is read-only plus inspect/attach/capture enough for V1, or should node assignment and retry actions be available from the UI?
 4. **Agent filtering:** should stopped/historical agents be hidden by default? Recommended: yes.
@@ -432,7 +432,7 @@ The V1 dialog answers with flat rows (ATTENTION/FLOW/LANES/EVENTS). A human cann
 │   handoff: plan→implement delivered ✓ acked                                                          │
 │   current: ▶ implement · obs-implementer · 12m                                                       │
 │ ATTENTION                                                                                             │
-│   ! implement is waiting for ACK from orchestrator — capture pane                                    │
+│   ! implement is waiting for ACK from root — capture pane                                    │
 │ FLOW / LANES / EVENTS(grouped)                                                                        │
 │ [r] refresh [Enter] detail [/] filter [o] lanes [a] attention [d] debug raw [Esc] close               │
 ╰────────────────────────────────────────────────────────────────────────────────────────────╱╯

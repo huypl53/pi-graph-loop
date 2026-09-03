@@ -5,7 +5,7 @@
  * Source incident (verified by plan §0):
  *   - Live trace sequence goal-1788266039522-6eae40, origin=user, nudgeIntervalMs=5000.
  *   - 7_278 `goal.nudge.held_no_live_workers` traces fired over ~16h at exactly 5s cadence.
- *   - ZERO orchestrator-bound recovery nudges — the pump never surfaced a goal-empty
+ *   - ZERO root-bound recovery nudges — the pump never surfaced a goal-empty
  *     escalation despite a standing user goal with `effectiveAgentCount: 0`.
  *
  * Three root causes (plan §1):
@@ -14,7 +14,7 @@
  *   2. `goal.nudge.held_no_live_workers` trace fires every tick, not once per transition
  *      (the comment promises once-per-transition; the code emits unconditionally).
  *   3. No escalation path: the function returns `{emitted:false,reason:"no_live_workers"}`
- *      with no surface; the orchestrator has no recovery nudge despite a user goal.
+ *      with no surface; the root has no recovery nudge despite a user goal.
  *
  * Reproduce-first (mandate 2026-08-31). RED observed for ALL SIX scenarios below
  * (and Configs A, B, C specifically reproduce the live incident shape). GREEN
@@ -55,7 +55,7 @@
  *   4. `mailboxAppendCount` at `mailbox.ts:362,445` durable append.
  *   5. `sendMessageCallCount` at `reconcile.ts:1763-1773` `pi.sendMessage` loop
  *      (R13 boundary; not changed by R14 but asserted here for the
- *      `idle-and-settled` orchestrator case).
+ *      `idle-and-settled` root case).
  *   6. `escalationCancelledOnClearCount` at `goals.ts:32-51` clear boundary.
  *
  * ISOLATION CONTRACT — SCRATCH CWD ONLY.
@@ -70,12 +70,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, "..", "src");
 
 const {
-	pumpOrchestratorMailbox,
+	pumpRootMailbox,
 	evaluateIdleGoalNudgeLocked,
 } = await import(join(srcDir, "reconcile.ts"));
 
 const { paths, withLock, readState, writeState } = await import(join(srcDir, "state.ts"));
-const { ensureOrchestrator, heartbeatOrchestratorLeader } = await import(join(srcDir, "identity.ts"));
+const { ensureRoot, heartbeatRootLeader } = await import(join(srcDir, "identity.ts"));
 const { deliverMessageLocked } = await import(join(srcDir, "mailbox.ts"));
 const { trace } = await import(join(srcDir, "state.ts"));
 
@@ -90,9 +90,9 @@ const ok = (name, cond, info) => {
 };
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const ORIG_PI_SWARM_IS_ORCHESTRATOR = process.env.PI_SWARM_IS_ORCHESTRATOR;
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
-process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+const ORIG_PI_SWARM_IS_ROOT = process.env.PI_SWARM_IS_ROOT;
+process.env.PI_SWARM_AGENT_ID = "root";
+process.env.PI_SWARM_IS_ROOT = "1";
 
 let scratch = mkdtempSync(join(tmpdir(), "swarm-r14-s0-"));
 
@@ -107,8 +107,8 @@ function readEvents(scratchDir) {
 	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
 
-function readOrchestratorMailbox(scratchDir) {
-	const p = join(scratchDir, ".pi/swarm/mailboxes/orchestrator.jsonl");
+function readRootMailbox(scratchDir) {
+	const p = join(scratchDir, ".pi/swarm/mailboxes/root.jsonl");
 	if (!existsSync(p)) return [];
 	const txt = readFileSync(p, "utf8").trim();
 	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
@@ -130,7 +130,7 @@ function makePiMockWithCounters(opts = {}) {
  * Seed a swarm state with the specified goal + worker shape.
  * @param opts.scratch — scratch dir
  * @param opts.workerShape — "settled-but-alive" | "genuinely-vacuous"
- * @param opts.goalOrigin — "user" | "orchestrator"
+ * @param opts.goalOrigin — "user" | "root"
  * @param opts.goalIntervalMs — 5000 (R14 default; matches live incident)
  * @param opts.activeTask — if true, seed a task assigned to worker #1
  * @param opts.nowMs — synthetic clock
@@ -262,7 +262,7 @@ async function seedR14Shape({
 			priority: "normal",
 			createdAt: workerTs,
 			updatedAt: workerTs,
-			owner: "orchestrator",
+			owner: "root",
 			workflow: "feature-dev",
 			allowedFiles: [],
 			acceptanceCriteria: [],
@@ -300,7 +300,7 @@ async function seedR14Shape({
 
 	await withLock(p, async () => {
 		const st = await readState(p, scratchDir);
-		ensureOrchestrator(st, scratchDir, p);
+		ensureRoot(st, scratchDir, p);
 		await writeState(p, st);
 	});
 	return { p, nowMs };
@@ -393,8 +393,8 @@ console.log("\n[R14-S2] Config B — 12-tick stable genuinely-vacuous pool (3 de
 		await withLock(p, async () => {
 			const st = await readState(p, s2Scratch);
 			await evaluateIdleGoalNudgeLocked(pi, s2Scratch, p, st, tickNowMs);
-			// Count mailbox appends to orchestrator mailbox post-tick.
-			const mbFile = join(s2Scratch, ".pi/swarm/mailboxes/orchestrator.jsonl");
+			// Count mailbox appends to root mailbox post-tick.
+			const mbFile = join(s2Scratch, ".pi/swarm/mailboxes/root.jsonl");
 			if (existsSync(mbFile)) {
 				const lines = readFileSync(mbFile, "utf8").trim().split("\n").filter(Boolean);
 				mailboxAppendCount = Math.max(mailboxAppendCount, lines.length);
@@ -527,7 +527,7 @@ console.log("\n[R14-S4] Config D — escalation cooldown bounded (12 ticks, genu
 	ok("R14-S4 [GREEN post-fix] escalationSendCount === 1 (one bounded nudge per cooldown)",
 		escalationSendCount === 1, `got ${escalationSendCount}`);
 
-	const mailbox = readOrchestratorMailbox(s4Scratch);
+	const mailbox = readRootMailbox(s4Scratch);
 	const highPriorityEscalations = mailbox.filter((m) => m.priority === "high");
 	ok("R14-S4 mailbox durable append === 1 with priority=high",
 		highPriorityEscalations.length === 1,
@@ -656,7 +656,7 @@ console.log("\n[R14-S6] Config E — explicit goal clear stops escalation mid-co
 // Cleanup
 // ============================================================================
 process.env.PI_SWARM_AGENT_ID = ORIG_PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = ORIG_PI_SWARM_IS_ORCHESTRATOR;
+process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 
 console.log(`\nR14-GOAL-EMPTY-POOL-ESCALATION ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 if (fail > 0) {

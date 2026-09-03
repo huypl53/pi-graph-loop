@@ -8,9 +8,9 @@
  *   - stopAgent (agents.ts:438) refuses only on activeTaskIds; ack debt proceeds silently.
  *
  * Plan §1 RED asserts (deterministic, state-seeded, NO LLM):
- *   1. Settled path: a running worker with seeded unacked requiresAck records → orchestrator
- *      receives an ack-debt notify (mailbox record to:"orchestrator" + subject matches).
- *   2. Stop path: stop_agent on the same shape → orchestrator receives the same notify.
+ *   1. Settled path: a running worker with seeded unacked requiresAck records → root
+ *      receives an ack-debt notify (mailbox record to:"root" + subject matches).
+ *   2. Stop path: stop_agent on the same shape → root receives the same notify.
  *   3. Re-settle with UNCHANGED debt set → notify count stays 1 (idempotency storm guard).
  *   4. Sensitivity (false-RED guard): requiresResponse-missing still triggers the existing
  *      L868 notify (proves the harness observes the real path).
@@ -65,7 +65,7 @@ const call = async (name, params) => {
 };
 const readSwarmState = () => JSON.parse(readFileSync(statePath, "utf8"));
 const writeSwarmState = (st) => writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
-const orchMailboxPath = join(scratch, ".pi", "swarm", "mailboxes", "orchestrator.jsonl");
+const orchMailboxPath = join(scratch, ".pi", "swarm", "mailboxes", "root.jsonl");
 const readOrchMailbox = () => {
 	try { return readFileSync(orchMailboxPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)); }
 	catch { return []; }
@@ -103,7 +103,7 @@ const seedAgentWithUnackedDebt = (agentId, opts = {}) => {
 		st.messages[id] = {
 			id,
 			swarmId: st.swarmId,
-			from: "orchestrator",
+			from: "root",
 			to: agentId,
 			subject,
 			priority: "normal",
@@ -132,13 +132,13 @@ const seedAgentWithUnackedDebt = (agentId, opts = {}) => {
 	return st;
 };
 
-// Register orchestrator pseudo-agent so deliverMessageLocked has an "orchestrator" agent to deliver to.
+// Register root pseudo-agent so deliverMessageLocked has an "root" agent to deliver to.
 {
 	const st = readSwarmState();
-	st.agents.orchestrator = st.agents.orchestrator || {
-		id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", roleKindExplicit: true,
+	st.agents.root = st.agents.root || {
+		id: "root", role: "root", roleKind: "root", roleKindExplicit: true,
 		tmuxTarget: "r25sess:orch.1", tmuxSession: "r25sess", tmuxWindow: "orch",
-		mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", capabilities: ["orchestrate"],
+		mailbox: ".pi/swarm/mailboxes/root.jsonl", capabilities: ["orchestrate"],
 		status: "running", runtimeStatus: "idle", health: "healthy",
 		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 		lastHeartbeatAt: new Date().toISOString(), activeTaskIds: [],
@@ -179,23 +179,23 @@ try {
 
 const orchMail1 = readOrchMailbox();
 const ackDebtNotify1 = orchMail1.find((m) =>
-	m.to === "orchestrator" && /unacked ack|ack debt|R25/i.test(m.subject || "")
+	m.to === "root" && /unacked ack|ack debt|R25/i.test(m.subject || "")
 );
-ok("[Settle path] orchestrator received ack-debt notify (RED today: none)", !!ackDebtNotify1, {
+ok("[Settle path] root received ack-debt notify (RED today: none)", !!ackDebtNotify1, {
 	totalOrchMessages: orchMail1.length,
 	subjects: orchMail1.map((m) => m.subject),
 });
 
 // === 3. Re-settle storm guard: cooldown suppresses repeated settles within window ===
 // [Settle path] already settled r25-worker once (lastAckDebtNotifyAt stamped). Run 2 more settles
-// back-to-back; cumulative orchestrator mailbox count for ack-debt subjects must stay at 1
+// back-to-back; cumulative root mailbox count for ack-debt subjects must stay at 1
 // (the original), not 3 — that's the storm-guard proof.
-const orchBeforeResettle = readOrchMailbox().filter((m) => m.to === "orchestrator" && /unacked ack|ack debt|R25/i.test(m.subject || "")).length;
+const orchBeforeResettle = readOrchMailbox().filter((m) => m.to === "root" && /unacked ack|ack debt|R25/i.test(m.subject || "")).length;
 process.env.PI_SWARM_AGENT_ID = "r25-worker";
 try { await agentSettledHandler({}, { cwd: scratch, mode: "tui" }); } finally { process.env.PI_SWARM_AGENT_ID = prevAgent; }
 process.env.PI_SWARM_AGENT_ID = "r25-worker";
 try { await agentSettledHandler({}, { cwd: scratch, mode: "tui" }); } finally { process.env.PI_SWARM_AGENT_ID = prevAgent; }
-const orchAfterResettle = readOrchMailbox().filter((m) => m.to === "orchestrator" && /unacked ack|ack debt|R25/i.test(m.subject || "")).length;
+const orchAfterResettle = readOrchMailbox().filter((m) => m.to === "root" && /unacked ack|ack debt|R25/i.test(m.subject || "")).length;
 ok("[Re-settle] cumulative notify count stays 1 across 2 more settles (cooldown storm guard)", orchAfterResettle === orchBeforeResettle, { before: orchBeforeResettle, after: orchAfterResettle });
 
 // === 4. Sensitivity: requiresResponse-missing still triggers L868 notify (false-RED guard) ===
@@ -209,7 +209,7 @@ try {
 }
 const orchMail3 = readOrchMailbox();
 const rrNotify = orchMail3.find((m) =>
-	m.to === "orchestrator" && /missing response/i.test(m.subject || "")
+	m.to === "root" && /missing response/i.test(m.subject || "")
 );
 ok("[Sensitivity] requiresResponse-missing still produces the existing L868 notify", !!rrNotify, {
 	totalOrchMessages: orchMail3.length,
@@ -239,7 +239,7 @@ try {
 }
 const orchMail4 = readOrchMailbox();
 const infoNotify = orchMail4.filter((m) =>
-	m.to === "orchestrator" && /unacked ack|ack debt|R25/i.test(m.subject || "")
+	m.to === "root" && /unacked ack|ack debt|R25/i.test(m.subject || "")
 );
 ok("[Invariant] requiresAck=false informational messages NEVER produce a notify", infoNotify.length === 0, {
 	count: infoNotify.length,
@@ -252,25 +252,25 @@ const stopRes = await call("swarm_stop_agent", { agentId: "r25-stopped", cwd: sc
 ok("[Stop path] swarm_stop_agent succeeds (no activeTaskIds)", !!stopRes?.content?.[0]?.text);
 const orchMail5 = readOrchMailbox();
 const stopNotify = orchMail5.find((m) =>
-	m.to === "orchestrator" && /unacked ack|ack debt|R25|stop/i.test(m.subject || "")
+	m.to === "root" && /unacked ack|ack debt|R25|stop/i.test(m.subject || "")
 );
-ok("[Stop path] orchestrator received ack-debt notify (RED today: none)", !!stopNotify, {
+ok("[Stop path] root received ack-debt notify (RED today: none)", !!stopNotify, {
 	totalOrchMessages: orchMail5.length,
 	subjects: orchMail5.map((m) => m.subject),
 });
 
 // === R10-1 boundary counting assertion ===
 // Plan §5 + AGENTS.md rule 4 require a REAL R10-1 boundary counter at the `pi.sendMessage`
-// surface, not a constant-true line. The settle-path notify lands in the orchestrator mailbox
-// synchronously; the actual sendMessage call happens when pumpOrchestratorMailbox surfaces it
+// surface, not a constant-true line. The settle-path notify lands in the root mailbox
+// synchronously; the actual sendMessage call happens when pumpRootMailbox surfaces it
 // on the next pump tick (real production boundary). We drive the pump twice and assert:
 //   - After 1st settle: at least 1 sendMessage carrying subject matching /owing/ (the ack-debt
 //     notify surfaces exactly once).
 //   - After the re-settle round (2 more settles within cooldown): ZERO new sends — the surface
-//     ledger (consumerReceipts.orchestrator.entries) dedupes the same idempotencyKey, and the
+//     ledger (consumerReceipts.root.entries) dedupes the same idempotencyKey, and the
 //     cooldown never reached the deliver path.
 //   - After the stop path: at least 1 sendMessage carrying subject matching /owing/.
-const { pumpOrchestratorMailbox } = await import(join(here, "..", "src", "reconcile.ts"));
+const { pumpRootMailbox } = await import(join(here, "..", "src", "reconcile.ts"));
 const { withLock } = await import(join(here, "..", "src", "state.ts"));
 const pumpStub = {
 	sendMessage: (m, o) => sentMessages.push({ customType: m?.customType, content: m?.content, details: m?.details, options: o }),
@@ -281,25 +281,25 @@ const pPaths = paths(scratch);
 // Helper: ack-debt sendMatcher — pump wraps the swarm message as {customType:"swarm-message",
 // details:<SwarmMessage>}; the subject lives at details.subject (NOT m.subject at the top level).
 const ackDebtSubject = (s) => /owing.*unacked ack/.test(String(s?.details?.subject || "") || "");
-// Seed the orchestrator leader so pump's second-line defense does not deny.
-const seedOrchestratorLeader = async () => {
+// Seed the root leader so pump's second-line defense does not deny.
+const seedRootLeader = async () => {
 	await withLock(pPaths, async () => {
 		const st = readSwarmState();
-		const { ensureOrchestrator, heartbeatOrchestratorLeader } = await import(join(here, "..", "src", "identity.ts"));
-		ensureOrchestrator(st, scratch, pPaths);
-		heartbeatOrchestratorLeader(st, Date.now(), process.pid, "r25_test_seed");
+		const { ensureRoot, heartbeatRootLeader } = await import(join(here, "..", "src", "identity.ts"));
+		ensureRoot(st, scratch, pPaths);
+		heartbeatRootLeader(st, Date.now(), process.pid, "r25_test_seed");
 		writeSwarmState(st);
 	});
 };
-// Helper: set orchestrator identity for the duration of a pump call.
-const pumpAsOrchestrator = async () => {
+// Helper: set root identity for the duration of a pump call.
+const pumpAsRoot = async () => {
 	const prev = process.env.PI_SWARM_AGENT_ID;
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	try { return await pumpOrchestratorMailbox(pumpStub, pumpCtx, pPaths, "r25"); }
+	process.env.PI_SWARM_AGENT_ID = "root";
+	try { return await pumpRootMailbox(pumpStub, pumpCtx, pPaths, "r25"); }
 	finally { process.env.PI_SWARM_AGENT_ID = prev; }
 };
 
-await seedOrchestratorLeader();
+await seedRootLeader();
 
 // [R10-1a] Fresh worker settle; pump once; assert >=1 ack-debt sendMessage at the boundary.
 seedAgentWithUnackedDebt("r25-worker-b1", { status: "running" });
@@ -307,7 +307,7 @@ rmSync(orchMailboxPath, { force: true });
 process.env.PI_SWARM_AGENT_ID = "r25-worker-b1";
 try { await agentSettledHandler({}, { cwd: scratch, mode: "tui" }); } finally { process.env.PI_SWARM_AGENT_ID = prevAgent; }
 sentMessages.length = 0;
-await pumpAsOrchestrator();
+await pumpAsRoot();
 const pumpSends1 = sentMessages.filter(ackDebtSubject);
 ok("[R10-1 boundary] first settle surfaces >=1 ack-debt sendMessage at the pump boundary", pumpSends1.length >= 1, { count: pumpSends1.length, detailsSubjects: sentMessages.map((s) => s?.details?.subject) });
 
@@ -317,7 +317,7 @@ try { await agentSettledHandler({}, { cwd: scratch, mode: "tui" }); } finally { 
 process.env.PI_SWARM_AGENT_ID = "r25-worker-b1";
 try { await agentSettledHandler({}, { cwd: scratch, mode: "tui" }); } finally { process.env.PI_SWARM_AGENT_ID = prevAgent; }
 sentMessages.length = 0;
-await pumpAsOrchestrator();
+await pumpAsRoot();
 const pumpSends2 = sentMessages.filter(ackDebtSubject);
 ok("[R10-1 boundary] re-settle within cooldown surfaces 0 NEW ack-debt sendMessage (surface-ledger dedupe)", pumpSends2.length === 0, { count: pumpSends2.length, detailsSubjects: sentMessages.map((s) => s?.details?.subject) });
 
@@ -326,7 +326,7 @@ seedAgentWithUnackedDebt("r25-worker-b1-stop", { status: "running" });
 rmSync(orchMailboxPath, { force: true });
 await call("swarm_stop_agent", { agentId: "r25-worker-b1-stop", cwd: scratch });
 sentMessages.length = 0;
-await pumpAsOrchestrator();
+await pumpAsRoot();
 const pumpSends3 = sentMessages.filter(ackDebtSubject);
 ok("[R10-1 boundary] stop path surfaces >=1 ack-debt sendMessage at the pump boundary", pumpSends3.length >= 1, { count: pumpSends3.length, detailsSubjects: sentMessages.map((s) => s?.details?.subject) });
 

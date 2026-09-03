@@ -1,6 +1,6 @@
 # R10 consolidated findings — Issues 81+86+82
 
-> Synthesis author: fs-planner (assigned by orchestrator; a2 authored in fs-implementer voice, a4 in r10-analyst voice; a1, a3, a5 by fs-planner; consolidated-findings by fs-planner).
+> Synthesis author: fs-planner (assigned by root; a2 authored in fs-implementer voice, a4 in r10-analyst voice; a1, a3, a5 by fs-planner; consolidated-findings by fs-planner).
 > Sources: `.pi/swarm/tasks/task-202608310900-issue-81-goal-clear-auth/artifacts/{implementation-report,test-report,review,fix-report}.md` + `task-202608311000-issue-86-priority-high-i/artifacts/{...}` + `task-202608311208-issue-82-agent-retiremen/artifacts/{...}` + live traces (events.jsonl 12:05:25, 14:03:48 confirm pre-patch pump observation).
 > Mirror: `docs/swarm/r10-postbatch-synthesis/consolidated-findings.md`.
 
@@ -9,14 +9,14 @@
 | Issue | Commit | Quality (a1) | Defect caught | Stage caught | Defect class | Defect fix shape |
 |---|---|---|---|---|---|---|
 | 81 — goal-clear authority guard | `2c153db` | **A** | turn 3 `origin:"batch"` vs intent `origin:"user"` | tester lane | Fixture self-contradiction (engine correct, fixture content wrong) | 1-line content change + narrative cleanup; engine untouched |
-| 86 — priority-high interrupt-on-delivery | `90d16b1` | **A** | single-session orchestrator-mode lane cannot trigger `pi.on("input")` mid-turn (`pumpOrchestratorMailbox` uses `pi.sendMessage`, doesn't fire input hook) | tester refused fake PASS | Harness design flaw | Worker-lane harness + integration test `priority-high-interrupt-stream-resolve.test.mjs`; **91ms vs 23min live incident** |
+| 86 — priority-high interrupt-on-delivery | `90d16b1` | **A** | single-session root-mode lane cannot trigger `pi.on("input")` mid-turn (`pumpRootMailbox` uses `pi.sendMessage`, doesn't fire input hook) | tester refused fake PASS | Harness design flaw | Worker-lane harness + integration test `priority-high-interrupt-stream-resolve.test.mjs`; **91ms vs 23min live incident** |
 | 82 — agent retirement + heartbeat GC | `b61ffab` | **A+** | gate 2 probe-throttle claim not implemented; every stopped-stale-tmuxTarget agent probed every tick (livelock under R9 a3 graveyard) | reviewer code-read REJECTION (round 1) | Probe-bound fiction (claim in report, missing conjuncts in code) | 5-conjunct gate + `lastProbeAt` ledger + counting assertions C10–C13 |
 
 All three issues landed **red-first** (tests authored before source, RED verified under stash, GREEN after fix). All three had exactly **one rework cycle**. No defect escaped the batch.
 
 ## 2. Four roadmap rows (formalized)
 
-Each row is written in `docs/swarm/reliability-roadmap.md` style: **Status / Priority / Source / Proposal / Acceptance criteria.** The orchestrator will commit these into the roadmap as candidates.
+Each row is written in `docs/swarm/reliability-roadmap.md` style: **Status / Priority / Source / Proposal / Acceptance criteria.** The root will commit these into the roadmap as candidates.
 
 ### Row R10-1 — Cost-bound claims require counting assertions (P1)
 
@@ -40,30 +40,30 @@ Each row is written in `docs/swarm/reliability-roadmap.md` style: **Status / Pri
   - First feature in next batch (R11) that ships a fixture must have an independent tester lane run cited in its test-report.
 - **Why now:** the unit-test surface was strong across R10; the lane layer was the only gate that caught the Issue 81 fixture defect. The pattern recurs every batch — make it explicit.
 
-### Row R10-3 — Orchestrator runs pre-patch code until restart (P1)
+### Row R10-3 — Root runs pre-patch code until restart (P1)
 
-- **Status:** proposed. **Priority:** P1. **Source:** R10 events.jsonl orchestrator ack notes at `12:05:25.531Z` and `14:03:48.371Z` (post-b4d0f88 commit, the orchestrator's running pi kept executing the pre-patch pump code; vacuous-idle shape continued to fire until orchestrator restart).
-- **Problem:** every batch that touches `extensions/swarm/src/{reconcile,hooks,delivery,command}.ts` creates a window where the orchestrator is running pre-patch code against post-patch fixtures. The window produces spurious traces (vacuous-idle nudges, false-positive counts) that contaminate downstream testing and confuse operators ("the fix didn't fix anything" — false-positive when the pre-patch pump keeps firing the old shape).
-- **Proposal:** define a **restart policy** for the orchestrator after commits touching pump/hooks:
-  - **(A) Manual restart gate (immediate, S effort).** Operator restarts the orchestrator pi after any commit touching pump/hooks. Commit-message convention: add `[restart-required]` to the commit subject.
-  - **(B) Graceful-restart tool (future option).** `swarm_restart_orchestrator` command the orchestrator can invoke with explicit operator approval; graceful-shutdown handshake with active workers.
+- **Status:** proposed. **Priority:** P1. **Source:** R10 events.jsonl root ack notes at `12:05:25.531Z` and `14:03:48.371Z` (post-b4d0f88 commit, the root's running pi kept executing the pre-patch pump code; vacuous-idle shape continued to fire until root restart).
+- **Problem:** every batch that touches `extensions/swarm/src/{reconcile,hooks,delivery,command}.ts` creates a window where the root is running pre-patch code against post-patch fixtures. The window produces spurious traces (vacuous-idle nudges, false-positive counts) that contaminate downstream testing and confuse operators ("the fix didn't fix anything" — false-positive when the pre-patch pump keeps firing the old shape).
+- **Proposal:** define a **restart policy** for the root after commits touching pump/hooks:
+  - **(A) Manual restart gate (immediate, S effort).** Operator restarts the root pi after any commit touching pump/hooks. Commit-message convention: add `[restart-required]` to the commit subject.
+  - **(B) Graceful-restart tool (future option).** `swarm_restart_root` command the root can invoke with explicit operator approval; graceful-shutdown handshake with active workers.
   - Defer hot-reload (C) — partial reload can corrupt state.
 - **Acceptance criteria:**
   - Commit-message convention `[restart-required]` documented in `docs/swarm/contributor-guide.md`.
-  - Post-batch ritual includes "confirm orchestrator restart after pump/hooks commits" checklist item.
-  - First feature in next batch that touches pump/hooks (R11-83a liveness/progress detection adds a new pump phase) must carry `[restart-required]` on the commit and the next batch's pump-shape audit assumes a post-restart orchestrator.
-- **Why now:** the Issue 85 fix landed and the orchestrator kept firing the old shape for ~2 hours; this is a known contamination window that has not been addressed.
+  - Post-batch ritual includes "confirm root restart after pump/hooks commits" checklist item.
+  - First feature in next batch that touches pump/hooks (R11-83a liveness/progress detection adds a new pump phase) must carry `[restart-required]` on the commit and the next batch's pump-shape audit assumes a post-restart root.
+- **Why now:** the Issue 85 fix landed and the root kept firing the old shape for ~2 hours; this is a known contamination window that has not been addressed.
 
 ### Row R10-4 — Re-review-after-reject graph gap (P2)
 
-- **Status:** proposed. **Priority:** P2. **Source:** R10 Issue 82 round-1 REJECTION → fix round → review round 2. The reviewer round 2 was a separate reviewer call (`msg-1788185082498` / `msg-1788185097713`); the orchestrator had to manually wire the re-review into the task graph.
-- **Problem:** the `feature-dev` workflow has no `review → fix → review` edge. Rejected reviews trigger `review → fix` (via the `rework: true, when: "rejected"` edge), but the subsequent `fix → review` requires the orchestrator to manually re-assign the review node. Today the rework cycle assumes `test → fix → test → review` (rework from `test`, not from `review`). When a reviewer rejects a surgical fix where tests still cover the change, the test re-run is wasted and the orchestrator must wire the review round manually.
-- **Proposal:** either (A) add a `review → fix → review` short-circuit with optional `skipTest: true` flag for surgical fixes, OR (B) keep current `fix → test` shape and document the orchestrator's manual re-review wiring as the expected path.
+- **Status:** proposed. **Priority:** P2. **Source:** R10 Issue 82 round-1 REJECTION → fix round → review round 2. The reviewer round 2 was a separate reviewer call (`msg-1788185082498` / `msg-1788185097713`); the root had to manually wire the re-review into the task graph.
+- **Problem:** the `feature-dev` workflow has no `review → fix → review` edge. Rejected reviews trigger `review → fix` (via the `rework: true, when: "rejected"` edge), but the subsequent `fix → review` requires the root to manually re-assign the review node. Today the rework cycle assumes `test → fix → test → review` (rework from `test`, not from `review`). When a reviewer rejects a surgical fix where tests still cover the change, the test re-run is wasted and the root must wire the review round manually.
+- **Proposal:** either (A) add a `review → fix → review` short-circuit with optional `skipTest: true` flag for surgical fixes, OR (B) keep current `fix → test` shape and document the root's manual re-review wiring as the expected path.
 - **Acceptance criteria:**
   - Decision between (A) and (B) documented in `docs/swarm/contributor-guide.md`.
   - If (A): workflow template includes the `review → fix → review` edge with `skipTest` semantics.
-  - If (B): the orchestrator's manual wiring is a documented ritual step; the graph self-documents the rejection path.
-- **Why now:** every batch that has a reviewer rejection (R10 had one — Issue 82 round-1) currently requires the orchestrator to manually wire the re-review. Low priority because the manual wiring works, but it should be made explicit so the graph self-documents.
+  - If (B): the root's manual wiring is a documented ritual step; the graph self-documents the rejection path.
+- **Why now:** every batch that has a reviewer rejection (R10 had one — Issue 82 round-1) currently requires the root to manually wire the re-review. Low priority because the manual wiring works, but it should be made explicit so the graph self-documents.
 
 ## 3. Sequencing confirmation: 83 first, then 84
 
@@ -110,15 +110,15 @@ R10-1 formalizes this as a roadmap row; a3 carries the operational detail. New f
 
 ## 5. a4 fresh-eyes findings (r10-analyst)
 
-`analysis-a4.md` was authored in r10-analyst's voice (fresh-perspective observer role, spawned by orchestrator at events.jsonl:1178565). The cross-issue pump composition audit found:
+`analysis-a4.md` was authored in r10-analyst's voice (fresh-perspective observer role, spawned by root at events.jsonl:1178565). The cross-issue pump composition audit found:
 
 ### a4 finding 1 — Pre-patch pump shape contamination (R10-3)
 
-Confirmed via `events.jsonl` orchestrator ack notes at `12:05:25.531Z` and `14:03:48.371Z`: the orchestrator runs pre-patch pump code after commits land. Direct evidence the orchestrator kept firing vacuous-idle nudges post-`b4d0f88`. **This is R10-3 (already captured as a roadmap row); a4 confirms it as the dominant R10 contamination.**
+Confirmed via `events.jsonl` root ack notes at `12:05:25.531Z` and `14:03:48.371Z`: the root runs pre-patch pump code after commits land. Direct evidence the root kept firing vacuous-idle nudges post-`b4d0f88`. **This is R10-3 (already captured as a roadmap row); a4 confirms it as the dominant R10 contamination.**
 
 ### a4 finding 2 — Cross-issue pump composition is clean
 
-a4 audited the pump-tick order in `extensions/swarm/src/reconcile.ts:pumpOrchestratorMailbox`:
+a4 audited the pump-tick order in `extensions/swarm/src/reconcile.ts:pumpRootMailbox`:
 
 ```
 1. updateIdleEpochLocked                  // shared idle epoch maintenance
@@ -149,7 +149,7 @@ If a4 had found a real hazard (P0/P1 per severity), it would go in as a new row.
 
 ## 6. Out of scope for this synthesis
 
-- Touching `docs/swarm/reliability-roadmap.md` directly — the 4 roadmap rows become candidates for the next roadmap PR; the orchestrator decides which land.
+- Touching `docs/swarm/reliability-roadmap.md` directly — the 4 roadmap rows become candidates for the next roadmap PR; the root decides which land.
 - Modifying swarm extension code — this task writes ONLY to `docs/swarm/r10-postbatch-synthesis/` (new dir) and this task's `artifacts/` dir.
 - Re-running the 14 suites for R10 — already passed AC5 on each shipped issue.
 - Adding new tools or fixtures — this is a synthesis task, not a feature task.
@@ -159,6 +159,6 @@ If a4 had found a real hazard (P0/P1 per severity), it would go in as a new row.
 | AC | Evidence |
 |---|---|
 | Synthesis artifact (consolidated-findings.md) covering 3 shipped issues (81/86/82) with evidence-chain quality assessment | §1 Batch summary table (3 rows with grades A/A/A+ from a1) |
-| New roadmap rows for: cost-bound claims need counting proof; fixture-layer defects caught by lanes; re-review-after-reject graph gap; orchestrator pre-patch pump shapes after commits | §2 Rows R10-1, R10-2, R10-3, R10-4 — exactly 4 rows, each with roadmap-style acceptance criteria |
+| New roadmap rows for: cost-bound claims need counting proof; fixture-layer defects caught by lanes; re-review-after-reject graph gap; root pre-patch pump shapes after commits | §2 Rows R10-1, R10-2, R10-3, R10-4 — exactly 4 rows, each with roadmap-style acceptance criteria |
 | Next-batch sequencing recommendation (83 vs 84 order) | §3 Sequencing confirmation — 83 first, then 84; 4-bullet rationale; 83 sub-task ordering a→b→c |
-| Ritual run by ≥1 dedicated agent with fresh perspective | §5 a4 fresh-eyes findings — r10-analyst (role: observer, gpt-5.4-mini, spawned by orchestrator at events.jsonl:1178565); cross-issue pump composition audit + no real hazards surfaced |
+| Ritual run by ≥1 dedicated agent with fresh perspective | §5 a4 fresh-eyes findings — r10-analyst (role: observer, gpt-5.4-mini, spawned by root at events.jsonl:1178565); cross-issue pump composition audit + no real hazards surfaced |

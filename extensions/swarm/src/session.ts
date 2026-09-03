@@ -4,26 +4,26 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import type { ModelSlot, RotationConfig, RotationStrategy, SwarmSettings } from "./types.ts";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, EXT, SWARM_GUEST_ID } from "./constants.ts";
-import { ensureOrchestrator } from "./identity.ts";
+import { ensureRoot } from "./identity.ts";
 
-// Explicit opt-in for the orchestrator/PM identity. Truthy PI_SWARM_IS_ORCHESTRATOR (1/true/yes)
-// asserts "this session IS the human-driven orchestrator". A bare `pi` session opened in the project
-// must NOT implicitly become the orchestrator: that would let it run the orchestrator mailbox pump
-// (surfacing PM traffic to an unintended TUI), call ensureOrchestrator (refreshing the orchestrator
+// Explicit opt-in for the root/PM identity. Truthy PI_SWARM_IS_ROOT (1/true/yes)
+// asserts "this session IS the human-driven root". A bare `pi` session opened in the project
+// must NOT implicitly become the root: that would let it run the root mailbox pump
+// (surfacing PM traffic to an unintended TUI), call ensureRoot (refreshing the root
 // pseudo-agent heartbeat and masking a dead/stalled PM), and default mailbox reads/sends to the
-// orchestrator. The PM opts in explicitly; an anonymous session resolves to SWARM_GUEST_ID (inert).
-export function isOrchestratorSession() {
-	const v = process.env.PI_SWARM_IS_ORCHESTRATOR;
+// root. The PM opts in explicitly; an anonymous session resolves to SWARM_GUEST_ID (inert).
+export function isRootSession() {
+	const v = process.env.PI_SWARM_IS_ROOT;
 	return Boolean(v) && !/^(0|false|no|)$/i.test(v.trim());
 }
 
 export function currentAgentId() {
 	// Explicit agent id always wins (spawned agents set PI_SWARM_AGENT_ID=<id>). Setting it to
-	// "orchestrator" is an affirmative orchestrator claim, not a silent default.
+	// "root" is an affirmative root claim, not a silent default.
 	if (process.env.PI_SWARM_AGENT_ID) return process.env.PI_SWARM_AGENT_ID;
-	// Explicit orchestrator opt-in (the human PM sets PI_SWARM_IS_ORCHESTRATOR=1).
-	if (isOrchestratorSession()) return "orchestrator";
-	// No identity and no explicit orchestrator claim: anonymous/inert swarm session.
+	// Explicit root opt-in (the human PM sets PI_SWARM_IS_ROOT=1).
+	if (isRootSession()) return "root";
+	// No identity and no explicit root claim: anonymous/inert swarm session.
 	return SWARM_GUEST_ID;
 }
 

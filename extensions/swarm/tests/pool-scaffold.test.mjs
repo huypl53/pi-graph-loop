@@ -1,4 +1,4 @@
-// Pool-scaffold on orchestrator session_start (Issue 20) tests
+// Pool-scaffold on root session_start (Issue 20) tests
 //
 // Run: node extensions/swarm/pool-scaffold.test.mjs
 //

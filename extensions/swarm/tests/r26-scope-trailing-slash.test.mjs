@@ -89,7 +89,7 @@ ok("normalizeScopePattern('a/b/') returns array (not null)", Array.isArray(np), 
 console.log("\n== E2E: parallel assign of two disjoint dir-scoped tasks ==");
 
 // Now the E2E: real tool-handler factory, scratch cwd, two registered workers.
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
+process.env.PI_SWARM_AGENT_ID = "root";
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 

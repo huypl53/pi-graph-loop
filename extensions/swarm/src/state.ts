@@ -129,18 +129,18 @@ export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	}
 	st.messages ||= {};
 	st.delivered ||= {};
-	st.orchestratorPumpSessions ||= {};
+	st.rootPumpSessions ||= {};
 	// Orphan-spawn watchdog ledger (Issue 14): back-fill `[]` so pre-policy swarms boot cleanly and
 	// downstream code can use `state.recentSpawns.find(...)` without a null guard. The watchdog
 	// itself re-arms timers lazily on the next spawn for any entries that survive a restart
 	// (v1 limitation: stranded entries are observable but not auto-rearmed — see operations.md).
 	st.recentSpawns ||= [];
 	st.agents ||= {};
-	// Orchestrator durable consumer receipts (issue 11): back-fill so pre-policy swarms boot fine.
+	// Root durable consumer receipts (issue 11): back-fill so pre-policy swarms boot fine.
 	// The first pump against `revision === 0` runs a one-time migration back-fill that writes
 	// receipts for legacy `requiresAck: true` messages that are no longer actionable.
 	st.consumerReceipts ||= {};
-	st.consumerReceipts.orchestrator ||= { entries: {}, revision: 0 };
+	st.consumerReceipts.root ||= { entries: {}, revision: 0 };
 	// === R16 Fix B (2026-09-02): SwarmIdleNudgeState back-fill for legacy swarm-state.json ===
 	// Pre-R14 swarms do NOT have `lastWasVacuous` or `lastPoolEmptyEscalationAt` on their
 	// `idleNudgeState` object. The fields are optional (SwarmIdleNudgeState marks them with
@@ -161,10 +161,10 @@ export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	// evaluateIdleGoalNudgeLocked path. Leave this comment in place so a future maintainer does not
 	// copy the `consumerReceipts` pattern verbatim onto the goal field.
 	//
-	// (structurally identical to `orchestratorLeader?: OrchestratorLeader`, which is also additive
+	// (structurally identical to `rootLeader?: RootLeader`, which is also additive
 	// and not back-filled — absent === vacant for that field too.)
-	// orchestratorLeader is additive (roadmap issue 8): absent === vacant. readState leaves the
-	// field as-is on legacy swarms so the first orchestrator-authoritative mutation claims it.
+	// rootLeader is additive (roadmap issue 8): absent === vacant. readState leaves the
+	// field as-is on legacy swarms so the first root-authoritative mutation claims it.
 	// Back-fill structured reuse metadata for agents persisted before these fields existed.
 	for (const a of Object.values(st.agents)) ensureAgentDefaults(a);
 	return st;

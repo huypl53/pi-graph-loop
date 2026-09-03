@@ -52,7 +52,7 @@ try {
 } catch (e) {
 	evaluateArtifactProgressNudgeLocked = null;
 }
-const { ensureOrchestrator } = await import(join(here, "..", "src", "identity.ts"));
+const { ensureRoot } = await import(join(here, "..", "src", "identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "..", "src", "mailbox.ts"));
 
 let passed = 0, failed = 0;
@@ -62,14 +62,14 @@ const ok = (n, c, info) => {
 };
 
 const SAVED_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const SAVED_ORCH = process.env.PI_SWARM_IS_ORCHESTRATOR;
+const SAVED_ORCH = process.env.PI_SWARM_IS_ROOT;
 delete process.env.PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+process.env.PI_SWARM_IS_ROOT = "1";
 process.on("exit", () => {
 	if (SAVED_AGENT_ID === undefined) delete process.env.PI_SWARM_AGENT_ID;
 	else process.env.PI_SWARM_AGENT_ID = SAVED_AGENT_ID;
-	if (SAVED_ORCH === undefined) delete process.env.PI_SWARM_IS_ORCHESTRATOR;
-	else process.env.PI_SWARM_IS_ORCHESTRATOR = SAVED_ORCH;
+	if (SAVED_ORCH === undefined) delete process.env.PI_SWARM_IS_ROOT;
+	else process.env.PI_SWARM_IS_ROOT = SAVED_ORCH;
 });
 
 const sentMessages = [];
@@ -132,7 +132,7 @@ function makeAgentRecord(st, dir, id, overrides = {}) {
 
 async function seedState(p, dir, overrides = {}) {
 	const st = await readState(p, dir);
-	ensureOrchestrator(st, dir, p);
+	ensureRoot(st, dir, p);
 	const now = Date.now();
 	const ts = new Date(now).toISOString();
 	for (const id of Object.keys(overrides.agents || {})) {
@@ -173,7 +173,7 @@ async function writeTaskWithAllowedFile(p, dir, { taskId = "task-r20-1", allowed
 		priority: "normal",
 		createdAt: new Date(nowMs - 3600_000).toISOString(),
 		updatedAt: nowIso,
-		owner: "orchestrator",
+		owner: "root",
 		workflow: "feature-dev",
 		allowedFiles: allowedFiles ?? ["extensions/swarm/src/reconcile.ts"],
 		nodes: taskNodes,

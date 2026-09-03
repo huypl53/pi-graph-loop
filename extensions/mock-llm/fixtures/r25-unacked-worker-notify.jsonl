@@ -1,9 +1,9 @@
 # r25-unacked-worker-notify — R25 PM ack-debt notify E2E scenario.
 #
-# Validates the agent_settled → unackedRequiresAckRecords → deliverMessageLocked(orchestrator)
+# Validates the agent_settled → unackedRequiresAckRecords → deliverMessageLocked(root)
 # path when a worker settles (turn-end / final-turn stop) while still holding a live, non-superseded
 # requiresAck message addressed to it. Plan §3 scenario:
-#   "worker spawn taskless → ack-required message → settle/stop → orchestrator nhận notify"
+#   "worker spawn taskless → ack-required message → settle/stop → root nhận notify"
 #
 # This fixture is the engine-side artifact: it provides a deterministic terminal turn so the
 # worker's pi session reaches agent_settled naturally. The pre-existing unacked message is
@@ -20,5 +20,5 @@
 # Three turns: text ack-of-task -> text confirm-then-stop. Total runtime <120ms; lane then exits
 # cleanly so the engine fires agent_settled.
 {"name":"r25 turn 0 ack-receipt","events":[{"type":"text","delayMs":15,"text":"R25 turn 0: worker received the seeded requiresAck message but has not yet acked. Standing by for task body before settling."}]}
-{"name":"r25 turn 1 settle-confirm","events":[{"type":"text","delayMs":15,"text":"R25 turn 1: worker has not acked the seeded message and the turn is ending. The engine's agent_settled handler will now scan unackedRequiresAckRecords, find the seeded live message, and deliver the orchestrator notify."}]}
-{"name":"r25 turn 2 final-stop","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"R25 lane complete. After this stop, the worker settles; the orchestrator mailbox should now contain the ack-debt notify."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"r25 turn 1 settle-confirm","events":[{"type":"text","delayMs":15,"text":"R25 turn 1: worker has not acked the seeded message and the turn is ending. The engine's agent_settled handler will now scan unackedRequiresAckRecords, find the seeded live message, and deliver the root notify."}]}
+{"name":"r25 turn 2 final-stop","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"R25 lane complete. After this stop, the worker settles; the root mailbox should now contain the ack-debt notify."},{"type":"stop","delayMs":5,"reason":"stop"}]}

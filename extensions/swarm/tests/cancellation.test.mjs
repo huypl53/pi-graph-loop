@@ -3,7 +3,7 @@
 // Run: node extensions/swarm/cancellation.test.mjs
 //
 // Coverage:
-//   - Orchestrator can cancel a task (force + cancelTask); all attempts revoked, all messages superseded
+//   - Root can cancel a task (force + cancelTask); all attempts revoked, all messages superseded
 //   - Worker cannot cancel (CANCEL_FORBIDDEN)
 //   - cancelTask without force (CANCEL_REQUIRES_FORCE)
 //   - Late task update after cancellation rejected (TASK_CANCELLED), state unchanged
@@ -39,10 +39,10 @@ const pi = {
 };
 
 const ORIGINAL_AGENT = process.env.PI_SWARM_AGENT_ID;
-const ORIGINAL_ORCH = process.env.PI_SWARM_IS_ORCHESTRATOR;
+const ORIGINAL_ORCH = process.env.PI_SWARM_IS_ROOT;
 const setAgent = async (id, isOrch = false) => {
 	process.env.PI_SWARM_AGENT_ID = id;
-	process.env.PI_SWARM_IS_ORCHESTRATOR = isOrch ? "1" : "";
+	process.env.PI_SWARM_IS_ROOT = isOrch ? "1" : "";
 	const url = join(here, "..", "index.ts");
 	const mod = await import(`${url}?cb=${Date.now()}-${Math.random()}`);
 	const factory = mod.default;
@@ -71,9 +71,9 @@ const expectErr = async (fn, code) => {
 
 const buildTask = async (call, label) => {
 	const prevAgent = process.env.PI_SWARM_AGENT_ID;
-	const prevOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
-	process.env.PI_SWARM_AGENT_ID = "orchestrator";
-	process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+	const prevOrch = process.env.PI_SWARM_IS_ROOT;
+	process.env.PI_SWARM_AGENT_ID = "root";
+	process.env.PI_SWARM_IS_ROOT = "1";
 	const ct = await call("swarm_create_task", {
 		taskId: `task-test-${label}-${Math.random().toString(36).slice(2, 8)}`,
 		title: `Cancellation test ${label}`,
@@ -96,7 +96,7 @@ const buildTask = async (call, label) => {
 	});
 	const m = asJson(ct).match(/task-[\w-]+/);
 	process.env.PI_SWARM_AGENT_ID = prevAgent;
-	process.env.PI_SWARM_IS_ORCHESTRATOR = prevOrch;
+	process.env.PI_SWARM_IS_ROOT = prevOrch;
 	if (!m) throw new Error("no taskId parsed: " + asJson(ct));
 	return m[0];
 };
@@ -143,7 +143,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 		if (node.assignmentMessageId) {
 			registerAgent(st, node.assignee);
 			st.messages[node.assignmentMessageId] = {
-				id: node.assignmentMessageId, from: "orchestrator", to: node.assignee,
+				id: node.assignmentMessageId, from: "root", to: node.assignee,
 				status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 				attempts: 1, requiresAck: true, conversationId: `task:${taskId}:${nodeId}`,
 				subject: "assignment", priority: "normal", type: "swarm.message", schemaVersion: 1,
@@ -155,9 +155,9 @@ const materializeAssignments = (taskId, nodeIds) => {
 	writeFileSync(statePath, JSON.stringify(st, null, 2));
 };
 
-// === Test 1: orchestrator cancels an in-progress task ===
+// === Test 1: root cancels an in-progress task ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t1");
 	stampAssignee(taskId, "plan", "planner-01", "att-plan-1");
@@ -168,7 +168,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 	t0.nodes.plan.status = "done"; t0.nodes.plan.outcome = "planned";
 	writeFileSync(planPath, JSON.stringify(t0, null, 2));
 	const r = await call("swarm_update_task", { taskId, nodeId: "implement", force: true, cancelTask: true, cwd: scratch });
-	ok("orchestrator cancel returned a result", asJson(r).length > 0);
+	ok("root cancel returned a result", asJson(r).length > 0);
 	const taskPath = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
 	const j = JSON.parse(readFileSync(taskPath, "utf8"));
 	ok("task.status = cancelled", j.status === "cancelled");
@@ -199,21 +199,21 @@ const materializeAssignments = (taskId, nodeIds) => {
 	ok("worker cancel rejected with CANCEL_FORBIDDEN", codeOk, err);
 }
 
-// === Test 3: orchestrator cancel without force (CANCEL_REQUIRES_FORCE) ===
+// === Test 3: root cancel without force (CANCEL_REQUIRES_FORCE) ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t3");
 	const { ok: codeOk, err } = await expectErr(
 		() => call("swarm_update_task", { taskId, nodeId: "plan", cancelTask: true, cwd: scratch }),
 		"CANCEL_REQUIRES_FORCE"
 	);
-	ok("orchestrator cancel without force rejected with CANCEL_REQUIRES_FORCE", codeOk, err);
+	ok("root cancel without force rejected with CANCEL_REQUIRES_FORCE", codeOk, err);
 }
 
 // === Test 4: late task update after cancellation rejected (TASK_CANCELLED) ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t4");
 	stampAssignee(taskId, "plan", "planner-01", "att-plan-2");
@@ -230,7 +230,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 
 // === Test 5: late ACK on a superseded assignment message rejected (ASSIGNMENT_SUPERSEDED) ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t5");
 	stampAssignee(taskId, "plan", "planner-01", "att-plan-5");
@@ -253,7 +253,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 
 // === Test 6: reassignment supersession ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t6");
 	const statePath = join(scratch, ".pi/swarm/swarm-state.json");
@@ -262,7 +262,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 	registerAgent(st, "planner-01");
 	registerAgent(st, "planner-02");
 	st.messages[msg1] = {
-		id: msg1, from: "orchestrator", to: "planner-01",
+		id: msg1, from: "root", to: "planner-01",
 		status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 		attempts: 1, requiresAck: true, conversationId: `task:${taskId}:plan`,
 		subject: "assignment v1", priority: "normal", type: "swarm.message", schemaVersion: 1,
@@ -272,7 +272,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 	const taskPath = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
 	const j = JSON.parse(readFileSync(taskPath, "utf8"));
 	j.handoffs = j.handoffs || [];
-	j.handoffs.push({ fromNode: null, toNode: "plan", kind: "assign", messageId: msg1, taskId, by: "orchestrator", at: new Date().toISOString() });
+	j.handoffs.push({ fromNode: null, toNode: "plan", kind: "assign", messageId: msg1, taskId, by: "root", at: new Date().toISOString() });
 	writeFileSync(taskPath, JSON.stringify(j, null, 2));
 	writeFileSync(statePath, JSON.stringify(st, null, 2));
 	// Reassignment via swarm_assign_task — the only path that triggers supersedeOpenAssignments.
@@ -285,7 +285,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 
 // === Test 7: duplicate delivery idempotency ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const idempKey = `idem-test-${Date.now()}`;
 	const r1 = await call("swarm_send_message", { to: "planner-01", body: "dup test", subject: "dup", requiresAck: false, idempotencyKey: idempKey, cwd: scratch });
@@ -298,7 +298,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 
 // === Test 8: audit persistence ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t8");
 	stampAssignee(taskId, "plan", "planner-01", "att-plan-audit");
@@ -320,7 +320,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 
 // === Test 9: edit lock release on cancel ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t9");
 	const taskPath = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
@@ -337,7 +337,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 
 // === Test 10: historical compatibility — legacy task without attemptHistory still readable ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const ct = await call("swarm_create_task", {
 		taskId: `task-legacy-${Math.random().toString(36).slice(2, 8)}`,
@@ -362,7 +362,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 
 // === Test 11: isTaskOrNodeCancelled helper correctness ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t11");
 	stampAssignee(taskId, "plan", "planner-01", "att-plan-helper");
@@ -386,7 +386,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 
 // === Test 12: cancel during assigned (not yet in_progress); already-terminal nodes must NOT be mutated ===
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t12");
 	stampAssignee(taskId, "implement", "implementer-01", "att-impl-assigned");
@@ -411,7 +411,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 // check so the cancel fence deterministically wins for ANY late worker mutation, even
 // those that are not the assignee (e.g. stale workers trying to claim work).
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t13");
 	stampAssignee(taskId, "implement", "implementer-01", "att-impl-fence");
@@ -440,7 +440,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 // to a newer attempt (which itself is in handoffs), then cancel — and verify BOTH
 // historical handoff ids are marked superseded + waived.
 {
-	await setAgent("orchestrator", true);
+	await setAgent("root", true);
 	const call = makeCall();
 	const taskId = await buildTask(call, "t14");
 	// Build handoffs by hand: a historical assign (older) and a current assignment on the node.
@@ -460,7 +460,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 	j.handoffs = j.handoffs || [];
 	j.handoffs.push({ fromNode: null, toNode: "implement", kind: "assign", messageId: olderId, by: "planner-01", at: new Date().toISOString() });
 	// Current assign handoff
-	j.handoffs.push({ fromNode: null, toNode: "implement", kind: "assign", messageId: currentId, by: "orchestrator", at: new Date().toISOString() });
+	j.handoffs.push({ fromNode: null, toNode: "implement", kind: "assign", messageId: currentId, by: "root", at: new Date().toISOString() });
 	writeFileSync(path, JSON.stringify(j, null, 2));
 	// Register both messages in swarm state
 	const statePath = join(scratch, ".pi/swarm/swarm-state.json");
@@ -468,7 +468,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 	registerAgent(st, "implementer-01");
 	for (const mid of [olderId, currentId]) {
 		st.messages[mid] = {
-			id: mid, from: "orchestrator", to: "implementer-01",
+			id: mid, from: "root", to: "implementer-01",
 			status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 			attempts: 1, requiresAck: true, conversationId: `task:${taskId}:implement`,
 			subject: "assignment", priority: "normal", type: "swarm.message", schemaVersion: 1,
@@ -491,7 +491,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);
 
 process.env.PI_SWARM_AGENT_ID = ORIGINAL_AGENT;
-process.env.PI_SWARM_IS_ORCHESTRATOR = ORIGINAL_ORCH;
+process.env.PI_SWARM_IS_ROOT = ORIGINAL_ORCH;
 
 rmSync(scratch, { recursive: true, force: true });
 process.exit(fail === 0 ? 0 : 1);

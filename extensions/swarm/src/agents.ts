@@ -66,7 +66,7 @@ export function armOrphanWatch(p: Paths, st: SwarmState, agentId: string, ts: st
 	const deadlineAt = new Date(new Date(ts).getTime() + ORPHAN_SPAWN_WARNING_TIMEOUT_MS).toISOString();
 	// Issue 16: stamp the spawning session's identity onto the RecentSpawn entry so the pre-clear
 	// predicate in swarm_assign_task can match without re-reading env at compare time. We use the
-	// *caller's* pid + sessionStartedAt directly rather than the live orchestratorLeader record
+	// *caller's* pid + sessionStartedAt directly rather than the live rootLeader record
 	// because swarm_spawn_agent does NOT run a leader heartbeat (the leader contract is enforced at
 	// the assign site, not the spawn site). The leader record at arm time may be vacant — that's
 	// normal for the operator's first tool call after PM opt-in, and we still want the subsequent
@@ -101,7 +101,7 @@ export type OrphanClearKind = "preflight" | "delivery";
 // Issue 16: compare a RecentSpawn stamp against a caller's session identity. Returns false when
 // the entry lacks a stamp (legacy pre-Issue-16 state — never preempt so we don't accidentally
 // surface a fresh warning as a false-positive resolution).
-export function isSameOrchestratorLeader(spawn: RecentSpawn, caller: {
+export function isSameRootLeader(spawn: RecentSpawn, caller: {
 	pid: number;
 	sessionStartedAt?: string; // from PI_SWARM_SESSION_STARTED_AT
 }): boolean {
@@ -228,7 +228,7 @@ export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state:
 		roleKindExplicit,
 		capabilities: [],
 		activeTaskIds: [],
-		maxConcurrentTasks: roleKind === "orchestrator" ? 99 : 1,
+		maxConcurrentTasks: roleKind === "root" ? 99 : 1,
 		status: "running",
 		runtimeStatus: "starting",
 		health: "healthy",
@@ -339,11 +339,11 @@ export async function registerAgent(pi: ExtensionAPI, cwd: string, p: Paths, sta
 	const target = await resolveRegisterTarget(pi, input.tmuxTarget);
 	if (!target) throw new Error("tmuxTarget is required: use 'here' for the current pane, or a target like 'session:window.pane', 'session:window', '%paneid', '=session'");
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
-	// The orchestrator is a human-driven coordinating role with no dedicated swarm pane (mailbox-only).
-	// It must be created by ensureOrchestrator and opted into explicitly (PI_SWARM_IS_ORCHESTRATOR=1 or
-	// `/swarm register here orchestrator`), not adopted as a generic pane agent. Generic registration would
+	// The root is a human-driven coordinating role with no dedicated swarm pane (mailbox-only).
+	// It must be created by ensureRoot and opted into explicitly (PI_SWARM_IS_ROOT=1 or
+	// `/swarm register here root`), not adopted as a generic pane agent. Generic registration would
 	// hijack its record with a pane target and leave the session unable to actually orchestrate.
-	if (id === "orchestrator") throw new Error("Cannot register a pane as 'orchestrator': the orchestrator is a human-driven coordinating role (mailbox-only, no dedicated pane). To make THIS pi session the orchestrator, run `/swarm register here orchestrator [role]`, or relaunch pi with PI_SWARM_IS_ORCHESTRATOR=1.");
+	if (id === "root") throw new Error("Cannot register a pane as 'root': the root is a human-driven coordinating role (mailbox-only, no dedicated pane). To make THIS pi session the root, run `/swarm register here root [role]`, or relaunch pi with PI_SWARM_IS_ROOT=1.");
 	const existing = state.agents[id];
 	const tmuxAlive = await isTmuxRunning(pi, target);
 	const parsed = parseTmuxTarget(target, state.tmuxSession);
@@ -373,7 +373,7 @@ export async function registerAgent(pi: ExtensionAPI, cwd: string, p: Paths, sta
 		roleKindExplicit,
 		capabilities: [],
 		activeTaskIds: [],
-		maxConcurrentTasks: roleKind === "orchestrator" ? 99 : 1,
+		maxConcurrentTasks: roleKind === "root" ? 99 : 1,
 		status: "running",
 		runtimeStatus: "idle",
 		health: "healthy",
@@ -464,7 +464,7 @@ export async function stopAgent(pi: ExtensionAPI, cwd: string, p: Paths, state: 
 			const idList = sortedIds.join(", ");
 			try {
 				await deliverMessageLocked(pi, cwd, p, state, {
-					to: "orchestrator",
+					to: "root",
 					subject: `agent ${agentId} stopped owing ${ackDebt.length} unacked ack(s)`,
 					body: `Agent ${agentId} stopped (swarm_stop_agent) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
 					requiresAck: false,
@@ -623,7 +623,7 @@ export function matchReusableAgents(st: SwarmState, opts: MatchOpts = {}): Reusa
 	const hasCapsRequest = wantCaps.size > 0;
 	const matches: ReusableAgentMatch[] = [];
 	for (const agent of Object.values(st.agents)) {
-		if (agent.id === "orchestrator") continue; // never reuse the human-driven orchestrator
+		if (agent.id === "root") continue; // never reuse the human-driven root
 		ensureAgentDefaults(agent);
 		if (agent.paused) continue; // paused/drain: parked but not killed — excluded from the reuse pool
 		// Escape-hatch (Issue 10 §3.2 step 3): an explicit agentId bypasses the role-kind check AND
@@ -712,7 +712,7 @@ export async function findReusableAgent(pi: ExtensionAPI, st: SwarmState, opts: 
 // === R20 — deriveTaskProgressState ===
 // Pure-function helper. Collapses the 12-field swarm_agent_status observation into a single
 // mutually-exclusive taskProgressState (dead | idle_blocked | completed_unverified | stalled |
-// active | awaiting_input). The orchestrator's "3 đường kiểm chứng" rule becomes:
+// active | awaiting_input). The root's "3 đường kiểm chứng" rule becomes:
 //   1. read taskProgressState
 //   2. cross-check against disk artifacts
 //   3. cross-check against mailbox/response debt

@@ -81,7 +81,7 @@ async function readEvents(scratch) {
 // Build a synthetic swarm message + the corresponding input-handler event text.
 function buildMsg({ id, priority = "high" }) {
 	return {
-		id, swarmId: "test", from: "orchestrator", to: RECIPIENT, priority, type: "swarm.message",
+		id, swarmId: "test", from: "root", to: RECIPIENT, priority, type: "swarm.message",
 		schemaVersion: 1, createdAt: new Date().toISOString(), body: "STOP: stop the current implement turn.",
 		requiresAck: true, headers: {},
 	};

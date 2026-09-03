@@ -27,9 +27,9 @@ const readEvents = async () => {
 	return raw.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
 };
 
-async function loadExtension({ agentId = "orchestrator", isOrchestrator = true } = {}) {
+async function loadExtension({ agentId = "root", isRoot = true } = {}) {
 	if (agentId) process.env.PI_SWARM_AGENT_ID = agentId; else delete process.env.PI_SWARM_AGENT_ID;
-	if (isOrchestrator) process.env.PI_SWARM_IS_ORCHESTRATOR = "1"; else delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+	if (isRoot) process.env.PI_SWARM_IS_ROOT = "1"; else delete process.env.PI_SWARM_IS_ROOT;
 	const tools = {};
 	const handlers = {};
 	const activeTools = new Set();
@@ -58,15 +58,15 @@ async function loadExtension({ agentId = "orchestrator", isOrchestrator = true }
 }
 
 const call = (tools, name, params) => tools[name].execute("call", params, undefined, undefined, { cwd: scratch });
-const as = async (agentId, isOrchestrator, fn) => {
+const as = async (agentId, isRoot, fn) => {
 	const prevId = process.env.PI_SWARM_AGENT_ID;
-	const prevOrch = process.env.PI_SWARM_IS_ORCHESTRATOR;
+	const prevOrch = process.env.PI_SWARM_IS_ROOT;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	if (isOrchestrator) process.env.PI_SWARM_IS_ORCHESTRATOR = "1"; else delete process.env.PI_SWARM_IS_ORCHESTRATOR;
+	if (isRoot) process.env.PI_SWARM_IS_ROOT = "1"; else delete process.env.PI_SWARM_IS_ROOT;
 	try { return await fn(); }
 	finally {
 		if (prevId === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = prevId;
-		if (prevOrch === undefined) delete process.env.PI_SWARM_IS_ORCHESTRATOR; else process.env.PI_SWARM_IS_ORCHESTRATOR = prevOrch;
+		if (prevOrch === undefined) delete process.env.PI_SWARM_IS_ROOT; else process.env.PI_SWARM_IS_ROOT = prevOrch;
 	}
 };
 const attach = async (path, content) => {
@@ -261,7 +261,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	console.log("\n--- Scenario 8: tool_execution_end hook appends evidence ---");
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-	const { handlers } = await loadExtension({ agentId: "worker-hook", isOrchestrator: false });
+	const { handlers } = await loadExtension({ agentId: "worker-hook", isRoot: false });
 	const hooks = handlers.tool_execution_end || [];
 	ok("hook registered", hooks.length >= 1);
 	for (const hook of hooks) await hook({ toolName: "bash", eventId: "e-hook", ts: "2026-08-29T14:00:00.000Z", cls: "success", exitCode: 0 }, { cwd: scratch });

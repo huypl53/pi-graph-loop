@@ -1,8 +1,8 @@
 // === swarm/tools/gating.ts — identity-gated swarm tool visibility ===
 //
-// A swarm session that neither sets PI_SWARM_AGENT_ID nor opts in as the orchestrator resolves to the
+// A swarm session that neither sets PI_SWARM_AGENT_ID nor opts in as the root resolves to the
 // anonymous SWARM_GUEST_ID. Such a guest is inert for swarm COORDINATION (no agent record, no PM pump,
-// no orchestrator heartbeat refresh — see hooks.ts session_start). It should also NOT expose the swarm
+// no root heartbeat refresh — see hooks.ts session_start). It should also NOT expose the swarm
 // tool surface to the model: a plain `pi` session that merely loaded the extension has no business
 // spawning agents, driving the task graph, or reading swarm state. The /swarm slash command stays
 // available so an operator can still opt a guest in via `/swarm register here <role>`.
@@ -15,15 +15,15 @@
 //
 // === Issue 25 Phase 2: tier-based profile gating (proposal §E + §K.3) ===
 // Under PI_SWARM_MINIMAL_PROTOCOL=1 the active set is additionally constrained by a per-tier
-// allow-list (WORKER_TOOL_ALLOWLIST / ORCHESTRATOR_TOOL_ALLOWLIST). Tools remain registered (UX §N5);
-// only the active set is filtered. Execution-time authority checks (requireOrchestratorAuthority)
+// allow-list (WORKER_TOOL_ALLOWLIST / ROOT_TOOL_ALLOWLIST). Tools remain registered (UX §N5);
+// only the active set is filtered. Execution-time authority checks (requireRootAuthority)
 // remain authoritative — tier-gating is the FIRST gate, authority is the SECOND. Admin mode
 // (PI_SWARM_ADMIN_MODE=1) sees all registered tools (recovery workflows).
 // Under gate=0 the Phase-1 guest-vs-registered behavior is preserved byte-identically (regression safe).
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ORCHESTRATOR_TOOL_ALLOWLIST, PI_SWARM_MINIMAL_PROTOCOL, SWARM_GUEST_ID, WORKER_TOOL_ALLOWLIST } from "../constants.ts";
+import { ROOT_TOOL_ALLOWLIST, PI_SWARM_MINIMAL_PROTOCOL, SWARM_GUEST_ID, WORKER_TOOL_ALLOWLIST } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
 
 export const SWARM_TOOL_PREFIX = "swarm_";
@@ -60,10 +60,10 @@ function readRoleKindForAgent(me: string): string | undefined {
 }
 
 // Apply identity-based gating. Guests lose swarm tools from the active set; registered agents and the
-// orchestrator have them ensured present (so an in-session opt-in via `/swarm register here` re-enables
+// root have them ensured present (so an in-session opt-in via `/swarm register here` re-enables
 // them immediately). Under gate=1 the tier allow-list is consulted additionally: workers see only the
 // 5-tool worker surface (with swarm_reconcile constrained at execution time to dryRun:true + scope:"self");
-// orchestrators see the worker 5 + 5 orchestration + 2 goal tools. Never adds or removes non-swarm tools.
+// roots see the worker 5 + 5 orchestration + 2 goal tools. Never adds or removes non-swarm tools.
 // No-op when the set is already correct (avoids a needless system-prompt rebuild on every session_start
 // for non-guests). Defensive against partial/mocked pi objects (e.g. test harnesses without active-tool methods).
 export function applySwarmToolGating(pi: ExtensionAPI): void {
@@ -86,7 +86,7 @@ export function applySwarmToolGating(pi: ExtensionAPI): void {
 		// Phase 2 path: tier-based allow-list.
 		const me = currentAgentId();
 		const isAdmin = process.env.PI_SWARM_ADMIN_MODE === "1" || me === "admin";
-		const isOrch = me === "orchestrator";
+		const isOrch = me === "root";
 		if (currentAgentId() === SWARM_GUEST_ID) {
 			// Guest loses swarm tools entirely (same as gate=0).
 			for (const n of swarm) next.delete(n);
@@ -94,9 +94,9 @@ export function applySwarmToolGating(pi: ExtensionAPI): void {
 			// Admin sees all registered swarm tools.
 			for (const n of swarm) next.add(n);
 		} else {
-			// Tier filter: orchestrator vs worker (read roleKind for forward-compat w/ new roles).
-			const roleKind = isOrch ? "orchestrator" : (readRoleKindForAgent(me) || "worker");
-			const allow = roleKind === "orchestrator" ? ORCHESTRATOR_TOOL_ALLOWLIST : WORKER_TOOL_ALLOWLIST;
+			// Tier filter: root vs worker (read roleKind for forward-compat w/ new roles).
+			const roleKind = isOrch ? "root" : (readRoleKindForAgent(me) || "worker");
+			const allow = roleKind === "root" ? ROOT_TOOL_ALLOWLIST : WORKER_TOOL_ALLOWLIST;
 			for (const n of swarm) {
 				if (allow.has(n)) next.add(n); else next.delete(n);
 			}

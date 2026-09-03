@@ -214,7 +214,7 @@ async function seedAgent(agentId, opts = {}) {
 		await writePoolHealth(p, h);
 	});
 
-	// Drive the recovery scan directly. The orchestrator pump also calls this on every tick.
+	// Drive the recovery scan directly. The root pump also calls this on every tick.
 	const fakePi = { registerTool: () => {}, registerCommand: () => {}, on: () => {}, sendMessage: () => {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
 	const st = await rsLocal(p, dir);
 	const nowMs = Date.now();

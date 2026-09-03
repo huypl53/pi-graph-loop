@@ -2,7 +2,7 @@
 /**
  * CT contract probes phase 2 — CT-3 nextTurn idle, CT-4 compaction isIdle,
  * CT-5 ctx.signal undefined, CT-6 stale ctx throw, CT-7 end-vs-settled,
- * CT-8 orchestrator tmuxTarget unknown.
+ * CT-8 root tmuxTarget unknown.
  *
  * Source plan: `.pi/swarm/tasks/task-202609021845-ct-phase2-probes/artifacts/plan.md`
  *
@@ -11,7 +11,7 @@
  *
  * Each probe is a deterministic mock-LLM fixture + boundary-counted assertions
  * per R10-1. The probe outcome table (CONTRACT_CONFIRMED /
- * BUG_FOUND_R_ROW_NEEDED) is printed at lane completion so the orchestrator
+ * BUG_FOUND_R_ROW_NEEDED) is printed at lane completion so the root
  * can decide whether to file a reproduce-first R-row.
  *
  * Probes under test (plan §1-2):
@@ -35,9 +35,9 @@
  *   CT-7.B: After the queued follow-up is consumed, `agent_settled` is
  *           emitted; timeline ordering is [agent_end, followUp_consumed,
  *           agent_settled].
- *   CT-8:   Orchestrator pseudo-agent record (created by
- *           `ensureOrchestrator`) has `tmuxTarget === "unknown"`,
- *           `id === "orchestrator"`.
+ *   CT-8:   Root pseudo-agent record (created by
+ *           `ensureRoot`) has `tmuxTarget === "unknown"`,
+ *           `id === "root"`.
  *
  * R10-1 boundary counters (across the 9 sub-cases):
  *   CT-3.A: sendMessageCallCount, sendMessageReturnIsUndefined, opts.deliverAs,
@@ -56,8 +56,8 @@
  *           agentSettledNotYetAtMidStream
  *   CT-7.B: agentSettledEmittedCount, agentSettledAfterFollowUp,
  *           emissionOrderingMatches
- *   CT-8:   orchestratorAgentRecordFound, orchestratorTmuxTargetMatchesUnknown,
- *           orchestratorIdMatches
+ *   CT-8:   rootAgentRecordFound, rootTmuxTargetMatchesUnknown,
+ *           rootIdMatches
  *
  * ISOLATION CONTRACT — SCRATCH CWD ONLY.
  * Run: node extensions/swarm/ct-phase2-probes.test.mjs
@@ -72,7 +72,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, "..", "src");
 
 const { paths, withLock, readState, writeState } = await import(join(srcDir, "state.ts"));
-const { ensureOrchestrator } = await import(join(srcDir, "identity.ts"));
+const { ensureRoot } = await import(join(srcDir, "identity.ts"));
 
 // ============================================================================
 // Test harness
@@ -85,9 +85,9 @@ const ok = (name, cond, info) => {
 };
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const ORIG_PI_SWARM_IS_ORCHESTRATOR = process.env.PI_SWARM_IS_ORCHESTRATOR;
-process.env.PI_SWARM_AGENT_ID = "orchestrator";
-process.env.PI_SWARM_IS_ORCHESTRATOR = "1";
+const ORIG_PI_SWARM_IS_ROOT = process.env.PI_SWARM_IS_ROOT;
+process.env.PI_SWARM_AGENT_ID = "root";
+process.env.PI_SWARM_IS_ROOT = "1";
 
 const PROBE_OUTCOME = {};
 
@@ -695,10 +695,10 @@ console.log("\n[CT-7.B] agent_settled fires AFTER follow-up consumed");
 }
 
 // ============================================================================
-// CT-8 — orchestrator pseudo-agent record tmuxTarget === "unknown" (F2)
+// CT-8 — root pseudo-agent record tmuxTarget === "unknown" (F2)
 // ============================================================================
 
-console.log("\n[CT-8] orchestrator pseudo-agent record tmuxTarget === 'unknown' (F2 framing verification)");
+console.log("\n[CT-8] root pseudo-agent record tmuxTarget === 'unknown' (F2 framing verification)");
 {
 	const scratchDir = mkdtempSync(join(tmpdir(), `swarm-ct8-${process.pid}-${Date.now()}-`));
 	mkdirSync(join(scratchDir, ".pi/swarm/mailboxes"), { recursive: true });
@@ -707,44 +707,44 @@ console.log("\n[CT-8] orchestrator pseudo-agent record tmuxTarget === 'unknown' 
 
 	const p = paths(scratchDir);
 	const st = await readState(p, scratchDir);
-	const orchestrator = ensureOrchestrator(st, scratchDir, p);
+	const root = ensureRoot(st, scratchDir, p);
 	await writeState(p, st);
 
-	const orchestratorAgentRecordFound = Boolean(orchestrator);
-	const orchestratorTmuxTargetMatchesUnknown = orchestrator?.tmuxTarget === "unknown";
-	const orchestratorIdMatches = orchestrator?.id === "orchestrator";
-	const orchestratorRoleKindMatches = orchestrator?.roleKind === "orchestrator";
+	const rootAgentRecordFound = Boolean(root);
+	const rootTmuxTargetMatchesUnknown = root?.tmuxTarget === "unknown";
+	const rootIdMatches = root?.id === "root";
+	const rootRoleKindMatches = root?.roleKind === "root";
 
-	ok("CT-8 orchestratorAgentRecordFound === true (ensureOrchestrator returned a record)",
-		orchestratorAgentRecordFound, `got ${orchestratorAgentRecordFound}`);
-	ok("CT-8 orchestratorTmuxTargetMatchesUnknown === true (literal string 'unknown')",
-		orchestratorTmuxTargetMatchesUnknown, `got ${JSON.stringify(orchestrator?.tmuxTarget)}`);
-	ok("CT-8 orchestratorIdMatches === true (id === 'orchestrator')",
-		orchestratorIdMatches, `got ${JSON.stringify(orchestrator?.id)}`);
-	ok("CT-8 orchestratorRoleKindMatches === true (roleKind === 'orchestrator')",
-		orchestratorRoleKindMatches, `got ${JSON.stringify(orchestrator?.roleKind)}`);
+	ok("CT-8 rootAgentRecordFound === true (ensureRoot returned a record)",
+		rootAgentRecordFound, `got ${rootAgentRecordFound}`);
+	ok("CT-8 rootTmuxTargetMatchesUnknown === true (literal string 'unknown')",
+		rootTmuxTargetMatchesUnknown, `got ${JSON.stringify(root?.tmuxTarget)}`);
+	ok("CT-8 rootIdMatches === true (id === 'root')",
+		rootIdMatches, `got ${JSON.stringify(root?.id)}`);
+	ok("CT-8 rootRoleKindMatches === true (roleKind === 'root')",
+		rootRoleKindMatches, `got ${JSON.stringify(root?.roleKind)}`);
 
-	PROBE_OUTCOME["CT-8"] = (orchestratorAgentRecordFound
-		&& orchestratorTmuxTargetMatchesUnknown
-		&& orchestratorIdMatches
-		&& orchestratorRoleKindMatches)
+	PROBE_OUTCOME["CT-8"] = (rootAgentRecordFound
+		&& rootTmuxTargetMatchesUnknown
+		&& rootIdMatches
+		&& rootRoleKindMatches)
 		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
 
-	const path = writeProbeTranscript("ct8-orchestrator-unknown", "ct8-orchestrator-unknown", {
+	const path = writeProbeTranscript("ct8-root-unknown", "ct8-root-unknown", {
 		outcome: PROBE_OUTCOME["CT-8"],
 		subcase: "CT-8",
-		orchestratorAgentRecordFound,
-		orchestratorTmuxTargetMatchesUnknown,
-		orchestratorIdMatches,
-		orchestratorRoleKindMatches,
-		orchestratorRecord: {
-			id: orchestrator?.id,
-			roleKind: orchestrator?.roleKind,
-			tmuxTarget: orchestrator?.tmuxTarget,
-			tmuxSession: orchestrator?.tmuxSession,
-			tmuxWindow: orchestrator?.tmuxWindow,
-			status: orchestrator?.status,
-			runtimeStatus: orchestrator?.runtimeStatus,
+		rootAgentRecordFound,
+		rootTmuxTargetMatchesUnknown,
+		rootIdMatches,
+		rootRoleKindMatches,
+		rootRecord: {
+			id: root?.id,
+			roleKind: root?.roleKind,
+			tmuxTarget: root?.tmuxTarget,
+			tmuxSession: root?.tmuxSession,
+			tmuxWindow: root?.tmuxWindow,
+			status: root?.status,
+			runtimeStatus: root?.runtimeStatus,
 		},
 	});
 	console.log("       transcript →", path);
@@ -766,7 +766,7 @@ for (const probe of probeOrder) {
 // Cleanup
 // ============================================================================
 process.env.PI_SWARM_AGENT_ID = ORIG_PI_SWARM_AGENT_ID;
-process.env.PI_SWARM_IS_ORCHESTRATOR = ORIG_PI_SWARM_IS_ORCHESTRATOR;
+process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 
 console.log(`\nCT-PHASE2-PROBES ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 if (fail > 0 || !allConfirmed) {

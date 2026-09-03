@@ -5,9 +5,9 @@
  * Plan §3 acceptance: end-to-end scenario via the mock-LLM fixture. Strategy:
  *   - Use real `pi --provider mock-llm --model r25-unacked-worker-notify` against a scratch
  *     cwd, with PI_SWARM_AGENT_ID=r25-worker.
- *   - Seed the swarm state with: r25-worker agent + an orchestrator pseudo-agent + 2 live
+ *   - Seed the swarm state with: r25-worker agent + an root pseudo-agent + 2 live
  *     requiresAck messages addressed to r25-worker (unacked, intercepted status).
- *   - Let the lane run to terminal (3 turns). After agent_settled fires, the orchestrator
+ *   - Let the lane run to terminal (3 turns). After agent_settled fires, the root
  *     mailbox must contain the ack-debt notify (subject "settled owing N unacked ack(s)").
  *
  * Pattern 2 (seeded world + single-actor script) per the mock-llm-scenarios skill: the
@@ -56,17 +56,17 @@ rmSync(scratch, { recursive: true, force: true });
 // Seed state
 const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
 const mailboxDir = join(scratch, ".pi", "swarm", "mailboxes");
-const orchMailPath = join(mailboxDir, "orchestrator.jsonl");
+const orchMailPath = join(mailboxDir, "root.jsonl");
 
 const { ensureDirs, paths, defaultState } = await import(join(repoRoot, "extensions/swarm/src/state.ts"));
 await ensureDirs(paths(scratch));
 
 const st = defaultState("swarm-r25-lane", scratch);
 const now = new Date().toISOString();
-st.agents["orchestrator"] = {
-	id: "orchestrator", role: "orchestrator", roleKind: "orchestrator", roleKindExplicit: true,
+st.agents["root"] = {
+	id: "root", role: "root", roleKind: "root", roleKindExplicit: true,
 	tmuxTarget: "r25lane:orch.1", tmuxSession: "r25lane", tmuxWindow: "orch",
-	mailbox: ".pi/swarm/mailboxes/orchestrator.jsonl", capabilities: ["orchestrate"],
+	mailbox: ".pi/swarm/mailboxes/root.jsonl", capabilities: ["orchestrate"],
 	status: "running", runtimeStatus: "idle", health: "healthy",
 	createdAt: now, updatedAt: now, lastHeartbeatAt: now, activeTaskIds: [],
 };
@@ -80,7 +80,7 @@ st.agents["r25-worker"] = {
 st.messages = st.messages || {};
 for (const id of ["msg-r25-lane-1", "msg-r25-lane-2"]) {
 	st.messages[id] = {
-		id, swarmId: st.swarmId, from: "orchestrator", to: "r25-worker",
+		id, swarmId: st.swarmId, from: "root", to: "r25-worker",
 		subject: `Task ${id} requiresAck`, priority: "normal", type: "swarm.message", schemaVersion: 1,
 		createdAt: now, body: `seeded ${id}`, requiresAck: true, requiresResponse: false,
 		status: "intercepted", attempts: 1, queuedAt: now, updatedAt: now,
@@ -90,11 +90,11 @@ for (const id of ["msg-r25-lane-1", "msg-r25-lane-2"]) {
 writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
 
 // Run the lane — mirror reviewer-lane-probe.mjs recipe: scratch cwd, -ne, absolute -e paths,
-// env hygiene (strip PI_SWARM_IS_ORCHESTRATOR; set PI_SWARM_AGENT_ID=r25-worker). Without this
+// env hygiene (strip PI_SWARM_IS_ROOT; set PI_SWARM_AGENT_ID=r25-worker). Without this
 // the engine reads the repo's real swarm state (worker absent), double-loads swarm_audit
-// (exit 1), and the parent's orchestrator identity env collides.
+// (exit 1), and the parent's root identity env collides.
 const env = { ...process.env };
-delete env.PI_SWARM_IS_ORCHESTRATOR;
+delete env.PI_SWARM_IS_ROOT;
 env.PI_SWARM_AGENT_ID = "r25-worker";
 env.PI_MOCK_LLM_TRANSCRIPTS_DIR = join(scratch, ".pi/mock-llm/transcripts");
 
@@ -108,8 +108,8 @@ const r = spawnSync("pi", [
 ], { cwd: scratch, env, timeout: 30_000, encoding: "utf8" });
 
 const orchMail = existsSync(orchMailPath) ? readFileSync(orchMailPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
-const notify = orchMail.find((m) => m.to === "orchestrator" && /unacked ack/.test(m.subject || ""));
-ok("[live lane] orchestrator mailbox contains the R25 ack-debt notify", !!notify, {
+const notify = orchMail.find((m) => m.to === "root" && /unacked ack/.test(m.subject || ""));
+ok("[live lane] root mailbox contains the R25 ack-debt notify", !!notify, {
 	totalOrchMessages: orchMail.length,
 	subjects: orchMail.map((m) => m.subject),
 });

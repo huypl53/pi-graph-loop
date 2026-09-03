@@ -10,9 +10,9 @@ import { appendJsonl, mailboxPath, readState, readTaskState, taskPaths, trace, w
 import { buildSystemDelivery } from "./delivery.ts";
 import { capturePane, isPanePiLike, sendToPane, tmux } from "./tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
-import { ensureOrchestrator } from "./identity.ts";
+import { ensureRoot } from "./identity.ts";
 import { now, safeId, sleep } from "./utils.ts";
-import { pumpOrchestratorMailbox, reconcile } from "./reconcile.ts";
+import { pumpRootMailbox, reconcile } from "./reconcile.ts";
 
 export function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status: MessageStatus, patch: Partial<MessageRecord> = {}) {
 	const ts = now();
@@ -112,7 +112,7 @@ export function findIdempotentMessage(st: SwarmState, from: string, to: string, 
 }
 
 // Incremental mailbox read (issue B): parse only lines appended since the byte `offset`, avoiding a
-// full-file parse per pump tick on unbounded orchestrator mailboxes. Falls back to a full read (and
+// full-file parse per pump tick on unbounded root mailboxes. Falls back to a full read (and
 // returns its length) when the file shrank or no checkpoint exists. Returns the parsed messages and
 // the new offset to persist as the checkpoint.
 export async function readMailboxSince(p: Paths, agentId: string, offset: number, maxLines = 500): Promise<{ messages: SwarmMessage[]; offset: number; truncated: boolean }> {
@@ -155,7 +155,7 @@ export async function readMailboxSince(p: Paths, agentId: string, offset: number
 	}
 }
 
-// Stat-gated mailbox read (issue B): the orchestrator pump ticks every ~5s; re-parsing the whole
+// Stat-gated mailbox read (issue B): the root pump ticks every ~5s; re-parsing the whole
 // (unbounded) mailbox JSONL each tick is pure waste when nothing was appended. Cache the last full
 // parse per file identity (size + mtime) in-process and re-read only when the file changed. Semantics
 // are IDENTICAL to readMailbox — same messages, same order — so the pump's window/retrigger logic
@@ -208,10 +208,10 @@ export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg
 		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "failure", reason: "unknown agent", probe: buildInjectionProbe(state, msg, "failure", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
 		return { delivered: false, reason: "unknown agent" };
 	}
-	// Mailbox-only recipients (e.g. the orchestrator pseudo-agent) have no swarm tmux pane. The
+	// Mailbox-only recipients (e.g. the root pseudo-agent) have no swarm tmux pane. The
 	// message is already persisted in the mailbox; treat this as successful mailbox delivery, not
-	// a tmux injection failure. The recipient surfaces it via the orchestrator auto-pump
-	// (pumpOrchestratorMailbox, on session_start/agent_settled/interval) or swarm_check_mailbox;
+	// a tmux injection failure. The recipient surfaces it via the root auto-pump
+	// (pumpRootMailbox, on session_start/agent_settled/interval) or swarm_check_mailbox;
 	// callers must NOT pre-mark it delivered (see deliverMessageLocked) so the pump can surface it.
 	if (!agent.tmuxTarget || agent.tmuxTarget === "unknown") {
 		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "success", reason: "mailbox-only", probe: buildInjectionProbe(state, msg, "success", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
@@ -239,13 +239,13 @@ export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg
 }
 
 // Lock-free core of message enqueue+deliver. Mutates the passed-in `st` (message record, delivered[],
-// orchestrator pseudo-agent) and appends to the recipient mailbox; it does NOT read/write state or
+// root pseudo-agent) and appends to the recipient mailbox; it does NOT read/write state or
 // acquire the lock. Callers that already hold the swarm lock (task tools that send within one atomic
 // operation) use this directly and writeState once afterward.
 export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string; clearReason?: OrphanClearReason }): Promise<{ msg: SwarmMessage; delivery: any }> {
 	const to = safeId(params.to);
 	const from = currentAgentId();
-	if (to === "orchestrator") ensureOrchestrator(st, cwd, p);
+	if (to === "root") ensureRoot(st, cwd, p);
 	if (!st.agents[to]) throw new Error(`Unknown swarm agent: ${to}`);
 
 	// Idempotency check: if from+to+idempotencyKey already exists, return existing message
@@ -344,10 +344,10 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	const delivery = await deliver(pi, p, st, m);
 	if (delivery?.delivered) {
 		if (delivery.mailboxOnly) {
-			// Mailbox-only delivery (e.g. the orchestrator has no swarm tmux pane): the message is safely
+			// Mailbox-only delivery (e.g. the root has no swarm tmux pane): the message is safely
 			// appended to the recipient mailbox. Do NOT pre-mark it in st.delivered[to] — that set is the
-			// shared dedup/surfaced ledger, and pre-marking here would defeat the orchestrator auto-pump
-			// (pumpOrchestratorMailbox) and swarm_check_mailbox(pendingOnly), which surface messages NOT yet
+			// shared dedup/surfaced ledger, and pre-marking here would defeat the root auto-pump
+			// (pumpRootMailbox) and swarm_check_mailbox(pendingOnly), which surface messages NOT yet
 			// in the set. The surfacing pump / check_mailbox add to the set themselves when they surface.
 			// Message lifecycle is tracked by status "mailbox_delivered" (kept off "queued"/"failed" so it is
 			// not mistaken for a tmux injection failure).

@@ -18,7 +18,7 @@ Core properties:
 ## Main runtime pieces
 
 ```text
-orchestrator pi session
+root pi session
   └─ extensions/swarm/index.ts
        ├─ src/agents.ts      spawn / reuse / stop / restart / role changes
        ├─ src/mailbox.ts     durable mailbox append/read/delivery helpers
@@ -28,12 +28,12 @@ orchestrator pi session
        ├─ src/nudges/goal-epoch.ts       swarm-level idle epoch + goal-floor emission
        ├─ src/nudges/graph-advance.ts    graph-advance / stall / artifact / heartbeat GC nudges
        ├─ src/nudges/status-predicates.ts pure predicates over TaskState["status"]
-       ├─ src/surface.ts                 orchestrator-facing message surface machinery
+       ├─ src/surface.ts                 root-facing message surface machinery
        ├─ src/tasks-index.ts             PM-facing rollup + task indexer
        └─ src/reconcile-core.ts          reconcile runner (entry points)
        ├─ src/tmux.ts        tmux wrappers and pane capture/injection
        ├─ src/state.ts       paths, locks, JSON/JSONL writes, traces
-       └─ src/hooks.ts       lifecycle hooks and orchestrator mailbox pump
+       └─ src/hooks.ts       lifecycle hooks and root mailbox pump
 ```
 
 ## Runtime layout
@@ -87,7 +87,7 @@ dead letters, and idempotency. A delivery that initially failed tmux injection b
 
 **Issue 25 Phase 1: inferred lifecycle shadow telemetry.** Under `PI_SWARM_MINIMAL_PROTOCOL=0` (default), `MessageRecord` carries optional v2 evidence fields (`mailboxDeliveredAt`, `seenAt`, `processingAt`, `respondedAt`, `terminalAt`, `lifecycleStage`, `lifecycleSource`, `terminalReason`, `expectResponse`, `responseDeadlineMs`, `escalateIfSilent`, `migrationRunId`, `migratedAt`). The engine does NOT mutate these under gate=0; `swarm_check_mailbox` emits `message.lifecycle_derived_shadow` traces carrying the would-be `seenAt` derivation, and the reconcile deadline sweep emits the same trace for messages whose `responseDeadlineMs` has elapsed. `tool.invoked` telemetry is emitted once per swarm tool via `src/tools/wrapper.ts`. Migration is via `/swarm protocol migrate [--dry-run]`, idempotent and additive-only. Proposal: `docs/swarm/minimal-agent-protocol-proposal.md` §A–§K.
 
-**Issue 25 Phase 2: authoritative lifecycle (gate=1, default off).** With `PI_SWARM_MINIMAL_PROTOCOL=1`, the derivations become authoritative writes performed inside the existing `withLock` (never a nested lock): `swarm_check_mailbox` stamps `seenAt`; an accepted reply stamps `respondedAt` and auto-verifies the response — only for a non-superseded current attempt (late replies are fenced with a `message.reply_rejected_superseded` trace and do NOT release debt); a terminal task update stamps `terminalAt` and runs response validation + debt release in the same lock. The reconcile deadline sweep authoritatively stamps `terminalAt` when `responseDeadlineMs` elapses. Every derivation site emits `TRACE_LIFECYCLE_DERIVED` (`message.lifecycle_derived`). Worker `swarm_reconcile` is rate-limited (`PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS`, default 60s) and scope-locked to `self`; orchestrator/admin may use `scope: "all"`. Delivered message bodies drop the `[PI-SWARM ACK REQUIRED]` banner under gate=1. The repo default remains gate=0; flipping is a rollout decision gated on the proposal's §H UAT matrix.
+**Issue 25 Phase 2: authoritative lifecycle (gate=1, default off).** With `PI_SWARM_MINIMAL_PROTOCOL=1`, the derivations become authoritative writes performed inside the existing `withLock` (never a nested lock): `swarm_check_mailbox` stamps `seenAt`; an accepted reply stamps `respondedAt` and auto-verifies the response — only for a non-superseded current attempt (late replies are fenced with a `message.reply_rejected_superseded` trace and do NOT release debt); a terminal task update stamps `terminalAt` and runs response validation + debt release in the same lock. The reconcile deadline sweep authoritatively stamps `terminalAt` when `responseDeadlineMs` elapses. Every derivation site emits `TRACE_LIFECYCLE_DERIVED` (`message.lifecycle_derived`). Worker `swarm_reconcile` is rate-limited (`PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS`, default 60s) and scope-locked to `self`; root/admin may use `scope: "all"`. Delivered message bodies drop the `[PI-SWARM ACK REQUIRED]` banner under gate=1. The repo default remains gate=0; flipping is a rollout decision gated on the proposal's §H UAT matrix.
 
 Primary code:
 - `src/mailbox.ts` (`deriveLifecycleFromTrigger` pure helper + `upsertMessageRecord`)
@@ -100,7 +100,7 @@ Primary code:
 ### 3. Task graph lifecycle
 Handles durable tasks, ready/assigned/in-progress/terminal node transitions,
 branch outcomes, assignment, closure derivation, shared context, runtime
-warnings, and declared rework edges that can re-open a failed/skipped node as `ready` without an orchestrator force-reset. **Cancellation:** the orchestrator-only
+warnings, and declared rework edges that can re-open a failed/skipped node as `ready` without an root force-reset. **Cancellation:** the root-only
 `swarm_update_task(force=true, cancelTask=true)` revokes every active attempt,
 transitions non-terminal nodes to `cancelled`, supersedes every assignment-class message,
 releases agent `activeTaskIds` + advisory edit locks, and sends informational cancellation notices.
@@ -121,14 +121,14 @@ unknown syntax (`{a,b}`, `/abs`, `a/../b`, internal `//`) is conservatively conf
 trailing-slash dirs are now assignable in parallel; previously they were all blocked as unknown-syntax.
 See contributor-guide "Scope syntax" for the full table.
 
-**Orchestrator leadership and recovery:** the harness is strict-reject, single-leader by default.
-`SwarmState.orchestratorLeader` is the durable source of truth for the active orchestrator pid.
-A live leader is refreshed via `heartbeatOrchestratorLeader`; a second live pid is rejected with
-`ORCHESTRATOR_LEADER_DENIED`. Leader staleness is bounded by `ORCHESTRATOR_LEADER_STALE_MS`
+**Root leadership and recovery:** the harness is strict-reject, single-leader by default.
+`SwarmState.rootLeader` is the durable source of truth for the active root pid.
+A live leader is refreshed via `heartbeatRootLeader`; a second live pid is rejected with
+`ROOT_LEADER_DENIED`. Leader staleness is bounded by `ROOT_LEADER_STALE_MS`
 (currently equal to `LOCK_STALE_MS` = 60s), so a pane/process crash can leave a short blind spot
 before the next claim replaces the stale leader. During that window, slash-command / tool gates
-must still reject unsafe non-orchestrator mutations; the claim/heartbeat path never upgrades a
-worker into orchestrator authority.
+must still reject unsafe non-root mutations; the claim/heartbeat path never upgrades a
+worker into root authority.
 
 Primary code:
 - `src/taskgraph.ts`
@@ -157,7 +157,7 @@ These rules should stay stable unless there is an intentional design change.
   explains delivery issues but does not erase durable state.
 - **Reconcile repairs and surfaces drift; it should not invent work.** It may
   mark derived status drift, retry delivery, or stamp stale signals.
-- **The orchestrator is special.** It is mailbox-oriented coordination state,
+- **The root is special.** It is mailbox-oriented coordination state,
   not just another regular pane agent.
 - **Identity is generated state plus optional override.** Do not hand-edit
   generated identity files directly when override flow exists.
@@ -167,9 +167,9 @@ These rules should stay stable unless there is an intentional design change.
 ### Enforced
 - durable task transitions and ownership checks
 - **file-scope ownership preflight: `swarm_assign_task` rejects overlapping active write scopes with `ACTIVE_SCOPE_CONFLICT` before any mutation**
-- **orchestrator-only authority for `force=true` and `cancelTask`** (server-side identity check; a non-orchestrator caller is rejected before any mutation)
-- **destructive tools are server-side gated to `PI_SWARM_AGENT_ID=orchestrator`** — `swarm_prune`, `swarm_gc`, `swarm_assign_task`, `swarm_update_task(force=…)`, `swarm_stop_agent`, `swarm_release_agent_task` all reject non-orchestrator callers with `ORCHESTRATOR_AUTHORITY_REQUIRED` (or `FORCE_FORBIDDEN`/`CANCEL_FORBIDDEN` for the `force`/`cancelTask` paths) before any state mutation
-- **strict single-orchestrator leadership: `ORCHESTRATOR_LEADER_DENIED` rejects a second live pid on gated tool and command paths**
+- **root-only authority for `force=true` and `cancelTask`** (server-side identity check; a non-root caller is rejected before any mutation)
+- **destructive tools are server-side gated to `PI_SWARM_AGENT_ID=root`** — `swarm_prune`, `swarm_gc`, `swarm_assign_task`, `swarm_update_task(force=…)`, `swarm_stop_agent`, `swarm_release_agent_task` all reject non-root callers with `ROOT_AUTHORITY_REQUIRED` (or `FORCE_FORBIDDEN`/`CANCEL_FORBIDDEN` for the `force`/`cancelTask` paths) before any state mutation
+- **strict single-root leadership: `ROOT_LEADER_DENIED` rejects a second live pid on gated tool and command paths**
 - **reuse predicate (`matchReusableAgents`) tightens role-kind matching** by re-deriving roleKind from id+role text (Issue 10, Issue 7 misroute fix), honors a same-task active-lease guard (`excludeTaskId`) with an idle carve-out so reclaim stays the right gate, and respects explicit `agentId` / `capabilities` escape-hatches; every substring-collapsed or fallback match emits a `reuse.match_kind` trace for auditability
 - assignment state in task files
 - ack/response checks for response-required messages
@@ -182,7 +182,7 @@ These rules should stay stable unless there is an intentional design change.
 - tmux pane injection
 - stale/nudge signals
 - runtime health derived from recent events and pane liveness
-- **initial-ready recovery nudge** (a freshly created task whose start node stays ready+unassigned past a short grace period is surfaced to the orchestrator; the nudge is idempotent and never auto-assigns/auto-spawns)
+- **initial-ready recovery nudge** (a freshly created task whose start node stays ready+unassigned past a short grace period is surfaced to the root; the nudge is idempotent and never auto-assigns/auto-spawns)
 - file edit lock coordination
 
 ## How work flows through the system
@@ -197,12 +197,12 @@ These rules should stay stable unless there is an intentional design change.
 7. a previously failed delivery that is later ACKed `processing` stays visible as an active response-tracked assignment until verified or waived
 
 ### Task path
-1. orchestrator creates a task graph
+1. root creates a task graph
 2. ready node is assigned to an agent
 3. agent updates node state and artifacts
 4. graph derives next ready nodes / closure
 5. reconcile and PM notifications surface stalls or closure changes
-6. a freshly created task with a start node left ready+unassigned past the grace period is nudged to the orchestrator (bounded, idempotent, never auto-assigned)
+6. a freshly created task with a start node left ready+unassigned past the grace period is nudged to the root (bounded, idempotent, never auto-assigned)
 
 ## Change map: where to implement new work
 

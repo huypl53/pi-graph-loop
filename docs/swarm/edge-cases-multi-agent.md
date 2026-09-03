@@ -19,15 +19,15 @@ Mỗi mục có tham chiếu `file:line` (theo file tại thời điểm phân t
 
 ### 1.2. Read-modify-write nguyên khối, không optimistic concurrency
 - `writeState` ghi đè cả file; không version check / compare-and-swap.
-- **Edge case:** process A đọc state, process B đọc+ghi (agent mới, ack mới), A ghi lại → **mất agent record / ack / delivered ledger** của B. Các đường chạy ngoài lock (vd `pumpOrchestratorMailbox` sau lock đọc kết quả rồi ghi ledger lần nữa) đã cố giảm window nhưng mọi core "lock-free core" (docstring trong `agents.ts`) **đặt định rằng caller giữ lock** — chỉ cần một caller quên là race im lặng.
-- Đặc biệt: `hooks.ts` input-intercept, `agent_settled` notify, `session_shutdown` nudge đều mutate `st` rồi `writeState` — nếu cùng lúc orchestrator pump đang sweep, một trong hai bản ghi bị rơi.
+- **Edge case:** process A đọc state, process B đọc+ghi (agent mới, ack mới), A ghi lại → **mất agent record / ack / delivered ledger** của B. Các đường chạy ngoài lock (vd `pumpRootMailbox` sau lock đọc kết quả rồi ghi ledger lần nữa) đã cố giảm window nhưng mọi core "lock-free core" (docstring trong `agents.ts`) **đặt định rằng caller giữ lock** — chỉ cần một caller quên là race im lặng.
+- Đặc biệt: `hooks.ts` input-intercept, `agent_settled` notify, `session_shutdown` nudge đều mutate `st` rồi `writeState` — nếu cùng lúc root pump đang sweep, một trong hai bản ghi bị rơi.
 
 ### 1.3. `st.delivered` là dedup ledger chia sẻ nhưng ghi ở nhiều nơi
 - Ghi tại: inject thành công (`deliverMessageLocked`), reconcile retry, pump informational-consume, auto-ack nudge. Nhiều writer + lost update (1.2) → message đã inject có thể bị **re-inject duplicate** (ledger mất entry) hoặc message chưa từng surfaced bị coi là đã surface.
 - `delivered` không được trim theo mailbox — mảng mỗi agent lớn dần cho đến khi `swarm_prune` (gc giữ 500 newest, nhưng **phải gọi thủ công**).
 
 ### 1.4. Terminal transition + `releaseNodeAssignment` không phải hàng ràng cứng
-- Transition map `ALLOWED_NODE_TRANSITIONS` chỉ chặn worker regress từ terminal; **orchestrator bypass hoàn toàn** (`force`). Hai orchestrator lane (xem 3.1) cùng force một node → last-writer-wins trên `task.json` (cũng là atomic file nhưng read-modify-write).
+- Transition map `ALLOWED_NODE_TRANSITIONS` chỉ chặn worker regress từ terminal; **root bypass hoàn toàn** (`force`). Hai root lane (xem 3.1) cùng force một node → last-writer-wins trên `task.json` (cũng là atomic file nhưng read-modify-write).
 - `task.json` cũng có lost-update giữa `reconcileTasks` (mark=true) và `swarm_update_task` của assignee — cả hai `readTaskState → writeTaskState` dưới cùng lock nên thường an toàn, nhưng `scanAgentOpenAssignments`/`runtimeTaskWarnings` đọc **ngoài lock** (`hooks.ts` session_shutdown đọc task, mutate, writeTaskState trong lock — ok; `loop.ts` `recordLoopPlan` đọc task/loop **ngoài lock** rồi ghi lại).
 
 ### 1.5. Advisory edit locks chỉ là advisory
@@ -37,20 +37,20 @@ Mỗi mục có tham chiếu `file:line` (theo file tại thời điểm phân t
 
 ## 2. Message pipeline: nghẽn, bão, mất message
 
-### 2.1. Orchestrator mailbox là điểm nghẽn hình phễu duy nhất
-- Mọi notify đều đổ về `to: "orchestrator"`: PM auto-notify (settle với open work, cooldown 2 phút), node-close notify, response_missing notify, loop kickoff/reopen/plan-now nudges, graph-advance nudges, shutdown nudges. Worker không bao giờ tự phối hợp ngang (mọi handshake đều qua PM hoặc qua message ngang nhưng điều phối bởi PM).
-- **Nghẽn:** pump quét `readMailbox(orchestrator)` **mỗi 5 giây** (TUI interval) + đọc slice 50 message cuối (`PUMP_SCAN_WINDOW`) + parse toàn file JSONL mỗi lần. Mailbox orchestrator không bao giờ bị trim tự động (chỉ `swarm_prune` thủ tác) → file phình theo thời gian sống của swarm → mỗi tick 5s đọc toàn bộ. Với vài nghìn message, pump 5s trở thành I/O + CPU đáng kể, và message thứ 51+ kể từ cuối **không bao giờ được nhìn thấy trong cùng tick** (chỉ 10 surface/tick, các tick sau xử lý tiếp — chậm dần nếu rate arrive > rate consume).
-- Busy-pump deferral: khi orchestrator đang chạy turn, message không surface và không đánh dấu → đúng thiết kế, nhưng nếu orchestrator **bận liên tục dài hạn** (vd chạy tool batch lớn), đống followUp dồn lại; re-trigger cap `PUMP_RETRIGGER_MAX = 3` × delay 60s — nếu 3 lần re-trigger đều rơi vào lúc busy thì message requiresAck **chỉ còn nằm lại dạng unacked**, không có escalation nào nữa cho tới khi người/người-đứng-đọc `swarm_check_mailbox`.
+### 2.1. Root mailbox là điểm nghẽn hình phễu duy nhất
+- Mọi notify đều đổ về `to: "root"`: PM auto-notify (settle với open work, cooldown 2 phút), node-close notify, response_missing notify, loop kickoff/reopen/plan-now nudges, graph-advance nudges, shutdown nudges. Worker không bao giờ tự phối hợp ngang (mọi handshake đều qua PM hoặc qua message ngang nhưng điều phối bởi PM).
+- **Nghẽn:** pump quét `readMailbox(root)` **mỗi 5 giây** (TUI interval) + đọc slice 50 message cuối (`PUMP_SCAN_WINDOW`) + parse toàn file JSONL mỗi lần. Mailbox root không bao giờ bị trim tự động (chỉ `swarm_prune` thủ tác) → file phình theo thời gian sống của swarm → mỗi tick 5s đọc toàn bộ. Với vài nghìn message, pump 5s trở thành I/O + CPU đáng kể, và message thứ 51+ kể từ cuối **không bao giờ được nhìn thấy trong cùng tick** (chỉ 10 surface/tick, các tick sau xử lý tiếp — chậm dần nếu rate arrive > rate consume).
+- Busy-pump deferral: khi root đang chạy turn, message không surface và không đánh dấu → đúng thiết kế, nhưng nếu root **bận liên tục dài hạn** (vd chạy tool batch lớn), đống followUp dồn lại; re-trigger cap `PUMP_RETRIGGER_MAX = 3` × delay 60s — nếu 3 lần re-trigger đều rơi vào lúc busy thì message requiresAck **chỉ còn nằm lại dạng unacked**, không có escalation nào nữa cho tới khi người/người-đứng-đọc `swarm_check_mailbox`.
 
 ### 2.2. Loop nudge storms (đã mitigate một phần nhưng còn khe)
 - Các nudge đều idempotent theo `idempotencyKey` (một nudge/round/node) + auto-ack. Nhưng:
-  - `sendGraphAdvanceNudgeLocked` quét **mọi task in_progress × mọi node** mỗi `LOOP_RECONCILE_INTERVAL_MS = 30s`. Một graph lớn (20+ node ready song song — parallel design là điểm mạnh của graph) → 20 nudges đòi "assign node X" đổ vào mailbox orchestrator trong 1 tick; orchestrator 1 turn chỉ surface 10 → các nudge còn lại chờ tick sau trong khi orchestrator đã assign → sau đó bị auto-ack, nhưng **vẫn chiếm slot surface** của tick kế (surfaced set đánh dấu khi trigger, ack ở tick sau).
+  - `sendGraphAdvanceNudgeLocked` quét **mọi task in_progress × mọi node** mỗi `LOOP_RECONCILE_INTERVAL_MS = 30s`. Một graph lớn (20+ node ready song song — parallel design là điểm mạnh của graph) → 20 nudges đòi "assign node X" đổ vào mailbox root trong 1 tick; root 1 turn chỉ surface 10 → các nudge còn lại chờ tick sau trong khi root đã assign → sau đó bị auto-ack, nhưng **vẫn chiếm slot surface** của tick kế (surfaced set đánh dấu khi trigger, ack ở tick sau).
   - Cooldown settle-notify là per-agent 2 phút, nhưng **không cooldown toàn cục**: 20 agent cùng settle "với open work" trong cùng cửa sổ → 20 informational messages cùng lúc (chỉ 1 lần mỗi agent, nhưng vẫn burst).
-  - Loop kickoff nudge gửi khi task close-done; nếu orchestrator reopen và close lại nhanh (rework loop), mỗi close-done tạo round mới → round dồn, `maxRounds` mặc định **không đặt** (`cfg.maxRounds` undefined = vô hạn) → vòng lặp plan/reopen không chặn trên trừ khi cấu hình.
+  - Loop kickoff nudge gửi khi task close-done; nếu root reopen và close lại nhanh (rework loop), mỗi close-done tạo round mới → round dồn, `maxRounds` mặc định **không đặt** (`cfg.maxRounds` undefined = vô hạn) → vòng lặp plan/reopen không chặn trên trừ khi cấu hình.
 
 ### 2.3. tmux injection là "delivered" ngay cả khi chưa chắc agent đọc được
 - `deliver()` (`src/mailbox.ts`): `sendToPane` không throw = delivered → mark `injected`. Nếu pane đang ở **trạng thái không nhận input** (dialog confirm, editor mode, agent đang streaming output — `send-keys -l` vẫn gõ vào TUI nhưng dòng gõ có thể bị TUI bỏ/part render), message bị coi là đã deliver rồi nằm kẹt ở `ack_missing` 5 phút trước khi reconcile chỉ *đánh dấu*, **không re-inject** (ack_missing path cố tình không bump attempts). Recovery duy nhất: TTL (nếu đặt) hoặc người gọi lại reconcile retry — nhưng retry predicate `isDeliveryFailureRetryable` chỉ nhận `queued/failed` không có `lastAck` → message `injected` không ack **không bao giờ được re-inject tự động**. Đây là nghẽn/ứ đọng bền: node gán rồi, agent không thấy, chỉ có stale signal sau `ACK_MISSING_MS = 5p` và `TASK_NUDGE_MS = 30p` (chỉ warning).
-- Hai message gửi liên tiếp vào cùng pane: `sendToPane` = literal text + Enter, sleep 150ms; nếu agent TUI đang xử lý dòng trước, dòng thứ hai **ghi đè/chen vào input buffer** (không có kiểm tra idle-recipient). Base64 single-line giúp tránh marker collision nhưng không tránh **race TUI input**. `deliverMessageLocked` gửi tuần tự trong lock nên ít gặp, nhưng deliver từ 2 process khác nhau (2 orchestrator lane) → chen dòng.
+- Hai message gửi liên tiếp vào cùng pane: `sendToPane` = literal text + Enter, sleep 150ms; nếu agent TUI đang xử lý dòng trước, dòng thứ hai **ghi đè/chen vào input buffer** (không có kiểm tra idle-recipient). Base64 single-line giúp tránh marker collision nhưng không tránh **race TUI input**. `deliverMessageLocked` gửi tuần tự trong lock nên ít gặp, nhưng deliver từ 2 process khác nhau (2 root lane) → chen dòng.
 
 ### 2.4. Dead-letter chỉ vì TTL/attempts, không có DLQ drain tự động
 - `swarm_dead_letters` là tool đọc; không có gì tự động xử lý. Message requiresResponse dead → node tham chiếu nó thành "dead-lettered" warning mãi. Fine cho ops-manual, nhưng nhiều swarm song song dài hạn sẽ chất đống requiresResponse missing → `responseMissingRecords` quét **toàn bộ `st.messages`** mỗi lần gọi (settle hook, findReusableAgent từng agent) → O(M×N) dần nặng.
@@ -61,20 +61,20 @@ Mỗi mục có tham chiếu `file:line` (theo file tại thời điểm phân t
 ---
 
 ### 2.6. Settle-notify races (đã quan sát thực tế)
-- `agent_settled` hook (`hooks.ts`) gửi 2 loại informational notify khi settle: "settled with missing response(s)" (dựa `responseMissingRecords`) và "settled idle with open assignment(s)" (dựa `agent.activeTaskIds`). Cả hai đọc **state snapshot tại thời điểm settle** — notify có thể đến orchestrator **sau khi** response đã verified / node đã done (đặc biệt khi agent settle lần cuối trước khi bị stop).
-- Đã tái hiện trong task task-swarm-robustness-v2: planner-01 settle sau khi node plan đã done + response verified → orchestrator nhận 2 cảnh báo giả. Nguyên nhân pointer `activeTaskIds` không được dọn khi node terminal xảy ra trước settle (chỉ `releaseNodeAssignment` trên transition terminal dọn pointer).
+- `agent_settled` hook (`hooks.ts`) gửi 2 loại informational notify khi settle: "settled with missing response(s)" (dựa `responseMissingRecords`) và "settled idle with open assignment(s)" (dựa `agent.activeTaskIds`). Cả hai đọc **state snapshot tại thời điểm settle** — notify có thể đến root **sau khi** response đã verified / node đã done (đặc biệt khi agent settle lần cuối trước khi bị stop).
+- Đã tái hiện trong task task-swarm-robustness-v2: planner-01 settle sau khi node plan đã done + response verified → root nhận 2 cảnh báo giả. Nguyên nhân pointer `activeTaskIds` không được dọn khi node terminal xảy ra trước settle (chỉ `releaseNodeAssignment` trên transition terminal dọn pointer).
 - **Mitigate:** trong `agent_settled`, re-check `response?.status === "verified"` và closure của node trước khi notify; hoặc dọn `activeTaskIds` theo node-status thực tế thay vì chỉ theo transition.
 
-## 3. Đa orchestrator / đa swarm
+## 3. Đa root / đa swarm
 
-### 3.1. Hai lane orchestrator cùng lúc
-- Nhận diện orchestrator = env (`PI_SWARM_IS_ORCHESTRATOR` / `PI_SWARM_AGENT_ID=orchestrator`) — **không phải lock single-owner**. Mở 2 terminal cùng env này:
-  - Cả hai chạy pump 5s; per-pid surfaced set giúp không starve nhau, nhưng **cả hai có thể surface cùng một message requiresAck** (session-local) → orchestrator xử lý 2 lần (duplicate actions: assign 2 lần, plan 2 lần).
-  - `orchestratorPumpSessions` entries per-pid được prune theo TTL 1h — session chết sớm (crash) để lại ghost entry 1h (bounded, chỉ rác nhỏ).
+### 3.1. Hai lane root cùng lúc
+- Nhận diện root = env (`PI_SWARM_IS_ROOT` / `PI_SWARM_AGENT_ID=root`) — **không phải lock single-owner**. Mở 2 terminal cùng env này:
+  - Cả hai chạy pump 5s; per-pid surfaced set giúp không starve nhau, nhưng **cả hai có thể surface cùng một message requiresAck** (session-local) → root xử lý 2 lần (duplicate actions: assign 2 lần, plan 2 lần).
+  - `rootPumpSessions` entries per-pid được prune theo TTL 1h — session chết sớm (crash) để lại ghost entry 1h (bounded, chỉ rác nhỏ).
 - **Edge case nghiêm trọng hơn:** 2 process pi cùng agent-id worker (vd restart tay bằng cách chạy `PI_SWARM_AGENT_ID=reviewer pi` trong 2 pane). `pid-guard` trong hooks chặn phần lớn mutation của process không sở hữu, nhưng `session_start` path cho agent **đã có record** ghi đè `pid = process.pid` không có guard (chỉ `lastSessionStartAt`...) — thực tế nó *cập nhật* pid, tức process mới "cướp" ownership im lặng; process cũ bị pid-guard chặn ở các hook sau → hành vi thường đúng cho restart, nhưng nếu cả hai cùng sống: acks từ process cũ có thể bị từ chối logic (guard `agent.pid !== process.pid` chỉ chặn state-update hooks, **không chặn tool handlers** như `swarm_ack_message` — tools không kiểm pid) → 2 "reviewer" cùng ack/commit task.
 
 ### 3.2. Nhiều swarm trong cùng repo (share `.pi/swarm/`)
-- Paths neo theo `cwd` — 2 orchestrator khác swarmId trong cùng project **chia sẻ** `swarm-state.json`, mailboxes, tasks. `defaultState` tạo swarmId mới nhưng mọi thứ vẫn ghi chung file. Agent id trùng (vd cả hai spawn `reviewer`) → `spawnAgent` guard chỉ chặn khi `status === "running"`; một bên stop rồi bên kia spawn lại cùng id → **mailbox/identity/history hoà trộn giữa 2 swarm**. Không có namespacing per-swarmId (field `swarmId` có trong message nhưng không dùng để route/scope).
+- Paths neo theo `cwd` — 2 root khác swarmId trong cùng project **chia sẻ** `swarm-state.json`, mailboxes, tasks. `defaultState` tạo swarmId mới nhưng mọi thứ vẫn ghi chung file. Agent id trùng (vd cả hai spawn `reviewer`) → `spawnAgent` guard chỉ chặn khi `status === "running"`; một bên stop rồi bên kia spawn lại cùng id → **mailbox/identity/history hoà trộn giữa 2 swarm**. Không có namespacing per-swarmId (field `swarmId` có trong message nhưng không dùng để route/scope).
 
 ### 3.3. Restart agent giữa chừng
 - `restartAgent` kill pane rồi respawn cùng id, mailbox/identity giữ. Message đã `injected` chưa ack trước khi kill → sau restart, agent mới **không tự re-read mailbox** trừ khi được bảo (initialPrompt mặc định "await tasks" không nhắc check_mailbox). → Message ứ: chỉ được phát hiện bởi ack_missing 5p → cảnh báo, không re-deliver (2.3). Kịch bản rất hay gặp khi PM "restart" agent treo.
@@ -91,7 +91,7 @@ Mỗi mục có tham chiếu `file:line` (theo file tại thời điểm phân t
 - Target lưu dạng `session:windowIndex.paneIndex` (`spawnAgent`: `${state.tmuxSession}:${window}.0` với window = id, dùng **window name** thực ra — tmux resolve name trước index, ổn hơn). NHƯC: `registerAgent` nhận target tùy ý từ operator — nếu target theo **index** (`myproj:2.1`) và user swap/move window, injection đi nhầm pane. tmux pane-id `%n` ổn định nhưng register mặc định theo target con người chỉ định. Không có auto-repair target khi pane chết/window đổi (chỉ `register` lại thủ công).
 
 ### 4.3. `send-keys` vào pane không phải của mình
-- Không có xác thực/namespace pane: mọi agent đều có thể `swarm_send_keys` tới target bất kỳ (kể cả pane người dùng đang gõ, hoặc chính orchestrator) → **lệnh literal rơi vào input của process khác**. Tương tự `swarm_register_agent` adopt pane người dùng một cách hợp lệ (đó là feature) nhưng cũng là vector nghịch ý: 2 swarm cùng host, swarm A register nhầm pane của swarm B.
+- Không có xác thực/namespace pane: mọi agent đều có thể `swarm_send_keys` tới target bất kỳ (kể cả pane người dùng đang gõ, hoặc chính root) → **lệnh literal rơi vào input của process khác**. Tương tự `swarm_register_agent` adopt pane người dùng một cách hợp lệ (đó là feature) nhưng cũng là vector nghịch ý: 2 swarm cùng host, swarm A register nhầm pane của swarm B.
 - `killAgentPane` kill-window theo `tmuxSession:tmuxWindow` — nếu 2 agent được register vào **cùng một window** (2 pane cùng window), kill một agent chết cả window, kéo theo agent kia (tái hiện dưới dạng "assignee tmux pane not alive" stale chain).
 
 ### 4.4. Capture-pane 300 dòng trước/sau mỗi delivery
@@ -102,7 +102,7 @@ Mỗi mục có tham chiếu `file:line` (theo file tại thời điểm phân t
 - Loop refresh dùng `/new` + Enter qua send-keys (`loop.ts` `refreshLoopAgent`) — nếu agent đang có dialog/confirm mở, `/new` bị TUI diễn giải là text thường.
 
 ### 4.6. tmux server là single point
-- tmux server chết / bị restart (user `tmux kill-server`) → toàn bộ agent "chết" cùng lúc; durable state sống sót nhưng mọi in-flight injected-unacked message thànhack_missing, mọi pane target invalid → `isTmuxRunning` throw-path catch trả false → reconcile bão "pending: recipient not running". Hệ thống tự lành chỉ khi có orchestrator nhìn thấy và reconcile lại — nếu chính PM session cũng trong tmux server đó thì PM chết luôn.
+- tmux server chết / bị restart (user `tmux kill-server`) → toàn bộ agent "chết" cùng lúc; durable state sống sót nhưng mọi in-flight injected-unacked message thànhack_missing, mọi pane target invalid → `isTmuxRunning` throw-path catch trả false → reconcile bão "pending: recipient not running". Hệ thống tự lành chỉ khi có root nhìn thấy và reconcile lại — nếu chính PM session cũng trong tmux server đó thì PM chết luôn.
 
 ---
 
@@ -113,7 +113,7 @@ Mỗi mục có tham chiếu `file:line` (theo file tại thời điểm phân t
 ### 5.2. `maxAttempts` không được engine đếch
 - Node có `attempts/maxAttempts` nhưng không thấy nơi nào auto-fail khi vượt (chỉ dữ liệu). Worker loop done→rework→done không bị chặn bởi graph.
 ### 5.3. Multi-assignee race
-- `swarm_assign_task` không kiểm "node đã assigned cho agent khác đang in_progress" (chỉ supersede message, waives response). Orchestrator reassign khi agent cũ vẫn đang chạy → **2 agent cùng làm 1 node**, artifact write đè nhau; agent cũ khi update task bị ownership-check từ chối (node assignee giờ là agent mới) → công sức vứt, message ack của nó thành ack trễ trên message đã superseded (đã waived, vô hại nhưng confusing).
+- `swarm_assign_task` không kiểm "node đã assigned cho agent khác đang in_progress" (chỉ supersede message, waives response). Root reassign khi agent cũ vẫn đang chạy → **2 agent cùng làm 1 node**, artifact write đè nhau; agent cũ khi update task bị ownership-check từ chối (node assignee giờ là agent mới) → công sức vứt, message ack của nó thành ack trễ trên message đã superseded (đã waived, vô hại nhưng confusing).
 ### 5.4. Closure derive đọc artifacts tồn tại
 - `computeNodeClosureSummary` check artifact file exists khi done. Agent done nhưng artifact trong `tp.root` (per-task dir) — nếu artifact ghi nhầm chỗ (vd repo root) → closure blocking "artifact missing" dù task done → reconcile "task_status_drift" loop cảnh báo.
 
@@ -131,9 +131,9 @@ Mỗi mục có tham chiếu `file:line` (theo file tại thời điểm phân t
 
 ### 7.1. Chuỗi fallback cứng về glm-5.1/zai-coding-cn
 - `currentModel()` (`src/session.ts`): `settings.defaultModel → PI_SWARM_DEFAULT_MODEL → DEFAULT_MODEL ("glm-5.1")`; `currentProvider()` fallback tương tự về `zai-coding-cn` (`providerForModel`: chỉ `gpt-5.4-mini` → openai, **mọi model khác đều về zai-coding-cn**).
-- `swarm_spawn_agent` tool (`src/tools/agents.ts:161`): `params.model || currentModel()` → khi orchestrator/agent **không chỉ định model** (rất phổ biến — LLM gọi tool thường lược field tùy chọn), mọi agent spawn ra đều glm-5.1, kể cả khi session cha chạy model khác. `restartAgent` Worse: dùng lại `existing.model` đã ghi trong record — model cũ được "đúc kết" vĩnh viễn qua restart, không có đường config lại ngoài `swarm_set_role` (không đổi model) hay re-register.
+- `swarm_spawn_agent` tool (`src/tools/agents.ts:161`): `params.model || currentModel()` → khi root/agent **không chỉ định model** (rất phổ biến — LLM gọi tool thường lược field tùy chọn), mọi agent spawn ra đều glm-5.1, kể cả khi session cha chạy model khác. `restartAgent` Worse: dùng lại `existing.model` đã ghi trong record — model cũ được "đúc kết" vĩnh viễn qua restart, không có đường config lại ngoài `swarm_set_role` (không đổi model) hay re-register.
 - **Edge case cụ thể:**
-  - Project dùng `.pi/settings.json` swarm config nhưng orchestrator chạy ở repo khác / cwd khác → settings không được đọc (readSwarmSettings neo `process.cwd()`) → âm thầm fallback glm-5.1.
+  - Project dùng `.pi/settings.json` swarm config nhưng root chạy ở repo khác / cwd khác → settings không được đọc (readSwarmSettings neo `process.cwd()`) → âm thầm fallback glm-5.1.
   - Spawn 1 lúc 10 worker không truyền model → cả 10 trừ một nhà cung cấp (zai): nghẽn rate limit + chi phí + không tận dụng được fast model cho task nhẹ. Tool description có nhắc "fast preset gpt-5.4-mini" nhưng không có preset switch (vd `model: "fast"`) — LLM phải tự nhớ tên model.
   - `providerForModel` là bảng cứng 1 mục: model tùy chỉnh (Claude, Gemini...) mặc định bị ghép với provider zai-coding-cn → spawn fail lúc tmux chạy lệnh `pi --provider zai-coding-cn --model <model-khác>` trừ khi caller luôn nhớ truyền provider khớp.
   - Loop refresh (`refreshLoopAgent`) và identity reload không chạm model — nhưng `restartAgent` giữ model cũ, nên "đổi model hàng loạt sau khi accept memory về model tốt hơn" không có công cụ nào làm được (phải stop + spawn id mới).
@@ -165,10 +165,10 @@ Mỗi mục có tham chiếu `file:line` (theo file tại thời điểm phân t
 | 1.1 | Stale-lock break → concurrent write `swarm-state.json` | Cao | Lost update toàn cục | Heartbeat lock (pid+ts trong lock dir), CAS bằng version trong state |
 | 1.2 | Read-modify-write nguyên khối, mất ack/agent | Cao | Mọi hook | Cùng 1.1; tách state per-domain (agents/messages/tasks) |
 | 1.3 | `delivered` ledger nhiều writer | TB | Dup inject / mất surface | Single-writer qua reconcile; hoặc move dedup vào mailbox offset |
-| 2.1 | Orchestrator pump 5s đọc mailbox không trim, window 50, 10/tick | Cao (dài hạn) | Nghẽn hình phễu PM | Trim mailbox theo checkpoint; tăng window; priority queue |
+| 2.1 | Root pump 5s đọc mailbox không trim, window 50, 10/tick | Cao (dài hạn) | Nghẽn hình phễu PM | Trim mailbox theo checkpoint; tăng window; priority queue |
 | 2.3 | Injected-unacked không bao giờ auto re-inject | Cao | Message ứ bền | Re-inject có giới hạn sau ack_missing; hoặc check pane-current-command trước khi coi delivered |
 | 2.5 | Idempotency/nudge check O(M) trong lock | TB | Kéo dài critical section | Index Map idempotencyKey trong state |
-| 3.1 | 2 orchestrator / 2 process cùng agent id | Cao | Duplicate actions, cướp pid | Lease single-orchestrator; pid-guard cho tool handlers |
+| 3.1 | 2 root / 2 process cùng agent id | Cao | Duplicate actions, cướp pid | Lease single-root; pid-guard cho tool handlers |
 | 3.2 | 2 swarm share `.pi/swarm/` | TB | Trộn mailbox/identity | Namespace theo swarmId |
 | 4.1 | Pane alive ≠ pi alive | Cao | Dead-marked-delivered | Probe `pane_current_command` + probe prompt marker |
 | 4.3 | send-keys/register vào pane ngoài swarm | TB | Cross-talk, kill nhầm window | Ghi swarm marker vào pane_user_option; kill check owner |
@@ -187,7 +187,7 @@ Mỗi mục có tham chiếu `file:line` (theo file tại thời điểm phân t
 ## 8. Câu trả lời trực tiếp cho câu hỏi đặt ra
 
 - **Có xung đột gì không khi multiple agents làm việc?** Có, ba lớp: (a) xung đột ghi state do lock best-effort + full-file write (mất ack/agent record); (b) xung đột công việc khi reassign node đang in_progress (hai agent cùng code một node, edit lock chỉ advisory); (c) xung đột "danh tính" khi 2 process dùng cùng agent id (tool handlers không pid-guard).
-- **Có bị nghẽn message ở đâu không?** Có — điểm nghẽn lớn nhất là **mailbox của orchestrator + pump 5 giây** (mọi notify đổ về đây, đọc toàn file JSONL mỗi tick, window scan 50, surface 10/tick, không trim tự động). Thứ hai là trạng thái **injected-but-unacked** — message đã coi là delivered nhưng agent không thực sự đọc (pane ở dialog/copy-mode/pi chết) thì không bao giờ được re-inject tự động. Thứ ba là chính **swarm lock** khi N agent đông: mọi hook đều serial qua một lock directory.
+- **Có bị nghẽn message ở đâu không?** Có — điểm nghẽn lớn nhất là **mailbox của root + pump 5 giây** (mọi notify đổ về đây, đọc toàn file JSONL mỗi tick, window scan 50, surface 10/tick, không trim tự động). Thứ hai là trạng thái **injected-but-unacked** — message đã coi là delivered nhưng agent không thực sự đọc (pane ở dialog/copy-mode/pi chết) thì không bao giờ được re-inject tự động. Thứ ba là chính **swarm lock** khi N agent đông: mọi hook đều serial qua một lock directory.
 - **Tích hợp tmux có rủi ro gì không?** Có: liveness chỉ là "target resolve được" (không chắc pi còn sống); send-keys không xác thực chủ sở hữu pane (có thể gõ vào pane người dùng/swarm khác, kill-window làm chết cả shared window); settle time cứng làm mất kickoff prompt; window-index target không ổn định khi user đổi layout; tmux server là SPOF cho toàn swarm kể cả PM.
 - **Spawn mặc định glm-5.1?** Đúng: chuỗi fallback `params.model → settings → env → DEFAULT_MODEL("glm-5.1")` + `providerForModel` bảng cứng 1 mục (mọi model ≠ gpt-5.4-mini đều ghép zai-coding-cn). Tool `swarm_spawn_agent` không truyền model (thói quen của LLM caller) thì mọi agent sinh ra đều glm-5.1; `restartAgent` còn "đúc kết" model cũ vĩnh viễn. Chỉ settings `.pi/settings.json` ở đúng cwd mới rescue được.
 - **Skill qualification metrics sơ sài?** Đúng, theo 2 chiều: (a) skill `swarm_metric_designer` chỉ là prompt-guide — không node/role graph nào gọi nó, PM phải tự thuộc 8-tool sequence; (b) engine metric chỉ là file-IO — `validityRules` là chuỗi tự do không được thực thi, `source.command` "stored, not auto-run", giá trị metric do agent **self-report** (gate chỉ chặn sửa file sau, không chặn khai số tuỳ ý), baseline mutable qua append latest-by-id, và `minimumMeaningfulChange` không chặn promote memory hay loop round mới. Nói ngắn: qualification/success-criteria hiện là **tuyên bố** chứ chưa phải **cơ chế**.
