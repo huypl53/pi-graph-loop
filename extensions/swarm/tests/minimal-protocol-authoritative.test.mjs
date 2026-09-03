@@ -536,7 +536,7 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 }
 
 // ============================================================
-// Scenario 8: gate=1 root active tool set = 12 distinct tools
+// Scenario 8: gate=1 root active tool set = 14 distinct tools
 // ============================================================
 {
 	console.log("\n--- Scenario 8: gate=1 root active tool set (profile gating) ---");
@@ -547,14 +547,14 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const activeTools = (pi8.getActiveTools?.() || []).filter((n) => n.startsWith("swarm_"));
 
 	const expectedOrch = new Set([
-		"swarm_check_mailbox", "swarm_send_message", "swarm_update_task", "swarm_task_status", "swarm_reconcile",
-		"swarm_agent_status", "swarm_list_agents", "swarm_spawn_agent", "swarm_create_task", "swarm_assign_task",
+		"swarm_check_mailbox", "swarm_send_message", "swarm_update_task", "swarm_task_status", "swarm_reconcile", "swarm_audit",
+		"swarm_agent_status", "swarm_list_agents", "swarm_spawn_agent", "swarm_create_task", "swarm_confirm_qualification", "swarm_assign_task",
 		"swarm_set_goal", "swarm_mark_goal_done",
 	]);
 	const missing = [...expectedOrch].filter((n) => !activeTools.includes(n));
 	const extra = activeTools.filter((n) => !expectedOrch.has(n));
 
-	ok("gate=1 root: exactly 12 distinct root tools active", activeTools.length === expectedOrch.size && missing.length === 0 && extra.length === 0);
+	ok("gate=1 root: exactly 14 distinct root tools active", activeTools.length === expectedOrch.size && missing.length === 0 && extra.length === 0);
 }
 
 // ============================================================

@@ -8,7 +8,9 @@
     "pi",
     "swarm",
     "agents",
-    "task-graph"
+    "task-graph",
+    "qualification-gate",
+    "qualification"
   ],
   "pi": {
     "extensions": [

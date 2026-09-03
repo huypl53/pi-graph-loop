@@ -204,6 +204,15 @@ Required examples in this issue family:
 - **KR5 (silent-swallow anti-pattern).** A `try { ... } catch { /* swallow */ }` or `.catch(() => {})` wrapping an engine-wiring path (hook body, pump-tick phase, message-delivery callback) MUST have at least one integration test exercising the production factory/registration path that would FAIL if the wrapped body throws. Helper-only unit tests that bypass the wrapping layer cannot catch silent failures inside the swallowed region. Corollary: when the production entry point is a hook (`pi.on("tool_execution_end", ...)`), at least one assertion must go through the hook, not the helper.
 - **KR6 (seed diversity for threshold gates).** Tests that verify threshold/staleness/boundary logic MUST seed BOTH sides of the boundary: stale-above (gate SHOULD fire) + fresh-below (gate SHOULD NOT fire). One-sided suites cannot detect gate-polarity bugs (an implementer flipping the gate direction passes the one-sided suite). Apply at plan-writing time too: plans should specify the negative case explicitly.
 
+## Qualification-gate skill
+
+The package-shipped qualification playbook is
+`extensions/swarm/qualification-skills/qualification-gate/SKILL.md`. It is included
+with the swarm extension under the package's existing `extensions/` publish rule and
+is surfaced by generated identity only to root, reviewer, and auditor. See
+[`tools.md`](./tools.md#normal-graph-execution) for the `auto` and `human-discuss`
+task-creation modes.
+
 ## Documentation update checklist
 
 When you change behavior, update docs in this order:
