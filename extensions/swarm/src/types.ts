@@ -27,6 +27,15 @@ export type ModelSlot = {
 	provider?: string;
 	weight?: number; // default 1; 0 = fallback-only (used only when all weighted slots are down)
 	label?: string;
+	// Issue 21 quota-reset-interval: optional per-slot floor for quota benches. When a quota error
+	// benches this slot, the effective bench = max(rotation.cooldownMs, quotaResetMs ?? env-default).
+	// The 24h exponential cap still applies — quotaResetMs is a floor only, not a ceiling. Absent or
+	// 0 falls back to rotation.cooldownMs (unchanged behavior).
+	quotaResetMs?: number;
+	// Issue 22 roles-filter: optional allow-list of roleKind names; when set & non-empty, the slot
+	// is only eligible for pickSlot() when the agent's roleKind is in the list. Absent / empty =
+	// available for ALL roleKinds (default). Closed roleKind set: completion.ts ROLE_KINDS.
+	roles?: string[];
 };
 
 export type RotationStrategy = "weighted" | "round-robin" | "sticky";
@@ -75,12 +84,42 @@ export type PoolSlotHealth = {
 	deduped?: boolean;
 	cooldownUntil?: string; // ISO; slot excluded from picking while in the future
 	benchStreak?: number; // consecutive benches without an intervening success (drives exponential backoff)
+	// Issue 21 quota-reset-interval: kind of the most recent bench event (quota/auth/etc.). Stamped
+	// on every bench so the orchestrator pump's recovery scan can filter on "quota" (no point
+	// emitting slot_recovered for an auth bench). Preserved across recordSlotSuccess (see B-3) so
+	// the recovery gate stays accurate even if a successful turn is followed by a re-bench.
+	lastBenchReason?: ProviderErrorKind;
+	// Issue 21 quota-reset-interval: original bench duration in ms (the cap-adjusted value before
+	// the 24h cap and exponential backoff were applied — actually the FINAL value written to
+	// cooldownUntil). Stamped at bench time so the recovery trace can report how long the slot
+	// was actually benched. Preserved across recordSlotSuccess for the same reason as lastBenchReason.
+	lastBenchMs?: number;
+	// Issue 21 quota-reset-interval: timestamp of the last emitted pool.slot_recovered trace for
+	// this slot. Used as the idempotent dedupe gate (same contract as goal.idle_nudge's notify key).
+	// Pre-policy slots simply lack the field, which the recovery scan treats as "never recovered".
+	lastRecoveredAt?: string;
 };
 
 export type PoolHealthState = {
 	slots: Record<string, PoolSlotHealth>;
 	// round-robin cursor (index into the configured slot list)
 	rrCursor?: number;
+};
+
+// Per-agent engine-retry observation (Issue 17 model-pool-respect-pi-retries). The pi engine
+// retries a failed provider request up to retry.maxRetries (default 3) times before giving up.
+// The extension cannot subscribe to engine retry events directly (`auto_retry_*` is not in the
+// extension event allowlist — see agent-session.js:_emitExtensionEvent). Instead we count
+// consecutive `turn_end { stopReason: "error" }` events on the SAME providerKey + errorMessage
+// within ENGINE_RETRY_WINDOW_MS; when the count reaches ENGINE_MAX_RETRIES (or the burst ages out),
+// we conclude the engine has exhausted retries on this slot and gate the swap path on that signal.
+// In-process only — never persisted. See pool-retry.test.mjs for fixture coverage.
+export type EngineRetryIncident = {
+	providerKey: string;    // `${provider}/${model}` of the slot being retried by the engine
+	errorMessage: string;   // normalized (slice 0..200) for comparison
+	firstSeenAt: number;    // ms epoch — first turn_end {error} for this incident
+	lastSeenAt: number;     // ms epoch — most recent turn_end {error} for this incident
+	count: number;          // number of consecutive turn_end {error} events in this incident
 };
 
 export type MessageRecord = {
@@ -123,6 +162,30 @@ export type MessageRecord = {
 	idempotencyKey?: string;
 	// Set when a newer assignment supersedes this open assignment message (idempotency/supersede fix).
 	superseded?: { at: string; by: string; supersededBy: string };
+
+	// --- Issue 25 Phase 1: v2 lifecycle evidence schema ---
+	// Each field has a distinct meaning (see proposal §A); none of them overloads the
+	// existing delivered/ack fields. Under gate=0 these are SHADOW ONLY: the engine does
+	// not mutate state or change completion decisions. Under gate=1 (Phase 2) the same
+	// derivation paths become authoritative.
+	mailboxDeliveredAt?: string;     // durable mailbox append succeeded (transport receipt)
+	seenAt?: string;                // API-level surface/read receipt (NOT pane injection)
+	processingAt?: string;          // recipient action scoped to task/node/assignment
+	respondedAt?: string;           // accepted, non-superseded replyTo response received
+	terminalAt?: string;            // inferred terminal disposition reached
+	terminalReason?: string;        // evidence source label (e.g. "response_verified", "task_node_terminal", "supersession", "deadline_exceeded", "ttl_expired")
+	lifecycleStage?: "delivered" | "surfaced" | "seen" | "processing" | "responded" | "terminal"; // derived stage at last derivation; shadow-only under gate=0
+	lifecycleSource?: string;       // the evidence source that drove the last derivation (e.g. "mailbox.read", "task.tool", "reply.accepted")
+	// Optional forward-compat fields on the send side. NOT exposed in normal tool
+	// schemas during Phase 1; the migration tool may stamp `expectResponse` on legacy
+	// envelopes when it can derive a response expectation without inventing one.
+	expectResponse?: boolean;
+	responseDeadlineMs?: number;
+	escalateIfSilent?: boolean;
+	// Migration provenance (Issue 25 Phase 1 §D). Additive audit field; set by the migration
+	// command only. Absent on pre-migration records.
+	migrationRunId?: string;        // runId of the migration that last touched this record
+	migratedAt?: string;            // ISO timestamp of the last successful migration write
 };
 
 export type SwarmAgent = {
@@ -141,6 +204,11 @@ export type SwarmAgent = {
 	lastAgentStartAt?: string;
 	lastAgentSettledAt?: string;
 	lastSettleNotifyAt?: string; // persisted cooldown for agent_settled->orchestrator idle/open-work notify
+	// === Issue 25 Phase 2: worker dry-run reconcile rate-limit ledger (proposal §K.1) ===
+	// Last worker dry-run reconcile timestamp. Persisted so a worker that calls swarm_reconcile
+	// more often than PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS gets RECONCILE_RATE_LIMITED without
+	// a separate ledger. Orchestrator/admin is exempt; the gate is enforced at the tool boundary.
+	lastReconcileDryRunAt?: string;
 	lastToolAt?: string;
 	lastShutdownAt?: string;
 	pid?: number;
@@ -154,6 +222,14 @@ export type SwarmAgent = {
 	provider: string;
 	cwd: string;
 	mailbox: string;
+	// Issue 26 — task-close worker sweep (auto-stop task-scoped workers). Additive durable link
+	// from an agent to the task it was FRESHLY SPAWNED FOR. Stamped at spawn-for-task time in
+	// `tools/tasks.ts:swarm_assign_task` (autoSpawn/spawnIsolated path) when the agent is a new
+	// record for that task; never overwritten by unrelated task ids. Read by the task-close sweep
+	// in `taskgraph.ts:sweepTaskWorkersLocked` to decide whether an otherwise-idle worker should be
+	// swept when its task closes. Absent on reuse-pool agents that were not spawned for the task
+	// — they are swept ONLY when their only active task is the closing one.
+	spawnedForTaskId?: string;
 	// Identity provenance (additive, optional). Stamped whenever the EFFECTIVE identity file is
 	// (re)generated by writeEffectiveIdentity (spawn / swarm_agent_identity refresh / swarm_reload_identity).
 	identityVersion?: number;       // monotonically bumps when the effective content (base+override) changes
@@ -189,6 +265,38 @@ export type OrchestratorReceiptEntry = {
 	fingerprint: string;
 };
 
+// Per-task task-graph-state idle nudge state (Issue 23). One entry per stalled task; the orchestrator
+// pump increments consecutiveNoResolveNudges on each emitted nudge and resets the counter when the
+// task graph advances (reassignment, claim, or task leaving in_progress). Anti-loop cap at
+// MAX_TASK_STALL_NUDGES; back-off at GOAL_NUDGE_BACKOFF_TICKS. Mirrors SwarmGoal's shape.
+export type SwarmTaskStallState = {
+	taskId: string;                      // safe-id (validated by formatNotifyKey)
+	consecutiveNoResolveNudges: number;  // monotonic; reset when node leaves ready+unassigned or task leaves in_progress
+	nudgeSeq?: number;                   // monotonic emit counter (NEVER reset) — idempotency key component so each nudge gets a fresh dedupe slot
+	lastNudgeAt?: string;                // ISO; set on every successful nudge emission
+	lastResolvedAt?: string;             // ISO; set on every successful counter reset
+	backoffTicksRemaining?: number;      // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
+};
+
+// Durable goal the orchestrator wants the swarm to advance toward (Issue 18). Set via
+// `swarm_set_goal` / `/swarm goal set <text>`; cleared via `swarm_mark_goal_done` / `/swarm goal done`.
+// While set and ALL non-orchestrator agents are runtimeStatus="idle" with zero active task nodes,
+// the orchestrator pump emits an idempotent idle-streak nudge (anti-loop: at most
+// MAX_CONSECUTIVE_NUDGES_DEFAULT consecutive, then a GOAL_NUDGE_BACKOFF_TICKS-tick back-off). Any
+// orchestrator turn that ends stopReason="stop" resets the consecutiveNoResolveNudges counter and
+// clears back-off (turn_end branch in hooks.ts).
+export type SwarmGoal = {
+	id: string;                         // stable goalId (e.g. "goal-<ms>-<rand6>")
+	text: string;                       // the goal text the orchestrator set
+	setAt: string;                      // ISO; durable on set
+	setBy: string;                      // agentId that set it (orchestrator in practice; recorded for audit)
+	consecutiveNoResolveNudges: number; // monotonic; reset on orchestrator turn_end {stop} resolve
+	nudgeSeq?: number;                   // monotonic emit counter (NEVER reset, survives resolve) — idempotency key component so each nudge gets a fresh dedupe slot
+	lastNudgeAt?: string;               // ISO; set on every successful nudge emission
+	lastResolvedAt?: string;            // ISO; set on every successful counter reset
+	backoffTicksRemaining?: number;     // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
+};
+
 // In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent
 // record (not restart/register/pool-reuse) and removed when the engine either (a) detects a follow-up
 // delivery within the ORPHAN_SPAWN_WARNING_TIMEOUT_MS window or (b) the timer fires and emits
@@ -199,6 +307,13 @@ export type RecentSpawn = {
 	agentId: string;
 	spawnedAt: string;     // ISO; mirrors agent.createdAt for the just-created record
 	deadlineAt: string;    // ISO; spawnedAt + ORPHAN_SPAWN_WARNING_TIMEOUT_MS
+	// Issue 16: identity of the spawning orchestrator session, stamped unconditionally at
+	// armOrphanWatch time. The pre-clear predicate in swarm_assign_task compares these against
+	// process.pid + process.env.PI_SWARM_SESSION_STARTED_AT at compare time. Both fields are
+	// optional only for backward-compat reads of legacy state (no production code path leaves
+	// them undefined for entries armed after this change).
+	spawnedByPid?: number;
+	spawnedBySessionStartedAt?: string;
 };
 
 export type SwarmState = {
@@ -242,6 +357,26 @@ export type SwarmState = {
 	// follow-up delivery. Cleared on a follow-up delivery, by swarm_stop_agent, or by the watchdog
 	// itself when the timer fires. ReadState back-fills `[]` so pre-policy swarms boot cleanly.
 	recentSpawns?: RecentSpawn[];
+	// Durable swarm goal (Issue 18): set by the orchestrator via swarm_set_goal / /swarm goal set;
+	// cleared by swarm_mark_goal_done / /swarm goal done. While set + all non-orchestrator agents
+	// idle + no active task nodes, the orchestrator pump emits an idempotent idle-streak nudge with
+	// an anti-loop counter and 2-tick back-off. Optional; absent (== no goal) is the default. The
+	// readState back-fill intentionally leaves this field as-is on legacy swarms: a JSON file with
+	// no `goal` key parses to `undefined`, which is the correct initial state — a future maintainer
+	// MUST NOT add `st.goal ||= {}` here, since that would replace undefined with an empty object
+	// and crash `goal.id` access in the pump.
+	goal?: SwarmGoal;
+	// Issue 23 — task-graph-state idle nudge. Per-(taskId) counter + back-off so a stalled
+	// task graph doesn't spam the orchestrator's mailbox. Reset on first reassignment of the
+	// actionable node OR on the task leaving `in_progress` state.
+	taskStallState?: Record<string, SwarmTaskStallState>;
+	// Issue 20: pool-scaffold write-once flag. Set by the orchestrator session_start hook AFTER the
+	// first successful `.pi/settings.json` scaffold + notify emission. Absent === never notified, which
+	// is the correct initial state. `readState` does NOT back-fill this field (mirrors `goal`): a
+	// pre-policy swarm-state.json file parses absent keys to `undefined`, and `undefined` means
+	// "next session_start should scaffold + notify". Setting this to a non-empty string suppresses the
+	// notify on every subsequent session_start and /reload until the swarm dir is cleared (clean slate).
+	poolScaffoldNotifiedAt?: string;
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;

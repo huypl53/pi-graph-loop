@@ -7,9 +7,10 @@
 
 ## pi session spawn rules
 - use tmux skill to create a dedicated tmux session for validation/review work; if a full new session is not practical, create a clearly named pane/window instead
-- in that session/pane create pi session with the models below:
+- in that session/pane start pi with bare `pi` (it reads defaultModel/defaultProvider from `~/.pi/agent/settings.json` and credentials from `~/.pi/agent/auth.json`)
+- only pass explicit model/provider flags after verifying the provider is authenticated (`pi auth`); a model/provider combo without a stored key makes pi exit with `No API key found` and the pane looks dead. Example verified lanes:
 ```
-pi --model glm-5.1 --provider zai-coding-cn
+pi --model glm-5.1 --provider zai-coding-cn   # ONLY if zai-coding-cn has a key in auth.json
 pi --model gpt-5.4-mini --provider openai
 ```
 

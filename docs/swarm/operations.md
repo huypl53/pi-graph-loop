@@ -4,10 +4,22 @@ This page is for operating, debugging, and reviewing a swarm instance.
 
 ## Quick start
 
-Start pi with the packaged extension:
+Start pi with the packaged extension — bare `pi` picks up the defaults from
+`~/.pi/agent/settings.json` (defaultModel/defaultProvider) and credentials
+from `~/.pi/agent/auth.json`:
 
 ```bash
-pi --model glm-5.1 --provider zai-coding-cn -e extensions/swarm/index.ts
+pi -e extensions/swarm/index.ts
+```
+
+Only pass `--model`/`--provider` when you have verified the pair works on
+this machine (the provider must have a stored API key — check `pi auth` or
+`~/.pi/agent/auth.json`; a configured-looking combo without a key exits with
+`No API key found for <provider>` and the pane looks dead). If you do use
+explicit flags, they are the same for both roles, e.g.
+
+```bash
+pi --model glm-5.1 --provider zai-coding-cn -e extensions/swarm/index.ts   # if zai-coding-cn is authenticated
 ```
 
 Inside pi:
@@ -91,6 +103,54 @@ Un-cancelling is not supported in this release. To work on the same goal again, 
 
 ### Inspect or change agent roles
 
+### Model pool auto-scaffold on first orchestrator session (Issue 20)
+
+On the orchestrator's first `session_start` in a swarm, the extension checks
+`.pi/settings.json`. If neither `swarm.modelPool` nor `extensions.swarm.modelPool`
+(runtime precedence: extensions wins per `src/session.ts:readSwarmSettings`) is
+declared, the extension writes a placeholder slot `[{ "model": null, "provider": null }]`
+into the resolved block while preserving every other top-level key. The write is
+atomic (`state.ts:atomicWriteFile`) so a torn write is impossible.
+
+Three skip paths surface as their own return values but emit **no notify** and
+leave `.pi/settings.json` untouched:
+
+- `modelpool_present` — either block already declares `modelPool` (even `[]`).
+- `no_pi_dir` — `.pi/` directory is absent. We deliberately do NOT `mkdir -p`
+  to create a pi directory inside a non-pi project. The `.pi/swarm/...` trace
+  pipeline is also skipped (it would mkdir the chain we just refused to create).
+- `settings_unparseable` — `.pi/settings.json` exists but is not valid JSON.
+  Traced as `pool.scaffold_skipped_unparseable`; the file is left as-is for the
+  user to repair manually.
+
+The one-shot `ctx.ui.notify` fires **only** when (a) `modelpool_present` /
+`no_pi_dir` / `settings_unparseable` did NOT skip AND (b) the durable flag
+`SwarmState.poolScaffoldNotifiedAt` is absent. The flag is stamped inside the
+same `withLock` block that creates the leader-orchestrator session record, so
+subsequent `session_start` invocations (including `/reload` of the same swarm)
+are suppressed until the entire `.pi/swarm` directory is cleared (clean-slate
+re-notify is the intended escape hatch). The notify text is stable; see the
+`POOL_SCAFFOLD_NOTIFY_TEXT` constant in `extensions/swarm/src/constants.ts`.
+
+Trace events (durable in `.pi/swarm/traces/events.jsonl`):
+
+- `pool.scaffold_created` — `{ path, previousKeys, source, modelPool }`. Fires
+  on every successful write; idempotent across calls because the payload is the
+  same and the durable flag suppresses the notify.
+- `pool.scaffold_skipped_unparseable` — `{ path, error }`.
+- `pool.scaffold_error` — `{ error }`. Fires only when the scaffold threw an
+  unexpected error (e.g. an EACCES from a read-only mount). The session_start
+  handler swallows this and continues; the user can diagnose via `swarm_trace`.
+
+Placeholder `model: null` is intentionally invalid against
+`validateSwarmSettings()` (which reports `slot_empty_model`); this nudges the
+user to replace it with a real slot before running `/swarm pool validate`.
+Concurrent orchestrator session_starts (two PM panes racing) both call
+`ensurePoolScaffold`; both observe `modelPool` absent; the first
+`atomicWriteFile` wins and the second sees the post-write state on its next read
+or simply overwrites with the same idempotent payload — neither the user nor
+the swarm state machine observes a torn write.
+
 ### Model pool (multi-provider rotation)
 
 `.pi/settings.json` (under `swarm` or `extensions.swarm`) supports a weighted
@@ -116,6 +176,16 @@ Slot fields:
 - `model`: required, non-empty string
 - `provider`: optional; defaults to the provider registry
 - `weight`: non-negative number; default 1; `0` = fallback-only (used when every weighted slot is benched)
+- `roles`: optional array of role-kind names; when set & non-empty, this slot is only eligible for
+  `pickSlot()` when the spawning agent's roleKind is in the list. Absent / empty = available for
+  all roleKinds (default). The closed set of roleKinds is defined in
+  `extensions/swarm/src/completion.ts` `ROLE_KINDS` (seven entries: orchestrator, planner,
+  reviewer, tester, implementer, worker, observer). Manual `/swarm pool rotate now` ALWAYS
+  bypasses the role filter (operator override) and stamps `rolesIgnored: true` in the swap trace.
+  If every slot is filtered out for a roleKind at spawn time, a warning trace
+  (`pool.role_filter_all_filtered_fallback`) is emitted and the worker still starts on the next
+  available unfiltered slot. Malformed `roles` values are reported as `slot_bad_roles` by
+  `/swarm pool validate` (warning-grade) and treated as "no filter".
 
 Rotation fields:
 - `strategy`: `weighted` (default) | `round-robin` | `sticky` (per-agent-id deterministic)
@@ -179,9 +249,26 @@ prints the action directly so the operator never has to guess the fix.
 - **Incident dedupe**: pi may emit several error turns for one underlying failure (internal stream retries, overflow-recovery re-runs). An identical error on the same slot within 30s counts once toward `maxRetries`.
 - **Exponential bench backoff**: consecutive benches without an intervening success double the cooldown (capped at 24h). A long outage (e.g. monthly quota) costs one probe per doubling instead of one retry per `cooldownMs`.
 - **Swap-chain cap**: at most 2 consecutive swaps per agent (chain resets after 5 idle minutes). A fully-dead pool cannot cascade fail→swap→retry through every slot; beyond the cap the turn fails naturally and the trace `pool.swap_chain_capped` makes it visible.
+- **Pi engine retry coordination** (Issue 17 gate + Issue 19 manual override): the pi engine itself retries a failed provider request up to `retry.maxRetries` (default `3`) times with exponential backoff (2s, 4s, 8s = 14s total budget) before giving up. The extension cannot subscribe to engine retry events (the `auto_retry_*` family is not in the extension event allowlist), so the gate observes retries **indirectly**: every retry re-enters via `agent.continue()` and emits a fresh `turn_end { stopReason: "error" }` with the SAME `providerKey + errorMessage`. The gate counts consecutive same-error turn_ends per agent; only after `ENGINE_MAX_RETRIES` (`3`) strikes within `ENGINE_RETRY_WINDOW_MS` (`14000`) does it conclude the engine has exhausted retries and let the auto-swap path fire. Below the threshold, the swap path is suppressed: `pool.swap_gated_by_engine_retry` is traced, but there is NO `setModel`, NO bench, NO failure-streak bump. A successful turn (`stopReason: "stop"`) clears any open incident (`pool.engine_retry_recovered`), as does `session_start`, `session_shutdown`, and `agent_settled`. The constants live in `extensions/swarm/src/constants.ts` and are mirrored by pi's own defaults — the swarm does NOT read `retry.maxRetries` from settings; engine policy belongs to the engine.
+- **Streak-counting behavior change** (binding C4 of Issue 17, operator-visible in Issue 19): a persistent transient now needs **2 retry-exhaustion cycles** (not 2 consecutive errors) to bench the slot. The engine-retry gate collapses the burst — `ENGINE_MAX_RETRIES` strikes inside one `ENGINE_RETRY_WINDOW_MS` window count as exactly **one** `recordProviderError` call, not three. The bench-streak therefore tracks exhaustion cycles 1:1, not raw error events. Operators who relied on "after the second provider error the slot is benched" should now plan for 2 full 14s retry-exhaustion windows on the slot before it benches. The trace lane (`pool.swap_gated_by_engine_retry` per gated strike, then `pool.engine_retry_exhausted` on the terminal strike, then `pool.slot_failure` / `pool.swap` / `pool.swap_failed`) tells you exactly which cycle you are on.
+- **Manual override paths** (Issue 19, orchestrator-only, slash commands only — no new public tools):
+  - **`/swarm pool rotate now`** — bypasses the gate, force-swaps the current slot to a healthy alternative via `pi.setModel()`. Traces `pool.swap_forced_by_manual_override` with the same `{ agentId, from, to, reason, target }` shape the auto-swap uses for `pool.swap`. Bumps the swap-chain counter (a swap happened; the operator is accountable for the same `MAX_SWAP_CHAIN=2` cap).
+  - **`/swarm pool rotate next`** — benches the current slot for `rotation.cooldownMs` so the next normal `pickSlot()` skips it. Does NOT call `setModel()` — the agent keeps its current model for this turn, and the next `turn_end` (or the next exhaustion) advances organically. Traces `pool.bench_forced_by_manual_override` with `{ agentId, slot, cooldownMs }`. Does NOT bump the swap-chain counter (no swap happened) and does NOT call `recordProviderError` (the bench is a deliberate operator decision, not a provider error).
+  - Both commands are orchestrator-gated (`currentAgentId() === "orchestrator"`, same wording as `/swarm goal|attention|remind|stop|release`: `<cmd> is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)`). Guest sessions are naturally refused by the same check.
+  - Manual override traces are distinguishable in dashboards (`pool.swap_forced_by_manual_override` vs `pool.swap`, `pool.bench_forced_by_manual_override` vs `pool.slot_failure`) so an operator can audit when the gate was bypassed vs when it fired naturally.
+- **Where to look in the trace log**:
+  - `pool.swap_gated_by_engine_retry` — gate held (below threshold; no swap, no bench, no streak bump).
+  - `pool.engine_retry_exhausted` — gate opened on the terminal strike; the swap path is now free to fire.
+  - `pool.engine_retry_recovered` — engine recovered on a later retry attempt (incident cleared on a `stop` turn).
+  - `pool.swap_forced_by_manual_override` — operator forced an immediate swap (gate bypassed).
+  - `pool.bench_forced_by_manual_override` — operator benched the current slot (gate bypassed, no swap).
+  - `pool.manual_rotate_no_alternative` — manual `rotate now` refused because every alternative is benched.
+  - `pool.manual_rotate_model_not_found` — manual `rotate now` refused because the picked slot has no resolvable model registry entry (config error).
+  - `pool.manual_rotate_no_current_slot` — manual `rotate` refused because the pane's `ctx.model` is empty (not running on a model pool slot).
+- **Cross-reference**: Issue 17 commit `1016d7c` introduced the gate. Issue 19 adds the constants extraction (`extensions/swarm/src/constants.ts`), this documentation, the operator-facing traces, and the manual override commands.
 - Health state persists in `.pi/swarm/pool-state.json` (includes the classified error); all read-modify-write cycles run under a dedicated lock so concurrent agent processes cannot lose updates. Provider errors classify as `quota` | `rate_limit` | `auth` | `transient`; anything else (e.g. context overflow) is traced (`pool.turn_error_unclassified`) but never benches or swaps a slot. A slot must resolve under its own provider in the model registry — slots with no explicit provider are rejected with `pool.swap_model_not_found`.
-- Traces: `pool.slot_failure`, `pool.swap`, `pool.swap_failed`, `pool.swap_no_candidate`, `pool.swap_chain_capped`, `pool.swap_model_not_found`, `pool.slot_success`, `pool.turn_error_unclassified` (`.pi/swarm/traces/`).
-- Commands: `/swarm pool list`, `/swarm pool cooldown <provider/model> <ms>`, `/swarm pool clear <provider/model>`, `/swarm pool show`, `/swarm pool validate`, `/swarm pool help`, `/swarm pool preview-preflight`.
+- Traces: `pool.slot_failure`, `pool.swap`, `pool.swap_failed`, `pool.swap_no_candidate`, `pool.swap_chain_capped`, `pool.swap_model_not_found`, `pool.swap_gated_by_engine_retry`, `pool.engine_retry_exhausted`, `pool.engine_retry_recovered`, `pool.swap_forced_by_manual_override`, `pool.bench_forced_by_manual_override`, `pool.manual_rotate_no_alternative`, `pool.manual_rotate_model_not_found`, `pool.manual_rotate_no_current_slot`, `pool.slot_success`, `pool.turn_error_unclassified` (`.pi/swarm/traces/`).
+- Commands: `/swarm pool list`, `/swarm pool cooldown <provider/model> <ms>`, `/swarm pool clear <provider/model>`, `/swarm pool rotate now` (orchestrator-only; force-swap current slot, bypass gate), `/swarm pool rotate next` (orchestrator-only; bench current slot for `rotation.cooldownMs`, advance organically), `/swarm pool show`, `/swarm pool validate`, `/swarm pool help`, `/swarm pool preview-preflight`.
 - Without `modelPool`, the single `defaultModel`/`defaultProvider` behavior is unchanged.
 
 ### Inspect or change agent roles
@@ -249,18 +336,50 @@ stale record as recoverable state, not evidence that a worker may take over.
 
 ## Orphan-spawn watchdog (Issue 14)
 
+<!-- (sections below kept in original order) -->
+
 The engine emits a structured trace event when `swarm_spawn_agent` mints a NEW agent record but no
 follow-up delivery (`swarm_send_message`, `swarm_assign_task` which sends internally, or
 `swarm_stop_agent`) occurs within `ORPHAN_SPAWN_WARNING_TIMEOUT_MS` (default **30 000 ms**). The
 warning is purely diagnostic — it is **not** a new public tool, **not** a hard error, and **not** a
 model-side gate. Ops and dashboards surface it via `swarm_trace` or the `events.jsonl` log.
 
+### Pre-flight auto-clear (Issue 16)
+
+When the same orchestrator session that called `swarm_spawn_agent` follows up with
+`swarm_assign_task` resolving to the freshly-spawned agentId within
+`PREFLIGHT_ASSIGN_GRACE_MS` (default `max(5_000, ORPHAN_SPAWN_WARNING_TIMEOUT_MS - 1_000)` =
+**29 000 ms** at production defaults), the orphan watch is **pre-cleared** before the timer fires:
+
+- The in-process timer is cancelled and the `recentSpawns[]` entry is removed.
+- `agent.spawn.orphan_cleared` is emitted with `by: "swarm_assign_task"` and `reason: "preflight"`
+  (distinct from the late-delivery backstop which carries `reason: "delivery"`).
+- The `spawnedByPid` and `spawnedBySessionStartedAt` stamps carried on the entry are surfaced in
+  the trace payload for ops correlation.
+
+Same-orchestrator detection uses `process.pid` + `process.env.PI_SWARM_SESSION_STARTED_AT` stamped
+**unconditionally** onto the entry at `armOrphanWatch` time (so it works on the operator's first
+tool call after PM opt-in, when the leader record may still be vacant). A foreign orchestrator
+session invoking `swarm_assign_task` against the fresh record does **not** preempt — the warning
+fires normally, because the spawn was not followed by the spawning orchestrator's intended use.
+
+The existing delivery-side `clearReason="swarm_assign_task"` path inside `deliverMessageLocked`
+remains intact as a late-clear backstop; if pre-clear already removed the entry, the delivery-side
+clear is a no-op. True orphans (no follow-up) still trip the warning after the full timeout.
+
+Override the grace window for tests via `PI_SWARM_PREFLIGHT_GRACE_MS` (must be set BEFORE module
+import):
+
+```bash
+PI_SWARM_ORPHAN_TIMEOUT_MS=50 PI_SWARM_PREFLIGHT_GRACE_MS=10 node extensions/swarm/spawn-orphan-warning.test.mjs
+```
+
 ### Trace events
 
 | Event | When | Payload | Purpose |
 |---|---|---|---|
 | `agent.spawn.orphan_watch_start` | End of a successful fresh spawn | `{ agentId, deadlineAt, timeoutMs }` | Watchdog arm signal; lets ops confirm the timer is running |
-| `agent.spawn.orphan_cleared` | Follow-up delivery (or stop) before the deadline | `{ agentId, by, clearedBy, spawnedAt, deadlineAt }` where `by` is `swarm_send_message` / `swarm_assign_task` / `swarm_stop_agent` | Disambiguates averted orphans from real ones in dashboards |
+| `agent.spawn.orphan_cleared` | Follow-up delivery (or pre-flight assign) before the deadline | `{ agentId, by, reason, clearedBy, spawnedAt, deadlineAt, spawnedByPid, spawnedBySessionStartedAt }` where `by` is `swarm_send_message` / `swarm_assign_task` / `swarm_stop_agent` and `reason` is `preflight` (Issue 16) or `delivery` (Issue 14 backstop) | Disambiguates averted orphans from real ones in dashboards; preflight vs delivery split tells ops how many were prevented by the auto-clear path |
 | `agent.spawn.orphan_warning` | Timer expired with no follow-up delivery | `{ agentId, spawnedAt, deadlineAt, ageMs, source }` | **The warning itself.** Observe via `swarm_trace` |
 | `agent.spawn.orphan_resolved_late` | Timer fired but an inbound message already exists | `{ agentId, resolver: "pre-existing-message", messageIds }` | Race-condition backstop; not a warning |
 
@@ -293,6 +412,55 @@ The orphan entry persists in `swarm-state.json` (`recentSpawns[]`), but the time
 process-local memory (a module-level `Map`). A process restart **strands** any in-flight entries
 they never fire — they remain observable in the state file for forensics but produce no new warning.
 Rearming on restart is deferred to a follow-up; see `extensions/swarm/spawn-orphan-warning.test.mjs`
+
+## Operator: task-close worker sweep (Issue 26)
+
+When a task reaches a terminal status via `applyTaskStatus`, the swarm auto-stops every worker
+agent whose ONLY active assignment was on that task. This keeps `/swarm status` clean — closed
+tasks don't leave behind a long tail of stopped ghost workers.
+
+**Eligibility rules** (all must hold):
+
+1. The agent is NOT the orchestrator pseudo-agent.
+2. The agent is NOT paused (`agent.paused === true`).
+3. The agent was associated with the closing task AND has no remaining active tasks on other tasks.
+4. The agent is NOT protected by `PI_SWARM_KEEP_TASK_WORKERS=1`.
+
+**`spawnedForTaskId` link**: when `swarm_assign_task` spawns a fresh agent for a node (via
+`autoSpawn` / `spawnIsolated`), it stamps `agent.spawnedForTaskId = task.taskId`. Reuse-pool
+agents that were not spawned for the task are swept ONLY when their only active task was the
+closing task (the `task-graph`-derived `node.assignee` membership is the canonical signal).
+
+**Trace events** (every close):
+
+- `agent.task_sweep_stopped` — one per stopped agent (includes taskId, priorActiveTaskIds, releaseReason).
+- `task.workers_swept` — one summary per close (includes taskId, stoppedCount).
+
+**Opt-out**: set `PI_SWARM_KEEP_TASK_WORKERS=1` to disable the entire sweep (no per-agent or
+summary traces emitted). Default ON. Not gated behind `PI_SWARM_MINIMAL_PROTOCOL`.
+
+**Idempotence**: the sweep is computed from current state on every invocation, so a second call
+finds nothing to stop and emits zero traces. Already-stopped agents are skipped with reason
+`already_stopped`. Safe under the same `withLock(p)` the caller already holds — no nested locks.
+
+## Operator: Phase 2 authoritative lifecycle (Issue 25)
+
+Phase 2 ships with the gate OFF. Behavior switches only when
+`PI_SWARM_MINIMAL_PROTOCOL=1` is set at module load:
+
+- **Gate flip**: set the env var for the orchestrator (and workers) to enable
+  authoritative lifecycle derivations, reply auto-verify + fencing, ACK-banner
+  removal, and profile-gated active tool sets. Default `0` keeps Phase-1 shadow
+  behavior byte-identical.
+- **Rollback**: unset the env var and restart sessions — gate=0 is fully
+  behavior-preserving; no on-disk migration is required to roll back.
+- **Rate-limit env var**: `PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS` (default
+  60000) throttles worker-scoped dry-run reconcile; workers are also forced to
+  `scope: "self"` while orchestrator/admin may pass `scope: "all"`.
+- **New trace events** under gate=1: `message.lifecycle_derived` (per derivation
+  site), `message.response.verified`, `message.reply_rejected_superseded`.
+- Before flipping the gate in a production swarm, run the proposal §H 10×2 UAT
+  matrix (two model lanes × repeated runs).
 for the test matrix and `docs/swarm/reliability-execution-plan.md` for issue-tracking history.
 
 ## Recovery nudges (Phase 1)
@@ -311,9 +479,156 @@ proof that work finished.
 
 ### Unified notification policy
 All recovery nudges share one semantic key space (`task:{taskId}:node:{nodeId}:nudge:...`,
-`task:{taskId}:nudge:initial-ready`), formatted by `formatNotifyKey`, and the same dedupe/cooldown/cap
-contract. Every message tells the recipient the concrete next action (the exact tool call) plus an
-alternative path (cancel/inspect).
+`task:{taskId}:nudge:initial-ready`, `goal:{goalId}:nudge:idle-streak`), formatted by `formatNotifyKey`,
+and the same dedupe/cooldown/cap contract. Every message tells the recipient the concrete next action
+(the exact tool call) plus an alternative path (cancel/inspect).
+
+### Goal idle-streak nudge (Issue 18)
+
+The orchestrator's durable goal plus an anti-loop nudge that fires when the swarm has nothing to do.
+
+- **Set the goal**: `/swarm goal set <text>` or `swarm_set_goal({ text })`. The orchestrator-only
+  tool/command stores `swarm-state.json.goal = { id, text, setAt, setBy, consecutiveNoResolveNudges }`.
+  Setting a new goal replaces the old one, resets `consecutiveNoResolveNudges` to 0, and clears any
+  back-off state (`backoffTicksRemaining`, `lastNudgeAt`, `lastResolvedAt`) so a new intent never
+  inherits the previous goal's counter.
+- **Idle predicate** (every pump tick, inside the existing `withLock` in `pumpOrchestratorMailbox`):
+  every non-orchestrator agent must be `runtimeStatus: "idle"` AND zero task nodes may be in
+  `assigned` or `in_progress` status across `tasks/<taskId>/task.json`. If either fails, no nudge.
+- **Anti-loop counter**: `consecutiveNoResolveNudges` resets to 0 on ANY orchestrator turn that ends
+  `stopReason: "stop"` AND `role: "assistant"` — the act of ending a turn (vs staying silent) is the
+  resolve signal. A `turn_end {error}` is intentionally NOT a resolve (tool/model failures are not
+  "I addressed the goal"); a non-orchestrator `turn_end` is also NOT a resolve (workers don't decide
+  the goal). The reset runs in a second `pi.on("turn_end", ...)` handler registered AFTER the
+  model-pool swap branch, so the resolve observes the post-swap state.
+- **Back-off**: once `consecutiveNoResolveNudges` reaches `MAX_CONSECUTIVE_NUDGES_DEFAULT` (3,
+  overridable via `PI_SWARM_MAX_NUDGES`), the pump enters a `GOAL_NUDGE_BACKOFF_TICKS`-tick (2)
+  back-off: each subsequent tick decrements `backoffTicksRemaining` without emitting. The tick that
+  drains the counter to 0 is the back-off exit gate and does NOT emit (avoids a one-tick
+  over-emit); the FOLLOWING tick may re-enter the `max_nudges` branch if the counter is still at
+  cap and re-arm the back-off. The pattern stabilises at "3 nudges → 2-tick back-off → repeat"
+  until the goal is resolved (counter reset) or cleared (`swarm_mark_goal_done`).
+- **Idempotency**: the nudge's semantic key is `goal:{goalId}:nudge:idle-streak`, validated via
+  `SAFE_ID_RE`. A fresh `swarm_set_goal` mints a new `goalId` so a fresh goal is a fresh emit slot.
+  Within the same goal, `findIdempotentMessage(st, "orchestrator", "orchestrator", key)` suppresses
+  duplicate emissions across concurrent ticks (matches the existing semantic-key dedupe pattern used
+  by `reconcileGraphAdvanceLocked` and `reconcileInitialReadyLocked`).
+- **Clear the goal**: `/swarm goal done [<goalId>]` or `swarm_mark_goal_done({ goalId? })`. Deletes
+  `state.goal` (no archive), traces `goal.cleared`. Optional `<goalId>` is a safety fence; the call
+  throws if it does not match the current goal.
+- **Trace events**:
+  - `goal.set` — durable write of `st.goal` (from tool or command).
+  - `goal.cleared` — `delete st.goal` (from tool or command).
+  - `goal.idle_nudge` — successful nudge emit; payload includes `goalId`, `consecutiveCount`, `max`,
+    `idleAgents`, `key`, `customType: "goal.idle_nudge"`.
+  - `goal.nudge.resolved` — `turn_end {stop}` reset of the counter; payload includes `goalId`,
+    `nudges` (counter pre-reset), `hadBackoff`, `by: "turn_end"`.
+  - `goal.nudge.backoff` — first tick after the counter reached `MAX`; payload includes `goalId`,
+    `nudges`, `max`, `backoffTicks`.
+  - `goal.nudge.backoff.skip` — subsequent skipped ticks while `backoffTicksRemaining > 0`.
+  - `goal.nudge.backoff.exhausted` — tick when the back-off counter hits 0 (does NOT emit).
+  - `goal.nudge.error` — caught exception wrapper (matches the existing `reconcileGraphAdvanceLocked`
+    / `reconcileInitialReadyLocked` try/catch pattern; a throw never kills the pump tick).
+- **Authoritative gate**: both `swarm_set_goal` and `swarm_mark_goal_done` call
+  `requireOrchestratorAuthority(currentAgentId(), "<tool>")` which throws
+  `ERR_ORCHESTRATOR_AUTHORITY_REQUIRED` for non-orchestrators. The `/swarm goal` slash command adds
+  an explicit `currentAgentId() !== "orchestrator"` notify (matches the `attention`/`remind`/`stop`
+  /`release` pattern).
+- **No new public schema**: only the two declared tools + the two slash command subcommands. No
+  new event hooks, no new env knobs beyond `PI_SWARM_MAX_NUDGES`.
+
+### Pipeline-stall nudge (Issue 23)
+
+The goal-nudge (Issue 18) only fires when the orchestrator has set an explicit `swarm_goal`. If
+the operator never sets a goal, a task can stall silently: every node is `ready` (or `assigned`
+to a dead agent), every agent is `idle`, and no nudge is ever sent because the predicate
+`if (!goal) return { emitted: false, reason: "no_goal" }` short-circuits. The pipeline-stall
+nudge is the goal-independent counterpart.
+
+- **Predicate (a nudge fires when ALL hold)**:
+  1. At least one `in_progress` task exists in `tasksDir`.
+  2. At least one of its nodes has `status === "ready"` AND `assignee === undefined` (the same
+     actionable set as `reconcileGraphAdvanceLocked`).
+  3. Every non-orchestrator agent is `runtimeStatus === "idle"`.
+  4. The task has existed for at least `TASK_INITIAL_READY_GRACE_MS` (60 seconds) so a fresh
+     task's first tick is not immediately flagged.
+  5. NOT firing the existing `reconcileGraphAdvanceLocked` nudge for the same node already
+     (the shared `NOTIFY_KEY_GRAPH_ADVANCE` dedupe key) so two concurrent nudges don't compete.
+- **Back-off machinery**: mirrors the goal-nudge but is per-task. New `SwarmTaskStallState` on
+  `SwarmState` (per-taskId counter + 2-tick back-off). Cap at `MAX_TASK_STALL_NUDGES` (3,
+  overridable via `PI_SWARM_MAX_TASK_STALL_NUDGES`); back-off at `GOAL_NUDGE_BACKOFF_TICKS` (2).
+- **Resolve detection**: any reassignment of an actionable node — including a worker's claim of
+  an unassigned node via `swarm_update_task` (Issue 24.a) — resets the counter. So does the
+  task leaving `in_progress` state (e.g. all nodes reach terminal, or `cancelTask=true`).
+- **Resolve hooks** (call sites that mutate the counter):
+  - `swarm_assign_task` after stamping `node.assignee` (`tools/tasks.ts`).
+  - `swarm_update_task` claim branch after minting an attempt + stamping assignee (Issue 24.a).
+  - `applyTaskStatus` terminal-transition sites (`tools/tasks.ts`): create_task auto-close path,
+    update_task main path, and update_task second-pass after auto-close.
+- **Trace events**:
+  - `task_stall.nudge_emitted` — successful nudge emit; payload includes `taskId`,
+    `actionableCount`, `actionable` (capped at 5 nodeIds), `consecutiveCount`, `max`,
+    `idleAgents`, `key`.
+  - `task_stall.nudge.resolved` — counter reset on assign/claim/terminal transition.
+  - `task_stall.nudge.backoff` — first tick after the counter reached `MAX`; payload includes
+    `taskId`, `nudges`, `max`, `backoffTicks`.
+  - `task_stall.nudge.backoff.skip` — subsequent skipped ticks while `backoffTicksRemaining > 0`.
+  - `task_stall.nudge.backoff.exhausted` — tick when the back-off counter hits 0 (does NOT emit).
+  - `task_stall.nudge_error` — caught exception wrapper (matches the existing nudge error pattern).
+- **No new public schema**: reuses existing pump machinery; no new tools or commands.
+
+#### DISTINCTION FROM GOAL-NUDGE (do not conflate)
+
+The goal-nudge resolves on `turn_end` activity at the `hooks.ts` site (`hooks.ts:484-506`); the
+task-stall nudge resolves on graph-mutation events (assign, claim, terminal-transition). Two
+independent counters with two different reset triggers, both running under the same `withLock`.
+Operators may see both nudges in the same pump tick if both predicates fire (goal set + stalled
+task); the two messages use different dedupe keys (`goal:{goalId}:nudge:idle-streak` vs
+`task:{taskId}:nudge:graph-stall`).
+
+### Node ownership self-heal (Issue 24)
+
+The orchestration engine has two safety nets that prevent orphaned nodes from blocking work
+indefinitely.
+
+#### Claim of unassigned nodes (Issue 24.a)
+
+`swarm_update_task` no longer rejects outright when a node has `assignee=undefined`. A
+non-terminal unassigned node is claimed by the first caller: status moves to `assigned`,
+attempt-mint via the shared `mintNodeAttempt` helper (in `taskgraph.ts`), and the claimer's
+`activeTaskIds` is updated. An in-flight unassigned node (`status="in_progress"` + `assignee=undefined`)
+is still refused with the inline-string `OWNERSHIP_REQUIRED` error code; the caller is directed
+to escalate to the orchestrator (`force=true` or a fresh `swarm_assign_task`).
+
+The trace event `task.node.claimed` is emitted on every successful claim with `{ taskId,
+nodeId, claimer, priorAssignee: null, priorStatus, attemptId, created }`.
+
+#### Assignment auto-stamp (Issue 24.b)
+
+`deliverMessageLocked` auto-stamps `node.assignee = msg.to` when the message is assignment-style
+(subject starts with `"Task "` and contains `" assigned"`; conversationId matches
+`task:{taskId}:{nodeId}`). The auto-stamp runs INSIDE the swarm lock (caller's contract) and
+**MUST NOT** re-wrap in `withLock` — `withLock` is mkdir-based and non-re-entrant; nested
+acquisition hangs ~120s then throws. The only residual race is a `writeTaskState` failure,
+which the claim branch (24.a) self-heals on the recipient's first `swarm_update_task` call.
+
+#### Remediation hints (Issue 24.c)
+
+Every `failTaskTool` reject **listed in the §24.c coverage table** in `tools/tasks.ts` includes
+an `actionableHint` or `suggestedNextCall` so the LLM caller has a concrete next step. The full
+21-site audit is tracked as follow-up issue `task-graph-reject-hints-coverage-audit` (deferred).
+
+#### Ownership-reject trace (Issue 24.d)
+
+`task.update.ownership_reject` is emitted on every `NODE_ASSIGNEE_MISMATCH` (and the new
+`OWNERSHIP_REQUIRED`) so dashboards can surface ownership drift. Payload includes `{ taskId,
+nodeId, attemptedBy, priorAssignee, priorStatus, isOrchestrator, remediation, errorCode }`.
+
+#### Assignment-mismatch trace (Issue 24.e)
+
+`message.deliver.assignment_mismatch` warns when an assignment-style message is delivered to a
+recipient whose `node.assignee` already differs (reassign race or config error). Advisory only
+— the message is still delivered. The recipient may legitimately need context for a handover.
 
 ### Recovery attention and bounded worker reminder (roadmap issue 5)
 
@@ -380,3 +695,50 @@ notification was caught before it could mislead the recipient.
   whose notify keeps being suppressed while no fresh assignment is being issued).
 
 
+## Operator protocol-migration (Issue 25 Phase 1)
+
+`/swarm protocol migrate [--dry-run]` is the operator command for upgrading durable v1 message envelopes to v2 evidence fields (proposal §A + §D, plan §2.7). It runs entirely under the existing `withLock(p)` critical section; no nesting; no state writes outside the lock.
+
+**When to run**
+
+- After every stable release once `PI_SWARM_MINIMAL_PROTOCOL=1` is enabled (Phase 2 gate-flip).
+- During the two-stable-release compatibility window before `requiresAck` is deprecated (Phase 3 governance).
+- Before an operator wants to roll forward into inferred-lifecycle tooling that consumes `seenAt` / `processingAt` / `respondedAt` / `terminalAt`.
+
+**What it does and does NOT do**
+
+- ✅ Back-fills `mailboxDeliveredAt` from existing `delivered[to]` entries (transport-only).
+- ✅ Stamps `migrationRunId` + `migratedAt` audit fields per migrated record.
+- ❌ Does NOT invent `seenAt` / `respondedAt` / `processingAt` / `terminalAt` / `lifecycleStage`.
+- ❌ Does NOT dead-letter or skip records lacking v2 fields.
+- ❌ Does NOT change completion or recovery semantics.
+
+**Dry-run**
+
+```bash
+/swarm protocol migrate --dry-run
+```
+
+Emits `protocol.migration.record` per record (action `skip` / `plan`) and one `protocol.migration.completed` summary. Does NOT write state.
+
+**Real run**
+
+```bash
+/swarm protocol migrate
+```
+
+Stamps eligible records; emits `protocol.migration.record` (action `stamp`) + `protocol.migration.completed` summary. Idempotent: a second run yields `migrated: 0`.
+
+**Rollback**
+
+A migration run is additive-only. Deleting the `migrationRunId` and `migratedAt` fields from `swarm-state.json` reverts the audit stamps without affecting durable message state. No other code path consults those fields.
+
+**Trace events**
+
+- `protocol.migration.record` — per record; payload `{ runId, messageId, from, to, action, reason, fields, auditOnly, dryRun }`.
+- `protocol.migration.completed` — one per run; payload `{ runId, scanned, migrated, skipped, errors, dryRun, via, gate }`.
+
+**Related tools / commands**
+
+- `/swarm trace` — view the migration trace.
+- `swarm_message_status` — inspect a single record's v2 fields (admin/diagnostic; not model-exposed by default).

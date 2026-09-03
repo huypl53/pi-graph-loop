@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
+import { randomUUID } from "node:crypto";
 import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
 import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from "./tmux.ts";
 import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, checkStallNotificationStale, deriveNodeAttention, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
@@ -14,9 +15,11 @@ import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState,
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
 import { claimOrchestratorLeader, ensureOrchestrator, overridePath } from "./identity.ts";
-import { startOrchestratorPump } from "./hooks.ts";
+import { startOrchestratorPump, bumpSwapChain } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
-import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError } from "./pool.ts";
+import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError, pickSlot, slotKey, effectiveConfig } from "./pool.ts";
+import { MAX_CONSECUTIVE_NUDGES_DEFAULT, TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
+import type { ModelSlot } from "./types.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
@@ -41,7 +44,7 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 	return out;
 }
 
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight] | pool cooldown <slot> <ms> | pool clear <slot>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set <text> | goal done [<goalId>] (show read-only; set/done orchestrator-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -640,10 +643,14 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						const status = await poolStatus(p);
 						if (!status.slots.length) { ctx.ui.notify("No model pool configured. Add `modelPool` under `swarm` (or extensions.swarm) in .pi/settings.json.", "warning"); return; }
 						const lines = [`Model pool (${status.rotation.strategy}, cooldown ${Math.round(status.rotation.cooldownMs / 60000)}min, maxRetries ${status.rotation.maxRetries}):`];
+						// Issue 22: render a roles= column only when ANY slot has a roles allow-list set — no
+						// bare `roles=` fragment is printed for pools without roles config.
+						const anyRoles = status.slots.some((s) => Array.isArray(s.roles) && s.roles.length > 0);
 						for (const s of status.slots) {
 							const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m` : "ok";
 							const err = s.health?.lastError ? ` lastError=${s.health.lastError.slice(0, 60)}` : "";
-							lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${err}`);
+							const rolesCol = anyRoles ? ` roles=[${(s.roles || []).join(",") || "(all)"}]` : "";
+							lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${rolesCol}${err}`);
 						}
 						ctx.ui.notify(lines.join("\n"), "info");
 						return;
@@ -679,6 +686,10 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 								const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m` : (s.weight === 0 ? "ok (fallback-only)" : "ok");
 								const err = s.health?.lastError ? ` lastError=${s.health.lastError.slice(0, 60)}` : "";
 								lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${err}`);
+								// Issue 22: roles=[…] line only when the slot has a non-empty allow-list (absence = all roles).
+								if (s.roles && s.roles.length) {
+									lines.push(`    roles=[${s.roles.join(", ")}]`);
+								}
 							}
 							lines.push(`Rotation: strategy=${status.rotation.strategy}, cooldown=${Math.round(status.rotation.cooldownMs / 60000)}min, maxRetries=${status.rotation.maxRetries}`);
 						} else {
@@ -741,7 +752,88 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						}
 						return;
 					}
-					ctx.ui.notify("Usage: /swarm pool [list|show|validate|help|preview-preflight] | /swarm pool cooldown <provider/model> <ms> | /swarm pool clear <provider/model>", "warning");
+					if (sub === "rotate") {
+					// === Issue 19: manual /swarm pool rotate override ===
+					// Orchestrator-only escape hatch for the engine-retry gate (Issue 17). Two subcommands:
+					//   `now`  — bypass the gate and force-swap the current slot to a healthy alternative.
+					//            Traces pool.swap_forced_by_manual_override and bumps the swap-chain counter
+					//            via bumpSwapChain(agentId) from hooks.ts (a swap happened — operator is
+					//            accountable for the same MAX_SWAP_CHAIN=2 cap as the auto-swap path).
+					//   `next` — bench the current slot for `rotation.cooldownMs` so the NEXT normal
+					//            pickSlot() skips it; the agent keeps its current model for this turn.
+					//            Traces pool.bench_forced_by_manual_override. Does NOT call setModel.
+					// Authority gate mirrors `/swarm goal|attention|remind|stop|release`. Guest sessions
+					// (PI_SWARM_AGENT_ID=swarm-guest) are naturally refused by the currentAgentId() check.
+					if (currentAgentId() !== "orchestrator") {
+						ctx.ui.notify("rotate is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+						return;
+					}
+					const action = rest.shift();
+					if (action !== "now" && action !== "next") {
+						ctx.ui.notify("Usage: /swarm pool rotate now | /swarm pool rotate next\n  rotate: now (force-swap current agent) | next (bench current slot, let next pick skip)", "warning");
+						return;
+					}
+					const { slots, rotation } = effectiveConfig();
+					if (!slots.length) {
+						ctx.ui.notify("No model pool configured. Add `modelPool` under `swarm` (or `extensions.swarm`) in .pi/settings.json.", "warning");
+						return;
+					}
+					const agentId = currentAgentId();
+					const currentModelId = ctx.model?.id || currentModel();
+					const currentProviderId = (ctx.model?.provider && ctx.model.provider.trim()) ? ctx.model.provider : currentProvider(currentModelId);
+					if (!currentModelId) {
+						await trace(p, "pool.manual_rotate_no_current_slot", { agentId, action, reason: "ctx.model.id is empty" }).catch(() => {});
+						ctx.ui.notify("Cannot determine the current slot from ctx.model. This pane is not running on a model pool slot — nothing to rotate.", "warning");
+						return;
+					}
+					const currentSlot: ModelSlot = { model: currentModelId, provider: currentProviderId };
+					if (action === "now") {
+						// `now` — force-swap the current slot. Bypasses the engine-retry gate AND any Issue 22
+						// roles filter (operator escape hatch) entirely.
+						const picked = await pickSlot(p, { stickyKey: agentId, avoidKey: slotKey(currentSlot), bypassRolesFilter: true }).catch(() => undefined);
+						if (!picked) {
+							await trace(p, "pool.manual_rotate_no_alternative", { agentId, from: slotKey(currentSlot), action: "now" }).catch(() => {});
+							ctx.ui.notify("No healthy alternative slot. All eligible slots are benched — /swarm pool list to see, or /swarm pool clear <provider/model> to unbench.", "warning");
+							return;
+						}
+						const target = picked.slot.provider
+							? ctx.modelRegistry?.find?.(picked.slot.provider, picked.slot.model)
+							: undefined;
+						if (!target) {
+							await trace(p, "pool.manual_rotate_model_not_found", { agentId, slot: slotKey(picked.slot), action: "now", hint: picked.slot.provider ? "model not registered under the slot's provider" : "pool slot has no explicit provider; add one in settings.json modelPool" }).catch(() => {});
+							ctx.ui.notify(`Manual rotate refused: picked slot ${slotKey(picked.slot)} has no resolvable model registry entry. /swarm pool list to inspect.`, "warning");
+							return;
+						}
+						const okSwap = await pi.setModel(target).catch(() => false);
+						if (!okSwap) {
+							await trace(p, "pool.swap_failed", { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), kind: "manual_override", reason: picked.reason, target: `${target.provider}/${target.id}` }).catch(() => {});
+							ctx.ui.notify(`Manual rotate failed: setModel refused for ${target.provider}/${target.id}.`, "warning");
+							return;
+						}
+						await trace(p, "pool.swap_forced_by_manual_override", { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), reason: picked.reason, target: `${target.provider}/${target.id}`, rolesIgnored: true, agentRoleKind: await withLock(p, async () => { const st = await readState(p, ctx.cwd); return st.agents[agentId]?.roleKind; }).catch(() => undefined) ?? null }).catch(() => {});
+						// Issue 19 Q1: manual override is operator-accountable for the same MAX_SWAP_CHAIN=2
+						// cap as the auto-swap path. Call bumpSwapChain AFTER a successful setModel so a
+						// dead new slot cannot cascade unlimited manual rotations. Mirrors hooks.ts:405.
+						bumpSwapChain(agentId);
+						pi.sendMessage({
+							customType: "swarm-message",
+							content: `[PI-SWARM MODEL POOL] Operator forced manual rotation: previous slot ${slotKey(currentSlot)} was swapped to ${slotKey(picked.slot)} (bypassing engine-retry gate). Your context and mailbox are intact. Continue your current task on the new model.`,
+							display: true,
+						}, ctx.isIdle?.() ? { triggerTurn: true } : { deliverAs: "followUp" });
+						ctx.ui.notify(`Manual rotation: ${slotKey(currentSlot)} -> ${slotKey(picked.slot)} (gate bypassed; reason: ${picked.reason}).`, "info");
+						return;
+					}
+					// `next` — bench the current slot for rotation.cooldownMs so the next pickSlot() skips it.
+					// NO setModel call: the agent keeps its current model for this turn. The next normal
+					// turn_end (or next auto-swap on exhaustion) will pick a different slot organically.
+					// We do NOT call recordProviderError (the operator's bench is a deliberate decision,
+					// not a provider error) and we do NOT bump the swap-chain counter (no swap happened).
+					await setSlotCooldown(p, slotKey(currentSlot), rotation.cooldownMs);
+					await trace(p, "pool.bench_forced_by_manual_override", { agentId, slot: slotKey(currentSlot), cooldownMs: rotation.cooldownMs }).catch(() => {});
+					ctx.ui.notify(`Bench forced: ${slotKey(currentSlot)} is now benched for ${Math.round(rotation.cooldownMs / 60000)}min. Next auto-swap/pickSlot will skip it; current model remains for this turn.`, "info");
+					return;
+				}
+				ctx.ui.notify("Usage: /swarm pool [list|show|validate|help|preview-preflight|rotate] | /swarm pool cooldown <provider/model> <ms> | /swarm pool clear <provider/model> | /swarm pool rotate now | /swarm pool rotate next", "warning");
 					return;
 				}
 				if (cmd === "role") {
@@ -909,13 +1001,145 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					ctx.ui.notify(`Mailbox reset for ${result.agentId}${isHereToken(requestedId) ? " (resolved from 'here')" : ""}. Archived ${result.lines} line(s) to ${relative(ctx.cwd, result.archive)}; cleared live mailbox ${relative(ctx.cwd, result.file)} and delivered ledger entries=${result.deliveredCleared}. If a session was stuck on parse errors, /reload or restart that pi session next.`, "warning");
 					return;
 				}
+				if (cmd === "goal") {
+					// Orchestrator-only goal lifecycle command (mirror of swarm_set_goal / swarm_mark_goal_done).
+					// Goal is the durable record the orchestrator's pump emits idle-streak nudges against
+					// (see docs/swarm/operations.md "Recovery nudges > Goal idle-streak nudge"). Setting a goal
+					// resets consecutiveNoResolveNudges + clears back-off. Marking done clears the entry.
+					if (currentAgentId() !== "orchestrator") {
+						ctx.ui.notify("goal is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning");
+						return;
+					}
+					const sub = rest.shift();
+					if (sub === "show" || !sub) {
+					// Read-only: any swarm member may inspect the goal (no authority gate).
+					const s = await readState(p, ctx.cwd);
+					const g = s.goal;
+					if (!g) { ctx.ui.notify("No active swarm goal.", "info"); return; }
+					const age = Math.round((Date.now() - Date.parse(g.setAt)) / 60000);
+					const backoff = g.backoffTicksRemaining ? `, backoff ${g.backoffTicksRemaining} tick(s)` : "";
+					const lastNudge = g.lastNudgeAt ? `, last nudge ${g.lastNudgeAt}` : "";
+					ctx.ui.notify(
+						`Goal ${g.id}\n  text: ${g.text}\n  set: ${g.setAt} by ${g.setBy} (${age} min ago)\n  idle-streak nudges: ${g.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}${lastNudge}${backoff}`,
+						"info",
+					);
+					return;
+				}
+				if (sub === "set") {
+						const text = rest.join(" ").trim();
+						if (!text) { ctx.ui.notify("Usage: /swarm goal set <text>", "warning"); return; }
+						const st = await withLock(p, async () => {
+							const s = await readState(p, ctx.cwd);
+							const ts = now();
+							const goalId = `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
+							const previousId = s.goal?.id;
+							s.goal = {
+								id: goalId,
+								text,
+								setAt: ts,
+								setBy: "orchestrator",
+								consecutiveNoResolveNudges: 0,
+							};
+							delete s.goal.lastNudgeAt;
+							delete s.goal.lastResolvedAt;
+							delete s.goal.backoffTicksRemaining;
+							await trace(p, "goal.set", { goalId, previousId, via: "command", length: text.length });
+							await writeState(p, s);
+							return s.goal;
+						});
+						ctx.ui.notify(`Goal set: ${st.id} — "${st.text.slice(0, 80)}${st.text.length > 80 ? "…" : ""}"`, "info");
+						return;
+					}
+					if (sub === "done") {
+						const goalIdArg = rest.shift();
+						const result = await withLock(p, async () => {
+							const s = await readState(p, ctx.cwd);
+							if (!s.goal) return { cleared: true, noop: true };
+							if (goalIdArg && safeId(goalIdArg) !== s.goal.id) throw new Error(`goalId ${goalIdArg} does not match current goal ${s.goal.id}`);
+							const clearedId = s.goal.id;
+							const nudges = s.goal.consecutiveNoResolveNudges;
+							delete s.goal;
+							await trace(p, "goal.cleared", { goalId: clearedId, nudges, via: "command" });
+							await writeState(p, s);
+							return { cleared: true, clearedId, nudges };
+						});
+						ctx.ui.notify(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, "info");
+						return;
+					}
+					ctx.ui.notify("Usage: /swarm goal show | set <text> | done [<goalId>]", "warning");
+					return;
+				}
+				if (cmd === "protocol") {
+					// === Issue 25 Phase 1: /swarm protocol migrate [--dry-run] ===
+					// Idempotent admin migration tool (proposal §D + §J.5). Bumps v1 envelopes to v2
+					// evidence fields WITHOUT inventing any seen/responded/processing/terminal facts.
+					// Only stamps audit fields (migrationRunId, migratedAt) and back-fills the
+					// transport-only mailboxDeliveredAt when a delivered[to] entry already provides a
+					// timestamp. Safe to re-run: a record with migrationRunId is skipped.
+					const sub = rest.shift();
+					if (sub !== "migrate") { ctx.ui.notify("Usage: /swarm protocol migrate [--dry-run]", "warning"); return; }
+					const dryRun = rest.some((t) => t === "--dry-run" || t === "-n");
+					// Filter out the recognized flag before parseFlags so it doesn't bounce as unknown-rest.
+					const flags = parseFlags(rest.filter((t) => t !== "--dry-run" && t !== "-n"));
+					if (flags.rest.length) { ctx.ui.notify("Usage: /swarm protocol migrate [--dry-run]", "warning"); return; }
+					// Authority: slash commands bypass the model authority gate by design (same as
+					// /swarm pool rotate, /swarm attention). Operators running this in any pane can
+					// execute it; the tool itself is not model-exposed.
+					const outcome = await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const ts = now();
+						const runId = `pmig-${ts.replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 6)}`;
+						let scanned = 0;
+						let migrated = 0;
+						let skipped = 0;
+						let errors = 0;
+						const plan: Array<{ messageId: string; action: string; reason: string }> = [];
+						for (const [msgId, rec] of Object.entries(st.messages || {})) {
+							scanned++;
+							let action: "skip" | "stamp" | "plan" = "skip";
+							let reason = "";
+							if (rec.migrationRunId) {
+								skipped++; action = "skip"; reason = "migrationRunId already set";
+							} else {
+								// Only back-fill mailboxDeliveredAt when we have a transport receipt to
+								// back it from. We never invent seen/responded/processing/terminal fields.
+								const deliveredArr = st.delivered?.[rec.to] || [];
+								const backfill = !rec.mailboxDeliveredAt && deliveredArr.includes(msgId)
+									? { mailboxDeliveredAt: rec.injectedAt || rec.createdAt }
+									: null;
+								if (!backfill) {
+									skipped++; action = "skip"; reason = "no transport receipt to stamp; other v2 fields derived lazily";
+								} else if (dryRun) {
+									action = "plan"; reason = "would back-fill transport-only mailboxDeliveredAt from delivered[] entry";
+								} else {
+									// Mutate via the existing key/record shape; this is the ONLY write
+									// surface the migration tool uses.
+									const updated: typeof rec = { ...rec };
+									updated.mailboxDeliveredAt = backfill.mailboxDeliveredAt;
+									updated.migrationRunId = runId;
+									updated.migratedAt = ts;
+									st.messages[msgId] = updated;
+									action = "stamp"; reason = "back-filled transport-only mailboxDeliveredAt from delivered[] entry";
+									migrated++;
+								}
+							}
+							plan.push({ messageId: msgId, action, reason });
+							await trace(p, TRACE_PROTOCOL_MIGRATION_RECORD, { runId, messageId: msgId, from: rec.from, to: rec.to, action, reason, fields: action === "skip" ? [] : ["mailboxDeliveredAt"], auditOnly: true, dryRun });
+						}
+						if (!dryRun && (migrated > 0 || scanned > 0)) await writeState(p, st);
+						await trace(p, TRACE_PROTOCOL_MIGRATION_COMPLETED, { runId, scanned, migrated, skipped, errors, dryRun, via: "command", gate: 0 });
+						return { runId, scanned, migrated, skipped, errors, dryRun, plan };
+					});
+					const head = `Migration ${outcome.dryRun ? "(dry-run) " : ""}complete. runId=${outcome.runId} scanned=${outcome.scanned} migrated=${outcome.migrated} skipped=${outcome.skipped} errors=${outcome.errors} dryRun=${outcome.dryRun}`;
+					ctx.ui.notify(head, outcome.errors > 0 ? "warning" : "info");
+					return;
+				}
 				ctx.ui.notify(`Unknown /${commandName} command: ${cmd}`, "warning");
 			} catch (err: any) {
 				await trace(p, "error", { where: "command", command: cmd, commandName, message: err?.message || String(err), stack: err?.stack });
 				ctx.ui.notify(`Swarm error: ${err?.message || err}`, "error");
 			}
 		};
-
 	pi.registerCommand("swarm", {
 		description: SWARM_COMMAND_DESCRIPTION,
 		getArgumentCompletions: (argumentPrefix) => swarmArgumentCompletions(argumentPrefix),

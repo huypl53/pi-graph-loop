@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Paths, SwarmAgent, SwarmState } from "./types.ts";
-import { ERR_ORCHESTRATOR_AUTHORITY_REQUIRED, ERR_ORCHESTRATOR_LEADER_DENIED, MEMORY_POLICY_DOC, ORCHESTRATOR_LEADER_STALE_MS } from "./constants.ts";
+import { ERR_ORCHESTRATOR_AUTHORITY_REQUIRED, ERR_ORCHESTRATOR_LEADER_DENIED, MEMORY_POLICY_DOC, ORCHESTRATOR_LEADER_STALE_MS, PI_SWARM_MINIMAL_PROTOCOL } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { identityPath, mailboxPath, paths, trace } from "./state.ts";
 import { now, safeId } from "./utils.ts";
@@ -130,6 +130,13 @@ export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 		`- As soon as you start work, call \`swarm_ack_message\` with the message id and \`status=seen\` or \`status=processing\`.\n` +
 		`- When finished, send a result back to the requester with \`swarm_send_message(replyTo=<original-message-id>)\` or \`swarm_task_message\`, then call \`swarm_ack_message(status=done, resultMessageId=<result-message-id>)\`. ACK is lifecycle only; it is not the work result.\n` +
 		`- Never leave a requiresAck message unacked. Reconcile surfaces unacked delivered messages as \`ack_missing\`.\n\n` +
+		(PI_SWARM_MINIMAL_PROTOCOL === 1
+			? `## Reply protocol (gate=1)\n\n` +
+				`- Replies are auto-verified; do NOT call \`swarm_ack_message\` for normal workflow.\n` +
+				`- Send a result back to the requester with \`swarm_send_message(replyTo=<original-message-id>)\`; the engine stamps \`respondedAt\` + closes response debt atomically.\n` +
+				`- Close your assigned node with \`swarm_update_task\` (status=done). The terminal update runs response validation + debt release in the SAME lock.\n` +
+				`- Late replies (to a superseded / cancelled / orphaned original) are FENCED: the engine emits \`message.reply_rejected_superseded\` and the original record is NOT mutated. Re-read the latest message in your mailbox before retrying.\n\n`
+			: ``) +
 		`## Lifecycle\n\n` +
 		`- Start by reading this identity when role details are unclear.\n` +
 		`- If an initial task is present, begin it after reading identity; do not wait indefinitely for another instruction.\n` +
@@ -148,7 +155,10 @@ export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 }
 
 export function identityPrompt(cwd: string, identityRelPath: string) {
-	return `\n\n[PI-SWARM IDENTITY]\nYour durable swarm identity is stored at ${identityRelPath}. Read it before acting when you need role details. Treat it as your agent-specific AGENT.md.\nFor any swarm message with requiresAck=true, you MUST acknowledge it with swarm_ack_message. If requiresResponse=true, send a result message first and ack done with resultMessageId.\n[/PI-SWARM IDENTITY]`;
+	const hint = PI_SWARM_MINIMAL_PROTOCOL === 1
+		? `For any swarm message, reply via \`swarm_send_message({ replyTo })\`. Do not call \`swarm_ack_message\` for normal workflow; the engine derives lifecycle from your reply and your \`swarm_update_task\` calls. If requiresResponse=true, send a result message first, then close with \`swarm_update_task\`.\n`
+		: `For any swarm message with requiresAck=true, you MUST acknowledge it with swarm_ack_message. If requiresResponse=true, send a result message first and ack done with resultMessageId.\n`;
+	return `\n\n[PI-SWARM IDENTITY]\nYour durable swarm identity is stored at ${identityRelPath}. Read it before acting when you need role details. Treat it as your agent-specific AGENT.md.\n${hint}[/PI-SWARM IDENTITY]`;
 }
 
 // Override file path: `.pi/swarm/agents/<id>.override.md`. This file is USER-EDITABLE and is ONLY EVER

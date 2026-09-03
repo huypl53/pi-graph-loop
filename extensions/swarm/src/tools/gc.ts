@@ -6,6 +6,7 @@ import { pruneState, DEFAULT_KEEP_MESSAGES, type PruneOptions } from "../gc.ts";
 import { textResult } from "../utils.ts";
 import { currentAgentId } from "../session.ts";
 import { requireOrchestratorAuthority } from "../identity.ts";
+import { wrapSwarmToolInvocation } from "./wrapper.ts";
 
 export function registerGcTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
@@ -21,8 +22,9 @@ export function registerGcTools(pi: ExtensionAPI) {
 			dryRun: Type.Optional(Type.Boolean({ description: "If true (default), report what would be removed without writing state." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = paths(ctx.cwd);
-			requireOrchestratorAuthority(currentAgentId(), "swarm_gc");
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_gc", async () => {
+				const p = paths(ctx.cwd);
+				requireOrchestratorAuthority(currentAgentId(), "swarm_gc");
 			const dryRun = params.dryRun !== false; // default true
 			const opts: PruneOptions = { keepMessages: typeof params.keepMessages === "number" ? params.keepMessages : DEFAULT_KEEP_MESSAGES };
 			const result = await withLock(p, async () => {
@@ -39,6 +41,7 @@ export function registerGcTools(pi: ExtensionAPI) {
 				`Swarm GC ${dryRun ? "dry run" : "applied"}: removed ${result.removed} terminal message(s), kept ${result.kept} of ${result.before} (keepMessages=${opts.keepMessages}).${dryRun ? " State unchanged — pass dryRun:false to apply." : ` Messages: ${result.before} → ${result.after}.`}`,
 				{ removed: result.removed, kept: result.kept, dryRun, keepMessages: opts.keepMessages, before: result.before, after: result.after },
 			);
+		});
 		},
 	}));
 }

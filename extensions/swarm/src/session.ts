@@ -61,6 +61,12 @@ function parseModelPool(raw: unknown): ModelSlot[] | undefined {
 			provider: typeof (s as any).provider === "string" && (s as any).provider.trim() ? (s as any).provider.trim() : undefined,
 			weight,
 			label: typeof (s as any).label === "string" ? (s as any).label.trim() || undefined : undefined,
+			// Issue 22 roles-filter: forward the optional per-slot roleKind allow-list. Absent / empty
+			// preserved verbatim so slotMatchesRole can detect "no filter set". Malformed shapes become
+		// undefined (no filter applied); validateSwarmSettings reports slot_bad_roles for visibility.
+			roles: Array.isArray((s as any).roles) && (s as any).roles.every((r: any) => typeof r === "string" && r.length > 0)
+				? (s as any).roles.map((r: string) => r.trim()).filter(Boolean)
+				: undefined,
 		});
 	}
 	return slots.length ? slots : undefined;

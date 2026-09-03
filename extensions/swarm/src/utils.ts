@@ -1,6 +1,7 @@
 // === swarm/utils.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { SwarmAgent, TaskNode } from "./types.ts";
 import { trace } from "./state.ts";
 
@@ -67,6 +68,21 @@ export function normalizeTaskNode(node: TaskNode): TaskNode {
 
 export function isSafeRelativePath(value: string) {
 	return Boolean(value) && !value.startsWith("/") && !value.includes("..");
+}
+
+// Read JSON from a file. Returns `undefined` when the file is missing (ENOENT); THROWS on any other
+// error (permission denied, unparseable JSON, etc.) so the caller can distinguish "absent" from "broken".
+// Used by ensurePoolScaffold (Issue 20) so missing `.pi/settings.json` is treated as a fresh-scaffold
+// opportunity, while corrupt JSON is a hard skip + trace event. Atomic write is provided by
+// state.ts:atomicWriteFile (already exported).
+export async function readJsonSafe(file: string): Promise<any | undefined> {
+	try {
+		const raw = await readFile(file, "utf8");
+		return JSON.parse(raw);
+	} catch (err: any) {
+		if (err?.code === "ENOENT") return undefined;
+		throw err;
+	}
 }
 
 // Returns the CURRENT orchestrator process's surfaced-id ledger (keyed by process.pid), creating it if

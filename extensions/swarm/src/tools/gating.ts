@@ -12,8 +12,18 @@
 // active set is toggled by identity at runtime. Removing a tool from the active set also drops its
 // promptGuidelines bullets from the system prompt (see pi extensions.md). Idempotent and safe to re-run
 // on an in-session identity change (e.g. after `/swarm register here`).
+//
+// === Issue 25 Phase 2: tier-based profile gating (proposal §E + §K.3) ===
+// Under PI_SWARM_MINIMAL_PROTOCOL=1 the active set is additionally constrained by a per-tier
+// allow-list (WORKER_TOOL_ALLOWLIST / ORCHESTRATOR_TOOL_ALLOWLIST). Tools remain registered (UX §N5);
+// only the active set is filtered. Execution-time authority checks (requireOrchestratorAuthority)
+// remain authoritative — tier-gating is the FIRST gate, authority is the SECOND. Admin mode
+// (PI_SWARM_ADMIN_MODE=1) sees all registered tools (recovery workflows).
+// Under gate=0 the Phase-1 guest-vs-registered behavior is preserved byte-identically (regression safe).
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { SWARM_GUEST_ID } from "../constants.ts";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { ORCHESTRATOR_TOOL_ALLOWLIST, PI_SWARM_MINIMAL_PROTOCOL, SWARM_GUEST_ID, WORKER_TOOL_ALLOWLIST } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
 
 export const SWARM_TOOL_PREFIX = "swarm_";
@@ -34,11 +44,28 @@ function sameSet(a: Set<string>, b: Set<string>): boolean {
 	return true;
 }
 
+function readRoleKindForAgent(me: string): string | undefined {
+	// Best-effort, lock-free read of the caller agent's roleKind. Absent record (e.g. guest / freshly-
+	// spawned-but-not-yet-persisted) -> undefined. We read the swarm-state.json without acquiring
+	// withLock because the active-tool-set update is best-effort and out-of-band with durable state
+	// (tier gating is advisory; authority is the second gate). Missing file / corrupt file -> undefined.
+	try {
+		const file = join(process.cwd(), ".pi/swarm/swarm-state.json");
+		if (!existsSync(file)) return undefined;
+		const st = JSON.parse(readFileSync(file, "utf8"));
+		return st?.agents?.[me]?.roleKind;
+	} catch {
+		return undefined;
+	}
+}
+
 // Apply identity-based gating. Guests lose swarm tools from the active set; registered agents and the
 // orchestrator have them ensured present (so an in-session opt-in via `/swarm register here` re-enables
-// them immediately). Never adds or removes non-swarm tools. No-op when the set is already correct
-// (avoids a needless system-prompt rebuild on every session_start for non-guests). Defensive against
-// partial/mocked pi objects (e.g. test harnesses without active-tool methods).
+// them immediately). Under gate=1 the tier allow-list is consulted additionally: workers see only the
+// 5-tool worker surface (with swarm_reconcile constrained at execution time to dryRun:true + scope:"self");
+// orchestrators see the worker 5 + 5 orchestration + 2 goal tools. Never adds or removes non-swarm tools.
+// No-op when the set is already correct (avoids a needless system-prompt rebuild on every session_start
+// for non-guests). Defensive against partial/mocked pi objects (e.g. test harnesses without active-tool methods).
 export function applySwarmToolGating(pi: ExtensionAPI): void {
 	const getActive = (pi as any).getActiveTools;
 	const setActive = (pi as any).setActiveTools;
@@ -48,10 +75,32 @@ export function applySwarmToolGating(pi: ExtensionAPI): void {
 	catch { return; }
 	const swarm = new Set(swarmToolNames(pi));
 	const next = new Set(active);
-	if (currentAgentId() === SWARM_GUEST_ID) {
-		for (const n of swarm) next.delete(n);
+	if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
+		// Phase 1 path (unchanged): guest drops swarm tools; everyone else keeps them.
+		if (currentAgentId() === SWARM_GUEST_ID) {
+			for (const n of swarm) next.delete(n);
+		} else {
+			for (const n of swarm) next.add(n);
+		}
 	} else {
-		for (const n of swarm) next.add(n);
+		// Phase 2 path: tier-based allow-list.
+		const me = currentAgentId();
+		const isAdmin = process.env.PI_SWARM_ADMIN_MODE === "1" || me === "admin";
+		const isOrch = me === "orchestrator";
+		if (currentAgentId() === SWARM_GUEST_ID) {
+			// Guest loses swarm tools entirely (same as gate=0).
+			for (const n of swarm) next.delete(n);
+		} else if (isAdmin) {
+			// Admin sees all registered swarm tools.
+			for (const n of swarm) next.add(n);
+		} else {
+			// Tier filter: orchestrator vs worker (read roleKind for forward-compat w/ new roles).
+			const roleKind = isOrch ? "orchestrator" : (readRoleKindForAgent(me) || "worker");
+			const allow = roleKind === "orchestrator" ? ORCHESTRATOR_TOOL_ALLOWLIST : WORKER_TOOL_ALLOWLIST;
+			for (const n of swarm) {
+				if (allow.has(n)) next.add(n); else next.delete(n);
+			}
+		}
 	}
 	if (sameSet(new Set(active), next)) return; // nothing to do
 	try { setActive.call(pi, [...next]); }

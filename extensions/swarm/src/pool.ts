@@ -1,13 +1,97 @@
 // === swarm/pool.ts — model pool: weighted rotation + health cooldown + failover picks ===
 import { mkdir, readFile, stat, rm } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import type { ModelSlot, Paths, PoolHealthState, PoolSlotHealth, PreflightError, PreflightResult, ProviderErrorKind, RotationConfig, RotationStrategy, SwarmSettings } from "./types.ts";
 import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
 import { currentModel, currentProvider, readSwarmSettings } from "./session.ts";
 import { atomicWriteFile, trace } from "./state.ts";
+
+// Credential probe for preflightSpawn (3b): does this provider have a usable API key?
+// Mirrors pi's own lookup order: ~/.pi/agent/auth.json entries, then the conventional
+// <PROVIDER>_API_KEY / <PROVIDER>_APIKEY env vars. Returns undefined when a key exists.
+function missingProviderCredential(provider: string): string | undefined {
+	if (!provider) return "no provider";
+	try {
+		const home = process.env.HOME || "";
+		if (home) {
+			const auth = JSON.parse(readFileSync(join(home, ".pi", "agent", "auth.json"), "utf8")) as Record<string, any>;
+			const entry = auth?.[provider];
+			if (entry && typeof entry === "object" && entry.type === "api_key" && String(entry.key || entry.apiKey || "").trim()) return undefined;
+		}
+	} catch { /* missing/unreadable auth.json falls through to env check */ }
+	const envKey = provider.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+	if (process.env[`${envKey}_API_KEY`] || process.env[`${envKey}_APIKEY`]) return undefined;
+	return `no api key for provider '${provider}'`;
+}
 import { sleep } from "./utils.ts";
+
+// === Issue 21 quota-reset-interval ===
+// PI_SWARM_QUOTA_RESET_MS: fleet-wide env-var override for slot.quotaResetMs. Default 0 (disabled).
+// Per-slot value wins when both are set; the env var only kicks in when the per-slot value is
+// undefined or 0. Read at module-load time (mirrors constants.ts:ORPHAN_SPAWN_WARNING_TIMEOUT_MS
+// + MAX_CONSECUTIVE_NUDGES_DEFAULT pattern). Tests that need to override this MUST delete the env
+// var first, set the new value, then dynamic-import this module — the constants module's env read
+// happens once at module-load and is captured thereafter.
+const QUOTA_RESET_DEFAULT_MS =
+	Number(process.env.PI_SWARM_QUOTA_RESET_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_QUOTA_RESET_MS))
+		: 0;
+
+// Read quotaResetMs directly from the raw settings.json. `readSwarmSettings()` strips unknown
+// fields (session.ts:parseModelPool only forwards model/provider/weight/label), and session.ts is
+// out of scope for this issue. The raw read is cached per cwd; chdir invalidates by re-reading the
+// file. Cheap enough to call per bench (bench is a cold path, not a hot path).
+const quotaResetCache = new Map<string, Map<string, number>>();
+function readQuotaResetMsFor(cwd: string, key: string): number {
+	let m = quotaResetCache.get(cwd);
+	if (!m) {
+		m = new Map();
+		quotaResetCache.set(cwd, m);
+		try {
+			const file = join(cwd, CONFIG_DIR_NAME, "settings.json");
+			if (existsSync(file)) {
+				const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, any>;
+				const cfg = raw?.extensions?.swarm || raw?.swarm;
+				if (cfg && Array.isArray(cfg.modelPool)) {
+					for (const s of cfg.modelPool) {
+						if (!s || typeof s !== "object") continue;
+						if (typeof s.quotaResetMs === "number" && Number.isFinite(s.quotaResetMs) && s.quotaResetMs >= 0) {
+							const provider = typeof s.provider === "string" && s.provider ? s.provider : "(default)";
+							const model = typeof s.model === "string" ? s.model : "";
+							m.set(`${provider}/${model}`, Math.floor(s.quotaResetMs));
+						}
+					}
+				}
+			}
+		} catch { /* ignore — empty cache */ }
+	}
+	return m.get(key) ?? 0;
+}
+
+// Pure helper: effective bench duration for a quota bench on the given slot. Returns
+// max(rotation.cooldownMs, slot.quotaResetMs ?? QUOTA_RESET_DEFAULT_MS). Note the env default only
+// applies when the per-slot value is undefined or 0 — if the slot explicitly sets quotaResetMs=0
+// we want the same behavior as before (no env floor either). The 24h exponential backoff cap is
+// applied at the caller, NOT here. The auth branch uses a separate, longer floor (6h) that is
+// independent of quotaResetMs (auth benches do not self-heal on a known reset window).
+export function effectiveBenchMs(slot: Pick<ModelSlot, "model" | "provider">, rotation: Required<RotationConfig>, cwd: string = process.cwd()): number {
+	const key = slotKey(slot);
+	const slotVal = (slot as ModelSlot).quotaResetMs;
+	// Per-slot value wins when > 0; otherwise fall back to env default.
+	const floor = (typeof slotVal === "number" && slotVal > 0)
+		? slotVal
+		: (readQuotaResetMsFor(cwd, key) || QUOTA_RESET_DEFAULT_MS);
+	return Math.max(rotation.cooldownMs, floor);
+}
+
+// Test-only helper: clear the quotaResetMs per-cwd cache. Exposed so tests that re-seed settings
+// between fixtures (without changing cwd) can force a fresh read. NOT used in production code.
+export function _clearQuotaResetCacheForTests() {
+	quotaResetCache.clear();
+}
 
 // Health state lives next to swarm-state.json so every swarm process (orchestrator, workers,
 // spawned agents) shares one view of which slots are benched.
@@ -84,10 +168,13 @@ export function effectiveConfig(): { slots: ModelSlot[]; rotation: Required<Rota
 
 // Canonical JSON format shown by /swarm pool help and copied verbatim into suggestions + docs.
 // Kept in lock-step with the schema in docs/swarm/operations.md (see "Model pool configuration").
+// Issue 21: quotaResetMs is optional (omit for slots without a known reset window). When set, the
+// effective bench for a quota error becomes max(rotation.cooldownMs, quotaResetMs) — see
+// effectiveBenchMs().
 export const POOL_FORMAT_EXAMPLE = {
 	modelPool: [
 		{ model: "gpt-5.4-mini", provider: "openai", weight: 50 },
-		{ model: "claude-sonnet-4", provider: "anthropic", weight: 30 },
+		{ model: "claude-sonnet-4", provider: "anthropic", weight: 30, quotaResetMs: 2592000000 },
 		{ model: "glm-5.1", provider: "zai-coding-cn", weight: 0 },
 	],
 	rotation: { strategy: "weighted", cooldownMs: 900000, maxRetries: 2 },
@@ -196,6 +283,16 @@ export function validateSwarmSettings(cwd = process.cwd()): { ok: boolean; error
 			const key = `${provider || "(default)"}/${model}`;
 			if (seen.has(key) && model) errors.push({ kind: "slot_duplicate", field: `modelPool[${idx}]`, message: `Duplicate slot: ${key}` });
 			if (model) seen.add(key);
+			// Issue 21: validate the optional quotaResetMs field. Reject non-numeric / negative / NaN
+			// values so a typo is caught at validate time rather than silently treated as 0.
+			if (s.quotaResetMs !== undefined && (typeof s.quotaResetMs !== "number" || !Number.isFinite(s.quotaResetMs) || s.quotaResetMs < 0)) {
+				errors.push({ kind: "slot_bad_quota_reset", field: `modelPool[${idx}].quotaResetMs`, message: `Slot #${idx + 1} quotaResetMs must be a non-negative number of milliseconds (floor for quota benches; 24h cap still applies)` });
+			}
+			// Issue 22: validate the optional roles allow-list (warning-grade, informational — the
+			// malformed value is treated as "no filter" by parseModelPool, but the operator should see it).
+			if (s.roles !== undefined && (!Array.isArray(s.roles) || !s.roles.every((r: any) => typeof r === "string" && r.length > 0))) {
+				errors.push({ kind: "slot_bad_roles", field: `modelPool[${idx}].roles`, message: `Slot #${idx + 1} roles must be a string array of role-kind names (see completion.ts ROLE_KINDS for the closed set: orchestrator, planner, reviewer, tester, implementer, worker, observer)` });
+			}
 		});
 	}
 	if (rotation) {
@@ -254,18 +351,32 @@ export type PickResult = {
 // fallback-only slots (weight=0, not in cooldown) -> any slot at all (all benched: best effort).
 // `stickyKey` (agent id) pins sticky strategy; `avoidKey` (the slot that just failed) is deprioritized
 // for round-robin so a failover restart doesn't land back on the same benched slot.
-export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: string } = {}): Promise<PickResult | undefined> {
+// Issue 22 roles-filter: true when the slot is eligible for the given roleKind. Absent / empty
+// roles matches every role; roleKind === undefined (legacy callers) matches everything too.
+export function slotMatchesRole(slot: ModelSlot, roleKind: string | undefined): boolean {
+	const roles = slot.roles;
+	if (!Array.isArray(roles) || roles.length === 0) return true;
+	if (!roleKind) return true; // no role filter applied
+	return roles.includes(roleKind);
+}
+
+export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: string; roleKind?: string; bypassRolesFilter?: boolean } = {}): Promise<PickResult | undefined> {
 	const { slots, rotation } = effectiveConfig();
 	if (!slots.length) return undefined;
+	// Issue 22: filter slots through the role allow-list unless bypassed (manual operator rotate)
+	// or no roleKind was threaded (legacy callers — full backward compat).
+	const applyRoles = !opts.bypassRolesFilter && opts.roleKind !== undefined;
+	const visible = applyRoles ? slots.filter((s) => slotMatchesRole(s, opts.roleKind)) : slots;
+	if (!visible.length) return undefined;
 	// Round-robin mutates the shared cursor, so the whole pick runs under the pool lock.
 	return withPoolLock(p, async () => {
 	const h = await readPoolHealth(p);
 	const nowMs = Date.now();
 
-	const eligible = slots
+	const eligible = visible
 		.map((slot, index) => ({ slot, index }))
 		.filter(({ slot }) => (slot.weight ?? 1) > 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
-	const fallbacks = slots
+	const fallbacks = visible
 		.map((slot, index) => ({ slot, index }))
 		.filter(({ slot }) => (slot.weight ?? 1) === 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
 
@@ -305,7 +416,9 @@ export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: 
 // Record a provider/turn error for a slot (the in-process turn_end hook path). Error KIND drives
 // the bench policy: quota/auth bench IMMEDIATELY (retrying will not fix an exhausted quota or a
 // bad key); auth benches extra-long (6h floor) because keys do not self-heal; rate_limit/transient
-// follow the maxRetries streak before a normal cooldown.
+// follow the maxRetries streak before a normal cooldown. Quota benches honor slot.quotaResetMs
+// (effective = max(rotation.cooldownMs, slot.quotaResetMs)) and stamp lastBenchReason so the
+// orchestrator pump's recovery scan can detect quota benches specifically.
 export async function recordProviderError(p: Paths, slot: ModelSlot, kind: ProviderErrorKind, error: string): Promise<PoolSlotHealth> {
 	const { rotation } = effectiveConfig();
 	return withPoolLock(p, async () => {
@@ -325,58 +438,101 @@ export async function recordProviderError(p: Paths, slot: ModelSlot, kind: Provi
 		// cooldown doubles its bench time (capped at 24h), so a long outage (monthly quota reset)
 		// costs at most one probe attempt per doubling instead of one per cooldownMs.
 		const benchStreak = (prev.benchStreak || 0) + 1;
-		const base = kind === "auth" ? Math.max(rotation.cooldownMs, 6 * 60 * 60_000) : rotation.cooldownMs;
+		// B-1: effectiveBenchMs already floors on rotation.cooldownMs — drop the redundant Math.max.
+		// auth is unaffected by quotaResetMs (auth benches do not self-heal on a known reset window).
+		const base = kind === "auth" ? Math.max(rotation.cooldownMs, 6 * 60 * 60_000) : effectiveBenchMs(slot, rotation);
 		const ms = Math.min(base * Math.pow(2, benchStreak - 1), 24 * 60 * 60_000);
 		next.cooldownUntil = new Date(Date.now() + ms).toISOString();
 		next.failures = 0; // fresh chance after cooldown
 		next.benchStreak = benchStreak;
+		// Issue 21: stamp the reason on every bench so the recovery scan can filter on "quota".
+		// Always overwrite (a fresh bench invalidates any prior reason stamp).
+		next.lastBenchReason = kind;
+		// Stamp the original bench duration for the recovery trace's benchMs payload.
+		next.lastBenchMs = ms;
+		// A new bench also invalidates the prior recovery dedupe stamp — if the slot was recovered
+		// and is being benched again, the NEXT recovery after THIS bench must fire (not be deduped
+		// by the stale lastRecoveredAt from the previous cycle).
+		delete next.lastRecoveredAt;
 	}
 	h.slots[key] = next;
 	await writePoolHealth(p, h);
-	await trace(p, "pool.slot_failure", { slot: key, failures, kind, error: error.slice(0, 200), cooldownUntil: next.cooldownUntil }).catch(() => {});
+	await trace(p, "pool.slot_failure", { slot: key, failures, kind, error: error.slice(0, 200), cooldownUntil: next.cooldownUntil, benchReason: next.lastBenchReason }).catch(() => {});
 	return next;
 	});
 }
 
 // Record a success: clears the failure streak AND the bench backoff (a healthy call proves the
-// slot works again — the next failure starts a fresh, short cooldown).
+// slot works again — the next failure starts a fresh, short cooldown). Issue 21 B-3: preserve
+// lastBenchReason + benchStreak + lastRecoveredAt across successes so the recovery scan's gate
+// (bench expired + lastBenchReason === "quota" + activeTaskIds > 0) stays accurate even if a
+// successful turn is followed by a re-bench. Only failures/lastError/lastErrorAt/cooldownUntil are
+// cleared; lastRecoveredAt is preserved across successes so the next bench's eventual recovery
+// event is not deduped by a stale stamp.
 export async function recordSlotSuccess(p: Paths, slot: ModelSlot): Promise<void> {
 	await withPoolLock(p, async () => {
 	const h = await readPoolHealth(p);
 	const key = slotKey(slot);
 	const prev = h.slots[key];
 	if (!prev || (!prev.failures && !prev.cooldownUntil && !prev.lastError)) return;
-	h.slots[key] = { failures: 0 };
+	h.slots[key] = {
+		failures: 0,
+		lastBenchReason: prev.lastBenchReason,
+		lastBenchMs: prev.lastBenchMs,
+		benchStreak: prev.benchStreak,
+		lastRecoveredAt: prev.lastRecoveredAt,
+	};
 	await writePoolHealth(p, h);
 	await trace(p, "pool.slot_success", { slot: key }).catch(() => {});
 	});
 }
 
-// Manual cooldown control for `/swarm pool cooldown <key> <ms|clear>`.
+// Manual cooldown control for `/swarm pool cooldown <key> <ms|clear>`. Issue 21: stamp
+// lastBenchReason when a manual bench is applied (defaults to undefined so the recovery scan
+// ignores manual benches — only error-driven quota benches trigger slot_recovered). Clear also
+// wipes lastBenchReason + lastRecoveredAt so a future quota bench starts with a fresh recovery
+// dedupe state.
 export async function setSlotCooldown(p: Paths, key: string, ms: number | null): Promise<boolean> {
 	return withPoolLock(p, async () => {
 	const h = await readPoolHealth(p);
 	const slot = h.slots[key];
 	if (!slot && ms === null) return false;
 	h.slots[key] = slot || { failures: 0 };
-	if (ms === null) delete h.slots[key].cooldownUntil;
-	else h.slots[key].cooldownUntil = new Date(Date.now() + ms).toISOString();
+	if (ms === null) {
+		delete h.slots[key].cooldownUntil;
+		// Manual clear wipes both the bench reason stamp and the recovery dedupe stamp — a fresh
+		// quota bench after the clear should NOT be deduped by an old lastRecoveredAt.
+		delete h.slots[key].lastBenchReason;
+		delete h.slots[key].lastBenchMs;
+		delete h.slots[key].lastRecoveredAt;
+	} else {
+		h.slots[key].cooldownUntil = new Date(Date.now() + ms).toISOString();
+		// Manual bench leaves lastBenchReason undefined so the recovery scan ignores it (only
+		// error-driven quota benches trigger slot_recovered).
+	}
 	await writePoolHealth(p, h);
 	return true;
 	});
 }
 
-export async function poolStatus(p: Paths): Promise<{ slots: Array<ModelSlot & { key: string; health: PoolSlotHealth | undefined; inCooldown: boolean; cooldownRemainingMs: number }>; rotation: Required<RotationConfig> }> {
+export async function poolStatus(p: Paths): Promise<{ slots: Array<ModelSlot & { key: string; health: PoolSlotHealth | undefined; inCooldown: boolean; cooldownRemainingMs: number; quotaResetMs: number; quotaAware: boolean }>; rotation: Required<RotationConfig> }> {
 	const { slots, rotation } = effectiveConfig();
 	const h = await readPoolHealth(p);
 	const nowMs = Date.now();
+	const cwd = process.cwd();
 	return {
 		rotation,
 		slots: slots.map((slot) => {
 			const key = slotKey(slot);
 			const health = h.slots[key];
 			const until = health?.cooldownUntil ? new Date(health.cooldownUntil).getTime() : 0;
-			return { ...slot, key, health, inCooldown: until > nowMs, cooldownRemainingMs: Math.max(0, until - nowMs) };
+			// Issue 21: surface the effective quotaResetMs (slot value or env default) so /swarm
+			// pool list can render a "quota-aware" annotation. quotaAware=true means the effective
+			// bench floor exceeds rotation.cooldownMs.
+			const qrMs = (typeof (slot as ModelSlot).quotaResetMs === "number" && (slot as ModelSlot).quotaResetMs! > 0)
+				? (slot as ModelSlot).quotaResetMs!
+				: (readQuotaResetMsFor(cwd, key) || QUOTA_RESET_DEFAULT_MS);
+			return { ...slot, key, health, inCooldown: until > nowMs, cooldownRemainingMs: Math.max(0, until - nowMs), quotaResetMs: qrMs, quotaAware: qrMs > 0 && qrMs > rotation.cooldownMs };
 		}),
 	};
 }
@@ -478,6 +634,22 @@ export async function preflightSpawn(p: Paths, opts: PreflightOptions = {}): Pro
 				kind: "provider_not_found",
 				provider: provider || "",
 				suggestion: `Set swarm.defaultProvider in .pi/settings.json, or PI_SWARM_DEFAULT_PROVIDER in your shell.`,
+			},
+		};
+	}
+
+	// (3b) Credential check (user-reported spawn-dead class): the resolved provider must have a
+	// usable API key, otherwise the child `pi --provider X` exits with `No API key found for X`
+	// and the spawned pane looks inexplicably dead. Key sources mirror pi's own lookup:
+	// ~/.pi/agent/auth.json first, then the conventional env vars.
+	const credErr = missingProviderCredential(provider);
+	if (credErr) {
+		return {
+			ok: false,
+			error: {
+				kind: "provider_not_found",
+				provider,
+				suggestion: `Provider '${provider}' has no stored API key — a spawned pi would exit with 'No API key found for ${provider}'. Authenticate it (pi auth / ~/.pi/agent/auth.json), pick another slot (/swarm pool list), or set ${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY in your shell.`,
 			},
 		};
 	}

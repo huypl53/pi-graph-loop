@@ -5,8 +5,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { MessageRecord, MessageResponseStatus, MessageStatus, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
 import type { OrphanClearReason } from "./agents.ts";
-import { SEND_SETTLE_MS, MAX_REINJECTS } from "./constants.ts";
-import { appendJsonl, mailboxPath, readState, trace, withLock, writeState } from "./state.ts";
+import { PI_SWARM_MINIMAL_PROTOCOL, SEND_SETTLE_MS, MAX_REINJECTS, TRACE_LIFECYCLE_DERIVED, TRACE_REPLY_REJECTED_SUPERSEDED } from "./constants.ts";
+import { appendJsonl, mailboxPath, readState, readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "./state.ts";
 import { buildSystemDelivery } from "./delivery.ts";
 import { capturePane, isPanePiLike, sendToPane, tmux } from "./tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
@@ -267,6 +267,65 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	upsertMessageRecord(st, m, "queued", { queuedAt: createdAt });
 	await appendJsonl(mailboxPath(p, to), m);
 	await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck, requiresResponse: m.requiresResponse, idempotencyKey: m.idempotencyKey });
+
+	// === Issue 24.b — assignment-style message auto-stamp ===
+	// Detect an assignment-style message by `conversationId` matching `task:<taskId>:<nodeId>` AND
+	// subject starting with "Task " AND including " assigned". When detected AND `to` is a registered
+	// agent AND `node.assignee !== msg.to`, auto-stamp node.assignee = msg.to so the recipient's
+	// first swarm_update_task call lands in the normal flow (or, if assignee was null, the new
+	// claim branch from 24.a).
+	//
+	// === HARD RULE: DO NOT RE-WRAP IN `withLock(p)` ===
+	// This branch runs INSIDE the existing withLock(p) the caller already holds (every caller of
+	// `deliverMessageLocked` in this codebase is lock-held by construction: swarm_assign_task in
+	// tools/tasks.ts:259-476, the cancellation notice at :699-705, the notify handoff at :758, the
+	// task message at :806, and enqueueAndDeliver at :321-326 — all hold withLock(p)).
+	// `withLock` (state.ts:56-73) is implemented via mkdir(p.lock) and is NOT re-entrant.
+	// Re-acquiring from within an already-held lock hangs for ~120s (LOCK_STALE_MS * 2) and then
+	// throws `Timed out acquiring swarm lock: ${p.lock}`. A code comment in this function is the
+	// only durable guard against future maintainers re-introducing the nested-lock pattern; please
+	// preserve it.
+	//
+	// The actual residual race (narrow): if `writeTaskState` fails between the read and the write
+	// below, the recipient's pane sees the assignment message but task.json still has assignee=null.
+	// The 24.a claim branch self-heals this on the recipient's first swarm_update_task call.
+	let assignmentAutoStamped = false;
+	if (params.conversationId && params.subject && params.subject.startsWith("Task ") && params.subject.includes(" assigned")) {
+		const m = params.conversationId.match(/^task:([a-z0-9_-]+):([a-z0-9_-]+)$/);
+		if (m) {
+			const taskId = m[1];
+			const nodeId = m[2];
+			const tp = taskPaths(p, taskId);
+			if (existsSync(tp.taskJson)) {
+				try {
+					const task = await readTaskState(tp.taskJson);
+					const node = task?.nodes?.[nodeId];
+					if (task && node && node.assignee !== to) {
+						const priorAssignee = node.assignee;
+						node.assignee = to;
+						node.lastActivityAt = now();
+						await writeTaskState(tp, task);
+						assignmentAutoStamped = true;
+						await trace(p, "message.deliver.assignment_auto_stamp", { taskId, nodeId, assignee: to, priorAssignee: priorAssignee || null });
+						// === Issue 24.e — assignment-mismatch advisory trace ===
+						// If after the stamp, node.assignee was set to someone OTHER than `to` BEFORE
+						// we stamped (race: a concurrent mutation set it elsewhere), the message is
+						// being delivered to a non-assignee. This is a signal of an in-flight reassign
+						// race or a configuration error. Advisory only — the message is still delivered
+						// (the recipient may legitimately need context for a handover).
+						if (priorAssignee && priorAssignee !== to) {
+							await trace(p, "message.deliver.assignment_mismatch", {
+								taskId, nodeId, messageTo: to, nodeAssignee: to, priorAssignee,
+								severity: "warn",
+								note: "assignment-style message delivered to a recipient other than the current node.assignee; investigate for an in-flight reassign race or configuration error",
+							});
+						}
+					}
+				} catch { /* best-effort; auto-stamp is observability, never blocks delivery */ }
+			}
+		}
+	}
+
 	const delivery = await deliver(pi, p, st, m);
 	if (delivery?.delivered) {
 		if (delivery.mailboxOnly) {
@@ -278,6 +337,28 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 			// Message lifecycle is tracked by status "mailbox_delivered" (kept off "queued"/"failed" so it is
 			// not mistaken for a tmux injection failure).
 			upsertMessageRecord(st, m, "mailbox_delivered", { lastError: undefined });
+			// === Issue 25 Phase 2: authoritative mailboxDeliveredAt stamp on durable append (plan §2.4(b)) ===
+			// Under gate=1 the FIRST mailbox append stamps mailboxDeliveredAt authoritatively via
+			// deriveLifecycleFromTrigger — the same pure helper Phase 1 declared. Gate=0 leaves the
+			// field undefined (Phase-1 behavior, shadow-only). Runs INSIDE this same withLock so the
+			// stamp is atomic with the durable append. Distinct from pane-injection which sets
+			// status=injected and updates delivered[]; mailboxDeliveredAt is the transport receipt.
+			if (PI_SWARM_MINIMAL_PROTOCOL === 1) {
+				const rec = st.messages[m.id];
+				if (rec && !rec.mailboxDeliveredAt) {
+					const d = deriveLifecycleFromTrigger(rec, { kind: "mailbox_appended" });
+					if (d.kind === "set") {
+						(rec as any)[d.field] = d.value;
+						rec.lifecycleStage = d.stage;
+						rec.lifecycleSource = d.source;
+						await trace(p, TRACE_LIFECYCLE_DERIVED, {
+							messageId: m.id, from: rec.from, to: rec.to,
+							field: d.field, source: d.source, stage: d.stage,
+							gate: 1, reason: d.reason, via: "deliverMessageLocked.mailbox_only",
+						}).catch(() => {});
+					}
+				}
+			}
 			await trace(p, "message.mailbox_only", { id: m.id, to: m.to, reason: delivery.reason });
 		} else {
 			// Injection into the recipient pane is already delivery. Mark it in state atomically with
@@ -289,12 +370,76 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	} else {
 		upsertMessageRecord(st, m, "failed", { failedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1, lastError: delivery?.reason || "delivery skipped" });
 	}
+	// === Issue 25 Phase 2: gate-aware reply auto-verify (proposal §B.2 + §B.3, plan §2.4(a)) ===
+	// Under gate=1, an accepted reply to an OPEN (non-superseded, current attempt context) record
+	// flips response.status to "verified" + stamps respondedAt via deriveLifecycleFromTrigger.
+	// Late replies to a superseded / cancelled / orphaned record are fenced with
+	// TRACE_REPLY_REJECTED_SUPERSEDED: the original record's response.status is NOT mutated,
+	// response debt is NOT cleared. Under gate=0 the Phase-1 unconditional "sent" path is
+	// preserved (byte-identical to Phase 1, regression tests stay green). Validation reuses the
+	// existing validateResultMessage contract (replyTo === original.id OR conversationId match;
+	// from === original.to === m.from/to; etc.) so the verified path cannot be abused by a
+	// mismatched reply. Runs INSIDE the existing deliverMessageLocked lock — no nested withLock.
 	if (params.replyTo) {
 		const original = st.messages[params.replyTo];
 		if (original?.requiresResponse && original.to === from && original.from === to) {
-			original.response = { ...(original.response || { status: "missing" as MessageResponseStatus }), status: "sent", resultMessageId: m.id, sentAt: now(), lastError: undefined };
-			original.updatedAt = now();
-			await trace(p, "message.response.sent", { id: original.id, resultMessageId: m.id, from, to });
+			const replyContextCurrent = !original.superseded && !(original.lastError?.startsWith("ack_missing"));
+			const traceBase = { id: original.id, resultMessageId: m.id, from, to, gate: PI_SWARM_MINIMAL_PROTOCOL };
+			if (PI_SWARM_MINIMAL_PROTOCOL === 1 && replyContextCurrent) {
+				let validationPassed = true;
+				try { validateResultMessage(st, original, m.id, from); }
+				catch (err) {
+					validationPassed = false;
+					await trace(p, TRACE_REPLY_REJECTED_SUPERSEDED, { ...traceBase, reason: "validation_failed", error: String((err as Error)?.message || err), proposal: "§B.3" }).catch(() => {});
+				}
+				if (validationPassed) {
+					original.response = { ...(original.response || { status: "missing" as MessageResponseStatus }), status: "verified", resultMessageId: m.id, sentAt: now(), verifiedAt: now(), lastError: undefined };
+					original.updatedAt = now();
+					// Read context off the existing record via the conversationId regex (no new fields).
+					const idMatch = typeof original.conversationId === "string" ? original.conversationId.match(/^task:([a-z0-9_-]+):([a-z0-9_-]+)$/) : null;
+					const d = deriveLifecycleFromTrigger(original, { kind: "reply_accepted", taskId: idMatch?.[1], nodeId: idMatch?.[2] });
+					if (d.kind === "set") {
+						(original as any)[d.field] = d.value;
+						original.lifecycleStage = d.stage;
+						original.lifecycleSource = d.source;
+						original.terminalReason = d.reason;
+						await trace(p, TRACE_LIFECYCLE_DERIVED, {
+							messageId: original.id, from: original.from, to: original.to,
+							field: d.field, source: d.source, stage: d.stage,
+							gate: 1, reason: d.reason, via: "deliverMessageLocked.reply",
+						}).catch(() => {});
+					}
+					// Release response debt: if the assignee's runtimeStatus was "response_missing" and
+					// this was their last open response, unstick it. responseMissingRecords is the
+					// existing Phase-0 helper; no new derivation. Atomic with the response stamp.
+					if (st.agents[original.to]?.runtimeStatus === "response_missing" && responseMissingRecords(st, original.to).length === 0) {
+						st.agents[original.to].runtimeStatus = "idle";
+						st.agents[original.to].updatedAt = now();
+					}
+					await trace(p, "message.response.verified", { ...traceBase, proposal: "§B.2" });
+				} else {
+					// Validation failed (e.g. conversationId mismatch) — advisory-only "sent" path,
+					// same shape as the gate=0 path. The engine still records the reply was sent but
+					// does NOT verify the assignment and does NOT clear debt.
+					original.response = { ...(original.response || { status: "missing" as MessageResponseStatus }), status: "sent", resultMessageId: m.id, sentAt: now(), lastError: undefined };
+					original.updatedAt = now();
+					await trace(p, "message.response.sent", { ...traceBase, advisory: true });
+				}
+			} else {
+				// Gate=0 OR superseded/cancelled/orphaned: keep current behavior (sent, no verify).
+				// Emit a fence trace on the superseded branch so dashboards see the rejection.
+				if (PI_SWARM_MINIMAL_PROTOCOL === 1 && original.superseded) {
+					await trace(p, TRACE_REPLY_REJECTED_SUPERSEDED, {
+						...traceBase, reason: "superseded", supersededBy: original.superseded.supersededBy,
+						proposal: "§B.3",
+					}).catch(() => {});
+				}
+				// CRITICAL: do NOT mutate the original response.status. Late replies to a superseded/
+				// waived record must not flip a "waived" record back to "sent" — that would erase the
+				// supersession evidence and re-introduce response debt. Plan §2.4(a) explicit binding.
+				original.updatedAt = now();
+				await trace(p, "message.response.sent", traceBase);
+			}
 		}
 	}
 	await trace(p, delivery?.delivered ? (delivery.mailboxOnly ? "message.deliver.mailbox_only" : "message.inject.ok") : "message.inject.skip", { id: m.id, to: m.to, delivery, markedDelivered: Boolean(delivery?.delivered), status: st.messages[m.id]?.status });
@@ -415,4 +560,81 @@ export async function supersedeTaskAssignmentMessages(p: Paths, st: SwarmState, 
 		await trySupersede(messageId, toNode);
 	}
 	return { supersededIds, skipped };
+}
+
+// === Issue 25 Phase 1: shadow lifecycle derivation helper ===
+// Pure function: returns the would-be derivation action WITHOUT mutating state. The caller
+// (swarm_check_mailbox, swarm_send_message replyTo branch, swarm_update_task terminal branch)
+// decides whether to (a) emit a shadow trace + leave state untouched (gate=0) or (b) actually
+// stamp the v2 field (gate=1, Phase 2). This function never writes; it only inspects the
+// current record + the trigger context and returns a decision object. The proposal §A mapping
+// is followed verbatim: transport events never produce `seenAt`; only recipient-side
+// surface/read evidence can; task-tool evidence requires matching taskId/nodeId/attemptId.
+//
+// INVARIANT: no caller in Phase 1 stamps the returned field under gate=0. Even at gate=1 the
+// caller must hold the existing withLock(p) critical section. Under gate=0 the caller emits a
+// `message.lifecycle_derived_shadow` trace carrying the would-be field name + source so
+// dashboards can already see the upcoming inferred stage.
+export type LifecycleStage = "delivered" | "surfaced" | "seen" | "processing" | "responded" | "terminal";
+
+export type LifecycleDerivation =
+	| { kind: "no_change"; reason: string }
+	| { kind: "set"; field: "mailboxDeliveredAt" | "seenAt" | "processingAt" | "respondedAt" | "terminalAt"; value: string; source: string; stage: LifecycleStage; reason: string };
+
+export type LifecycleTrigger =
+	| { kind: "mailbox_appended" }
+	| { kind: "mailbox_surfaced" }
+	| { kind: "task_tool"; taskId?: string; nodeId?: string; attemptId?: string }
+	| { kind: "reply_accepted"; taskId?: string; nodeId?: string; attemptId?: string }
+	| { kind: "task_node_terminal"; taskId?: string; nodeId?: string; attemptId?: string }
+	| { kind: "supersession"; supersededBy?: string }
+	| { kind: "deadline_exceeded"; deadlineMs?: number }
+	| { kind: "ttl_expired" };
+
+export function deriveLifecycleFromTrigger(rec: MessageRecord, trigger: LifecycleTrigger, atIso?: string): LifecycleDerivation {
+	const at = atIso || new Date().toISOString();
+	switch (trigger.kind) {
+		case "mailbox_appended": {
+			// Transport-only receipt. NEVER produces seenAt — proposal §A invariant.
+			if (rec.mailboxDeliveredAt) return { kind: "no_change", reason: "mailboxDeliveredAt already set" };
+			return { kind: "set", field: "mailboxDeliveredAt", value: at, source: "mailbox.appended", stage: "delivered", reason: "durable mailbox append succeeded" };
+		}
+		case "mailbox_surfaced": {
+			// swarm_check_mailbox returned this envelope. Distinct from pane injection per proposal §A.
+			if (rec.seenAt) return { kind: "no_change", reason: "seenAt already set" };
+			return { kind: "set", field: "seenAt", value: at, source: "mailbox.surfaced", stage: "seen", reason: "swarm_check_mailbox surfaced envelope" };
+		}
+		case "task_tool": {
+			// Requires matching taskId/nodeId/attemptId. We do NOT inspect the conversationId regex — the
+			// proposal §B.2 fence says the assignment reply branch re-verifies the assignment under lock.
+			// For task_tool evidence we accept the caller's context only when it's present.
+			if (!trigger.taskId || !trigger.nodeId || !trigger.attemptId) return { kind: "no_change", reason: "task_tool missing taskId/nodeId/attemptId" };
+			if (rec.processingAt) return { kind: "no_change", reason: "processingAt already set" };
+			return { kind: "set", field: "processingAt", value: at, source: "task.tool", stage: "processing", reason: `recipient tool for task=${trigger.taskId} node=${trigger.nodeId} attempt=${trigger.attemptId}` };
+		}
+		case "reply_accepted": {
+			if (rec.respondedAt) return { kind: "no_change", reason: "respondedAt already set" };
+			const reason = trigger.taskId
+				? `verified reply accepted for task=${trigger.taskId} node=${trigger.nodeId} attempt=${trigger.attemptId}`
+				: "verified reply accepted (non-task message)";
+			return { kind: "set", field: "respondedAt", value: at, source: "reply.accepted", stage: "responded", reason };
+		}
+		case "task_node_terminal": {
+			// Phase 1 never stamps terminalAt under gate=0; the caller is responsible for gating.
+			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
+			return { kind: "set", field: "terminalAt", value: at, source: "task.node_terminal", stage: "terminal", reason: `matching fenced node reached terminal status (task=${trigger.taskId ?? "?"} node=${trigger.nodeId ?? "?"} attempt=${trigger.attemptId ?? "?"})` };
+		}
+		case "supersession": {
+			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
+			return { kind: "set", field: "terminalAt", value: at, source: "supersession", stage: "terminal", reason: `superseded by ${trigger.supersededBy || "(unknown)"}` };
+		}
+		case "deadline_exceeded": {
+			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
+			return { kind: "set", field: "terminalAt", value: at, source: "responseDeadlineMs", stage: "terminal", reason: `response deadline ${trigger.deadlineMs ?? "?"}ms exceeded without reply/terminal` };
+		}
+		case "ttl_expired": {
+			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
+			return { kind: "set", field: "terminalAt", value: at, source: "ttl_expired", stage: "terminal", reason: "TTL/attempts exhausted; message moved to dead_letter" };
+		}
+	}
 }

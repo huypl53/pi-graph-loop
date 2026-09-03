@@ -64,7 +64,16 @@ export async function fireOrphanWarning(p: Paths, agentId: string, spawnEntry: R
 // paths skip this entirely). Caller MUST hold the swarm lock and pass the live SwarmState reference.
 export function armOrphanWatch(p: Paths, st: SwarmState, agentId: string, ts: string) {
 	const deadlineAt = new Date(new Date(ts).getTime() + ORPHAN_SPAWN_WARNING_TIMEOUT_MS).toISOString();
-	const entry: RecentSpawn = { agentId, spawnedAt: ts, deadlineAt };
+	// Issue 16: stamp the spawning session's identity onto the RecentSpawn entry so the pre-clear
+	// predicate in swarm_assign_task can match without re-reading env at compare time. We use the
+	// *caller's* pid + sessionStartedAt directly rather than the live orchestratorLeader record
+	// because swarm_spawn_agent does NOT run a leader heartbeat (the leader contract is enforced at
+	// the assign site, not the spawn site). The leader record at arm time may be vacant — that's
+	// normal for the operator's first tool call after PM opt-in, and we still want the subsequent
+	// assign_task to pre-clear.
+	const spawnedByPid = process.pid;
+	const spawnedBySessionStartedAt = process.env.PI_SWARM_SESSION_STARTED_AT || ts;
+	const entry: RecentSpawn = { agentId, spawnedAt: ts, deadlineAt, spawnedByPid, spawnedBySessionStartedAt };
 	st.recentSpawns = Array.isArray(st.recentSpawns) ? st.recentSpawns : [];
 	st.recentSpawns.push(entry);
 	const timer = setTimeout(() => {
@@ -84,16 +93,34 @@ export function armOrphanWatch(p: Paths, st: SwarmState, agentId: string, ts: st
 // pre-policy swarm, or already cleared). Caller MUST hold the swarm lock and pass the live state
 // reference; the trace is best-effort and never throws.
 export type OrphanClearReason = "swarm_send_message" | "swarm_assign_task" | "swarm_stop_agent" | "preflight_message";
+// Issue 16: distinguish why a clear happened. The `by` field stays the call site for back-compat
+// with existing test assertions; the new `kind` field carries "preflight" vs "delivery" for ops
+// observability.
+export type OrphanClearKind = "preflight" | "delivery";
 
-export async function clearOrphanWatch(p: Paths, st: SwarmState, agentId: string, reason: OrphanClearReason) {
+// Issue 16: compare a RecentSpawn stamp against a caller's session identity. Returns false when
+// the entry lacks a stamp (legacy pre-Issue-16 state — never preempt so we don't accidentally
+// surface a fresh warning as a false-positive resolution).
+export function isSameOrchestratorLeader(spawn: RecentSpawn, caller: {
+	pid: number;
+	sessionStartedAt?: string; // from PI_SWARM_SESSION_STARTED_AT
+}): boolean {
+	if (typeof spawn.spawnedByPid !== "number") return false;     // legacy entry: never preempt
+	if (spawn.spawnedByPid !== caller.pid) return false;          // different process
+	if (spawn.spawnedBySessionStartedAt && caller.sessionStartedAt &&
+		spawn.spawnedBySessionStartedAt !== caller.sessionStartedAt) return false; // pid recycled
+	return true;
+}
+
+export async function clearOrphanWatch(p: Paths, st: SwarmState, agentId: string, reason: OrphanClearReason, kind: OrphanClearKind = "delivery") {
 	if (!Array.isArray(st.recentSpawns) || st.recentSpawns.length === 0) return { cleared: false, reason: "empty" };
 	const idx = st.recentSpawns.findIndex((s) => s.agentId === agentId);
 	if (idx === -1) return { cleared: false, reason: "not-found" };
 	const [removed] = st.recentSpawns.splice(idx, 1);
 	const t = ORPHAN_TIMERS.get(agentId);
 	if (t) { clearTimeout(t); ORPHAN_TIMERS.delete(agentId); }
-	await trace(p, "agent.spawn.orphan_cleared", { agentId, by: reason, clearedBy: currentAgentId(), spawnedAt: removed.spawnedAt, deadlineAt: removed.deadlineAt }).catch(() => {});
-	return { cleared: true, reason, removed };
+	await trace(p, "agent.spawn.orphan_cleared", { agentId, by: reason, reason: kind, clearedBy: currentAgentId(), spawnedAt: removed.spawnedAt, deadlineAt: removed.deadlineAt, spawnedByPid: removed.spawnedByPid, spawnedBySessionStartedAt: removed.spawnedBySessionStartedAt }).catch(() => {});
+	return { cleared: true, reason, kind, removed };
 }
 
 // Kickoff preamble injected on spawn/restart when the agent's mailbox holds messages that are not yet
@@ -136,14 +163,33 @@ export async function spawnAgent(pi: ExtensionAPI, cwd: string, p: Paths, state:
 	let provider = input.provider;
 	let poolReason: string | undefined;
 	if (!model) {
-		const picked = await pickSlot(p, { stickyKey: id });
+		// Issue 22 roles-filter: resolve the intended roleKind with the same logic that stamps the
+		// record below (input.roleKind || inferRoleKind(id, role)) so the filter and the persisted
+		// roleKind cannot disagree.
+		const intendedRoleKind = input.roleKind || inferRoleKind(id, input.role);
+		const picked = await pickSlot(p, { stickyKey: id, roleKind: intendedRoleKind });
 		if (picked) {
 			model = picked.slot.model;
 			provider = picked.slot.provider || currentProvider(model);
 			poolReason = picked.reason;
 		} else {
-			model = currentModel();
-			provider = currentProvider(model);
+			// Issue 22 fallback: every pool slot was filtered out for this roleKind. Retry once
+			// WITHOUT the filter so the worker always starts; trace for operator visibility.
+			const fallback = await pickSlot(p, { stickyKey: id });
+			if (fallback) {
+				await trace(p, "pool.role_filter_all_filtered_fallback", {
+					agentId: id, roleKind: intendedRoleKind,
+					to: `${fallback.slot.provider || "(default)"}/${fallback.slot.model}`,
+					reason: fallback.reason,
+					note: "no slot matched role filter; spawned without filter so the worker can start",
+				}).catch(() => {});
+				model = fallback.slot.model;
+				provider = fallback.slot.provider || currentProvider(model);
+				poolReason = fallback.reason;
+			} else {
+				model = currentModel();
+				provider = currentProvider(model);
+			}
 		}
 	} else {
 		provider = provider || currentProvider(model);
