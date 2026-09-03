@@ -54,7 +54,13 @@ export type ScopeSegment = string | { intra: string };
 export function normalizeScopePattern(pattern: string): ScopeSegment[] | null {
 	if (typeof pattern !== "string" || !pattern.length) return null;
 	if (pattern.includes("\\") || pattern.startsWith("/")) return null;
-	const segments = pattern.split("/");
+	// R26: a trailing slash means "this directory subtree" (dir/ ≡ dir/**). Detect BEFORE
+	// split, strip, then re-append a trailing "**" sentinel after the segment loop.
+	// Internal "//" still hits the empty-segment guard below (conservative).
+	const dirSubtree = pattern.endsWith("/");
+	const trimmed = dirSubtree ? pattern.replace(/\/+$/, "") : pattern;
+	if (!trimmed.length) return null;
+	const segments = trimmed.split("/");
 	const out: ScopeSegment[] = [];
 	for (const seg of segments) {
 		if (!seg.length || seg === ".") return null;
@@ -66,6 +72,7 @@ export function normalizeScopePattern(pattern: string): ScopeSegment[] | null {
 		}
 		out.push(seg);
 	}
+	if (dirSubtree) out.push("**");
 	return out;
 }
 

@@ -118,6 +118,33 @@ Checklist:
 3. describe whether it is source-of-truth, cache, or trace output
 4. keep file format inspectable
 
+### Scope syntax (allowedFiles / file-scope ownership)
+
+The ownership preflight (`swarm_assign_task`, `src/taskgraph.ts`) compares each node's
+effective write scope — node `allowedFiles` → recursive `allowedFilesFrom` → task default —
+with a deterministic glob predicate. Pattern semantics (`normalizeScopePattern`):
+
+- **Trailing slash = directory subtree** — `dir/` ≡ `dir/**`. It covers the directory node
+  itself and every descendant. This is the ONLY form the task-default scope generator
+  emits (the orchestrator writes `artifacts/`, `extensions/swarm/src/`, `extensions/swarm/tests/`,
+  …). **Prefer trailing slash for directory scopes in plans** so two disjoint dirs are seen
+  as non-overlapping and can run in parallel.
+  - `('a/b/', 'c/d/')` → `false` (disjoint dirs coexist)
+  - `('a/b/', 'a/b/c.ts')` → `true` (dir covers a file inside it)
+  - `('a/b/', 'a/b')` → `true` (dir covers its own bare prefix)
+- **Bare path without slash = exact prefix** — `a/b` matches exactly `a/b` and NOT `a/b/c`.
+  This is the pre-existing semantics and is unchanged. Use a trailing slash (or `**`) when
+  you mean subtree.
+- **Glob** — `*` matches within a single segment (`src/*.ts`); `**` matches zero-or-more
+  segments (`src/**`); `{a,b}` / `?` / `[x]` / `!` are unsupported.
+- **Unknown syntax is conservatively conflicting** — `normalizeScopePattern` returns `null`
+  (absolute paths, `a/../b`, internal `//`, brace-globs), `scopesOverlap` reports
+  `{overlap:true, relation:"unknown-syntax"}`, and preflight fails with
+  `ACTIVE_SCOPE_CONFLICT`. Preflight can never pass on ambiguity.
+
+R26 added the trailing-slash → subtree mapping; prior to that, any trailing-slash pattern
+was treated as unknown syntax and blocked ALL parallel assignment of dir-scoped work.
+
 ## Invariants to protect
 
 - Do not create a hidden daemon dependency for core behavior.

@@ -115,6 +115,11 @@ every active attempt lease across ALL tasks with a conservative deterministic gl
 filesystem enumeration). Overlap fails with `ACTIVE_SCOPE_CONFLICT` before any mutation; leases
 release auditable (`releasedAt`/`releaseReason`) on terminal/reassign/rework/cancel. Legacy tasks
 without ownership metadata stay readable; reconcile reports them as advisory drift.
+**Scope pattern semantics** (`src/taskgraph.ts` `normalizeScopePattern`, R26): trailing-slash dir
+patterns (`dir/`) mean subtree coverage (`dir/ ≡ dir/**`); bare paths without slash are exact prefix;
+unknown syntax (`{a,b}`, `/abs`, `a/../b`, internal `//`) is conservatively conflicting. Two disjoint
+trailing-slash dirs are now assignable in parallel; previously they were all blocked as unknown-syntax.
+See contributor-guide "Scope syntax" for the full table.
 
 **Orchestrator leadership and recovery:** the harness is strict-reject, single-leader by default.
 `SwarmState.orchestratorLeader` is the durable source of truth for the active orchestrator pid.
