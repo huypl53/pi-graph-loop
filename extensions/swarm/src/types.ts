@@ -771,6 +771,18 @@ export type LoopState = {
 	updatedAt: string;
 };
 
+export type QualificationMode = "auto" | "human-discuss";
+export type QualificationStatus = "ready" | "awaiting-confirmation" | "confirmed";
+
+export type QualificationGate = {
+	mode: QualificationMode;
+	status: QualificationStatus;
+	artifact: string;
+	preparedAt: string;
+	confirmedAt?: string;
+	confirmationNote?: string;
+};
+
 export type TaskState = {
 	version: number;
 	taskId: string;
@@ -799,6 +811,8 @@ export type TaskState = {
 	gates: Record<string, TaskGate>;
 	editLocks: Record<string, { nodeId: string; by: string; at: string; expiresAt?: string }>;
 	evidence: Record<string, unknown>;
+	// Present on newly-created tasks. Absent on legacy tasks so historical work remains assignable.
+	qualification?: QualificationGate;
 	reworkConsumption?: ReworkConsumptionRecord[];
 	// V1.5 opt-in post-iteration loop config. Absent or enabled !== true => no behavior change.
 	loop?: LoopConfig;

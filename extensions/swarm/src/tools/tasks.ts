@@ -170,6 +170,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			allowedFiles: Type.Optional(Type.Array(Type.String({ description: "Project-relative file paths the task may touch." }))),
 			acceptanceCriteria: Type.Optional(Type.Array(Type.String())),
 			validationCommands: Type.Optional(Type.Array(Type.String())),
+			qualificationMode: Type.Optional(Type.String({ description: "Qualification preparation mode: auto (root/auditor challenge) or human-discuss (wait for human confirmation). Defaults to auto." })),
 			priority: Type.Optional(Type.String({ description: "low, normal, high. Defaults to normal." })),
 			taskId: Type.Optional(Type.String({ description: "Optional explicit task id; otherwise generated as task-<timestamp>-<slug>." })),
 			start: Type.Optional(Type.String({ description: "Start node id when supplying a custom graph." })),
@@ -201,6 +202,14 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const taskId = safeId(params.taskId || `task-${ts.replace(/[-:.TZ]/g, "").slice(0, 12)}-${slug}`);
 				const tp = taskPaths(p, taskId);
 				if (existsSync(tp.taskJson)) throw new Error(`Task already exists: ${taskId}`);
+				const qualificationMode = params.qualificationMode === "human-discuss" ? "human-discuss" : "auto";
+				if (params.qualificationMode && !["auto", "human-discuss"].includes(params.qualificationMode)) throw new Error(`Invalid qualificationMode \`${params.qualificationMode}\`; use auto or human-discuss.`);
+				const qualification = {
+					mode: qualificationMode,
+					status: qualificationMode === "human-discuss" ? "awaiting-confirmation" : "ready",
+					artifact: "artifacts/qualification-gate.md",
+					preparedAt: ts,
+				} as const;
 				const graph = buildGraphFromInput({ nodes: params.nodes as Record<string, NodeInput> | undefined, edges: params.edges, start: params.start, gates: params.gates as Record<string, TaskGate> | undefined }, params.allowedFiles || []);
 				const task: TaskState = {
 					version: 1, taskId, title: params.title, goal: params.goal, status: "ready",
@@ -209,7 +218,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					acceptanceCriteria: params.acceptanceCriteria || [], validationCommands: params.validationCommands || [],
 					start: graph.start, currentNodes: [],
 					sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
-					nodes: graph.nodes, edges: graph.edges, handoffs: [], gates: graph.gates, editLocks: {}, evidence: {},
+					nodes: graph.nodes, edges: graph.edges, handoffs: [], gates: graph.gates, editLocks: {}, evidence: {}, qualification,
 				};
 				// Reject structurally-invalid graphs at creation (hard errors only; soft warnings are still allowed)
 				// so a broken task can't be written and linger. Run swarm_validate_graph for the full report.
@@ -247,12 +256,52 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				]));
 				await writeTaskState(tp, task);
 				await writeFile(tp.taskMd, buildTaskMarkdown(task), "utf8");
-				await traceTask(tp, "task.create", { taskId, title: task.title, workflow: task.workflow, owner: task.owner, start: task.start, nodeCount: Object.keys(task.nodes).length, ready, actionable, autoClosed: autoClosed.closed });
+				const hardGates = task.acceptanceCriteria.length ? task.acceptanceCriteria : [task.goal];
+				const commands = task.validationCommands.length ? task.validationCommands.map((command) => `- [ ] Run: \`${command}\``).join("\n") : "- [ ] Add and run deterministic evidence appropriate to this change.";
+				const discussion = qualification.mode === "human-discuss"
+					? "\n## Human discussion required\n\nBefore implementation, confirm the intended outcome, scope trade-offs, and any visible behavior that only the user can decide. Root records that confirmation with `swarm_confirm_qualification`.\n"
+					: "\n## Auto-mode challenge\n\nRoot must draft this gate using `extensions/swarm/qualification-skills/qualification-gate/SKILL.md`, ask one reviewer/auditor to challenge missing negative cases, regressions, and evidence, then revise this artifact once before implementation.\n";
+				await writeFile(join(tp.root, qualification.artifact), `# Qualification Gate\n\n## Requested outcome\n\n${task.goal}\n\n## Hard gates\n\n${hardGates.map((item) => `- [ ] ${item}`).join("\n")}\n\n## Evidence plan\n\n${commands}\n- [ ] Independent reviewer/auditor checks that the evidence proves these gates.\n\n## Scope / non-goals\n\n- Use the task allowed-files list and explicit user request; record any change here.\n${discussion}`, "utf8");
+				await traceTask(tp, "task.create", { taskId, title: task.title, workflow: task.workflow, owner: task.owner, start: task.start, nodeCount: Object.keys(task.nodes).length, ready, actionable, autoClosed: autoClosed.closed, qualificationMode: qualification.mode, qualificationStatus: qualification.status });
 				if (autoClosed.closed.length) await traceTask(tp, "task.autoclose.root", { taskId, nodeIds: autoClosed.closed, by: "engine" });
 				return { taskId, task, tp, ready, actionable, autoClosed: autoClosed.closed };
 			});
 			return textResult(`Created task ${result.taskId} at ${relative(ctx.cwd, result.tp.root)}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}${result.autoClosed?.length ? `\nAuto-closed root terminal nodes: ${result.autoClosed.join(", ")}` : ""}`, { taskId: result.taskId, task: result.task, taskMd: relative(ctx.cwd, result.tp.taskMd), taskJson: relative(ctx.cwd, result.tp.taskJson), autoClosed: result.autoClosed });
 		});
+		},
+	}))
+
+	pi.registerTool(defineTool({
+		name: "swarm_confirm_qualification",
+		label: "Swarm Confirm Qualification",
+		description: "Record root's human-discuss confirmation for a task qualification gate, allowing implementation assignment to begin.",
+		promptGuidelines: ["Use `swarm_confirm_qualification` only after the human has discussed and confirmed the qualification gate."],
+		parameters: Type.Object({
+			taskId: Type.String({ description: "Task id." }),
+			note: Type.String({ description: "Short record of the human-confirmed outcome, trade-offs, or scope." }),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_confirm_qualification", async () => {
+				const p = paths(ctx.cwd);
+				requireRootAuthority(currentAgentId(), "swarm_confirm_qualification");
+				const result = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					heartbeatRootLeader(st, Date.now(), process.pid, "confirm_qualification");
+					const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
+					if (!task.qualification) await failTaskTool(tp, p, "QUALIFICATION_NOT_CONFIGURED", `Task ${task.taskId} has no qualification gate (legacy task).`, { taskId: task.taskId });
+					if (task.qualification.mode !== "human-discuss") await failTaskTool(tp, p, "QUALIFICATION_CONFIRMATION_NOT_REQUIRED", `Task ${task.taskId} uses auto qualification; its gate is already ready.`, { taskId: task.taskId, qualification: task.qualification });
+					task.qualification.status = "confirmed";
+					task.qualification.confirmedAt = now();
+					task.qualification.confirmationNote = params.note;
+					await writeTaskState(tp, task);
+					await writeFile(tp.taskMd, buildTaskMarkdown(task), "utf8");
+					await writeFile(join(tp.root, task.qualification.artifact), `\n## Human confirmation\n\n- Confirmed at: ${task.qualification.confirmedAt}\n- Note: ${params.note}\n`, { encoding: "utf8", flag: "a" });
+					await writeState(p, st);
+					await traceTask(tp, "task.qualification.confirmed", { taskId: task.taskId, by: currentAgentId(), note: params.note });
+					return { task, tp };
+				});
+				return textResult(`Qualification confirmed for ${result.task.taskId}. Implementation may now be assigned.`, { taskId: result.task.taskId, qualification: result.task.qualification });
+			});
 		},
 	}))
 
@@ -432,6 +481,10 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const node = task.nodes[params.nodeId];
 				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId }, actionableHint: "Valid node ids are listed in task.json. Run swarm_task_status or swarm_graph to inspect." });
 				if (TERMINAL_NODE_STATUSES.has(node.status)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} is terminal (${node.status}); cannot assign.`, { taskId, nodeId: params.nodeId, received: { nodeStatus: node.status } });
+				// Qualification is prepared at task creation. Planning can prepare/revise it, but source-changing implementation cannot start until the gate is ready or the human has confirmed it. Legacy tasks have no gate and remain compatible.
+				if (task.qualification && node.role === "implementer" && !["ready", "confirmed"].includes(task.qualification.status)) {
+					await failTaskTool(tp, p, "QUALIFICATION_NOT_READY", `Cannot assign implementation node ${params.nodeId}: qualification gate is ${task.qualification.status}. Complete human discussion and call swarm_confirm_qualification first.`, { taskId, nodeId: params.nodeId, qualification: task.qualification, actionableHint: "Read artifacts/qualification-gate.md, discuss unresolved user decisions, then call swarm_confirm_qualification." });
+				}
 				// Readiness: assignable when actionable (ready, or unassigned ready-status current) or already active (reassign).
 				const cr = computeReadyNodes(task);
 				const actionable = new Set([...cr.ready, ...cr.current.filter((id) => task.nodes[id].status === "ready" && !task.nodes[id].assignee)]);

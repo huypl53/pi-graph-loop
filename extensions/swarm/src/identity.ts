@@ -138,7 +138,10 @@ export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 		`3. Check your mailbox with \`swarm_check_mailbox\` when idle or after receiving swarm traffic. Here, idle means you have no active tool calls or immediate task steps; if you are waiting more than ~10 seconds, poll pending mailbox messages.\n` +
 		`4. Use \`swarm_list_agents\` before messaging a peer whose existence you have not verified.\n` +
 		`5. Use \`swarm_trace\` and \`swarm_capture_agent_pane\` when debugging coordination issues.\n` +
-		`6. Stay within your role unless the root explicitly changes your assignment.\n\n` +
+		`6. Stay within your role unless the root explicitly changes your assignment.\n` +
+		(["root", "reviewer", "auditor"].includes(agent.roleKind)
+			? `7. Qualification responsibility: read the package skill \`extensions/swarm/qualification-skills/qualification-gate/SKILL.md\` when preparing, challenging, or auditing a task's qualification gate. Keep it private to qualification roles; implementers follow the frozen artifact instead.\n\n`
+			: "\n") +
 		`## ACK Protocol\n\n` +
 		`- For every swarm message with \`requiresAck=true\`, you MUST acknowledge it with \`swarm_ack_message\`.\n` +
 		`- As soon as you start work, call \`swarm_ack_message\` with the message id and \`status=seen\` or \`status=processing\`.\n` +

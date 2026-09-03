@@ -1,0 +1,2 @@
+{"name":"create-auto-qualification-task","stopReason":"toolUse","events":[{"type":"toolcall","name":"swarm_create_task","id":"qualification-create","arguments":{"taskId":"mock-qualification-gate","title":"Mock qualification gate","goal":"Create a task with a durable auto qualification gate","qualificationMode":"auto","acceptanceCriteria":["The gate is persisted before implementation."],"validationCommands":["node extensions/swarm/tests/qualification-gates.test.mjs"]}}]}
+{"name":"finish","stopReason":"stop","events":[{"type":"text","text":"Qualification task was created."}]}

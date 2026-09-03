@@ -262,7 +262,8 @@ mail tools for discussion without advancing a graph.
 
 | Tool | What it does | Key inputs / operating notes |
 | --- | --- | --- |
-| `swarm_create_task` | Creates a durable graph, task markdown, event stream, and artifact directory. | `title`, `goal`; supports feature-dev defaults or custom `nodes`, `edges`, gates, allowed files, validation commands, and shared context. |
+| `swarm_create_task` | Creates a durable graph, task markdown, event stream, artifact directory, and qualification-gate artifact. | `title`, `goal`; supports feature-dev defaults or custom `nodes`, `edges`, gates, allowed files, validation commands, shared context, and `qualificationMode: auto\|human-discuss` (defaults to `auto`). |
+| `swarm_confirm_qualification` | Records root's human-discuss confirmation and unlocks implementation assignment. | Root-only; requires a concise note of the user-confirmed outcome/trade-off. |
 | `swarm_task_status` | Summarizes task/node/gate state. | Set `includeArtifacts=true` and/or `runtime=true` for evidence and liveness warnings. |
 | `swarm_validate_graph` | Validates graph structure and optionally runtime consistency. | Supply `taskId` or direct task file path; `runtime=true` checks agents/messages. |
 | `swarm_print_graph` | Prints text, Mermaid, or JSON graph view. | Select `format=text|mermaid|json`. Read-only. |
@@ -273,11 +274,12 @@ mail tools for discussion without advancing a graph.
 
 ### Normal graph execution
 
-1. Root creates a task with `swarm_create_task`.
-2. Inspect `swarm_next_nodes` and assign a ready node with `swarm_assign_task`.
-3. Assignee acknowledges the delivery, performs the work, and calls
+1. Root creates a task with `swarm_create_task`, which writes `artifacts/qualification-gate.md`.
+2. Choose `qualificationMode=auto` for a clear request (root drafts and reviewer/auditor challenges once) or `human-discuss` for user-owned decisions. In `human-discuss`, root records the user decision with `swarm_confirm_qualification` before source-changing implementation is assignable.
+3. Inspect `swarm_next_nodes` and assign a ready node with `swarm_assign_task`.
+4. Assignee acknowledges the delivery, performs the work, and calls
    `swarm_update_task` for its own node.
-4. Root inspects `swarm_next_nodes` again and assigns the newly-ready
+5. Root inspects `swarm_next_nodes` again and assigns the newly-ready
    work.
 5. Use `swarm_task_status(runtime=true)`, `swarm_validate_graph`, then
    `swarm_reconcile(dryRun=true)` if execution stalls.

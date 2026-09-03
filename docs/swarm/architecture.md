@@ -150,7 +150,9 @@ These rules should stay stable unless there is an intentional design change.
   should not invent an alternate task state model.
 - **Task artifacts and `sharedContext` are part of task state.** They live in
   the task graph and are not a replacement for the removed persistent-memory
-  subsystem.
+  subsystem. Newly-created tasks also persist a short qualification record and
+  Markdown artifact; `human-discuss` cannot unlock implementation until root
+  records the human confirmation.
 - **Mailbox files are append-only durable delivery records.** Delivery state is
   enriched in `swarm-state.json`, not substituted by tmux state.
 - **tmux liveness is runtime evidence, not sole truth.** A pane being dead
@@ -197,12 +199,13 @@ These rules should stay stable unless there is an intentional design change.
 7. a previously failed delivery that is later ACKed `processing` stays visible as an active response-tracked assignment until verified or waived
 
 ### Task path
-1. root creates a task graph
-2. ready node is assigned to an agent
-3. agent updates node state and artifacts
-4. graph derives next ready nodes / closure
-5. reconcile and PM notifications surface stalls or closure changes
-6. a freshly created task with a start node left ready+unassigned past the grace period is nudged to the root (bounded, idempotent, never auto-assigned)
+1. root creates a task graph and short `artifacts/qualification-gate.md` success contract
+2. `auto` qualification is root-drafted and reviewer/auditor-challenged once; `human-discuss` waits for root to record the human decision
+3. ready node is assigned to an agent; source-changing implementer nodes are refused until qualification is `ready` or `confirmed` (legacy tasks remain compatible)
+4. agent updates node state and artifacts
+5. graph derives next ready nodes / closure
+6. reconcile and PM notifications surface stalls or closure changes
+7. a freshly created task with a start node left ready+unassigned past the grace period is nudged to the root (bounded, idempotent, never auto-assigned)
 
 ## Change map: where to implement new work
 

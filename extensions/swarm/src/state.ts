@@ -235,6 +235,11 @@ export async function readTaskState(file: string): Promise<TaskState> {
 	task.gates ||= {};
 	task.editLocks ||= {};
 	task.evidence ||= {};
+	if (task.qualification) {
+		task.qualification.artifact ||= "artifacts/qualification-gate.md";
+		if (task.qualification.mode !== "human-discuss") task.qualification.mode = "auto";
+		if (!["ready", "awaiting-confirmation", "confirmed"].includes(task.qualification.status)) task.qualification.status = task.qualification.mode === "human-discuss" ? "awaiting-confirmation" : "ready";
+	}
 	task.reworkConsumption ||= [];
 	task.sharedContext ||= { summary: "", decisions: [], openQuestions: [], risks: [] };
 	return task;

@@ -157,7 +157,8 @@ Useful tools:
 
 Task-graph tools:
 
-- `swarm_create_task`, `swarm_assign_task`, `swarm_update_task`, `swarm_task_message`
+- `swarm_create_task`, `swarm_confirm_qualification`, `swarm_assign_task`, `swarm_update_task`, `swarm_task_message`
+- Package skill: `qualification-skills/qualification-gate/SKILL.md` ships inside `extensions/swarm/` and is surfaced only in generated root/reviewer/auditor identities. It guides the short task-creation qualification gate (`auto` or `human-discuss`).
 - `swarm_task_status`, `swarm_validate_graph`, `swarm_print_graph`, `swarm_next_nodes`
 - Rework edges are first-class: a declared `rework: true` edge can re-open a failed/skipped node as `ready` so follow-up validation is a normal graph transition, not an root force-reset.
 - `/swarm flow <#|task-id> [--events N]` — read-only observatory snapshot (task graph, agent lanes, recent events)

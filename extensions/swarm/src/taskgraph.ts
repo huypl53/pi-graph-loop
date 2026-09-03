@@ -674,7 +674,10 @@ export function buildTaskMarkdown(task: TaskState) {
 \`${file}\``).join("\n") : "- None specified";
 	const acceptance = task.acceptanceCriteria.length ? task.acceptanceCriteria.map((item) => `- ${item}`).join("\n") : "- None specified";
 	const validation = task.validationCommands.length ? task.validationCommands.map((cmd) => `\`\`\`bash\n${cmd}\n\`\`\``).join("\n\n") : "_None specified._";
-	return `# Task: ${task.title}\n\nTask ID: \`${task.taskId}\`\nWorkflow: \`${task.workflow}\`\nOwner: \`${task.owner}\`\n\n## Goal\n\n${task.goal}\n\n## Scope\n\nAllowed files:\n\n${allowed}\n\n## Acceptance Criteria\n\n${acceptance}\n\n## Validation Commands\n\n${validation}\n`;
+	const qualification = task.qualification
+		? `\n## Qualification Gate\n\n- Mode: \`${task.qualification.mode}\`\n- Status: \`${task.qualification.status}\`\n- Artifact: \`${task.qualification.artifact}\`\n`
+		: "";
+	return `# Task: ${task.title}\n\nTask ID: \`${task.taskId}\`\nWorkflow: \`${task.workflow}\`\nOwner: \`${task.owner}\`\n\n## Goal\n\n${task.goal}\n\n## Scope\n\nAllowed files:\n\n${allowed}\n\n## Acceptance Criteria\n\n${acceptance}\n\n## Validation Commands\n\n${validation}${qualification}`;
 }
 
 // ---- Task graph validation, printing, and graph synthesis helpers ----

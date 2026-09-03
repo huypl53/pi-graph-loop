@@ -311,6 +311,7 @@ export const ROOT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
 	"swarm_list_agents",
 	"swarm_spawn_agent",
 	"swarm_create_task",
+	"swarm_confirm_qualification",
 	"swarm_assign_task",
 	"swarm_audit",
 	// Goal tools (2):
