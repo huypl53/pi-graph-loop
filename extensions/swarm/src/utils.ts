@@ -33,12 +33,14 @@ export function inferRoleKind(id: string, role: string) {
 	if (idHas("root")) return "root";
 	if (idHas("planner")) return "planner";
 	if (idHas("reviewer")) return "reviewer";
+	if (idHas("auditor") || idHas("audit")) return "auditor";
 	if (idHas("tester") || idHas("qa")) return "tester";
 	if (idHas("observer")) return "observer";
 	if (idHas("implementer") || idHas("coder") || idHas("developer")) return "implementer";
 	if (text.includes("root")) return "root";
 	if (text.includes("planner") || text.includes("plan")) return "planner";
 	if (text.includes("reviewer") || text.includes("review")) return "reviewer";
+	if (text.includes("auditor") || text.includes("audit")) return "auditor";
 	if (text.includes("tester") || text.includes("test") || text.includes("qa")) return "tester";
 	if (text.includes("observer")) return "observer";
 	if (text.includes("implementer") || text.includes("coder") || text.includes("developer") || text.includes("fix")) return "implementer";

@@ -482,7 +482,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				if (!node) await failTaskTool(tp, p, "TASK_NODE_NOT_FOUND", `Node ${params.nodeId} does not exist in task ${taskId}.`, { taskId, nodeId: params.nodeId, expected: { validNodes: Object.keys(task.nodes) }, received: { nodeId: params.nodeId }, actionableHint: "Valid node ids are listed in task.json. Run swarm_task_status or swarm_graph to inspect." });
 				if (TERMINAL_NODE_STATUSES.has(node.status)) await failTaskTool(tp, p, "INVALID_TRANSITION", `Node ${params.nodeId} is terminal (${node.status}); cannot assign.`, { taskId, nodeId: params.nodeId, received: { nodeStatus: node.status } });
 				// Qualification is prepared at task creation. Planning can prepare/revise it, but source-changing implementation cannot start until the gate is ready or the human has confirmed it. Legacy tasks have no gate and remain compatible.
-				if (task.qualification && node.role === "implementer" && !["ready", "confirmed"].includes(task.qualification.status)) {
+				if (task.qualification && inferRoleKind(params.nodeId, node.role) === "implementer" && !["ready", "confirmed"].includes(task.qualification.status)) {
 					await failTaskTool(tp, p, "QUALIFICATION_NOT_READY", `Cannot assign implementation node ${params.nodeId}: qualification gate is ${task.qualification.status}. Complete human discussion and call swarm_confirm_qualification first.`, { taskId, nodeId: params.nodeId, qualification: task.qualification, actionableHint: "Read artifacts/qualification-gate.md, discuss unresolved user decisions, then call swarm_confirm_qualification." });
 				}
 				// Readiness: assignable when actionable (ready, or unassigned ready-status current) or already active (reassign).
