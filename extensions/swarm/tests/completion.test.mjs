@@ -46,7 +46,10 @@ const p = paths(scratch);
 for (const h of handlers.session_start ?? []) await h({}, { cwd: scratch, mode: "tui", hasUI: false });
 
 // Seed: one real task via the tool + two agents written into state.
+// (swarm_create_task is root-gated after the orchestrator->root rename; root the seeder.)
+process.env.PI_SWARM_IS_ROOT = "1";
 const ct = await tools.swarm_create_task.execute("c", { title: "Demo feature", goal: "ship it", cwd: scratch }, undefined, undefined, { cwd: scratch });
+process.env.PI_SWARM_IS_ROOT = "";
 const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 const st = await readState(p, scratch);
 st.agents = {
@@ -59,9 +62,9 @@ let fail = 0;
 const ok = (name, cond) => { if (cond) console.log("  ok  ", name); else { fail++; console.error("  FAIL", name); } };
 const vals = async (prefix) => (await complete(prefix) ?? []).map((i) => i.value);
 
-// 1. Empty prefix -> all subcommands (25 total incl. lifecycle cmds + panes + flow).
+// 1. Empty prefix -> all subcommands (28 total incl. lifecycle cmds + panes + flow + deregister).
 const subs = await vals("");
-ok("empty lists all subcommands", subs.length === 27 && subs.includes("graph") && subs.includes("flow") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("goal") && subs.includes("panes") && subs.includes("pool"));
+ok("empty lists all subcommands", subs.length === 28 && subs.includes("graph") && subs.includes("flow") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("goal") && subs.includes("panes") && subs.includes("pool") && subs.includes("deregister"));
 
 // 1b. goal subcommands include update (goal-interval feature).
 ok("goal <space> offers show/set/update/done", JSON.stringify(await vals("goal ")) === JSON.stringify(["goal show", "goal set", "goal update", "goal done"]));
@@ -69,6 +72,15 @@ ok("goal <space> offers show/set/update/done", JSON.stringify(await vals("goal "
 // 2. Partial subcommand filters by prefix.
 const stSubs = await vals("st");
 ok("'st' -> status + stop", JSON.stringify(stSubs) === JSON.stringify(["status", "stop"]));
+
+// 1c. deregister: 'he' prefix offers 'here' plus agent ids; flags after the id.
+ok("'de' -> deregister", JSON.stringify(await vals("de")) === JSON.stringify(["deregister"]));
+ok("deregister <space> offers here + agents", JSON.stringify((await vals("deregister ")).sort()) === JSON.stringify(["deregister here", "deregister planner", "deregister reviewer"]));
+ok("deregister he -> here only", JSON.stringify(await vals("deregister he")) === JSON.stringify(["deregister here"]));
+ok("deregister rev -> reviewer", JSON.stringify(await vals("deregister rev")) === JSON.stringify(["deregister reviewer"]));
+ok("deregister here <space> -> flags", JSON.stringify((await vals("deregister here ")).sort()) === JSON.stringify(["deregister here --force", "deregister here --purge"]));
+ok("deregister planner --p -> --purge", JSON.stringify(await vals("deregister planner --p")) === JSON.stringify(["deregister planner --purge"]));
+ok("deregister extra positional -> nothing", JSON.stringify(await complete("deregister here extra")) === JSON.stringify([]));
 
 // 3. graph + space -> the concise # form by default (value keeps "graph ").
 const graphTasks = await vals("graph ");
@@ -110,7 +122,7 @@ ok("send with body -> no suggestions", JSON.stringify(sendBody) === JSON.stringi
 
 // 9. spawn role position only (id is free text).
 const spawnRole = await vals("spawn worker-1 ");
-ok("spawn <id> <space> -> role kinds", spawnRole.length === 7 && spawnRole.includes("spawn worker-1 planner"));
+ok("spawn <id> <space> -> role kinds", spawnRole.length === 8 && spawnRole.includes("spawn worker-1 planner"));
 const spawnId = await complete("spawn worker-1");
 ok("spawn id word -> no suggestions", JSON.stringify(spawnId) === JSON.stringify([]));
 
@@ -163,7 +175,8 @@ const items0 = await complete("");
 ok("subcommand items have descriptions", items0.every((i) => i.label && i.description && i.value));
 
 // 20. scoped command completions expose only their domain and remap to alias values.
-ok("/swarm-agents top-level verbs", JSON.stringify(await valsScoped("swarm-agents", "")) === JSON.stringify(["list", "status", "spawn", "register", "panes", "stop", "restart", "role", "pause", "resume", "sendkey", "attach", "release", "mailbox", "identity"]));
+ok("/swarm-agents top-level verbs", JSON.stringify(await valsScoped("swarm-agents", "")) === JSON.stringify(["list", "status", "spawn", "register", "deregister", "panes", "stop", "restart", "role", "pause", "resume", "sendkey", "attach", "release", "mailbox", "identity"]));
+ok("/swarm-agents deregister remaps to /swarm completion", JSON.stringify((await valsScoped("swarm-agents", "deregister ")).sort()) === JSON.stringify(["deregister here", "deregister planner", "deregister reviewer"]));
 ok("/swarm-tasks top-level verbs", JSON.stringify(await valsScoped("swarm-tasks", "")) === JSON.stringify(["list", "graph", "status", "next", "validate"]));
 ok("/swarm-tasks status remaps task completion", JSON.stringify(await valsScoped("swarm-tasks", "status ")) === JSON.stringify(["status 1"]));
 ok("/swarm-msg only offers send", JSON.stringify(await valsScoped("swarm-msg", "")) === JSON.stringify(["send"]));

@@ -29,6 +29,7 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "validate", description: "Validate a task graph" },
 	{ name: "spawn", description: "Spawn an agent: <id> [role]" },
 	{ name: "register", description: "Adopt a tmux pane: <here|target> <id> [role] [flags]" },
+	{ name: "deregister", description: "De-register a session from its role: <here|id> [--force] [--purge]" },
 	{ name: "panes", description: "List tmux panes/targets (for register)" },
 	{ name: "stop", description: "Stop an agent: <id> [--force] [--no-kill]" },
 	{ name: "restart", description: "Restart an agent: <id>" },
@@ -53,6 +54,7 @@ const SCOPED_COMMANDS: Record<string, { name: string; description: string; canon
 		{ name: "status", description: "PM-facing status rollup", canonical: "status" },
 		{ name: "spawn", description: "Spawn an agent: <id> [role]", canonical: "spawn" },
 		{ name: "register", description: "Adopt a tmux pane into the swarm", canonical: "register" },
+		{ name: "deregister", description: "De-register a session from its swarm role (pane stays alive)", canonical: "deregister" },
 		{ name: "panes", description: "List tmux panes/targets", canonical: "panes" },
 		{ name: "stop", description: "Stop an agent", canonical: "stop" },
 		{ name: "restart", description: "Restart an agent", canonical: "restart" },
@@ -86,6 +88,7 @@ const IDENTITY_SUBS = ["reload", "show"];
 const MAILBOX_SUBS = ["reset"];
 const REGISTER_FLAGS = ["--kind", "--model", "--provider", "--inject", "--no-inject"];
 const STOP_FLAGS = ["--force", "--no-kill"];
+const DEREGISTER_FLAGS = ["--force", "--purge"];
 const ROLE_FLAGS = ["--kind", "--caps"];
 const SENDKEY_FLAGS = ["--literal", "--enter"];
 const RELEASE_FLAGS = ["--force"];
@@ -236,6 +239,14 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 			case "stop":
 				if (tokens.length === 1) return await agentSuggestions(p, cwd, b, currentWord);
 				return flagSuggestions(STOP_FLAGS, b, currentWord);
+			case "deregister":
+				// <here|id> [--force] [--purge]: 'here' = the current pane (self-service); otherwise any
+				// agent id (self-service for your own id, root-only for others — enforced at run time).
+				if (tokens.length === 1) {
+					const here = startsWith("here", currentWord) ? [{ value: `${b}here`, label: "here", description: "the current tmux pane (self-service)" }] : [];
+					return [...here, ...(await agentSuggestions(p, cwd, b, currentWord))];
+				}
+				return flagSuggestions(DEREGISTER_FLAGS, b, currentWord);
 			case "sendkey":
 				// <id> <keys...> [--literal] [--enter]: id then free-text keys; offer flags only.
 				if (tokens.length === 1) return await agentSuggestions(p, cwd, b, currentWord);

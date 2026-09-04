@@ -20,18 +20,19 @@ import { claimRootLeader, ensureRoot, overridePath } from "./identity.ts";
 import { startRootPump, bumpSwapChain } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError, pickSlot, slotKey, effectiveConfig } from "./pool.ts";
-import { MAX_CONSECUTIVE_NUDGES_DEFAULT, TRACE_AGENT_LEASE_CLEARED, TRACE_AGENT_LEASE_SET, TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
+import { MAX_CONSECUTIVE_NUDGES_DEFAULT, SWARM_GUEST_ID, TRACE_AGENT_LEASE_CLEARED, TRACE_AGENT_LEASE_SET, TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
 import type { ModelSlot } from "./types.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
-// --inject/--no-inject --kind <v> --model <v> --provider <v> --caps <v> --yes; everything else goes to `rest`.
-function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string; origin?: string; "set-by-scope"?: string } {
-	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string; origin?: string; "set-by-scope"?: string } = { rest: [], force: false, kill: true, literal: false, enter: false, yes: false };
+// --inject/--no-inject --kind <v> --model <v> --provider <v> --caps <v> --yes --purge; everything else goes to `rest`.
+function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; purge: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string; origin?: string; "set-by-scope"?: string } {
+	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; purge: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string; origin?: string; "set-by-scope"?: string } = { rest: [], force: false, kill: true, literal: false, enter: false, yes: false, purge: false };
 	for (let i = 0; i < tokens.length; i++) {
 		const t = tokens[i];
 		if (t === "--force") out.force = true;
 		else if (t === "--no-kill") out.kill = false;
+		else if (t === "--purge") out.purge = true;
 		else if (t === "--literal") out.literal = true;
 		else if (t === "--enter") out.enter = true;
 		else if (t === "--inject") out.inject = true;
@@ -61,7 +62,7 @@ function parseGoalSetInterval(raw: string): { ok: true; ms: number } | { ok: fal
 	if (!Number.isFinite(ms) || ms <= 0) return { ok: false, error: `invalid interval "${raw}"` };
 	return { ok: true, ms: Math.floor(ms) };
 }
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (root-only: durable recovery attention report) | remind <task-id> <node-id> (root-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | lease <id> [--reuse|--park] [--until <iso>] [--reason <text>] [--clear] (root-only) | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set [-i|--interval <time>] <text> | goal update [-i|--interval <time>] [<text>] | goal done [<goalId>] (show read-only; set/update/done root-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (root-only: durable recovery attention report) | remind <task-id> <node-id> (root-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | deregister <here|id> [--force] [--purge] (self-service exit from a role; pane stays alive; other-agent id root-only) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | lease <id> [--reuse|--park] [--until <iso>] [--reason <text>] [--clear] (root-only) | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set [-i|--interval <time>] <text> | goal update [-i|--interval <time>] [<text>] | goal done [<goalId>] (show read-only; set/update/done root-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -146,7 +147,7 @@ function normalizeScopedSwarmArgs(commandName: ScopedSwarmCommandName, args: str
 	if (!tokens.length) return null;
 	const [cmd, ...rest] = tokens;
 	if (commandName === "swarm-agents") {
-		if (!["list", "status", "spawn", "register", "panes", "stop", "restart", "role", "pause", "resume", "sendkey", "attach", "release", "mailbox", "identity"].includes(cmd)) return null;
+		if (!["list", "status", "spawn", "register", "deregister", "panes", "stop", "restart", "role", "pause", "resume", "sendkey", "attach", "release", "mailbox", "identity"].includes(cmd)) return null;
 		return [cmd, ...rest].join(" ");
 	}
 	if (commandName === "swarm-tasks") {
@@ -675,7 +676,73 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					} catch (err: any) { ctx.ui.notify(`Stop failed: ${err?.message || err}`, "warning"); }
 					return;
 				}
-				if (cmd === "restart") {
+				if (cmd === "deregister") {
+				// Self-service inverse of `/swarm register here <id> [role]`: de-register THIS pane's pi
+				// session from its swarm role without killing the pane. A session may always deregister
+				// ITSELF (worker dignity: exit a role you were put in without asking the PM); targeting
+				// ANOTHER agent id is root-only (same authority line as /swarm stop). The root (PM) role
+				// itself is not deregistrable from inside a session — the PM identity is pane-lifetime
+				// state (env + root-leader claim + pump), not an adoptable agent record.
+				// Semantics: mark stopped via stopAgent (keeps pane alive with killPane:false; refuses
+				// active tasks without --force; ack-debt notifies root; mailbox/identity/history persist
+				// by stable id), optionally --purge the record + delivered ledger (mailbox/identity files
+				// stay on disk for re-registration), then un-adopt the in-process identity so this
+				// session returns to the inert guest surface (env unset, footer reset, guest gating).
+				const flags = parseFlags(rest);
+				const target = flags.rest.shift();
+				if (!target) {
+					ctx.ui.notify("De-register a pi session from its swarm role (inverse of register; the pane stays alive):\n  /swarm deregister here            (this pane — self-service)\n  /swarm deregister <id>            (another agent — root-only)\nflags: --force (release active tasks) --purge (also remove the agent record + delivered ledger; mailbox/identity files stay)", "warning");
+					return;
+				}
+				const me = currentAgentId();
+				// Resolve 'here' to the calling session's own agent id (same resolution + guidance wording
+					// as /swarm mailbox reset here).
+				let agentId: string | undefined = isHereToken(target) ? me : undefined;
+				if (isHereToken(target) && (!agentId || agentId === SWARM_GUEST_ID)) {
+					ctx.ui.notify("Cannot resolve 'here' to a swarm agent in this pane. Register this pane first (for an agent: /swarm register here <id> [role]; for PM: /swarm register here root), or pass an explicit agent id.", "warning");
+						return;
+					}
+				if (!agentId) agentId = safeId(target);
+				if (agentId === "root") {
+					ctx.ui.notify("The root (PM) role cannot be de-registered from inside a session — it is bound to the PM pane (env opt-in + root-leader claim + PM pump), not an adoptable agent record. Exit or stop the PM pane to end the role.", "warning");
+					return;
+				}
+				const self = me !== SWARM_GUEST_ID && me === agentId;
+				if (!self && me !== "root") {
+					ctx.ui.notify("deregister is self-service for your own pane; deregistering another agent is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning");
+					return;
+				}
+				let purged = false;
+				const result = await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					if (flags.purge) {
+						// Purge requires the record to exist (stopAgent would otherwise throw after side
+						// effects); same unknown-agent error surface.
+						if (!st.agents[agentId!]) throw new Error(`Unknown swarm agent: ${agentId}`);
+					}
+					const r = await stopAgent(pi, ctx.cwd, p, st, agentId!, { force: flags.force, killPane: false });
+					if (flags.purge) {
+						delete st.agents[agentId!];
+						delete st.delivered[agentId!];
+						purged = true;
+					}
+					await trace(p, "agent.deregister", { agentId, self, by: me, force: flags.force, purge: flags.purge, paneKilled: false });
+					await writeState(p, st);
+					return r;
+				});
+				// Un-adopt the in-process identity ONLY when this pane was the deregistered agent (a PM
+				// deregistering a remote pane must not lose its own root identity). Mirror of the adopt
+				// branch in `register`: unset env, reset footer, re-apply guest gating so the swarm tool
+				// surface disappears from this session's next prompt.
+				if (self) {
+					delete process.env.PI_SWARM_AGENT_ID;
+					applySwarmToolGating(pi);
+					if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${SWARM_GUEST_ID}`);
+				}
+				ctx.ui.notify(`Deregistered ${result.agent.id}${purged ? " (record purged)" : " (record kept, marked stopped)"}; pane kept alive — this session is now an inert swarm guest. Re-register anytime with /swarm register here <id> [role].`, "info");
+				return;
+			}
+			if (cmd === "restart") {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm restart <id>", "warning"); return; }
 					try {
@@ -1466,7 +1533,7 @@ if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
 		handler: async (args, ctx) => runCommand(args, ctx, "swarm"),
 	});
 	pi.registerCommand("swarm-agents", {
-		description: "Agent lifecycle shortcuts for swarm: list | status | spawn | register | panes | stop | restart | role | pause | resume | sendkey | attach | release | mailbox | identity",
+		description: "Agent lifecycle shortcuts for swarm: list | status | spawn | register | deregister | panes | stop | restart | role | pause | resume | sendkey | attach | release | mailbox | identity",
 		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-agents", argumentPrefix),
 		handler: async (args, ctx) => runCommand(args, ctx, "swarm-agents"),
 	});
