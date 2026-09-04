@@ -62,6 +62,38 @@ export const POOL_MAX_RETRIES = 2; // consecutive failures before cooldown
 // assertion narrows `null` past ModelSlot's `model: string` invariant.
 export const POOL_SCAFFOLD_PLACEHOLDER = [{ model: null as any, provider: null as any }];
 
+// === swarm.yml scaffold (swarm.yml feature) ===
+// Commented YAML placeholder written to `.pi/swarm.yml` when NO source (settings.json swarm
+// block or swarm.yml) declares a modelPool and settings.json has no swarm block to merge into.
+// `model: null` keeps `slot_empty_model` steering parity with the JSON placeholder — validate
+// flags it and the operator is steered to fill real values. Comments teach the format.
+export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model pool configuration (YAML, comments welcome)
+# This file is read by the swarm extension only; pi core ignores it (pi core reads .pi/settings.json).
+# Precedence: extensions.swarm > swarm (in .pi/settings.json) > this file.
+# Full reference: docs/swarm/tools.md#configuration
+
+modelPool:
+  # - model: glm-5.1          # pi model id (required)
+  #   provider: zai-coding-cn  # provider id (recommended — resolves the model registry entry)
+  #   weight: 10               # optional, default 1; 0 = fallback-only
+  #   roles: [implementer]     # optional role-kind allow-list
+  #   quotaResetMs: 7200000    # optional quota-bench floor (ms)
+  - model: null
+    provider: null
+
+# rotation:
+#   strategy: weighted        # weighted | round-robin | sticky
+#   cooldownMs: 900000
+#   maxRetries: 2
+
+# defaultModel: glm-5.1
+# defaultProvider: zai-coding-cn
+`;
+
+// One-shot notify text surfaced to the root TUI on first scaffold into swarm.yml.
+export const POOL_SCAFFOLD_YML_NOTIFY_TEXT =
+	"Created .pi/swarm.yml model-pool placeholder — fill in your model/provider. See docs/swarm/tools.md.";
+
 // One-shot notify text surfaced to the root TUI on first scaffold.
 // Stable so tests + locale passes can match/swap it without touching hooks.ts.
 export const POOL_SCAFFOLD_NOTIFY_TEXT =

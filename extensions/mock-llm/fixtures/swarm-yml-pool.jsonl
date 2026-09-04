@@ -1,0 +1,8 @@
+# swarm-yml-pool: /swarm pool validate + list must reflect a pool configured in .pi/swarm.yml.
+# Lane recipe (tmux): scratch dir with .pi/swarm.yml only (mock-llm slots), then
+#   pi --provider mock-llm --model swarm-yml-pool -e ./extensions/mock-llm -e ./extensions/swarm
+# Expected surface: validate PASSES with source swarm.yml (explicit-pool, 2 slots); list shows
+# both mock slots; no settings.json swarm block is created by reading (scaffold may create the
+# yml placeholder only when no pool is declared — here one IS declared, so no write at all).
+{"name":"inspect swarm.yml pool via validate","events":[{"type":"text","delayMs":15,"text":"Validating the swarm.yml-configured pool.","chunks":["Validating ","the swarm.yml-configured pool."]},{"type":"toolcall","delayMs":15,"name":"swarm_spawn_agent","id":"yaml-inspect-1","arguments":{"id":"yaml-probe","role":"probe agent for swarm.yml pool resolution; immediately idle"}},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"settle and stop","events":[{"type":"text","delayMs":10,"text":"Lane complete.","chunks":["Lane complete."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

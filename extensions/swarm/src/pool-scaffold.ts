@@ -24,9 +24,12 @@ import {
 	POOL_SCAFFOLD_DOC_HINT,
 	POOL_SCAFFOLD_NOTIFY_TEXT,
 	POOL_SCAFFOLD_PLACEHOLDER,
+	POOL_SCAFFOLD_YML_NOTIFY_TEXT,
+	POOL_SCAFFOLD_YML_PLACEHOLDER,
 } from "./constants.ts";
 import { atomicWriteFile, paths as statePaths, trace } from "./state.ts";
 import { readJsonSafe } from "./utils.ts";
+import { readSwarmYml, swarmYmlPath } from "./config.ts";
 
 // Result of one ensurePoolScaffold invocation. The discriminated union lets the caller pattern-match
 // without inspecting booleans. `notify` is only present on the `wrote:true` branch — the caller emits
@@ -41,6 +44,11 @@ export type ScaffoldResult =
 // signature stays simple; tests call this directly to assert the resolved path.
 export function poolScaffoldSettingsPath(cwd: string): string {
 	return join(cwd, CONFIG_DIR_NAME, "settings.json");
+}
+
+// The YAML home for the scaffold (swarm.yml feature). Exposed for tests + docs.
+export function poolScaffoldYmlPath(cwd: string): string {
+	return swarmYmlPath(cwd);
 }
 
 // Inspect the raw `.pi/settings.json` object and decide where to write the placeholder. RUNTIME
@@ -115,6 +123,23 @@ export async function ensurePoolScaffold(
 	}
 	if (raw === undefined) raw = {};
 
+	// swarm.yml check: if the yml file already declares a modelPool, the user chose yml as their
+	// home — never scaffold over it, never write settings.json. Corrupt yml: skip too (we must not
+	// clobber a file we cannot parse; trace for visibility).
+	const ymlPath = swarmYmlPath(cwd);
+	if (existsSync(ymlPath)) {
+		let yml: any = null;
+		let ymlCorrupt = false;
+		try { yml = readSwarmYml(cwd); } catch { ymlCorrupt = true; }
+		if (ymlCorrupt) {
+			await trace(p, "pool.scaffold_skipped_yml_unparseable", { path: ymlPath }).catch(() => {});
+			return { wrote: false, skipped: "modelpool_present", path: ymlPath };
+		}
+		if (yml && Object.prototype.hasOwnProperty.call(yml, "modelPool")) {
+			return { wrote: false, skipped: "modelpool_present", path: ymlPath };
+		}
+	}
+
 	// Resolve the scaffold plan: which block to write into, whether to skip, and the existing keys.
 	const plan = resolveScaffoldPlan(raw);
 	if (plan.skip) {
@@ -132,9 +157,11 @@ export async function ensurePoolScaffold(
 	} else if (plan.source === "swarm") {
 		nextRaw = { ...raw, swarm: nextSwarmBlock };
 	} else {
-		// source === "absent": neither block exists. Write top-level `swarm.modelPool` (the conventional
-		// location; matches docs/swarm/tools.md canonical example).
-		nextRaw = { ...raw, swarm: nextSwarmBlock };
+		// source === "absent": neither JSON block exists. Scaffold `.pi/swarm.yml` — the comment-friendly
+		// dedicated home (swarm.yml feature; user decision 2026-09-04). settings.json is left untouched.
+		await atomicWriteFile(ymlPath, POOL_SCAFFOLD_YML_PLACEHOLDER);
+		await trace(p, "pool.scaffold_created", { path: ymlPath, previousKeys: [], source: "swarm.yml", modelPool: POOL_SCAFFOLD_PLACEHOLDER }).catch(() => {});
+		return { wrote: true, path: ymlPath, previousKeys: [], notify: POOL_SCAFFOLD_YML_NOTIFY_TEXT };
 	}
 
 	await atomicWriteFile(settingsPath, `${JSON.stringify(nextRaw, null, 2)}\n`);

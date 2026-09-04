@@ -104,6 +104,12 @@ let you inspect the effective pool (or implicit singleton fallback), catch
 structural errors, and dry-run the spawn gate before any worker is committed.
 The extension never edits `.pi/settings.json`.
 
+A comment-friendly YAML alternative is `.pi/swarm.yml` (swarm-only; pi core
+ignores it). Precedence: `extensions.swarm` > `swarm` (settings.json) >
+`.pi/swarm.yml`. Raw-config resolution for ALL readers lives in
+`src/config.ts` (`readSwarmRawConfig`); see `docs/swarm/tools.md#configuration`.
+Fresh projects get a commented scaffold in `.pi/swarm.yml` (not settings.json).
+
 Inside pi:
 
 ```text
@@ -116,6 +122,7 @@ Inside pi:
 /swarm pause reviewer                                              # drain from reuse (pane stays alive)
 /swarm resume reviewer
 /swarm stop reviewer                                               # refuse if active tasks; --force to override
+/swarm deregister here                                             # exit THIS pane's role (pane stays alive; self-service)
 /swarm status
 /swarm pool list                                            # weighted/rr/sticky slot health + rotation
 /swarm pool show                                           # full config view (pool OR implicit singleton)

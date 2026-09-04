@@ -19,6 +19,7 @@ Implementation modules:
 - `extensions/swarm/src/taskgraph.ts` — graph rules and closure logic
 - `extensions/swarm/src/delivery.ts` — message semantics and retryability
 - `extensions/swarm/src/session.ts` — root/model/session detection
+- `extensions/swarm/src/config.ts` — raw swarm-config resolution (settings.json blocks + .pi/swarm.yml, strict precedence)
 - `extensions/swarm/src/identity.ts` — generated identity cards and overrides
 - `extensions/swarm/src/tmux.ts` — tmux integration and pane capture
 - `extensions/swarm/src/mailbox.ts` — mailbox append/read helpers

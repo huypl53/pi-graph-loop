@@ -106,6 +106,22 @@ Legacy singleton (still supported, observable as an implicit singleton pool):
 
 Top-level \`swarm\` is preferred; \`extensions.swarm\` is accepted for backward compatibility.
 
+Comment-friendly YAML alternative (.pi/swarm.yml — pi core ignores this file; swarm-only):
+
+# .pi/swarm.yml
+modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    weight: 50
+rotation:
+  strategy: weighted
+  cooldownMs: 900000
+  maxRetries: 2
+
+Precedence: extensions.swarm > swarm (settings.json) > .pi/swarm.yml.
+When settings.json declares a swarm block AND .pi/swarm.yml exists, /swarm pool validate warns
+(the JSON wins; yml contents are ignored).
+
 Discover: /swarm pool show    Validate: /swarm pool validate    Preflight probe: /swarm pool preview-preflight
 See: docs/swarm/operations.md (Model pool configuration)`;
 
@@ -799,7 +815,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						return;
 					}
 					if (sub === "validate") {
-						// Read-only structural check; never edits .pi/settings.json.
+						// Read-only structural check; never edits .pi/settings.json or .pi/swarm.yml.
 						const v = validateSwarmSettings();
 						const lines: string[] = [];
 						if (v.ok) {
@@ -809,13 +825,14 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							else if (v.shape.kind === "explicit-pool") lines.push(`  - Explicit pool with ${(v.shape as any).slots} slot(s).`);
 							else if (v.shape.kind === "both") lines.push(`  - Both: ${(v.shape as any).slots} pool slot(s) + singleton fallback.`);
 							lines.push("  - No duplicates, all weights/cooldownMs/maxRetries are well-formed.");
-							await trace(p, "pool.validate", { by: currentAgentId(), ok: true, shape: v.shape.kind });
-							ctx.ui.notify(lines.join("\n"), "info");
+							for (const w of v.warnings || []) lines.push(`  ! ${w.field || "config"}: ${w.message}`);
+							await trace(p, "pool.validate", { by: currentAgentId(), ok: true, shape: v.shape.kind, warnings: (v.warnings || []).length });
+							ctx.ui.notify(lines.join("\n"), (v.warnings || []).length ? "warning" : "info");
 						} else {
 							lines.push(`Config validation: FAILED (${v.errors.length} issue${v.errors.length === 1 ? "" : "s"})`);
 							for (const e of v.errors) lines.push(`  \u2717 ${e.field || "config"}: ${e.message}`);
 							lines.push("");
-							lines.push("Fix in .pi/settings.json (under `swarm` or `extensions.swarm`), then run /swarm pool validate again.");
+							lines.push("Fix in .pi/settings.json (under `swarm` or `extensions.swarm`) or .pi/swarm.yml, then run /swarm pool validate again.");
 							await trace(p, "pool.validate", { by: currentAgentId(), ok: false, shape: v.shape.kind, errors: v.errors.length });
 							ctx.ui.notify(lines.join("\n"), "warning");
 						}

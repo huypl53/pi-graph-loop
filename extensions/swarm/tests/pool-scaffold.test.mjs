@@ -19,11 +19,13 @@ import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { ensurePoolScaffold, poolScaffoldSettingsPath } from "../src/pool-scaffold.ts";
+import { ensurePoolScaffold, poolScaffoldSettingsPath, poolScaffoldYmlPath } from "../src/pool-scaffold.ts";
 import {
 	POOL_SCAFFOLD_DOC_HINT,
 	POOL_SCAFFOLD_NOTIFY_TEXT,
+	POOL_SCAFFOLD_YML_NOTIFY_TEXT,
 } from "../src/constants.ts";
+import { parse as parseYaml } from "yaml";
 import { atomicWriteFile, paths, readState, readJsonlRecords, withLock, writeState } from "../src/state.ts";
 import { now } from "../src/utils.ts";
 
@@ -54,23 +56,27 @@ async function makeCase(name) {
 	return dir;
 }
 
-// === Case A: missing swarm.modelPool -> writes placeholder ===
+// === Case A: missing swarm.modelPool, settings.json WITHOUT a swarm block -> scaffolds .pi/swarm.yml ===
+// (swarm.yml feature: the fresh-project default home is now the comment-friendly yml file;
+// settings.json stays untouched when it has no swarm block to merge into.)
 {
 	const dir = await makeCase("A");
 	await mkdir(join(dir, ".pi"), { recursive: true });
 	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ theme: "dark" }));
 	const result = await ensurePoolScaffold(dir, {});
 	ok("A: result.wrote === true", result.wrote === true);
-	const after = JSON.parse(await readFile(poolScaffoldSettingsPath(dir), "utf8"));
-	ok("A: theme preserved", after.theme === "dark");
-	ok("A: swarm.modelPool has 1 placeholder slot", Array.isArray(after.swarm?.modelPool) && after.swarm.modelPool.length === 1);
-	ok("A: placeholder slot has null model", after.swarm.modelPool[0].model === null);
-	ok("A: placeholder slot has null provider", after.swarm.modelPool[0].provider === null);
+	ok("A: scaffold path is .pi/swarm.yml", result.path === poolScaffoldYmlPath(dir));
+	const settingsAfter = JSON.parse(await readFile(poolScaffoldSettingsPath(dir), "utf8"));
+	ok("A: settings.json untouched (theme preserved, no swarm block)", settingsAfter.theme === "dark" && settingsAfter.swarm === undefined);
+	const ymlText = await readFile(poolScaffoldYmlPath(dir), "utf8");
+	ok("A: yml placeholder contains model: null", /model:\s*null/.test(ymlText));
+	const yml = parseYaml(ymlText);
+	ok("A: parsed yml modelPool has 1 placeholder slot", Array.isArray(yml.modelPool) && yml.modelPool.length === 1 && yml.modelPool[0].model === null);
 	const traces = await readTraces(dir, "pool.scaffold_created");
 	ok("A: pool.scaffold_created trace emitted", traces.length === 1);
 	ok("A: trace.previousKeys is []", deepEqual(traces[0]?.previousKeys, []));
-	ok("A: trace.source === absent (no swarm block existed)", traces[0]?.source === "absent");
-	ok("A: result.notify matches the constant", result.notify === POOL_SCAFFOLD_NOTIFY_TEXT);
+	ok("A: trace.source === swarm.yml", traces[0]?.source === "swarm.yml");
+	ok("A: result.notify matches the yml constant", result.notify === POOL_SCAFFOLD_YML_NOTIFY_TEXT);
 }
 
 // === Case B: modelPool: [] -> no-op ===
@@ -174,8 +180,11 @@ async function makeCase(name) {
 	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: "not-an-object" }));
 	const r = await ensurePoolScaffold(dir, {});
 	ok("G: wrote === true (malformed swarm block treated as absent)", r.wrote === true);
-	const after = JSON.parse(await readFile(poolScaffoldSettingsPath(dir), "utf8"));
-	ok("G: scaffold wrote swarm.modelPool as object", typeof after.swarm === "object" && Array.isArray(after.swarm.modelPool));
+	ok("G: scaffold home is .pi/swarm.yml (no valid JSON block to merge into)", r.path === poolScaffoldYmlPath(dir));
+	const yml = parseYaml(await readFile(poolScaffoldYmlPath(dir), "utf8"));
+	ok("G: yml scaffold has modelPool array", Array.isArray(yml?.modelPool));
+	const settingsAfter = JSON.parse(await readFile(poolScaffoldSettingsPath(dir), "utf8"));
+	ok("G: settings.json left untouched (swarm still the malformed string)", settingsAfter.swarm === "not-an-object");
 }
 
 // === Case H: BINDING B1 — extensions.swarm.modelPool exists but top-level swarm.modelPool absent ===
@@ -237,10 +246,11 @@ async function makeCase(name) {
 	// the same payload multiple times (idempotent), so the final file must be parseable + valid.
 	const results = await Promise.all(Array.from({ length: 8 }, () => ensurePoolScaffold(dir, {})));
 	ok("I: every concurrent call wrote", results.every((r) => r.wrote === true));
-	const after = JSON.parse(await readFile(poolScaffoldSettingsPath(dir), "utf8"));
-	ok("I: final file is parseable", after && typeof after === "object");
-	ok("I: final file has exactly one modelPool slot", Array.isArray(after.swarm?.modelPool) && after.swarm.modelPool.length === 1);
-	ok("I: theme still preserved", after.theme === "dark");
+	const afterYml = parseYaml(await readFile(poolScaffoldYmlPath(dir), "utf8"));
+	ok("I: final yml is parseable", afterYml && typeof afterYml === "object");
+	ok("I: final yml has exactly one modelPool slot", Array.isArray(afterYml.modelPool) && afterYml.modelPool.length === 1);
+	const settingsAfter = JSON.parse(await readFile(poolScaffoldSettingsPath(dir), "utf8"));
+	ok("I: theme still preserved", settingsAfter.theme === "dark");
 	const traces = await readTraces(dir, "pool.scaffold_created");
 	ok("I: concurrent traces all recorded (idempotent payload)", traces.length >= 1);
 }
@@ -263,10 +273,11 @@ async function makeCase(name) {
 	// path). The user is expected to call /swarm pool rotate /swarm pool reset to clear settings.json,
 	// but in this case we simulate a clean-slate by removing BOTH .pi/swarm AND the modelPool key.
 	await rm(join(dir, ".pi", "swarm"), { recursive: true, force: true });
+	await rm(poolScaffoldYmlPath(dir), { force: true }); // clean-slate wipes the yml home too
 	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ theme: "dark" }));
 	const r2 = await ensurePoolScaffold(dir, {});
 	ok("J: second scaffold (after clean-slate) wrote", r2.wrote === true);
-	ok("J: notify text matches the constant (would re-emit on a real TUI session_start)", r2.notify === POOL_SCAFFOLD_NOTIFY_TEXT);
+	ok("J: notify text matches the yml constant (would re-emit on a real TUI session_start)", r2.notify === POOL_SCAFFOLD_YML_NOTIFY_TEXT);
 }
 
 // === Case K: corrupt settings.json -> hard skip, file untouched ===

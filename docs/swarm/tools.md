@@ -47,16 +47,50 @@ was a separate persistence layer and is no longer part of the core surface.
 
 ## Configuration
 
+### Config sources and precedence
+
+The swarm model pool reads three config sources with strict precedence:
+
+1. `.pi/settings.json` → `extensions.swarm` block (highest — runtime parity with pi core)
+2. `.pi/settings.json` → top-level `swarm` block
+3. `.pi/swarm.yml` → top-level keys, no `swarm:` wrapper (the filename is the namespace)
+
+`.pi/swarm.yml` is the comment-friendly home: pi core parses `settings.json` with bare
+`JSON.parse` (comments would make pi silently drop the whole project block), so swarm owns
+this dedicated YAML file. Comments are allowed anywhere in it.
+
+```yaml
+# .pi/swarm.yml
+modelPool:
+  - model: glm-5.1            # pi model id (required)
+    provider: zai-coding-cn   # provider id (recommended)
+    weight: 10                # optional; 0 = fallback-only
+    roles: [implementer]      # optional role-kind allow-list
+    quotaResetMs: 7200000     # optional quota-bench floor (ms)
+  - model: gpt-5.4-mini
+    provider: openai
+rotation:
+  strategy: weighted         # weighted | round-robin | sticky
+  cooldownMs: 900000
+  maxRetries: 2
+# defaultModel: glm-5.1      # implicit-singleton fallback config
+# defaultProvider: zai-coding-cn
+```
+
+When settings.json declares a swarm block AND `.pi/swarm.yml` carries recognized config,
+`/swarm pool validate` emits a **warning** (never an error): the JSON wins and the yml
+contents are ignored. Corrupt YAML is reported as `swarm_yml_unreadable` (`ok:false`);
+all readers degrade to defaults exactly like corrupt JSON does today.
+
 ### Model pool auto-scaffold on first root session (Issue 20)
 
-When the root (`PI_SWARM_IS_ROOT=1`) starts a session, the
-extension checks `.pi/settings.json`. If neither `swarm.modelPool` nor
-`extensions.swarm.modelPool` (runtime precedence: extensions wins per
-`extensions/swarm/src/session.ts:readSwarmSettings`) is declared, the
-extension writes a placeholder slot `[{ "model": null, "provider": null }]`
-into the resolved block while preserving every other top-level key. The
-placeholder is intentionally invalid against `validateSwarmSettings()` so the
-user is steered toward replacing it with a real slot.
+When the root (`PI_SWARM_IS_ROOT=1`) starts a session and NO source declares
+`modelPool`, the extension writes a **commented placeholder into `.pi/swarm.yml`** (the
+new default home for fresh projects — settings.json is not created). If settings.json
+already has a `swarm`/`extensions.swarm` block without `modelPool`, the placeholder
+merges into that JSON block instead (unchanged behavior). The placeholder is intentionally
+invalid against `validateSwarmSettings()` so the user is steered toward replacing it with a
+real slot.
 
 A one-shot TUI notify fires ONLY when (a) the scaffold actually wrote AND
 (b) the durable flag `SwarmState.poolScaffoldNotifiedAt` is absent. After the
@@ -158,6 +192,18 @@ needs structured parameters or machine-readable results.
 
 - `/swarm spawn <id> [role]`
 - `/swarm register <here|tmux-target> <id> [role…] [flags]`
+- `/swarm deregister <here|id> [--force] [--purge]` — self-service exit from a role.
+  `here` (or your own agent id) de-registers THIS pane's session: the agent record is
+  marked stopped, the pane is kept alive, the in-process identity is un-adopted (env
+  cleared, footer reset, guest tool gating re-applied — the swarm tool surface disappears
+  on the next prompt). Deregistering ANOTHER agent id is root-only. The root (PM) role
+  itself cannot be de-registered (it is pane-lifetime state, not an adoptable record).
+  Refuses active tasks unless `--force` (delegated to the same guard as `/swarm stop`).
+  `--purge` additionally removes the agent record + delivered ledger from
+  `swarm-state.json` (mailbox/identity files stay on disk; a still-live purged pane's
+  next `session_start` would resurrect its record as "externally started" — prefer
+  plain deregister + `/swarm stop` for remote panes, or use `--purge` only after the
+  pane is dead). Traces `agent.deregister`.
 - `/swarm stop <id> [--force] [--no-kill]`
 - `/swarm restart <id>`
 - `/swarm role <id> <role…> [--kind K] [--caps a,b]`

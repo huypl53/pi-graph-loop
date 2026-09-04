@@ -1,10 +1,9 @@
 // === swarm/session.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
-import { join, dirname, relative, sep } from "node:path";
 import type { ModelSlot, RotationConfig, RotationStrategy, SwarmSettings } from "./types.ts";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, EXT, SWARM_GUEST_ID } from "./constants.ts";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, SWARM_GUEST_ID } from "./constants.ts";
 import { ensureRoot } from "./identity.ts";
+import { readSwarmRawConfig } from "./config.ts";
 
 // Explicit opt-in for the root/PM identity. Truthy PI_SWARM_IS_ROOT (1/true/yes)
 // asserts "this session IS the human-driven root". A bare `pi` session opened in the project
@@ -28,26 +27,15 @@ export function currentAgentId() {
 }
 
 export function readSwarmSettings(cwd = process.cwd()): SwarmSettings {
-	const file = join(cwd, CONFIG_DIR_NAME, "settings.json");
-	if (!existsSync(file)) return {};
-	try {
-		const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, any>;
-		const fromExtensions = raw?.extensions?.[EXT];
-		const fromTopLevel = raw?.swarm;
-		const cfg = (fromExtensions && typeof fromExtensions === "object" ? fromExtensions : undefined) ||
-			(fromTopLevel && typeof fromTopLevel === "object" ? fromTopLevel : undefined);
-		if (!cfg || typeof cfg !== "object") return {};
-		return {
-			defaultModel: typeof cfg.defaultModel === "string" && cfg.defaultModel.trim() ? cfg.defaultModel.trim() : undefined,
-			defaultProvider: typeof cfg.defaultProvider === "string" && cfg.defaultProvider.trim() ? cfg.defaultProvider.trim() : undefined,
-			modelPool: parseModelPool(cfg.modelPool),
-			rotation: parseRotationConfig(cfg.rotation),
-		};
-	} catch {
-		return {};
-	}
+	const { cfg } = readSwarmRawConfig(cwd);
+	if (!cfg || typeof cfg !== "object") return {};
+	return {
+		defaultModel: typeof cfg.defaultModel === "string" && cfg.defaultModel.trim() ? cfg.defaultModel.trim() : undefined,
+		defaultProvider: typeof cfg.defaultProvider === "string" && cfg.defaultProvider.trim() ? cfg.defaultProvider.trim() : undefined,
+		modelPool: parseModelPool(cfg.modelPool),
+		rotation: parseRotationConfig(cfg.rotation),
+	};
 }
-
 function parseModelPool(raw: unknown): ModelSlot[] | undefined {
 	if (!Array.isArray(raw) || !raw.length) return undefined;
 	const slots: ModelSlot[] = [];

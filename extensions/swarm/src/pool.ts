@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import type { ModelSlot, Paths, PoolHealthState, PoolSlotHealth, PreflightError, PreflightResult, ProviderErrorKind, RotationConfig, RotationStrategy, SwarmSettings } from "./types.ts";
 import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
 import { currentModel, currentProvider, readSwarmSettings } from "./session.ts";
+import { readSwarmRawConfig, readSwarmYml, swarmYmlPath, type SwarmConfigSource } from "./config.ts";
 import { atomicWriteFile, trace } from "./state.ts";
 
 // Credential probe for preflightSpawn (3b): does this provider have a usable API key?
@@ -40,10 +41,11 @@ const QUOTA_RESET_DEFAULT_MS =
 		? Math.floor(Number(process.env.PI_SWARM_QUOTA_RESET_MS))
 		: 0;
 
-// Read quotaResetMs directly from the raw settings.json. `readSwarmSettings()` strips unknown
-// fields (session.ts:parseModelPool only forwards model/provider/weight/label), and session.ts is
-// out of scope for this issue. The raw read is cached per cwd; chdir invalidates by re-reading the
-// file. Cheap enough to call per bench (bench is a cold path, not a hot path).
+// Read quotaResetMs directly from the raw config (settings.json blocks or swarm.yml — resolved by
+// readSwarmRawConfig with the same precedence). `readSwarmSettings()` strips unknown fields
+// (session.ts:parseModelPool only forwards model/provider/weight/label/roles), hence this raw path.
+// The raw read is cached per cwd; chdir invalidates by re-reading the file. Cheap enough to call
+// per bench (bench is a cold path, not a hot path).
 const quotaResetCache = new Map<string, Map<string, number>>();
 function readQuotaResetMsFor(cwd: string, key: string): number {
 	let m = quotaResetCache.get(cwd);
@@ -51,18 +53,14 @@ function readQuotaResetMsFor(cwd: string, key: string): number {
 		m = new Map();
 		quotaResetCache.set(cwd, m);
 		try {
-			const file = join(cwd, CONFIG_DIR_NAME, "settings.json");
-			if (existsSync(file)) {
-				const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, any>;
-				const cfg = raw?.extensions?.swarm || raw?.swarm;
-				if (cfg && Array.isArray(cfg.modelPool)) {
-					for (const s of cfg.modelPool) {
-						if (!s || typeof s !== "object") continue;
-						if (typeof s.quotaResetMs === "number" && Number.isFinite(s.quotaResetMs) && s.quotaResetMs >= 0) {
-							const provider = typeof s.provider === "string" && s.provider ? s.provider : "(default)";
-							const model = typeof s.model === "string" ? s.model : "";
-							m.set(`${provider}/${model}`, Math.floor(s.quotaResetMs));
-						}
+			const { cfg } = readSwarmRawConfig(cwd);
+			if (cfg && Array.isArray(cfg.modelPool)) {
+				for (const s of cfg.modelPool) {
+					if (!s || typeof s !== "object") continue;
+					if (typeof s.quotaResetMs === "number" && Number.isFinite(s.quotaResetMs) && s.quotaResetMs >= 0) {
+						const provider = typeof s.provider === "string" && s.provider ? s.provider : "(default)";
+						const model = typeof s.model === "string" ? s.model : "";
+						m.set(`${provider}/${model}`, Math.floor(s.quotaResetMs));
 					}
 				}
 			}
@@ -205,31 +203,19 @@ export function implicitSingletonPool(): { slots: ModelSlot[]; rotation: Require
 // is empty. Read-only: never rewrites the file. Used by `/swarm pool show|validate|help` and tests.
 export type SettingsShape =
 	| { kind: "empty" }
-	| { kind: "singleton"; defaultModel?: string; defaultProvider?: string; source: "extensions.swarm" | "swarm" }
-	| { kind: "explicit-pool"; slots: number; rotation?: RotationConfig; source: "extensions.swarm" | "swarm" }
-	| { kind: "both"; slots: number; rotation?: RotationConfig; singleton: { defaultModel?: string; defaultProvider?: string }; source: "extensions.swarm" | "swarm" };
+	| { kind: "singleton"; defaultModel?: string; defaultProvider?: string; source: SwarmConfigSource }
+	| { kind: "explicit-pool"; slots: number; rotation?: RotationConfig; source: SwarmConfigSource }
+	| { kind: "both"; slots: number; rotation?: RotationConfig; singleton: { defaultModel?: string; defaultProvider?: string }; source: SwarmConfigSource };
 
 export function classifySwarmSettings(cwd = process.cwd()): SettingsShape {
-	let raw: any = null;
-	try {
-		const file = join(cwd, ".pi", "settings.json");
-		if (!existsSync(file)) return { kind: "empty" };
-		raw = JSON.parse(readFileSync(file, "utf8"));
-	} catch {
-		return { kind: "empty" };
-	}
-	const fromExt = raw?.extensions?.swarm;
-	const fromTop = raw?.swarm;
-	const cfg = (fromExt && typeof fromExt === "object" ? { ...fromExt, source: "extensions.swarm" as const } : null)
-		|| (fromTop && typeof fromTop === "object" ? { ...fromTop, source: "swarm" as const } : null);
+	const { cfg, source } = readSwarmRawConfig(cwd);
 	if (!cfg) return { kind: "empty" };
-	const source: "extensions.swarm" | "swarm" = cfg.source;
 	const slots = Array.isArray(cfg.modelPool) ? cfg.modelPool.length : 0;
 	const rotation = (cfg.rotation && typeof cfg.rotation === "object") ? cfg.rotation as RotationConfig : undefined;
 	const hasSingleton = typeof cfg.defaultModel === "string" || typeof cfg.defaultProvider === "string";
-	if (slots && hasSingleton) return { kind: "both", slots, rotation, singleton: { defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider }, source };
-	if (slots) return { kind: "explicit-pool", slots, rotation, source };
-	if (hasSingleton) return { kind: "singleton", defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider, source };
+	if (slots && hasSingleton) return { kind: "both", slots, rotation, singleton: { defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider }, source: source! };
+	if (slots) return { kind: "explicit-pool", slots, rotation, source: source! };
+	if (hasSingleton) return { kind: "singleton", defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider, source: source! };
 	return { kind: "empty" };
 }
 
@@ -238,31 +224,40 @@ export function classifySwarmSettings(cwd = process.cwd()): SettingsShape {
 export type PoolValidationError = { kind: string; field?: string; message: string };
 
 // Validate a settings shape WITHOUT mutating the file. Returns [] on success; otherwise an array
-// of structured errors suitable for `/swarm pool validate` rendering. Read-only.
-export function validateSwarmSettings(cwd = process.cwd()): { ok: boolean; errors: PoolValidationError[]; shape: SettingsShape } {
+// of structured errors suitable for `/swarm pool validate` rendering. Read-only. `warnings` are
+// advisory (never flip ok): the both_sources_present warning fires when settings.json declares a
+// swarm block AND .pi/swarm.yml exists with recognized config — precedence means the JSON wins, so
+// the operator should know their yml edits are being masked.
+export function validateSwarmSettings(cwd = process.cwd()): { ok: boolean; errors: PoolValidationError[]; warnings: PoolValidationError[]; shape: SettingsShape } {
 	const errors: PoolValidationError[] = [];
+	const warnings: PoolValidationError[] = [];
 	let shape: SettingsShape;
-	let raw: any = null;
-	try {
-		const file = join(cwd, ".pi", "settings.json");
-		if (!existsSync(file)) {
-			shape = { kind: "empty" };
-			return { ok: true, errors: [], shape }; // empty is valid (use defaults)
-		}
-		raw = JSON.parse(readFileSync(file, "utf8"));
-	} catch (err: any) {
+	const resolved = readSwarmRawConfig(cwd);
+	if (resolved.corrupt.includes("settings.json")) {
 		shape = { kind: "empty" };
-		errors.push({ kind: "settings_unreadable", message: `Could not parse .pi/settings.json: ${err?.message || err}` });
-		return { ok: false, errors, shape };
+		errors.push({ kind: "settings_unreadable", message: `Could not parse .pi/settings.json: corrupt JSON` });
+		return { ok: false, errors, warnings, shape };
 	}
-	const fromExt = raw?.extensions?.swarm;
-	const fromTop = raw?.swarm;
-	const cfg = (fromExt && typeof fromExt === "object" ? fromExt : null) || (fromTop && typeof fromTop === "object" ? fromTop : null);
+	if (resolved.corrupt.includes("swarm.yml")) {
+		shape = { kind: "empty" };
+		errors.push({ kind: "swarm_yml_unreadable", message: `Could not parse .pi/swarm.yml: corrupt YAML (comments are fine; check indentation/colons)` });
+		return { ok: false, errors, warnings, shape };
+	}
+	const cfg = resolved.cfg;
 	if (!cfg) {
 		shape = { kind: "empty" };
-		return { ok: true, errors: [], shape };
+		return { ok: true, errors, warnings, shape }; // empty is valid (use defaults)
 	}
-	const source: "extensions.swarm" | "swarm" = fromExt ? "extensions.swarm" : "swarm";
+	const source = resolved.source!;
+
+	// Both-sources warning: settings.json declares a swarm block AND swarm.yml carries config.
+	if (source !== "swarm.yml" && existsSync(swarmYmlPath(cwd))) {
+		let ymlCfg: any = null;
+		try { ymlCfg = readSwarmYml(cwd); } catch { /* corrupt already reported above */ }
+		if (ymlCfg && (Array.isArray(ymlCfg.modelPool) || ymlCfg.defaultModel || ymlCfg.defaultProvider || ymlCfg.rotation)) {
+			warnings.push({ kind: "both_sources_present", field: ".pi/swarm.yml", message: `Both .pi/settings.json (swarm block) and .pi/swarm.yml declare swarm config — settings.json (${source}) wins and the .pi/swarm.yml contents are ignored. Move your config into one file.` });
+		}
+	}
 	const slots = Array.isArray(cfg.modelPool) ? cfg.modelPool : null;
 	const rotation = (cfg.rotation && typeof cfg.rotation === "object") ? cfg.rotation : null;
 	if (slots) {
@@ -317,7 +312,7 @@ export function validateSwarmSettings(cwd = process.cwd()): { ok: boolean; error
 	} else {
 		shape = { kind: "empty" };
 	}
-	return { ok: errors.length === 0, errors, shape };
+	return { ok: errors.length === 0, errors, warnings, shape };
 }
 
 function inCooldown(h: PoolSlotHealth | undefined, nowMs: number): boolean {

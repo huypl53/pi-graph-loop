@@ -33,6 +33,7 @@ Inside pi:
 Common first actions:
 - spawn an agent: `/swarm spawn reviewer Review the current diff`
 - register the current pane: `/swarm register here reviewer Review the diff`
+deregister the current pane from its role: `/swarm deregister here` (pane stays alive; self-service)
 - inspect status: `/swarm status`
 - inspect traces: `/swarm trace`
 
@@ -105,17 +106,25 @@ Un-cancelling is not supported in this release. To work on the same goal again, 
 
 ### Model pool auto-scaffold on first root session (Issue 20)
 
-On the root's first `session_start` in a swarm, the extension checks
-`.pi/settings.json`. If neither `swarm.modelPool` nor `extensions.swarm.modelPool`
-(runtime precedence: extensions wins per `src/session.ts:readSwarmSettings`) is
-declared, the extension writes a placeholder slot `[{ "model": null, "provider": null }]`
-into the resolved block while preserving every other top-level key. The write is
-atomic (`state.ts:atomicWriteFile`) so a torn write is impossible.
+On the root's first `session_start` in a swarm, the extension checks every config
+source (`.pi/settings.json` swarm/`extensions.swarm` blocks, then `.pi/swarm.yml`).
+When NO source declares `modelPool`:
 
-Three skip paths surface as their own return values but emit **no notify** and
-leave `.pi/settings.json` untouched:
+- settings.json has a `swarm`/`extensions.swarm` block → the placeholder slot
+  `[{ "model": null, "provider": null }]` merges into that JSON block, preserving
+  every other top-level key (unchanged behavior);
+- no JSON block exists (fresh project) → a **commented placeholder is written to
+  `.pi/swarm.yml`** — the comment-friendly default home (swarm.yml feature).
+  settings.json is not created or touched.
 
-- `modelpool_present` — either block already declares `modelPool` (even `[]`).
+The write is atomic (`state.ts:atomicWriteFile`) so a torn write is impossible.
+
+Four skip paths surface as their own return values but emit **no notify** and
+leave every config file untouched:
+
+- `modelpool_present` — any source (JSON block or `.pi/swarm.yml`) already declares
+  `modelPool` (even `[]`, or a corrupt-but-present yml — never clobber what we
+  cannot parse; traced as `pool.scaffold_skipped_yml_unparseable` for the yml case).
 - `no_pi_dir` — `.pi/` directory is absent. We deliberately do NOT `mkdir -p`
   to create a pi directory inside a non-pi project. The `.pi/swarm/...` trace
   pipeline is also skipped (it would mkdir the chain we just refused to create).
@@ -130,21 +139,26 @@ same `withLock` block that creates the leader-root session record, so
 subsequent `session_start` invocations (including `/reload` of the same swarm)
 are suppressed until the entire `.pi/swarm` directory is cleared (clean-slate
 re-notify is the intended escape hatch). The notify text is stable; see the
-`POOL_SCAFFOLD_NOTIFY_TEXT` constant in `extensions/swarm/src/constants.ts`.
+`POOL_SCAFFOLD_NOTIFY_TEXT` / `POOL_SCAFFOLD_YML_NOTIFY_TEXT` constants in
+`extensions/swarm/src/constants.ts` (the notify names the file actually written).
 
 Trace events (durable in `.pi/swarm/traces/events.jsonl`):
 
-- `pool.scaffold_created` — `{ path, previousKeys, source, modelPool }`. Fires
+- `pool.scaffold_created` — `{ path, previousKeys, source, modelPool }`. `source`
+  is `extensions.swarm`, `swarm`, or `swarm.yml`. Fires
   on every successful write; idempotent across calls because the payload is the
   same and the durable flag suppresses the notify.
 - `pool.scaffold_skipped_unparseable` — `{ path, error }`.
+- `pool.scaffold_skipped_yml_unparseable` — `{ path }` (corrupt swarm.yml — skip,
+  never clobber).
 - `pool.scaffold_error` — `{ error }`. Fires only when the scaffold threw an
   unexpected error (e.g. an EACCES from a read-only mount). The session_start
   handler swallows this and continues; the user can diagnose via `swarm_trace`.
 
-Placeholder `model: null` is intentionally invalid against
-`validateSwarmSettings()` (which reports `slot_empty_model`); this nudges the
-user to replace it with a real slot before running `/swarm pool validate`.
+Placeholder `model: null` (JSON) / `model: null` inside the commented yml template
+is intentionally invalid against `validateSwarmSettings()` (which reports
+`slot_empty_model`); this nudges the user to replace it with a real slot before
+running `/swarm pool validate`.
 Concurrent root session_starts (two PM panes racing) both call
 `ensurePoolScaffold`; both observe `modelPool` absent; the first
 `atomicWriteFile` wins and the second sees the post-write state on its next read
