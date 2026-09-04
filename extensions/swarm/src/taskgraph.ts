@@ -1,12 +1,13 @@
 // === swarm/taskgraph.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { existsSync, readFileSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, NODE_ICON, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
+import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, NODE_ICON, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, PI_SWARM_PROXY_METRIC_INTERVAL_MS, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_POOL_DEPLETED_NUDGE, TRACE_PROXY_METRIC_EMIT, TRACE_STALE_OPEN_NUDGE_EMITTED, TRACE_STALE_OPEN_SURFACED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
-import { paths, readTaskState, taskPaths, trace, traceTask } from "./state.ts";
+import { paths, readTaskState, taskPaths, trace, traceTask, writeState } from "./state.ts";
 import { stopAgent } from "./agents.ts";
 
 // ---- File-scope ownership: effective scope resolution + conservative overlap predicate ----
@@ -53,7 +54,13 @@ export type ScopeSegment = string | { intra: string };
 export function normalizeScopePattern(pattern: string): ScopeSegment[] | null {
 	if (typeof pattern !== "string" || !pattern.length) return null;
 	if (pattern.includes("\\") || pattern.startsWith("/")) return null;
-	const segments = pattern.split("/");
+	// R26: a trailing slash means "this directory subtree" (dir/ ≡ dir/**). Detect BEFORE
+	// split, strip, then re-append a trailing "**" sentinel after the segment loop.
+	// Internal "//" still hits the empty-segment guard below (conservative).
+	const dirSubtree = pattern.endsWith("/");
+	const trimmed = dirSubtree ? pattern.replace(/\/+$/, "") : pattern;
+	if (!trimmed.length) return null;
+	const segments = trimmed.split("/");
 	const out: ScopeSegment[] = [];
 	for (const seg of segments) {
 		if (!seg.length || seg === ".") return null;
@@ -65,6 +72,7 @@ export function normalizeScopePattern(pattern: string): ScopeSegment[] | null {
 		}
 		out.push(seg);
 	}
+	if (dirSubtree) out.push("**");
 	return out;
 }
 
@@ -331,6 +339,7 @@ export function checkStallNotificationStale(
 	nodeId: string,
 	agentId: string,
 	nowMs: number,
+	opts?: { freshAssignment?: boolean },
 ): NotificationStaleness {
 	const evidence: string[] = [];
 	const node = task.nodes[nodeId];
@@ -392,6 +401,15 @@ export function checkStallNotificationStale(
 	}
 
 	// (6) Agent stopped / unhealthy with grace (SETTLE_NOTIFY_COOLDOWN_MS per plan §2 C4).
+	// R11-5: NEVER applies to a fresh assignment mint (swarm_assign_task passes freshAssignment) —
+	// an agent being `stopped` at assign time is the normal restart-the-pane flow; fencing the
+	// brand-new canonical assignment because the OLD canonId is old deadlocks the worker
+	// (live incident 2026-09-01 08:25: task.assign.fenced agent_stopped → worker self-assign
+	// attempt → ORCHESTRATOR_AUTHORITY_REQUIRED → settled idle with the node open).
+	if (opts?.freshAssignment) {
+		evidence.push("fresh_assignment: skipping agent-stopped staleness (assign path)");
+		return { stale: false, reason: null, evidence };
+	}
 	const agent = st.agents[agentId];
 	if (agent && (agent.status === "stopped" || agent.health === "unhealthy")) {
 		const assignmentAge = canonId && st.messages[canonId]?.createdAt
@@ -473,40 +491,113 @@ function edgeMatchesActivation(task: TaskState, edge: TaskEdge) {
 	return Boolean(edge.rework && (from.status === "failed" || from.status === "skipped"));
 }
 
-export function activateReworkNodes(task: TaskState) {
+function reworkEdgeKey(edge: TaskEdge) {
+	return `${edge.from}=>${edge.to}:${edge.when}:${edge.rework ? 1 : 0}`;
+}
+
+function sourceAttemptIdentity(task: TaskState, edge: TaskEdge): { attemptId: string; sourceStatus: TaskNodeStatus; sourceOutcome: string | null | undefined } | null {
+	const from = task.nodes[edge.from];
+	if (!from) return null;
+	const latestAttemptId = from.activeAttemptId || from.attemptHistory?.[from.attemptHistory.length - 1]?.attemptId;
+	if (latestAttemptId) {
+		return { attemptId: latestAttemptId, sourceStatus: from.status, sourceOutcome: from.outcome };
+	}
+	return { attemptId: `legacy:${edge.from}:${from.status}:${from.outcome ?? ""}:${from.lastActivityAt ?? ""}`, sourceStatus: from.status, sourceOutcome: from.outcome };
+}
+
+function hasConsumedRework(task: TaskState, edge: TaskEdge, sourceAttemptId: string, reopenedNodeId: string) {
+	return (task.reworkConsumption || []).some((record) => record.edgeKey === reworkEdgeKey(edge) && record.sourceNodeId === edge.from && record.sourceAttemptId === sourceAttemptId && record.reopenedNodeId === reopenedNodeId);
+}
+
+function recordReworkConsumption(task: TaskState, edge: TaskEdge, reopenedNodeId: string, sourceAttemptId: string, sourceStatus: TaskNodeStatus, sourceOutcome: string | null | undefined) {
+	task.reworkConsumption ||= [];
+	if (hasConsumedRework(task, edge, sourceAttemptId, reopenedNodeId)) return false;
+	task.reworkConsumption.push({
+		edgeKey: reworkEdgeKey(edge),
+		sourceNodeId: edge.from,
+		sourceAttemptId,
+		reopenedNodeId,
+		consumedAt: now(),
+		sourceStatus,
+		sourceOutcome,
+	});
+	return true;
+}
+
+export function activateReworkNodes(task: TaskState, tp?: TaskPaths) {
 	const reopened: string[] = [];
-	for (const [nodeId, node] of Object.entries(task.nodes)) {
-		if (!(node.status === "failed" || node.status === "skipped" || node.status === "done")) continue;
-		const incoming = task.edges.filter((edge) => edge.to === nodeId);
-		if (!incoming.some((edge) => edge.rework && edgeMatchesActivation(task, edge))) continue;
-		const priorActiveAttemptId = node.activeAttemptId;
-		const priorAttempt = priorActiveAttemptId && node.attemptHistory
-			? node.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId)
-			: undefined;
-		if (priorAttempt && (priorAttempt.status === "active" || priorAttempt.status === "completed" || priorAttempt.status === "failed" || priorAttempt.status === "skipped")) {
-			priorAttempt.supersededAt ||= now();
-			priorAttempt.supersededBy = "<rework>";
-			if (priorAttempt.status === "active") {
-				priorAttempt.status = "superseded";
-				priorAttempt.outcome = undefined;
-				priorAttempt.releasedAt ||= now();
-				priorAttempt.releaseReason = "terminal";
+	for (const [sourceNodeId, sourceNode] of Object.entries(task.nodes)) {
+		if (!(sourceNode.status === "failed" || sourceNode.status === "skipped" || sourceNode.status === "done")) continue;
+		const outgoing = task.edges.filter((edge) => edge.from === sourceNodeId && edge.rework);
+		for (const activation of outgoing) {
+			if (!edgeMatchesActivation(task, activation)) continue;
+			const source = sourceAttemptIdentity(task, activation);
+			if (!source) continue;
+			const target = task.nodes[activation.to];
+			if (!target) continue;
+			if (hasConsumedRework(task, activation, source.attemptId, activation.to)) {
+				trace(paths(process.cwd()), "task.rework.suppressed", {
+					taskId: task.taskId,
+					nodeId: activation.to,
+					edgeKey: reworkEdgeKey(activation),
+					sourceNodeId: activation.from,
+					sourceAttemptId: source.attemptId,
+					targetStatus: target.status,
+					sourceStatus: source.sourceStatus,
+					sourceOutcome: source.sourceOutcome ?? null,
+				});
+				continue;
 			}
+			if (!(target.status === "pending" || target.status === "failed" || target.status === "skipped" || target.status === "done")) {
+				trace(paths(process.cwd()), "task.rework.suppressed", {
+					taskId: task.taskId,
+					nodeId: activation.to,
+					edgeKey: reworkEdgeKey(activation),
+					sourceNodeId: activation.from,
+					sourceAttemptId: source.attemptId,
+					targetStatus: target.status,
+					sourceStatus: source.sourceStatus,
+					sourceOutcome: source.sourceOutcome ?? null,
+					reason: "target_not_reopenable",
+				});
+				continue;
+			}
+
+			const priorActiveAttemptId = target.activeAttemptId;
+			const priorAttempt = priorActiveAttemptId && target.attemptHistory
+				? target.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId)
+				: undefined;
+			if (priorAttempt && (priorAttempt.status === "active" || priorAttempt.status === "completed" || priorAttempt.status === "failed" || priorAttempt.status === "skipped")) {
+				priorAttempt.supersededAt ||= now();
+				priorAttempt.supersededBy = "<rework>";
+				if (priorAttempt.status === "active") {
+					priorAttempt.status = "superseded";
+					priorAttempt.outcome = undefined;
+					priorAttempt.releasedAt ||= now();
+					priorAttempt.releaseReason = "terminal";
+				}
+			}
+
+			target.status = "ready";
+			target.assignee = undefined;
+			target.assignmentMessageId = undefined;
+			delete target.activeAttemptId;
+			target.outcome = null;
+			delete target.staleAt;
+			target.lastActivityAt = now();
+
+			recordReworkConsumption(task, activation, activation.to, source.attemptId, source.sourceStatus, source.sourceOutcome ?? null);
+			reopened.push(activation.to);
+			trace(paths(process.cwd()), TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, {
+				taskId: task.taskId,
+				nodeId: activation.to,
+				priorStatus: priorAttempt ? priorAttempt.status : (priorActiveAttemptId ? "unknown" : "done"),
+				priorAttemptId: priorActiveAttemptId ?? null,
+				edgeKey: reworkEdgeKey(activation),
+				sourceNodeId: activation.from,
+				sourceAttemptId: source.attemptId,
+			});
 		}
-		node.status = "ready";
-		node.assignee = undefined;
-		node.assignmentMessageId = undefined;
-		delete node.activeAttemptId;
-		node.outcome = null;
-		delete node.staleAt;
-		node.lastActivityAt = now();
-		reopened.push(nodeId);
-		trace(paths(process.cwd()), TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, {
-			taskId: task.taskId,
-			nodeId,
-			priorStatus: priorAttempt ? priorAttempt.status : (priorActiveAttemptId ? "unknown" : "done"),
-			priorAttemptId: priorActiveAttemptId ?? null,
-		});
 	}
 	return reopened;
 }
@@ -615,8 +706,11 @@ export function validateTaskGraph(task: TaskState): GraphValidation {
 	if (!task.nodes[task.start]) errors.push(`start node does not exist: ${task.start}`);
 	for (const id of nodeIds) if (!SAFE_ID_RE.test(id)) errors.push(`node id is not a safe id: ${id}`);
 
+	const incoming = new Map<string, number>();
+	for (const edge of task.edges) incoming.set(edge.to, (incoming.get(edge.to) || 0) + 1);
 	for (const [id, node] of Object.entries(task.nodes)) {
 		for (const dep of node.dependsOn || []) if (!nodeIds.has(dep)) errors.push(`node ${id} dependsOn missing node: ${dep}`);
+		if (id !== task.start && (incoming.get(id) || 0) > 0 && !(node.dependsOn || []).length) errors.push(`node ${id} has incoming edge(s) but no dependsOn; non-root fan-in nodes must declare dependsOn`);
 	}
 	for (const edge of task.edges) {
 		if (!nodeIds.has(edge.from)) errors.push(`edge from missing node: ${edge.from}`);
@@ -775,6 +869,19 @@ export function printGraphText(task: TaskState, ready: string[], current: string
 		lines.push("Artifacts:");
 		for (const a of artifactStatus) lines.push(`  ${a.exists ? "✓" : "○"} ${a.path}`);
 	}
+	const commitEvidence = readCommitEvidence(task);
+	if (commitEvidence) {
+		lines.push("");
+		lines.push(`Commit evidence: ${commitEvidence.status}${commitEvidence.reason ? ` (${commitEvidence.reason})` : ""}${commitEvidence.baseline ? ` baseline=${commitEvidence.baseline}` : ""}${commitEvidence.head ? ` head=${commitEvidence.head}` : ""}${commitEvidence.nodeId && commitEvidence.nodeId !== "commit" ? ` node=${commitEvidence.nodeId}` : ""}`);
+	}
+	// Row 75 (fix): surface evidence for other commit-like terminal nodes (finalize, ship, ...)
+	// using the read-compat legacy `.commit` alias so orchestrators don't have to query the task JSON.
+	for (const [nodeId, ev] of Object.entries(task.evidence as Record<string, any> || {})) {
+		if (nodeId === "commit") continue;
+		if (!ev || typeof ev !== "object") continue;
+		lines.push("");
+		lines.push(`Commit evidence [${nodeId}]: ${ev.status}${ev.reason ? ` (${ev.reason})` : ""}${ev.baseline ? ` baseline=${ev.baseline}` : ""}${ev.head ? ` head=${ev.head}` : ""}`);
+	}
 	lines.push("");
 	lines.push(`Ready: ${ready.length ? ready.join(", ") : "(none)"}`);
 	return lines.join("\n");
@@ -851,7 +958,12 @@ export function computeTaskStatus(task: TaskState): TaskStatus {
 	const nodes = Object.values(task.nodes).filter((n) => n.status !== "cancelled");
 	if (nodes.some((n) => n.status === "failed")) return "failed";
 	const terminals = Object.keys(task.nodes).filter((id) => isGraphTerminalNode(task, id) && task.nodes[id].status !== "cancelled").map((id) => task.nodes[id]);
-	if (terminals.length && terminals.every((n) => n.status === "done" || n.status === "skipped")) return "done";
+	// R11-2: `done` additionally requires that NO live assignment remains anywhere in the graph.
+	// Graph-terminal completion alone is insufficient when a sub-task cycle re-arms an earlier node
+	// (rework/reuse): a done terminal set + an assigned/in_progress/ready node must stay in_progress,
+	// or the task-close worker sweep force-kills agents mid-assignment (6 kills, 2026-09-01).
+	const liveAssignment = nodes.some((n) => n.status === "assigned" || n.status === "in_progress" || n.status === "ready");
+	if (terminals.length && !liveAssignment && terminals.every((n) => n.status === "done" || n.status === "skipped")) return "done";
 	// Task-level blocked: every active (non-terminal, non-pending) node is blocked => the task cannot
 	// make progress. Pure (derived from node states, not the possibly-stale task.currentNodes); resumable
 	// (a node leaving `blocked` returns the task to in_progress/done). Cancelled nodes are excluded.
@@ -990,6 +1102,7 @@ export async function sweepTaskWorkersLocked(
 	cwd: string,
 	st: SwarmState,
 	taskId: string,
+	freshTask?: TaskState,
 ): Promise<SweepOutcome> {
 	// Opt-out check (first — short-circuit before any state read or trace).
 	if (process.env[PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV] === "1") {
@@ -999,32 +1112,52 @@ export async function sweepTaskWorkersLocked(
 	// sweep at every terminal transition site, so an agent whose only active task was the closing
 	// task now shows `activeTaskIds === []`. We rebuild the pre-release set per agent so the
 	// eligibility rule + per-agent trace evidence stay accurate. Reconstruction rules:
-	//   - cur includes taskId           -> pre-release = cur (release didn't touch them).
-	//   - cur empty AND link/assignment -> pre-release = [taskId] (sole-worker closure).
-	//   - cur has other tasks, no taskId -> pre-release = [taskId, ...cur] (cross-task agent).
-	//   - cur empty AND no link          -> pre-release = [] (never on this task).
+	//   - cur includes taskId                          -> pre-release = cur (release didn't touch).
+	//   - cur empty AND spawnedForTaskId === taskId    -> pre-release = [taskId] (sole-worker closure
+	//                                                     of a task-spawned worker).
+	//   - cur has other tasks (no taskId post-release) -> pre-release = [taskId, ...cur] (cross-task
+	//                                                     agent: keeps the closing task on its
+	//                                                     history so `cross_task_active` skip fires).
+	//   - cur empty AND no durable ownership link      -> pre-release = [] (never on this task —
+	//                                                     shared-pool agents belong to the role pool,
+	//                                                     not the task; node.assignee stamps are role
+	//                                                     evidence, not ownership evidence).
+	//
+	// R12 P0 (2026-09-01 mass-sweep fix): the previous branch-B also synthesized `[taskId]` when
+	// the agent appeared in `task.nodes[*].assignee` AND `cur.length === 0`. That synthesis
+	// conflated role evidence (the worker did the work) with ownership evidence (the worker belongs
+	// to this task) and made shared-pool workers (no `spawnedForTaskId` link) appear eligible for
+	// sweep, killing the entire role pool on a single task close. The fix removes the assignee-stamp
+	// synthesis from the empty-active-set branch; ownership is the durable `spawnedForTaskId` link
+	// only. Cross-task agents (with other active tasks beyond the closing one) still get the
+	// `[taskId, ...cur]` reconstruction so the `cross_task_active` skip reason remains accurate.
 	const tp = taskPaths(paths(cwd), taskId);
-	let task: TaskState | null = null;
-	try { task = await readTaskState(tp.taskJson); } catch { /* missing/unreadable: skip graph check */ }
-	const assignedInClosingTask = new Set<string>();
-	if (task) {
-		for (const n of Object.values(task.nodes)) {
-			if (n.assignee && n.assignee !== "orchestrator" && (n.status === "assigned" || n.status === "in_progress")) {
-				assignedInClosingTask.add(n.assignee);
-			}
-		}
-	}
+	let task: TaskState | null = freshTask ?? null;
+	// Prefer the caller's in-memory snapshot (terminal close mutates nodes AFTER the last disk
+	// write in some paths — R11-2 guard must not read a stale graph). Fall back to disk read.
+	if (!task) { try { task = await readTaskState(tp.taskJson); } catch { /* missing/unreadable: skip graph check */ } }
 	const priorActiveByAgent = new Map<string, string[]>();
 	for (const agent of Object.values(st.agents)) {
 		ensureAgentDefaults(agent);
 		const cur = agent.activeTaskIds.slice();
 		if (cur.includes(taskId)) {
+			// Race: release didn't strip taskId from this agent yet (concurrent path).
 			priorActiveByAgent.set(agent.id, cur);
-		} else if (cur.length === 0) {
-			const wasInTask = agent.spawnedForTaskId === taskId || assignedInClosingTask.has(agent.id);
-			priorActiveByAgent.set(agent.id, wasInTask ? [taskId] : []);
-		} else {
+		} else if (cur.length > 0) {
+			// Cross-task: agent has other active tasks beyond the closing one. Reconstructed
+			// pre-release = [taskId, ...cur] so the cross_task_active skip reason + per-agent
+			// trace evidence remain accurate when the agent has the durable ownership link
+			// (spawnedForTaskId === taskId) but is currently also serving another task.
 			priorActiveByAgent.set(agent.id, [taskId, ...cur]);
+		} else if (agent.spawnedForTaskId === taskId) {
+			// Sole-worker closure: agent was freshly spawned for this task and no other tasks
+			// remain. The durable ownership link is the only signal that makes this worker
+			// task-scoped (R12: node.assignee stamps alone are NOT sufficient).
+			priorActiveByAgent.set(agent.id, [taskId]);
+		} else {
+			// cur empty AND no durable ownership link: shared-pool agent. NEVER synthesized as
+			// sole-active-task from assignee stamps (R12 fix). Pre-release is empty.
+			priorActiveByAgent.set(agent.id, []);
 		}
 	}
 	const stopped: string[] = [];
@@ -1049,10 +1182,51 @@ export async function sweepTaskWorkersLocked(
 			if (wasInClosingTask && remainingAfterClose.length > 0) skipped.push({ agentId: agent.id, reason: "cross_task_active" });
 			continue;
 		}
+		// R11-2 blast-radius guard (belt to the computeTaskStatus suspenders): never stop an
+		// agent that still holds a live assignment (assigned/in_progress/ready node) in the
+		// closing task's graph, whatever the roll-up derived. Re-armed sub-task cycles depend
+		// on this when a stale task.status=done is repaired by a later path (reconcile mark).
+		if (task) {
+		const stillAssigned = Object.values(task.nodes).some(
+				(n) => n.assignee === agent.id && (n.status === "assigned" || n.status === "in_progress"),
+			);
+			if (stillAssigned) {
+				skipped.push({ agentId: agent.id, reason: "live_assignment_in_graph" });
+				continue;
+			}
+		}
+		// === Issue 82: lease-aware park-or-stop (precedes stop) ===
+		// When the orchestrator stamped an explicit lease on the agent, honor it BEFORE stopping.
+		//   - reuse: skip the sweep entirely (worker stays alive for cross-task reuse).
+		//   - park:  pause instead of stop (pane preserved for inspection / revival).
+		// Both leases auto-expire at `leaseUntil`; an expired lease falls through to default.
+		const leaseKind = agent.leaseKind;
+		const leaseUntilMs = agent.leaseUntil ? new Date(agent.leaseUntil).getTime() : 0;
+		const leaseValid = leaseKind && leaseUntilMs > Date.now();
+		if (leaseValid && leaseKind === "reuse") {
+			skipped.push({ agentId: agent.id, reason: "lease_reuse" });
+			continue;
+		}
+		if (leaseValid && leaseKind === "park") {
+			agent.paused = true;
+			agent.leaseReason = agent.leaseReason ?? "sweep honored park lease";
+			agent.updatedAt = new Date().toISOString();
+			stopped.push(agent.id); // counted as swept (paused) so the summary trace fires
+			skipped.push({ agentId: agent.id, reason: "lease_park" });
+			await trace(paths(cwd), TRACE_AGENT_TASK_SWEEP_PARKED, {
+				agentId: agent.id,
+				taskId,
+				leaseKind: "park",
+				leaseUntil: agent.leaseUntil,
+				leaseReason: agent.leaseReason ?? null,
+				by: "sweepTaskWorkersLocked",
+			});
+			continue;
+		}
 		// Stop via the lock-free core (no nested withLock). force:true so the empty-set check stays
 		// authoritative even if activeTaskIds had a stale pointer.
 		try {
-			const res = await stopAgent(pi, paths(cwd), st, agent.id, { force: true, killPane: true });
+			const res = await stopAgent(pi, cwd, paths(cwd), st, agent.id, { force: true, killPane: true });
 			stopped.push(agent.id);
 			await trace(paths(cwd), TRACE_AGENT_TASK_SWEEP_STOPPED, {
 				agentId: agent.id,
@@ -1060,6 +1234,8 @@ export async function sweepTaskWorkersLocked(
 				priorActiveTaskIds: priorActive,
 				releaseReason: spawnedForThis ? "spawned_for_task" : "sole_active_task",
 				spawnedForTaskId: agent.spawnedForTaskId ?? null,
+				leaseKind: leaseKind ?? null,
+				leaseValidAtSweep: Boolean(leaseValid),
 				killed: res.killed,
 				killMethod: res.method,
 				agentStatus: agent.status,
@@ -1080,6 +1256,91 @@ export async function sweepTaskWorkersLocked(
 		skippedCount: skipped.length,
 		by: "sweepTaskWorkersLocked",
 	});
+
+	// === R12 P0 — pool-depletion nudge ===
+	// When a task close transitions the effective live non-orchestrator agent pool from ≥1 to 0,
+	// wake the orchestrator with a high-priority nudge (mailbox + Issue 86 interrupt machinery)
+	// so it can either re-spawn workers or downgrade the goal. The transition is computed at
+	// sweep time: we know exactly which agent ids were stopped/parked in this call (the `stopped`
+	// list); the live count is taken from `st.agents` AFTER the loop, so any just-stopped agent
+	// already reflects `status: "stopped"` or `paused: true`.
+	//
+	// Transitions that DO NOT nudge:
+	//   - 0 → 0 (pool was already empty before this close — nothing to convey; also covers
+	//          idempotent re-invocations on a closed task where stopped.length === 0 anyway).
+	//   - ≥1 → ≥1 (sweep stopped some, but ≥1 non-orchestrator still running afterwards).
+	//
+	// Idempotency: a re-invoked sweep sees stopped=[] and returns at the guard above without
+	// nudging. The threshold is "≥1 → 0" only, so any single close call emits at most one nudge.
+	try {
+		const liveNonOrchestrator = Object.values(st.agents).filter(
+			(a) => a.id !== "orchestrator" && a.status !== "stopped" && !a.paused,
+		).length;
+		if (liveNonOrchestrator === 0) {
+			const key = `pool_depleted:${taskId}`;
+			// Compute pre-sweep live count by adding back the just-stopped set (stopped[] includes
+			// both freshly-stopped agents and lease_parked agents; both were 'running' pre-sweep).
+			const stoppedSet = new Set(stopped);
+			const preSweepLive = Object.values(st.agents).filter(
+				(a) => a.id !== "orchestrator" && a.status !== "stopped" && !a.paused,
+			).length + (Array.from(stoppedSet).filter((id) => {
+				const ag = st.agents[id];
+				return ag && ag.id !== "orchestrator";
+			}).length);
+			const stoppedForReport = Array.from(stoppedSet);
+			const p = paths(cwd);
+			await trace(p, TRACE_POOL_DEPLETED_NUDGE, {
+				taskId,
+				preSweepLive,
+				postSweepLive: liveNonOrchestrator,
+				stoppedAgentIds: stoppedForReport,
+				by: "sweepTaskWorkersLocked",
+			});
+			// Only emit the orchestrator nudge when there was actually a ≥1 → 0 transition
+			// (the pre-sweep live count was ≥1, the post-sweep is 0). A close that doesn't
+			// change the live count never reaches this branch because liveNonOrchestrator would
+			// still be ≥1 here. The 0 → 0 case is naturally suppressed by the liveNonOrchestrator
+			// === 0 guard combined with the preSweepLive check below.
+			if (preSweepLive >= 1) {
+				const { deliverMessageLocked } = await import("./mailbox.ts");
+				await deliverMessageLocked(pi, cwd, p, st, {
+					to: "orchestrator",
+					priority: "high",
+					subject: "swarm pool depleted",
+					body: `Task \`${taskId}\` closed and the task-close sweep drained the live non-orchestrator agent pool to 0.
+
+Stopped in this call: ${JSON.stringify(stoppedForReport)}.
+Live non-orchestrator agents remaining: ${liveNonOrchestrator}.
+
+R12 P0 contract: the sweep no longer force-kills shared-pool workers, but a task-scoped worker drain can still empty the pool. Decide now in this turn:
+  1. Re-spawn the role workers needed for the next task (swarm_spawn_agent for each missing role, or rely on swarm_assign_task autoSpawn).
+  2. If no more tasks are expected, mark the goal done (swarm_mark_goal_done) so the idle-streak pump stops nudging.
+
+(Idempotent within the sweep call: at most one nudge per close call. Not emitted on \`≥1 → ≥1\` or \`0 → 0\` transitions.)`,
+					idempotencyKey: key,
+					requiresAck: true,
+					requiresResponse: true,
+					conversationId: `task:${taskId}:pool_depleted`,
+				}).catch((err: any) => {
+					// Best-effort nudge delivery: a transient mailbox failure must not block the
+					// sweep outcome. Surface as a warning trace so observability still has a hook.
+					trace(p, "pool.depleted_nudge.delivery_failed", {
+						taskId,
+						error: String((err as Error)?.message || err).slice(0, 200),
+						by: "sweepTaskWorkersLocked",
+					}).catch(() => {});
+				});
+			}
+		}
+	} catch (err: any) {
+		// Nudge path is best-effort; the sweep outcome is already determined by the per-agent loop.
+		await trace(paths(cwd), "pool.depleted_nudge.error", {
+			taskId,
+			error: String((err as Error)?.message || err).slice(0, 200),
+			by: "sweepTaskWorkersLocked",
+		}).catch(() => {});
+	}
+
 	return { stopped, skipped };
 }
 
@@ -1113,6 +1374,207 @@ export async function scanAgentOpenAssignments(p: Paths, st: SwarmState, agentId
 	}
 	return out;
 }
+// === Issue 83a — progress stamp helper (production entry point, called from hooks.ts:tool_execution_end) ===
+// Stamps `node.lastProgressAt` when a worker (the assignee) emits a forward-progress signal:
+//   - tool_execution_end (the worker is making tool calls)
+//   - swarm_update_task forward transitions (in tools/tasks.ts) — not yet wired; see plan-deviations §
+// Only stamps when `assignee === workerAgentId` AND status is `assigned` or `in_progress`. Returns
+// true when the stamp landed (callers use this for instrumentation: 1 stamp per dirty task).
+export function ensureNodeActivityStamp(task: TaskState, nodeId: string, tsIso: string, workerAgentId?: string): boolean {
+	const node = task.nodes[nodeId];
+	if (!node) return false;
+	if (node.status !== "assigned" && node.status !== "in_progress") return false;
+	if (workerAgentId && node.assignee !== workerAgentId) return false;
+	node.lastProgressAt = tsIso;
+	// Reset the stale-open surface cycle: progress cancels any prior surface so the next stale
+	// period starts fresh.
+	delete node.staleOpenSurfacedAt;
+	return true;
+}
+
+// === Issue 83a — stale-open assignment scan (pump-tick phase) ===
+// Cost bound (R10-1): each scan tick does 1 `readdirSync(p.tasksDir)` + 1 `readTaskState` per
+// `task-*` subdirectory under the existing pump `withLock`. ZERO tmux probes, ZERO subprocess
+// calls. The bound is the count of task files on disk; for a 100-task graveyard shape that is
+// ~100 file reads per ~5 s tick (no interval gate yet; future PI_SWARM_STALE_OPEN_SCAN_INTERVAL_MS
+// is a follow-up). The scan is wrapped in `try { ... } catch { ... }` so a single tick failure
+// does not crash the pump; errors surface via the standard `trace()` events.
+export async function staleOpenAssignmentScanLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ surfaced: number; inspected: number; alreadySurfaced: number; surfacedNodes: Array<{ taskId: string; nodeId: string; assignee?: string }> }> {
+	const thresholdMs = Number(process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ?? DEFAULT_STALE_OPEN_THRESHOLD_MS);
+	let surfaced = 0, inspected = 0, alreadySurfaced = 0;
+	const surfacedNodes: Array<{ taskId: string; nodeId: string; assignee?: string }> = [];
+	// Discover tasks via the swarm's tasks dir.
+	let taskDirs: string[] = [];
+	try {
+		const { readdirSync } = await import("node:fs");
+		taskDirs = readdirSync(p.tasksDir).filter((d) => d.startsWith("task-"));
+	} catch { return { surfaced, inspected, alreadySurfaced, surfacedNodes }; }
+	for (const taskDir of taskDirs) {
+		const tp = taskPaths(p, taskDir);
+		let task: TaskState;
+		try {
+			task = await readTaskState(tp.taskJson);
+		} catch { continue; }
+		let dirty = false;
+		for (const [nodeId, node] of Object.entries(task.nodes)) {
+			if (node.status !== "assigned" && node.status !== "in_progress") continue;
+			inspected++;
+			const ts = nowMs;
+			// `lastProgressAt` absent or older than threshold → candidate.
+			// `staleOpenSurfacedAt` present within threshold → already surfaced this window → skip.
+			// Plan §(a): stale check is `nowMs - max(lastProgressAt, lastActivityAt) > thresholdMs`.
+			// A node with no `lastProgressAt` but recently assigned is NOT stale (the worker just
+			// picked it up). The implementer's first pass used `lastProgressAt absent → Infinity`
+			// which surfaced every un-progressed node immediately on assignment — defeated the
+			// feature. Use max() to anchor on the most-recent activity timestamp.
+			const lastProgressMs = node.lastProgressAt ? new Date(node.lastProgressAt).getTime() : 0;
+			const lastActivityMs = node.lastActivityAt ? new Date(node.lastActivityAt).getTime() : 0;
+			const anchorMs = Math.max(lastProgressMs, lastActivityMs);
+			const staleAtMs = anchorMs ? ts - anchorMs : Number.POSITIVE_INFINITY;
+			const surfacedMs = node.staleOpenSurfacedAt ? new Date(node.staleOpenSurfacedAt).getTime() : 0;
+			if (staleAtMs <= thresholdMs) continue;
+			if (surfacedMs && ts - surfacedMs <= thresholdMs) {
+				alreadySurfaced++;
+				continue;
+			}
+			const now = new Date(ts).toISOString();
+			node.staleOpenSurfacedAt = now;
+			dirty = true;
+			surfaced++;
+			surfacedNodes.push({ taskId: task.taskId, nodeId, assignee: node.assignee || undefined });
+			await traceTask(tp, TRACE_STALE_OPEN_SURFACED, {
+				taskId: task.taskId,
+				nodeId,
+				assignee: node.assignee,
+				assignedAt: node.lastActivityAt,
+				lastProgressAt: node.lastProgressAt ?? null,
+				thresholdMs,
+				staleMs: staleAtMs === Number.POSITIVE_INFINITY ? null : Math.round(staleAtMs),
+			}).catch(() => {});
+		}
+		if (dirty) {
+			const { writeTaskState } = await import("./state.ts");
+			await writeTaskState(tp, task).catch(() => {});
+		}
+	}
+	return { surfaced, inspected, alreadySurfaced, surfacedNodes };
+}
+
+// === R11-1 completion — stale-open assignment NUDGE (surfacing alone was a radar without a bell) ===
+// Called by the pump right after staleOpenAssignmentScanLocked surfaces nodes. Delivers ONE
+// high-priority orchestrator nudge per surfaced (task, node), idempotent within the surfacing
+// window (the scan's staleOpenSurfacedAt stamp), capped + cooled down like the graph-advance
+// nudge. Returns true when a nudge was emitted.
+export async function staleOpenNudgeLocked(
+	pi: import("@earendil-works/pi-coding-agent").ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	taskId: string,
+	nodeId: string,
+): Promise<boolean> {
+	const { deliverMessageLocked, findIdempotentMessage } = await import("./mailbox.ts");
+	const { formatNotifyKey, NOTIFY_KEY_STALE_OPEN } = await import("./constants.ts");
+	const keyPrefix = `task:${taskId}:node:${nodeId}:nudge:stale-open:seq:`;
+	// Defense-in-depth: only nudge nodes the scan ACTUALLY surfaced (staleOpenSurfacedAt fresh
+	// within the threshold window). A direct call for a fresh-progress node is a no-op.
+	const tp = taskPaths(paths(cwd), taskId);
+	try {
+		const t = await readTaskState(tp.taskJson);
+		const n = t.nodes[nodeId];
+		const thresholdMs = Number(process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ?? DEFAULT_STALE_OPEN_THRESHOLD_MS);
+		const surfacedMs = n?.staleOpenSurfacedAt ? new Date(n.staleOpenSurfacedAt).getTime() : 0;
+		if (!surfacedMs || Date.now() - surfacedMs > thresholdMs) return false;
+	} catch { return false; }
+	const prior = Object.values(st.messages || {}).filter((r: any) => r.to === "orchestrator" && (r.idempotencyKey?.startsWith(keyPrefix) ?? false));
+	if (prior.length >= NOTIFY_DEFAULT_MAX_NUDGES) return false; // cap
+	const seq = prior.length + 1;
+	const key = formatNotifyKey(NOTIFY_KEY_STALE_OPEN, { taskId, nodeId, seq: String(seq) });
+	const lastSent = prior.map((r: any) => r.createdAt || "").sort().pop() || "";
+	if (lastSent && Date.now() - new Date(lastSent).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) return false; // cooldown
+	if (findIdempotentMessage(st, "orchestrator", "orchestrator", key) && !prior.some((r: any) => r.ackedAt)) return false; // in-flight
+	try {
+		await deliverMessageLocked(pi, cwd, p, st, {
+			to: "orchestrator",
+			priority: "high",
+			subject: `STALE OPEN: node ${nodeId} of ${taskId} assigned but no progress — worker may have settled idle`,
+			body: `Node \`${nodeId}\` of task ${taskId} is assigned but has shown NO progress past the stale threshold (see trace stale_open_surfaced). The assignee may have settled idle with the node open (idle-lock pattern, 5 live incidents on 2026-09-1).
+
+Act NOW in this turn:
+  1. Check the assignee pane (swarm_agent_status) — if idle with the node open, send a high-priority directive naming the exact close action (swarm_update_task to done/failed/blocked + result message).
+  2. If the pane is dead, restart the agent with the brief (swarm_restart_agent) — the assignment record persists.
+  3. If the node is genuinely long-running (evidence of progress in artifacts), ack this nudge done with a note; it will not re-fire within the window.
+
+(Auto-clears when the node records progress or closes. Capped at ${NOTIFY_DEFAULT_MAX_NUDGES} nudges per node; ${Math.round(NOTIFY_DEFAULT_COOLDOWN_MS / 60000)}min cooldown.)`,
+			requiresAck: true,
+			idempotencyKey: key,
+		});
+		await trace(p, TRACE_STALE_OPEN_NUDGE_EMITTED, { taskId, nodeId, seq, cap: NOTIFY_DEFAULT_MAX_NUDGES, cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS }).catch(() => {});
+		return true;
+	} catch (err: any) {
+		await trace(p, "stale_open.nudge_failed", { taskId, nodeId, seq, error: String((err as Error)?.message || err) }).catch(() => {});
+		return false;
+	}
+}
+
+// === Issue 83c — proxy metric emit (pump-tick phase) ===
+// Cheap, read-only snapshot of the stale-open / hung-but-alive / supersession surface.
+// The pump calls this AFTER stale-open scanning and BEFORE nudges so the snapshot reflects
+// the current tick's repairs. Emission is bounded by PI_SWARM_PROXY_METRIC_INTERVAL_MS and
+// is idempotent within the interval: repeated calls only refresh the in-memory snapshot.
+export async function proxyMetricEmitLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ emitted: boolean; reason: string; metrics: { hungButAlive: number; staleOpen: number; supersessionChurn: number; lastEmitAt?: string } }> {
+	const intervalMs = Number(process.env.PI_SWARM_PROXY_METRIC_INTERVAL_MS ?? PI_SWARM_PROXY_METRIC_INTERVAL_MS);
+	const thresholdMs = Number(process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ?? DEFAULT_STALE_OPEN_THRESHOLD_MS);
+	const heartbeatStaleMs = DEFAULT_AGENT_HEARTBEAT_STALE_MS;
+	const metrics = (st.proxyMetrics ||= { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0 });
+	const lastEmitMs = metrics.lastEmitAt ? new Date(metrics.lastEmitAt).getTime() : 0;
+	if (lastEmitMs && nowMs - lastEmitMs < intervalMs) {
+		return { emitted: false, reason: "interval_pending", metrics: { ...metrics } };
+	}
+	let staleOpen = 0;
+	let supersessionChurn = 0;
+	const hungCandidates = new Set<string>();
+	if (existsSync(p.tasksDir)) {
+		let taskDirs: string[] = [];
+		try { taskDirs = await readdir(p.tasksDir); } catch { taskDirs = []; }
+		for (const taskDir of taskDirs) {
+			const tp = taskPaths(p, taskDir);
+			if (!existsSync(tp.taskJson)) continue;
+			let task: TaskState;
+			try { task = await readTaskState(tp.taskJson); } catch { continue; }
+			for (const node of Object.values(task.nodes)) {
+				if (!node || (node.status !== "assigned" && node.status !== "in_progress")) continue;
+				const lastProgressMs = node.lastProgressAt ? new Date(node.lastProgressAt).getTime() : 0;
+				const lastActivityMs = node.lastActivityAt ? new Date(node.lastActivityAt).getTime() : 0;
+				const anchorMs = Math.max(lastProgressMs, lastActivityMs);
+				const staleAtMs = anchorMs ? nowMs - anchorMs : Number.POSITIVE_INFINITY;
+				if (staleAtMs > thresholdMs) {
+					staleOpen++;
+					if (node.assignee) hungCandidates.add(node.assignee);
+				}
+				const windowStartMs = node.supersessionWindowStart ? new Date(node.supersessionWindowStart).getTime() : 0;
+				if (node.supersessionCount && windowStartMs && nowMs - windowStartMs <= intervalMs) supersessionChurn += node.supersessionCount;
+			}
+		}
+	}
+	let hungButAlive = 0;
+	for (const agentId of hungCandidates) {
+		const agent = st.agents[agentId];
+		if (!agent) continue;
+		ensureAgentDefaults(agent);
+		if (agent.status !== "running" || agent.runtimeStatus !== "idle") continue;
+		const hbMs = agent.lastHeartbeatAt ? new Date(agent.lastHeartbeatAt).getTime() : 0;
+		if (!hbMs || nowMs - hbMs > heartbeatStaleMs) continue;
+		if ((agent.activeTaskIds?.length ?? 0) === 0) continue;
+		hungButAlive++;
+	}
+	metrics.hungButAlive = hungButAlive;
+	metrics.staleOpen = staleOpen;
+	metrics.supersessionChurn = supersessionChurn;
+	metrics.lastEmitAt = new Date(nowMs).toISOString();
+	await trace(p, TRACE_PROXY_METRIC_EMIT, { emitAt: metrics.lastEmitAt, hungButAlive, staleOpen, supersessionChurn, intervalMs, thresholdMs, heartbeatStaleMs }).catch(() => {});
+	return { emitted: true, reason: "emitted", metrics: { ...metrics } };
+}
 
 // Apply gate updates { gateName: { status, by?, artifact? } }. `by` defaults to the acting agent.
 export function applyGateUpdates(task: TaskState, gateUpdates: Record<string, { status: TaskGateStatus; by?: string; artifact?: string | null }>, by: string) {
@@ -1134,9 +1596,57 @@ export function applySharedContextUpdates(task: TaskState, upd: { summary?: stri
 	for (const q of upd.openQuestions || []) ctx.openQuestions.push({ id: `question-${randomUUID().slice(0, 8)}`, by, at: ts, text: q.text });
 }
 
+function taskAbsoluteArtifactPath(taskId: string, artifact: string) {
+	if (artifact.startsWith(`.pi/swarm/tasks/${taskId}/`)) return artifact;
+	const clean = artifact.replace(/^\/+/, "").replace(/^\.\/?/, "");
+	return `.pi/swarm/tasks/${taskId}/${clean}`;
+}
+
+function rewriteTaskArtifactRefs(taskId: string, text: string) {
+	if (!text) return text;
+	// Allow optional leading ./ so references like "./artifacts/x.md" rewrite to the task-absolute
+	// path. Without the optional prefix the regex would treat the leading `.` as the boundary
+	// character, leaving `./artifacts/...` untouched and letting agents write to project-root
+	// artifacts/ by following the note literally.
+	return text.replace(/(^|[^A-Za-z0-9._/-])(\.\/)?(artifacts\/[A-Za-z0-9._/-]+)/g, (_m, prefix: string, dotPrefix: string, rel: string) => `${prefix}${dotPrefix || ""}${taskAbsoluteArtifactPath(taskId, rel)}`);
+}
+
+export async function resolveCommitNodeEvidence(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths) {
+	let baseline = "";
+	try {
+		baseline = readFileSync(join(tp.root, "baseline.txt"), "utf8").trim();
+	} catch {
+		return { verified: false as const, reason: "baseline_missing" as const };
+	}
+	if (!baseline) return { verified: false as const, baseline, reason: "baseline_empty" as const };
+	try {
+		const r = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 5000 });
+		if (r.code !== 0) return { verified: false as const, baseline, reason: "git_unavailable" as const, head: (r.stdout || "").trim() || undefined };
+		const head = (r.stdout || "").trim();
+		if (!head) return { verified: false as const, baseline, reason: "head_empty" as const };
+		if (head === baseline) return { verified: false as const, baseline, head, reason: "head_matches_baseline" as const };
+		return { verified: true as const, baseline, head };
+	} catch (err: any) {
+		return { verified: false as const, baseline, reason: `git_error:${String(err?.message || err)}` as const };
+	}
+}
+
 // Build the assignment message body. Carries task/node pointers, scope, artifacts, and reply target
 // so the assignee discovers the rest from durable files instead of a long orchestrator prompt.
-export function autoCloseOrchestratorTerminalNodes(task: TaskState) {
+export function readCommitEvidence(task: TaskState) {
+	const evidence = task.evidence as Record<string, any> | undefined;
+	if (!evidence) return undefined;
+	for (const [nodeId, node] of Object.entries(task.nodes || {})) {
+		if (inferRoleKind(nodeId, node.role) === "orchestrator" && isGraphTerminalNode(task, nodeId)) {
+			const ev = evidence[nodeId];
+			if (ev && typeof ev === "object") return ev;
+		}
+	}
+	if (evidence.commit && typeof evidence.commit === "object") return evidence.commit;
+	return undefined;
+}
+
+export async function autoCloseOrchestratorTerminalNodes(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths, task: TaskState) {
 	const closed: string[] = [];
 	for (;;) {
 		const { ready } = computeReadyNodes(task);
@@ -1146,6 +1656,22 @@ export function autoCloseOrchestratorTerminalNodes(task: TaskState) {
 		});
 		if (!candidate) break;
 		const node = task.nodes[candidate];
+		// Row 75 (fix): gate ANY terminal orchestrator-kind node (role text matching orchestrator
+		// OR id prefixed with commit/finalize/ship/etc.) on real git evidence, not just id === "commit".
+		// Otherwise custom graphs whose commit-step is named "finalize" / "commit-changes" / "ship"
+		// bypass the evidence check and auto-close without verification — the same defect AC4 was
+		// meant to kill, resurfacing through the naming door. Evidence is keyed by node id only;
+		// the legacy `.commit` surface reads through the per-node key for back-compat.
+		const isCommitLike = inferRoleKind(candidate, node.role) === "orchestrator" && isGraphTerminalNode(task, candidate);
+		if (isCommitLike) {
+			const evidence = await resolveCommitNodeEvidence(pi, tp);
+			const record = { status: evidence.verified ? "verified" : "unverified", reason: evidence.reason, baseline: evidence.baseline, head: evidence.head, at: now(), nodeId: candidate };
+			task.evidence[candidate] = record;
+			if (!evidence.verified) {
+				// Leave the node pending for the orchestrator to close deliberately after running git itself.
+				break;
+			}
+		}
 		node.assignee ||= "orchestrator";
 		node.status = "done";
 		node.lastActivityAt = now();
@@ -1162,12 +1688,15 @@ export function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget
 	lines.push(`Reply to ${replyTarget} when done, blocked, or needing clarification.`);
 	const scope = node.allowedFiles && node.allowedFiles.length ? node.allowedFiles.join(", ") : node.allowedFilesFrom ? `(inherit scope from node ${node.allowedFilesFrom})` : "(none specified)";
 	lines.push(`Scope: ${scope}`);
-	if (node.readArtifacts && node.readArtifacts.length) lines.push(`Read artifacts: ${node.readArtifacts.join(", ")}`);
-	if (node.writeArtifacts && node.writeArtifacts.length) lines.push(`Write artifacts: ${node.writeArtifacts.join(", ")}`);
+	if (node.readArtifacts && node.readArtifacts.length) lines.push(`Read artifacts: ${node.readArtifacts.map((artifact) => taskAbsoluteArtifactPath(task.taskId, artifact)).join(", ")}`);
+	if (node.writeArtifacts && node.writeArtifacts.length) lines.push(`Write artifacts: ${node.writeArtifacts.map((artifact) => taskAbsoluteArtifactPath(task.taskId, artifact)).join(", ")}`);
 	if (task.acceptanceCriteria.length) lines.push(`Acceptance: ${task.acceptanceCriteria.join("; ")}`);
 	// NEW: Include attempt token in assignment contract for fencing
 	if (attemptId) lines.push(`Attempt token: ${attemptId}`);
-	if (note) lines.push(`Note: ${note}`);
+	if (note) {
+		const rewritten = rewriteTaskArtifactRefs(task.taskId, note);
+		lines.push(rewritten === note ? `Note: ${rewritten}` : `Note (rewritten to task-absolute artifact paths): ${rewritten}`);
+	}
 	lines.push(`When finished, call swarm_update_task with taskId=${task.taskId}, nodeId=${nodeId}, status=done (or failed/blocked) and an outcome. Ack this assignment message too.`);
 	return lines.join("\n");
 }

@@ -1,0 +1,7 @@
+# priority-high-interrupt: Issue 86 — reproduces the 23-min hung-turn incident shape via
+# `{"type":"hang", "until":"abort"}`. Mid-hang, the lane harness injects a `priority:"high"`
+# swarm message; the input hook calls ctx.abort() to settle the hung turn. The next turn
+# resumes normally and consumes the queued message at the next-turn boundary.
+# Deterministic double-run: same outcome on a fresh lane replay (no flakiness).
+{"name":"hung turn phase","events":[{"type":"text","delayMs":15,"text":"Starting a long implement turn that will hang until ctx.abort() is called.","chunks":["Starting a long implement turn ","that will hang ","until ctx.abort() is called."]},{"type":"hang","delayMs":15,"until":"abort"}]}
+{"name":"resumed turn after abort","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"Interrupt settled the hung turn; consuming the queued high-priority message.","chunks":["Interrupt settled the hung turn; ","consuming the queued ","high-priority message."]},{"type":"toolcall","delayMs":15,"name":"swarm_ack_message","id":"ack-seen-1","arguments":{"messageId":"PHI-INJECT-1","status":"seen"}},{"type":"toolcall","delayMs":15,"name":"swarm_ack_message","id":"ack-done-1","arguments":{"messageId":"PHI-INJECT-1","status":"done"}},{"type":"stop","delayMs":5,"reason":"stop"}]}

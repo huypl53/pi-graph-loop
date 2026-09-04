@@ -1,0 +1,21 @@
+# goal-nudge-backoff-epoch-rearm: R23. A saturated goal (consecutiveNoResolveNudges=MAX,
+# nudgeSeq=3, backoffTicksRemaining=2) whose legacy nudges (seq 1..3) predate the CURRENT
+# all-idle epoch anchor must re-arm on the first eligible tick: the cap branch detects the
+# anchor postdates the last emission (prior epoch's nudges are idle_epoch_advanced-invalidated
+# and no turn_end resolve could fire while starved), resets the counter ONCE per anchor, and
+# emits the fresh seq=4 nudge. Pre-R23 the pump looped backoff.skip → backoff_just_exhausted →
+# max_nudges re-arm forever (zero goal.idle_nudge, zero pi.sendMessage).
+#
+# Pattern 2 (seeded world + single-actor script) per .agents/skills/mock-llm-scenarios/SKILL.md:
+# launch.sh seeds goal-r23-fixture (user-origin, saturated), 3 legacy mailbox_delivered nudges
+# (msg-r23-rearm-1/2/3, createdAt BEFORE the anchor), allIdleSinceAt = seed-time (anchor strictly
+# after every legacy createdAt), idle worker, PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS=1000 so the
+# first pump tick is eligible. Evidence cites (independent):
+#   C1 durable append: goal:goal-r23-fixture:nudge:idle-streak:4 message + goal.idle_nudge trace
+#      (seq:4, consecutiveCount:1) + goal.nudge.saturation_reset_on_epoch trace;
+#   C3 real send: mailbox.orchestrator_pump count>=1 (pi.sendMessage at the pump boundary);
+#   C4 no starvation: notification.stale.suppressed ABSENT for goal keys;
+#   C5 LLM consumption: this script's swarm_check_mailbox + swarm_ack_message tool calls run in
+#      the orchestrator turn AFTER the surfaced nudge (provider transcript records them).
+{"name":"r23 rearm verify mailbox","events":[{"type":"text","delayMs":200,"text":"Resuming after the legacy starvation window: the saturated goal must have re-armed on the fresh epoch — checking the mailbox for the fresh seq=4 nudge.","chunks":["Resuming after the legacy starvation window: ","the saturated goal must have re-armed on the fresh epoch ","— checking the mailbox for the fresh seq=4 nudge."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"limit":10}}]}
+{"name":"r23 rearm ack lifecycle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Closing the lifecycle on the legacy tail: the fresh seq=4 nudge re-armed by the epoch reset is what the orchestrator acts on; acking closes the ack loop so the counter resolves instead of re-saturating.","chunks":["Closing the lifecycle on the legacy tail: ","the fresh seq=4 nudge re-armed by the epoch reset ","is what the orchestrator acts on."]},{"type":"toolcall","delayMs":15,"name":"swarm_ack_message","id":"ack-1","arguments":{"messageId":"msg-r23-rearm-3","status":"done","note":"legacy tail closed; fresh epoch re-armed seq=4 (R23)"}},{"type":"stop","delayMs":5,"reason":"stop"}]}

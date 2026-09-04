@@ -1,0 +1,12 @@
+# ct6-reload-stale-ctx: CT-6 lane driver — invokes the real
+# /ct6_newsession_and_use_stale slash command, which captures the real ctx,
+# reads ctx.signal (pre baseline), then awaits ctx.newSession(), then reads
+# capturedCtx.signal (must throw "This extension ctx is stale...").
+#
+# The probe extension (extensions/ct-probe/ct-probe.ts CT6 factory) registers
+# ct6_newsession_and_use_stale as a SLASH COMMAND (not a tool) because
+# only ExtensionCommandContext exposes ctx.newSession() — the tool execute
+# ctx does not. This fixture turn fires after the slash command injection
+# and is just a placeholder so the lane settles; the actual probe work runs
+# via the slash command injection from the launch script.
+{"name":"ct6 baseline (text turn; probe runs via /ct6_newsession_and_use_stale slash command)","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"CT-6 lane: the probe extension slash command performs a real ctx.newSession() on the runtime (which disposes the OLD AgentSession and invalidates the OLD ExtensionRunner), then reads the captured stale ctx.signal. runner.js assertActive() must throw the stale-ctx error. The probe writes ct6-result.json. (Note: slash commands bypass the LLM; this fixture turn is just a placeholder so the lane settles after the slash command completes.)","chunks":["CT-6 lane: ","the probe extension slash command ","performs a real ctx.newSession() on the runtime ","(which disposes the OLD AgentSession ","and invalidates the OLD ExtensionRunner), ","then reads the captured stale ctx.signal."," runner.js assertActive() must throw the stale-ctx error."," The probe writes ct6-result.json."," (Note: slash commands bypass the LLM; ","this fixture turn is just a placeholder ","so the lane settles after the slash command completes.)"]},{"type":"stop","delayMs":5,"reason":"stop"}]}

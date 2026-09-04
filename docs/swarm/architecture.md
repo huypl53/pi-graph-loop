@@ -24,7 +24,13 @@ orchestrator pi session
        ├─ src/mailbox.ts     durable mailbox append/read/delivery helpers
        ├─ src/delivery.ts    lifecycle semantics, retryability, parsing
        ├─ src/taskgraph.ts   graph rules, transitions, closure derivation
-       ├─ src/reconcile.ts   repair sweeps, stale signals, PM nudges
+       ├─ src/reconcile.ts   **barrel re-export** of the post-split modules below
+       ├─ src/nudges/goal-epoch.ts       swarm-level idle epoch + goal-floor emission
+       ├─ src/nudges/graph-advance.ts    graph-advance / stall / artifact / heartbeat GC nudges
+       ├─ src/nudges/status-predicates.ts pure predicates over TaskState["status"]
+       ├─ src/surface.ts                 orchestrator-facing message surface machinery
+       ├─ src/tasks-index.ts             PM-facing rollup + task indexer
+       └─ src/reconcile-core.ts          reconcile runner (entry points)
        ├─ src/tmux.ts        tmux wrappers and pane capture/injection
        ├─ src/state.ts       paths, locks, JSON/JSONL writes, traces
        └─ src/hooks.ts       lifecycle hooks and orchestrator mailbox pump
@@ -73,6 +79,12 @@ Primary code:
 Handles mailbox append, tmux injection, interception, acknowledgements, retries,
 dead letters, and idempotency. A delivery that initially failed tmux injection but is later surfaced/intercepted or ACKed `processing` remains response-tracked until the worker produces a verified result and ACKs `done` with a `resultMessageId`.
 
+> **See also:** [`pi-runtime-contract.md §1 (four layers)`](./pi-runtime-contract.md#1-the-four-layers)
+> for the durable mailbox / Pi queue / visible surface / LLM consumption distinction that the
+> messaging lifecycle implements against. The R12–R15 false-claim register
+> ([§10](./pi-runtime-contract.md#10-r12r15-false--unproven-claims-register)) names every
+> cross-layer gap surfaced by past incidents.
+
 **Issue 25 Phase 1: inferred lifecycle shadow telemetry.** Under `PI_SWARM_MINIMAL_PROTOCOL=0` (default), `MessageRecord` carries optional v2 evidence fields (`mailboxDeliveredAt`, `seenAt`, `processingAt`, `respondedAt`, `terminalAt`, `lifecycleStage`, `lifecycleSource`, `terminalReason`, `expectResponse`, `responseDeadlineMs`, `escalateIfSilent`, `migrationRunId`, `migratedAt`). The engine does NOT mutate these under gate=0; `swarm_check_mailbox` emits `message.lifecycle_derived_shadow` traces carrying the would-be `seenAt` derivation, and the reconcile deadline sweep emits the same trace for messages whose `responseDeadlineMs` has elapsed. `tool.invoked` telemetry is emitted once per swarm tool via `src/tools/wrapper.ts`. Migration is via `/swarm protocol migrate [--dry-run]`, idempotent and additive-only. Proposal: `docs/swarm/minimal-agent-protocol-proposal.md` §A–§K.
 
 **Issue 25 Phase 2: authoritative lifecycle (gate=1, default off).** With `PI_SWARM_MINIMAL_PROTOCOL=1`, the derivations become authoritative writes performed inside the existing `withLock` (never a nested lock): `swarm_check_mailbox` stamps `seenAt`; an accepted reply stamps `respondedAt` and auto-verifies the response — only for a non-superseded current attempt (late replies are fenced with a `message.reply_rejected_superseded` trace and do NOT release debt); a terminal task update stamps `terminalAt` and runs response validation + debt release in the same lock. The reconcile deadline sweep authoritatively stamps `terminalAt` when `responseDeadlineMs` elapses. Every derivation site emits `TRACE_LIFECYCLE_DERIVED` (`message.lifecycle_derived`). Worker `swarm_reconcile` is rate-limited (`PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS`, default 60s) and scope-locked to `self`; orchestrator/admin may use `scope: "all"`. Delivered message bodies drop the `[PI-SWARM ACK REQUIRED]` banner under gate=1. The repo default remains gate=0; flipping is a rollout decision gated on the proposal's §H UAT matrix.
@@ -103,6 +115,11 @@ every active attempt lease across ALL tasks with a conservative deterministic gl
 filesystem enumeration). Overlap fails with `ACTIVE_SCOPE_CONFLICT` before any mutation; leases
 release auditable (`releasedAt`/`releaseReason`) on terminal/reassign/rework/cancel. Legacy tasks
 without ownership metadata stay readable; reconcile reports them as advisory drift.
+**Scope pattern semantics** (`src/taskgraph.ts` `normalizeScopePattern`, R26): trailing-slash dir
+patterns (`dir/`) mean subtree coverage (`dir/ ≡ dir/**`); bare paths without slash are exact prefix;
+unknown syntax (`{a,b}`, `/abs`, `a/../b`, internal `//`) is conservatively conflicting. Two disjoint
+trailing-slash dirs are now assignable in parallel; previously they were all blocked as unknown-syntax.
+See contributor-guide "Scope syntax" for the full table.
 
 **Orchestrator leadership and recovery:** the harness is strict-reject, single-leader by default.
 `SwarmState.orchestratorLeader` is the durable source of truth for the active orchestrator pid.

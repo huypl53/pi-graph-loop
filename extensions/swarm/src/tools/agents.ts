@@ -8,12 +8,14 @@ import { randomUUID } from "node:crypto";
 import { capturePane, isTmuxRunning, tmux } from "../tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "../session.ts";
 import { ensureDirs, identityPath, paths, readState, taskPaths, readTaskState, trace, withLock, writeState } from "../state.ts";
+import { classifyGoalClearAuthority, GOAL_ORIGIN_ORCHESTRATOR, GOAL_ORIGIN_VALUES } from "../goals.ts";
 import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
 import { heartbeatOrchestratorLeader, overridePath, requireOrchestratorAuthority, writeEffectiveIdentity } from "../identity.ts";
-import { attachTarget, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
-import { ERR_ORCHESTRATOR_PANE_REJECTED, FAST_MODEL, FAST_PROVIDER } from "../constants.ts";import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
+import { attachTarget, deriveTaskProgressState, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
+import { ERR_ORCHESTRATOR_PANE_REJECTED } from "../constants.ts";import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
+import { resolveGoalNudgeIntervalMs } from "../reconcile.ts";
 
 export function registerAgentsTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
@@ -45,8 +47,12 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				const responsesVerified = verifiedResponseCount(st, agent.id);
 				const blockedFromReuse = responseMissing > 0;
 				const lastHeartbeatAgeSec = agent.lastHeartbeatAt ? Math.round((Date.now() - new Date(agent.lastHeartbeatAt).getTime()) / 1000) : undefined;
+				// R20: derive the single mutually-exclusive taskProgressState at the top level.
+				// tmuxAlive is freshly probed here so the live pane state beats any stale cached value.
+				const taskProgressState = deriveTaskProgressState(agent, st, { nowMs: Date.now(), tmuxAlive });
 				rows.push({
 					agentId: agent.id,
+					taskProgressState,
 					status: agent.status,
 					runtimeStatus: agent.runtimeStatus || "idle",
 					health: agent.health || (tmuxAlive ? "healthy" : "degraded"),
@@ -157,7 +163,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			id: Type.Optional(Type.String({ description: "Stable agent id, e.g. planner or reviewer. Lowercase letters, digits, dash and underscore are safest." })),
 			role: Type.String({ description: "Role/instructions for the agent." }),
 			roleKind: Type.Optional(Type.String({ description: "Explicit role kind override (orchestrator/planner/reviewer/tester/observer/implementer/worker). Pinned so it is not re-derived from id/role. Defaults to inference (id-first, then role text)." })),
-			model: Type.Optional(Type.String({ description: "pi model id, or the preset alias 'fast' (expands to gpt-5.4-mini/openai). Defaults to PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1." })),
+			model: Type.Optional(Type.String({ description: "pi model id. Defaults to the model pool (if configured), else PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1." })),
 			provider: Type.Optional(Type.String({ description: "pi provider id. Defaults to PI_SWARM_DEFAULT_PROVIDER or model preset provider (zai-coding-cn for glm-5.1, openai for gpt-5.4-mini)." })),
 			initialPrompt: Type.Optional(Type.String({ description: "Optional first prompt to send into the spawned agent after pi starts." })),
 		}),
@@ -168,10 +174,9 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				const result = await withLock(p, async () => {
 					const st = await readState(p, ctx.cwd);
 					await trace(p, "agent.spawn.request", { requestedBy: currentAgentId(), ...params });
-				// Explicit model / 'fast' preset pin the slot; otherwise spawnAgent consults the
-				// model pool (if configured) before falling back to the single default.
-				const model = params.model === "fast" ? FAST_MODEL : params.model || undefined;
-				const provider = params.provider || (params.model === "fast" ? FAST_PROVIDER : undefined);
+				// Otherwise spawnAgent consults the model pool (if configured) before falling back to the single default.
+				const model = params.model || undefined;
+				const provider = params.provider || undefined;
 				const r = await spawnAgent(pi, ctx.cwd, p, st, { ...params, model, provider });
 				await writeState(p, st);
 				return { swarmId: st.swarmId, tmuxSession: st.tmuxSession, ...r };
@@ -351,7 +356,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				const result = await withLock(p, async () => {
 					const st = await readState(p, ctx.cwd);
 					heartbeatOrchestratorLeader(st, Date.now(), process.pid, "stop_agent");
-					const r = await stopAgent(pi, p, st, safeId(params.agentId), { force: params.force, killPane: params.killPane });
+					const r = await stopAgent(pi, ctx.cwd, p, st, safeId(params.agentId), { force: params.force, killPane: params.killPane });
 					await writeState(p, st);
 					return r;
 				});
@@ -541,50 +546,126 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		name: "swarm_set_goal",
 		label: "Swarm Set Goal",
 		description: "Persist a swarm-level goal. While a goal is set and every non-orchestrator agent is idle with no active task nodes, the orchestrator pump emits an idle-streak nudge (anti-loop: max MAX_CONSECUTIVE_NUDGES_DEFAULT consecutive, then 2-tick back-off). Orchestrator-only.",
-		promptGuidelines: ["Use `swarm_set_goal` to record the swarm's current goal in durable state. Resets the consecutiveNoResolveNudges counter; clears back-off.", "Pair with `swarm_mark_goal_done` when the goal is achieved or abandoned."],
+		promptGuidelines: ["Use `swarm_set_goal` to record or update the swarm's current goal in durable state.", "Pass `intervalMs` when you want a durable per-goal idle interval override.", "Pass `update: true` to update the existing goal in place without resetting counters.", "Pair with `swarm_mark_goal_done` when the goal is achieved or abandoned."],
 		parameters: Type.Object({
-			text: Type.String({ description: "Goal text (non-empty). Replaces any current goal and resets the nudge counter." }),
+			text: Type.Optional(Type.String({ description: "Goal text. Required for create mode; optional for update mode when only interval changes." })),
 			id: Type.Optional(Type.String({ description: "Optional explicit goalId. Omit to auto-generate." })),
+			intervalMs: Type.Optional(Type.Number({ description: "Optional durable idle interval override in milliseconds; positive values only." })),
+			update: Type.Optional(Type.Boolean({ description: "When true, update the current goal in place without resetting counters or goalId." })),
+			// Issue 81: durable origin metadata. Default "orchestrator" (backwards-compatible).
+			// "user" marks the goal as user-intent (refuses clear/replace without approval).
+			origin: Type.Optional(Type.String({ description: "Goal origin provenance: 'user' | 'orchestrator' | 'system' | 'batch'. Default 'orchestrator'. User-origin goals refuse clear/replace without explicit approval." })),
+			setByScope: Type.Optional(Type.String({ description: "Human-readable provenance hint (e.g. 'pm-cli', 'batch-worker-r80'). Optional, audit only." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_set_goal", async () => {
 				const p = paths(ctx.cwd);
 				requireOrchestratorAuthority(currentAgentId(), "swarm_set_goal");
+				const isUpdate = Boolean(params.update);
 				const text = String(params.text || "").trim();
-				if (!text) throw new Error("swarm_set_goal: text must be non-empty");
+				if (!isUpdate && !text) throw new Error("swarm_set_goal: text must be non-empty");
 				const requestedId = params.id ? safeId(String(params.id)) : `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
 				const result = await withLock(p, async () => {
 					const st = await readState(p, ctx.cwd);
-				const previousId = st.goal?.id;
-				const ts = now();
-				// Issue 56 (live defect): re-setting a goal with the SAME goalId used to reset nudgeSeq
-				// to undefined — the next nudges would re-walk seq keys 1..N that already exist in the
-				// idempotency index (stale records from before the refresh), so every one returns
-				// duplicate_suppressed and the goal silently never re-nudges. nudgeSeq is monotonic for
-				// the lifetime of the goalId: when the id is REUSED (text refresh), inherit the prior seq;
-				// only a genuinely NEW id starts at 0. The counter/backoff fields reset either way (a
-				// refreshed goal starts a fresh nudge streak).
-				const inheritSeq = previousId === requestedId ? (st.goal?.nudgeSeq ?? 0) : 0;
-				st.goal = {
-					id: requestedId,
-					text,
-					setAt: ts,
-					setBy: currentAgentId(),
-					consecutiveNoResolveNudges: 0,
-					nudgeSeq: inheritSeq,
-				};
-				// A fresh goal never inherits the previous goal's nudge state. Bound C-1 ensures the
-				// `goal` field was `undefined` (not {}) before this assignment — a JSON-absent key
-				// parses to undefined, which `st.goal = { ... }` cleanly replaces.
-				delete st.goal.lastNudgeAt;
-				delete st.goal.lastResolvedAt;
-				delete st.goal.backoffTicksRemaining;
-				await trace(p, "goal.set", { goalId: requestedId, previousId, setBy: currentAgentId(), length: text.length, via: "tool" });
-				await writeState(p, st);
-				return { goalId: requestedId, previousId };
+					const previousId = st.goal?.id;
+					const ts = now();
+					const hasInterval = params.intervalMs !== undefined;
+					const requestedInterval = Number(params.intervalMs);
+					if (hasInterval && (!Number.isFinite(requestedInterval) || requestedInterval <= 0 || !Number.isInteger(requestedInterval))) {
+						throw new Error(`swarm_set_goal: invalid intervalMs ${params.intervalMs}`);
+					}
+					const nudgeIntervalMs = hasInterval ? Math.floor(requestedInterval) : undefined;
+					const defaultIntervalMs = resolveGoalNudgeIntervalMs();
+					// Issue 81: validate origin parameter against the allowed set; default "orchestrator".
+					const requestedOrigin = params.origin;
+					if (requestedOrigin !== undefined && !GOAL_ORIGIN_VALUES.has(requestedOrigin as any)) {
+						throw new Error(`swarm_set_goal: invalid origin ${params.origin} (must be one of: ${[...GOAL_ORIGIN_VALUES].join(", ")})`);
+					}
+					const newOrigin = (requestedOrigin ?? GOAL_ORIGIN_ORCHESTRATOR) as import("../goals.ts").GoalOrigin;
+					const requestedSetByScope = params.setByScope ? String(params.setByScope) : undefined;
+					if (isUpdate) {
+						if (!st.goal) return { updated: false, noop: true };
+						// Issue 81: allow origin update on the update path (explicit provenance correction);
+						// do NOT trigger the replace guard for an in-place update (same id, no text replace).
+						if (text) st.goal.text = text;
+if (nudgeIntervalMs !== undefined && st.goal.nudgeIntervalMs !== nudgeIntervalMs) {
+									st.goal.nudgeIntervalMs = nudgeIntervalMs;
+									// Re-anchor the idle gate so the NEW interval applies immediately (command.ts parity).
+									// Only pull EARLIER (min) - a longer interval must never fire sooner than scheduled.
+									const idle = st.idleNudgeState ||= {};
+									const anchor = idle.allIdleSinceAt ? new Date(idle.allIdleSinceAt).getTime() : Date.now();
+									const fresh = anchor + nudgeIntervalMs;
+									idle.nextGoalNudgeAt = idle.nextGoalNudgeAt
+										? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), fresh)).toISOString()
+										: new Date(fresh).toISOString();
+								}
+						if (requestedOrigin !== undefined) st.goal.origin = newOrigin;
+						if (requestedSetByScope !== undefined) st.goal.setByScope = requestedSetByScope;
+						await trace(p, "goal.updated", { goalId: st.goal.id, previousId, via: "tool", updatedText: Boolean(text), updatedInterval: nudgeIntervalMs !== undefined, origin: st.goal.origin, setByScope: st.goal.setByScope });
+						await writeState(p, st);
+						return { updated: true, goalId: st.goal.id, previousId, goal: st.goal };
+					}
+					// Issue 81: REPLACE path on an existing user-origin goal must REFUSE unless the caller
+					// has explicit approval (the new origin is irrelevant — the replace is what fires the
+					// guard, because the user-origin goal is being implicitly retired).
+					if (previousId) {
+						const guard = classifyGoalClearAuthority({
+							currentGoal: st.goal,
+							action: "replace",
+							actor: currentAgentId(),
+							params: { origin: newOrigin },
+						});
+						if (!guard.allowed) {
+							await trace(p, "goal.clear_refused", {
+								goalId: previousId,
+								origin: guard.origin,
+								reason: guard.reason,
+								actor: currentAgentId(),
+								action: "replace",
+								via: "tool",
+							});
+							return {
+								refused: true,
+								reason: guard.reason,
+								origin: guard.origin,
+								goalId: previousId,
+							};
+						}
+					}
+					const goalId = requestedId;
+					const inheritSeq = previousId === requestedId ? (st.goal?.nudgeSeq ?? 0) : 0;
+					// Issue 85 (task-202608310905, bug #1): on a fresh set that REPLACES an existing goal,
+					// inherit the prior intervalMs when the caller did NOT pass an explicit interval. Without
+					// this, `swarm_set_goal({ text })` after a tuned (e.g. 600 000 ms) goal resets the cadence
+					// back to the 5 s default and the pump emits 3 nudges in 15 s (live incident 2026-08-31
+					// 09:00). Only inherit when `nudgeIntervalMs === undefined`; an explicit value (including
+					// explicit null / zero) MUST keep its "override" semantics. No interval inheritance on
+					// the update path — update leaves the existing interval untouched.
+					const inheritedIntervalMs = nudgeIntervalMs === undefined ? st.goal?.nudgeIntervalMs : undefined;
+					const resolvedIntervalMs = nudgeIntervalMs ?? inheritedIntervalMs ?? defaultIntervalMs;
+					st.goal = {
+						id: goalId,
+						text,
+						setAt: ts,
+						setBy: currentAgentId(),
+						origin: newOrigin,
+						setByScope: requestedSetByScope,
+						consecutiveNoResolveNudges: 0,
+						nudgeSeq: inheritSeq,
+						nudgeIntervalMs: resolvedIntervalMs,
+					};
+					delete st.goal.lastNudgeAt;
+					delete st.goal.lastResolvedAt;
+					delete st.goal.backoffTicksRemaining;
+					await trace(p, "goal.set", { goalId, previousId, setBy: currentAgentId(), length: text.length, via: "tool", nudgeIntervalMs: st.goal.nudgeIntervalMs, inheritedIntervalMs: inheritedIntervalMs ?? null, origin: newOrigin, setByScope: requestedSetByScope });
+					await writeState(p, st);
+					return { updated: false, goalId, previousId, goal: st.goal };
+				});
+				if (result.refused) return textResult(`Goal clear refused: ${result.reason} (origin=${result.origin}, goalId=${result.goalId}). Use swarm_mark_goal_done({ approvedByUser: true }) to clear an explicit user-origin goal first.`, result);
+				if (result.noop) return textResult("No active goal to update.", result);
+				if (result.updated) return textResult(`Goal updated: ${result.goalId}`, result);
+				return textResult(`Goal set: ${result.goalId}`, result);
 			});
-			return textResult(`Goal set: ${result.goalId}`, result);
-		});
 		},
 	}))
 
@@ -595,26 +676,59 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		promptGuidelines: ["Use `swarm_mark_goal_done` once the goal is achieved or abandoned — it stops the orchestrator pump's idle nudge entirely."],
 		parameters: Type.Object({
 			goalId: Type.Optional(Type.String({ description: "Optional goalId to clear (safety fence; clear fails if it does not match the current goal)." })),
+			// Issue 81: explicit user-approval signal. Without this, swarm_mark_goal_done refuses on
+			// a user-origin goal (the R9 a2 incident shape — a standing user goal silently cleared by
+			// batch workflow). Pass `approvedByUser: true` only when the user has explicitly
+			// authorized the clear.
+			approvedByUser: Type.Optional(Type.Boolean({ description: "Explicit user-approval signal. Required to clear a user-origin goal. Defaults to false (refuses on user-origin)." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_mark_goal_done", async () => {
 				const p = paths(ctx.cwd);
 				requireOrchestratorAuthority(currentAgentId(), "swarm_mark_goal_done");
 				const result = await withLock(p, async () => {
-				const st = await readState(p, ctx.cwd);
-				if (!st.goal) return { cleared: true, noop: true };
-				if (params.goalId && safeId(params.goalId) !== st.goal.id) {
-					throw new Error(`swarm_mark_goal_done: goalId ${params.goalId} does not match current goal ${st.goal.id}`);
-				}
-				const clearedId = st.goal.id;
-				const nudges = st.goal.consecutiveNoResolveNudges;
-				delete st.goal;
-				await trace(p, "goal.cleared", { goalId: clearedId, nudges, by: currentAgentId(), via: "tool" });
-				await writeState(p, st);
-				return { cleared: true, clearedId, nudges };
+					const st = await readState(p, ctx.cwd);
+					if (!st.goal) return { cleared: true, noop: true };
+					if (params.goalId && safeId(params.goalId) !== st.goal.id) {
+						throw new Error(`swarm_mark_goal_done: goalId ${params.goalId} does not match current goal ${st.goal.id}`);
+					}
+					// Issue 81: classify clear authority against the current goal's origin.
+					const guard = classifyGoalClearAuthority({
+						currentGoal: st.goal,
+						action: "clear",
+						actor: currentAgentId(),
+						params: { approvedByUser: Boolean(params.approvedByUser) },
+					});
+					if (!guard.allowed) {
+						await trace(p, "goal.clear_refused", {
+							goalId: st.goal.id,
+							origin: guard.origin,
+							reason: guard.reason,
+							actor: currentAgentId(),
+							action: "clear",
+							via: "tool",
+							approvedByUser: Boolean(params.approvedByUser),
+						});
+						return {
+							cleared: false,
+							refused: true,
+							reason: guard.reason,
+							origin: guard.origin,
+							goalId: st.goal.id,
+						};
+					}
+					const clearedId = st.goal.id;
+					const nudges = st.goal.consecutiveNoResolveNudges;
+					const clearedOrigin = guard.origin;
+					delete st.goal;
+					await trace(p, "goal.cleared", { goalId: clearedId, nudges, by: currentAgentId(), via: "tool", origin: clearedOrigin });
+					await writeState(p, st);
+					return { cleared: true, clearedId, nudges };
+				});
+				if (result.refused) return textResult(`Goal clear refused: ${result.reason} (origin=${result.origin}, goalId=${result.goalId}). Pass approvedByUser: true to clear a user-origin goal.`, result);
+				return textResult(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, result);
 			});
-			return textResult(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, result);
-		});
 		},
 	}))
+
 }

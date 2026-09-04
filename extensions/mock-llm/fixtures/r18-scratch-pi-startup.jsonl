@@ -1,0 +1,9 @@
+# r18-scratch-pi-startup: minimal fixture used by the R18 lane to verify
+# that Pi's mock-LLM stream is consumable end-to-end from a scratch cwd
+# without the R17 BLOCKED_RUNTIME silent-exit shape.
+#
+# Three turns: text -> text -> stop. Total scripted runtime ~120ms.
+# Model id = r18-scratch-pi-startup so the offline test driver can pin to it.
+{"name":"r18 turn 0 probe-init","events":[{"type":"text","delayMs":15,"text":"R18 lane turn 0 probe-init: Pi mock-LLM extension loaded successfully; the fixture is being replayed from a scratch cwd. The transcript must be written to PI_MOCK_LLM_TRANSCRIPTS_DIR."}]}
+{"name":"r18 turn 1 probe-classify","events":[{"type":"text","delayMs":15,"text":"R18 lane turn 1 probe-classify: the silent-exit symptom is classified by exit code, byte counts, process lifetime, resolved fixture path, and transcript presence. All five R10-1 boundaries must be measurable."}]}
+{"name":"r18 turn 2 probe-stop","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"R18 lane complete. The fixture produced three turns; the test driver recorded the per-cell counters and emitted the L1-L5 classification table."},{"type":"stop","delayMs":5,"reason":"stop"}]}

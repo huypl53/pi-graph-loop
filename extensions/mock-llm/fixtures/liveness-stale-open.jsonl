@@ -1,0 +1,6 @@
+# liveness-stale-open: Issue 83a — liveness/progress + stale-open surfacing.
+# Lane harness: orchestrator seeds a worker assigned to a node 6 min ago with no progress;
+# the pump-tick stale-open scan surfaces it via stale_open_surfaced trace + nudge.
+{"name":"stale-open scan surfaces a 6-min stale node","events":[{"type":"text","delayMs":15,"text":"Seeded a 6-min stale-open node; the scan must surface it.","chunks":["Seeded a 6-min stale-open node; ","the scan must surface it."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"forward progress via swarm_update_task resets stale-open cycle","events":[{"type":"text","delayMs":15,"text":"Worker w1 signaled forward progress; staleOpenSurfacedAt cleared.","chunks":["Worker w1 signaled forward progress; ","staleOpenSurfacedAt cleared."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"idempotency: re-scan within 5 min produces 0 additional surfaces","events":[{"type":"text","delayMs":15,"text":"Second scan within window is a no-op.","chunks":["Second scan within window ","is a no-op."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

@@ -1,0 +1,16 @@
+# r16-idle-goal-regression: orchestrator-side probe for the ACK-loop fix.
+#
+# Lane seeding helper pre-stamps st.goal as a user-origin standing goal with
+# nudgeIntervalMs=5000 (mirroring the live `goal-1788266039522-6eae40` incident
+# shape). The fixture drives ONE orchestrator turn whose text reads like a plain
+# "ack" — exactly the resolve-shape the R16 fix must distinguish from a real
+# resolve-action (spawn/assign/mark_goal_done/send_keys).
+#
+# AC: a fresh dedicated Pi extension lane uses this fixture via:
+#   pi --provider mock-llm --model r16-idle-goal-regression \
+#      -e ./extensions/mock-llm \
+#      --print -p "trigger"
+# After the fix, the produced turn text MUST NOT count as a resolve-action, so
+# consecutiveNoResolveNudges keeps climbing until MAX_CONSECUTIVE_NUDGES_DEFAULT
+# is reached and the bounded escalation chain engages.
+{"name":"r16 idle-goal ack-loop regression probe","events":[{"type":"text","delayMs":50,"text":"Acknowledged: I will continue working on the user goal. Will check back shortly.","chunks":["Acknowledged: ","I will continue ","working on the user goal. ","Will check back shortly."],"stopReason":"stop"}]}

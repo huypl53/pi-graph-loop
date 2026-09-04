@@ -4,28 +4,30 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomUUID } from "node:crypto";
-import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
+import { buildSwarmStatusSummary, listTasksIndexed, renderTasksIndexedList, resolveGoalNudgeIntervalMs, resolveTaskArg, runtimeTaskWarnings } from "./reconcile.ts";
 import { capturePane, currentPaneTarget, isHereToken, listAllPanes, tmux } from "./tmux.ts";
 import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, checkStallNotificationStale, deriveNodeAttention, graphJsonSummary, printGraphMermaid, printGraphText, validateTaskGraph } from "./taskgraph.ts";
+import { maybeRotateTraces } from "./tools/audit.ts";
 import { buildFlowSnapshot } from "./observability.ts";
 import { openFlowDialog, pickFlowTask } from "./flow-dialog.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { enqueueAndDeliver, deliverMessageLocked, findIdempotentMessage } from "./mailbox.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { attachTarget, findReusableAgent, registerAgent, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "./agents.ts";
+import { classifyGoalClearAuthority, GOAL_ORIGIN_ORCHESTRATOR, GOAL_ORIGIN_VALUES } from "./goals.ts";
 import { inferRoleKind, now, safeId } from "./utils.ts";
 import { claimOrchestratorLeader, ensureOrchestrator, overridePath } from "./identity.ts";
 import { startOrchestratorPump, bumpSwapChain } from "./hooks.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { poolStatus, setSlotCooldown, validateSwarmSettings, classifySwarmSettings, implicitSingletonPool, formatPreflightError, pickSlot, slotKey, effectiveConfig } from "./pool.ts";
-import { MAX_CONSECUTIVE_NUDGES_DEFAULT, TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
+import { MAX_CONSECUTIVE_NUDGES_DEFAULT, TRACE_AGENT_LEASE_CLEARED, TRACE_AGENT_LEASE_SET, TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "./constants.ts";
 import type { ModelSlot } from "./types.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
 // --inject/--no-inject --kind <v> --model <v> --provider <v> --caps <v> --yes; everything else goes to `rest`.
-function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string } {
-	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string } = { rest: [], force: false, kill: true, literal: false, enter: false, yes: false };
+function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string; origin?: string; "set-by-scope"?: string } {
+	const out: { rest: string[]; force: boolean; kill: boolean; literal: boolean; enter: boolean; yes: boolean; inject?: boolean; kind?: string; model?: string; provider?: string; caps?: string; interval?: string; origin?: string; "set-by-scope"?: string } = { rest: [], force: false, kill: true, literal: false, enter: false, yes: false };
 	for (let i = 0; i < tokens.length; i++) {
 		const t = tokens[i];
 		if (t === "--force") out.force = true;
@@ -39,12 +41,27 @@ function parseFlags(tokens: string[]): { rest: string[]; force: boolean; kill: b
 		else if (t === "--model") out.model = tokens[++i];
 		else if (t === "--provider") out.provider = tokens[++i];
 		else if (t === "--caps") out.caps = tokens[++i];
+		else if (t === "--interval" || t === "-i") out.interval = tokens[++i];
+		else if (t === "--origin") out.origin = tokens[++i];
+		else if (t === "--set-by-scope") out["set-by-scope"] = tokens[++i];
 		else out.rest.push(t);
 	}
 	return out;
 }
 
-const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set <text> | goal done [<goalId>] (show read-only; set/done orchestrator-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
+function parseGoalSetInterval(raw: string): { ok: true; ms: number } | { ok: false; error: string } {
+	const input = String(raw || "").trim().toLowerCase();
+	if (!input) return { ok: false, error: "missing interval" };
+	const m = input.match(/^(\d+)(ms|s|m|h)?$/);
+	if (!m) return { ok: false, error: `invalid interval "${raw}"` };
+	const value = Number(m[1]);
+	const unit = m[2] || "ms";
+	if (!Number.isFinite(value) || value <= 0) return { ok: false, error: `invalid interval "${raw}"` };
+	const ms = unit === "h" ? value * 3_600_000 : unit === "m" ? value * 60_000 : unit === "s" ? value * 1_000 : value;
+	if (!Number.isFinite(ms) || ms <= 0) return { ok: false, error: `invalid interval "${raw}"` };
+	return { ok: true, ms: Math.floor(ms) };
+}
+const SWARM_COMMAND_DESCRIPTION = "Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (orchestrator-only: durable recovery attention report) | remind <task-id> <node-id> (orchestrator-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | lease <id> [--reuse|--park] [--until <iso>] [--reason <text>] [--clear] (orchestrator-only) | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set [-i|--interval <time>] <text> | goal update [-i|--interval <time>] [<text>] | goal done [<goalId>] (show read-only; set/update/done orchestrator-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -442,11 +459,14 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						await traceTask(tp, "notification.stale.suppressed", { site: "swarm_remind.reminder", taskId, nodeId, to: assignee, reason: remindStaleCheck.reason, evidence: remindStaleCheck.evidence });
 						return { sent: false, reason: `stale: ${remindStaleCheck.reason} (${remindStaleCheck.evidence.join("; ")})` };
 					}
-					// Send the reminder: informational only, no ack/response debt by construction.
+					// Send the reminder: informational only, no ack/response debt by construction, and thread
+					// it back to the original assignment so a reply naturally lands in the original thread.
 					const { msg: rmsg, delivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, {
 						to: assignee,
 						subject: `Reminder: node ${nodeId} of ${taskId} awaiting progress`,
 						body: `You acknowledged the assignment for task ${taskId}, node ${nodeId} (${node.role}), but there has been no durable progress since ${new Date(anchorMs).toISOString()} (${Math.round((nowMs - anchorMs) / 60000)} minutes).\n\nRequired actions (choose one):\n1. If complete: swarm_update_task(taskId="${taskId}", nodeId="${nodeId}", status="done", outcome="<result>")\n2. If blocked: swarm_update_task(taskId="${taskId}", nodeId="${nodeId}", status="blocked", note="<reason>")\n3. If still working: continue, and update the node when finished.\n\nThis reminder is informational; it does not change your task status, assignment, or create any reply obligation. At most one reminder is sent per attempt.`,
+						replyTo: currentMsg.id,
+						conversationId: currentMsg.conversationId,
 						requiresAck: false,
 						requiresResponse: false,
 						priority: "normal",
@@ -474,6 +494,17 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				if (outcome.sent) ctx.ui.notify(`Reminder sent: message ${outcome.messageId} → ${outcome.assignee} (attempt ${outcome.attemptId}; injected=${outcome.injected}). Informational only; one per attempt, ever.`, "info");
 				else ctx.ui.notify(`Reminder NOT sent: ${outcome.reason}${outcome.repaired ? " (crash-repaired the attempt reminder record)" : ""}`, "warning");
 				return;
+				}
+				if (cmd === "metrics") {
+					// Orchestrator-only, read-only proxy metric snapshot for Issue 83c.
+					if (currentAgentId() !== "orchestrator") {
+						ctx.ui.notify("/swarm metrics is orchestrator-only", "warning");
+						return;
+					}
+					const st = await readState(p, ctx.cwd);
+					const proxy = st.proxyMetrics || { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0 };
+					ctx.ui.notify(`proxy metrics: hungButAlive=${proxy.hungButAlive} staleOpen=${proxy.staleOpen} supersessionChurn=${proxy.supersessionChurn}${proxy.lastEmitAt ? ` lastEmitAt=${proxy.lastEmitAt}` : ""}`, "info");
+					return;
 				}
 				if (cmd === "validate") {
 					// Structural + optional runtime validation. Mirrors swarm_validate_graph.
@@ -623,7 +654,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("stop is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
 					const flags = parseFlags(rest);
 					try {
-						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await stopAgent(pi, p, st, safeId(id), { force: flags.force, killPane: flags.kill }); await writeState(p, st); return r; });
+						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await stopAgent(pi, ctx.cwd, p, st, safeId(id), { force: flags.force, killPane: flags.kill }); await writeState(p, st); return r; });
 						ctx.ui.notify(`Stopped ${result.agent.id}: killed=${result.killed} method=${result.method}`, "info");
 					} catch (err: any) { ctx.ui.notify(`Stop failed: ${err?.message || err}`, "warning"); }
 					return;
@@ -635,6 +666,70 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						const result = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const r = await restartAgent(pi, ctx.cwd, p, st, safeId(id)); await writeState(p, st); return r; });
 						ctx.ui.notify(`Restarted ${result.agent.id} at ${result.agent.tmuxTarget} (kill=${result.kill.method})`, "info");
 					} catch (err: any) { ctx.ui.notify(`Restart failed: ${err?.message || err}`, "warning"); }
+					return;
+				}
+				if (cmd === "audit") {
+					let mode = rest[0] && !String(rest[0]).startsWith("--") ? rest.shift() : "events";
+					let json = false;
+					let messageId: string | undefined;
+					let limit: number | undefined;
+					let event: string | undefined;
+					let since: string | number | undefined;
+					let until: string | number | undefined;
+					let agent: string | undefined;
+					let task: string | undefined;
+					let cid: string | undefined;
+					let rollupWindowMs: number | undefined;
+					let generations: boolean | undefined;
+					let rotate = false;
+					for (let i = 0; i < rest.length; i++) {
+						const t = rest[i];
+						if (t === "--json") json = true;
+						else if (t === "--probes") mode = "probes";
+						else if (t === "--invariants") mode = "invariants";
+						else if (t === "--timeline") mode = "timeline";
+						else if (t === "--events") mode = "events";
+						else if (t === "--rotate") rotate = true;
+						else if (t === "--event") event = rest[++i];
+						else if (t === "--since") since = rest[++i];
+						else if (t === "--until") until = rest[++i];
+						else if (t === "--agent") agent = rest[++i];
+						else if (t === "--task") task = rest[++i];
+						else if (t === "--cid") cid = rest[++i];
+						else if (t === "--message") messageId = rest[++i];
+						else if (t === "--limit") limit = Number(rest[++i]);
+						else if (t === "--rollup-window") rollupWindowMs = Number(rest[++i]);
+						else if (t === "--no-generations") generations = false;
+					}
+					if (rotate || mode === "rotate") {
+						const res = await maybeRotateTraces(p, {});
+						ctx.ui.notify(json ? JSON.stringify(res, null, 2) : `Trace rotation: ${JSON.stringify(res)}`, "info");
+						return;
+					}
+					const { readAuditEvents, auditTimeline, checkInvariants } = await import("./tools/audit.ts");
+					const filters = { event, since, until, agent, task, cid, limit };
+					if (mode === "timeline") {
+						const res = await auditTimeline(p, String(messageId || ""), { ...filters, generations });
+						ctx.ui.notify(json ? JSON.stringify(res, null, 2) : JSON.stringify(res.timeline, null, 2), "info");
+						return;
+					}
+					if (mode === "invariants") {
+						const st = await readState(p, ctx.cwd);
+						const res = await checkInvariants(p, st);
+						ctx.ui.notify(json ? JSON.stringify(res, null, 2) : JSON.stringify(res.invariants, null, 2), "info");
+						return;
+					}
+					if (mode === "probes") {
+						const st = await readState(p, ctx.cwd);
+						const eventsRes = await readAuditEvents(p, { ...filters, generations, rollupWindowMs });
+						const payload = { ...eventsRes, probes: { P1: [], P2: [], P3: [], P4: [] } };
+						const auditMod = await import("./tools/audit.ts");
+						payload.probes = { P1: auditMod.__test.probeP1(st), P2: auditMod.__test.probeP2(st), P3: auditMod.__test.probeP3(eventsRes.events || []), P4: auditMod.__test.probeP4(eventsRes.events || []) };
+						ctx.ui.notify(json ? JSON.stringify(payload, null, 2) : JSON.stringify(payload.probes, null, 2), "info");
+						return;
+					}
+					const res = await readAuditEvents(p, { ...filters, generations, rollupWindowMs });
+					ctx.ui.notify(json ? JSON.stringify(res, null, 2) : JSON.stringify(res, null, 2), "info");
 					return;
 				}
 				if (cmd === "pool") {
@@ -855,6 +950,59 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					ctx.ui.notify(`${agent.id} ${paused ? "paused" : "resumed"}`, "info");
 					return;
 				}
+				// === Issue 82: explicit reuse lease + park mechanism (orchestrator-only) ===
+				// Usage: /swarm agent lease <id> [--reuse | --park] [--until <iso>] [--reason <text>] [--clear]
+				// Default flags: --reuse, --until now+1h, --reason "operator lease". Cleared with --clear.
+				if (cmd === "lease") {
+					if (currentAgentId() !== "orchestrator") { ctx.ui.notify("lease is orchestrator-only: run it in the PM session (PI_SWARM_IS_ORCHESTRATOR=1 or /swarm register here orchestrator)", "warning"); return; }
+					const id = rest.shift();
+					if (!id) { ctx.ui.notify("Usage: /swarm lease <id> [--reuse|--park] [--until <iso>] [--reason <text...>] [--clear]", "warning"); return; }
+					const clear = rest.includes("--clear");
+					const out = await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const agent = st.agents[safeId(id)];
+						if (!agent) throw new Error(`Unknown agent ${id}`);
+						if (clear) {
+							delete agent.leaseKind;
+							delete agent.leaseUntil;
+							delete agent.leaseReason;
+							agent.updatedAt = now();
+							await writeState(p, st);
+							await trace(p, TRACE_AGENT_LEASE_CLEARED, { agentId: agent.id, by: "command" }).catch(() => {});
+							return { cleared: true, agentId: agent.id };
+						}
+						const leaseKind: "reuse" | "park" = rest.includes("--park") ? "park" : "reuse";
+						const untilFlagIdx = rest.indexOf("--until");
+						const reasonFlagIdx = rest.indexOf("--reason");
+						let leaseUntil = new Date(Date.now() + 3600_000).toISOString();
+						if (untilFlagIdx >= 0 && rest[untilFlagIdx + 1]) {
+							const parsed = new Date(rest[untilFlagIdx + 1]);
+							if (isNaN(parsed.getTime())) throw new Error(`Invalid --until timestamp: ${rest[untilFlagIdx + 1]}`);
+							leaseUntil = parsed.toISOString();
+						}
+						let leaseReason = "operator lease";
+						if (reasonFlagIdx >= 0) {
+							// --reason takes the rest of the args as the reason text (single-token bug
+							// was the reviewer-flagged hygiene #5c issue). Slice after --reason and
+							// join with spaces. Stops at the next recognized flag if present.
+							const afterReason = rest.slice(reasonFlagIdx + 1);
+							const reasonEnd = afterReason.findIndex((a) => a.startsWith("--"));
+							const tokens = reasonEnd >= 0 ? afterReason.slice(0, reasonEnd) : afterReason;
+							if (tokens.length > 0) leaseReason = tokens.join(" ");
+						}
+						agent.leaseKind = leaseKind;
+						agent.leaseUntil = leaseUntil;
+						agent.leaseReason = leaseReason;
+						agent.updatedAt = now();
+						await writeState(p, st);
+						await trace(p, TRACE_AGENT_LEASE_SET, { agentId: agent.id, leaseKind, leaseUntil, leaseReason, by: "command" }).catch(() => {});
+						return { cleared: false, agentId: agent.id, leaseKind, leaseUntil, leaseReason };
+					}).catch((err: any) => { return { failed: String((err as Error)?.message || err) }; });
+					if ("failed" in out) ctx.ui.notify(`Lease failed: ${out.failed}`, "warning");
+					else if (out.cleared) ctx.ui.notify(`Cleared lease on ${out.agentId}`, "info");
+					else ctx.ui.notify(`Set ${out.leaseKind} lease on ${out.agentId} until ${out.leaseUntil} (reason: ${out.leaseReason})`, "info");
+					return;
+				}
 				if (cmd === "sendkey") {
 					const id = rest.shift();
 					if (!id) { ctx.ui.notify("Usage: /swarm sendkey <id> <keys...> [--literal] [--enter]", "warning"); return; }
@@ -1020,53 +1168,208 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const backoff = g.backoffTicksRemaining ? `, backoff ${g.backoffTicksRemaining} tick(s)` : "";
 					const lastNudge = g.lastNudgeAt ? `, last nudge ${g.lastNudgeAt}` : "";
 					ctx.ui.notify(
-						`Goal ${g.id}\n  text: ${g.text}\n  set: ${g.setAt} by ${g.setBy} (${age} min ago)\n  idle-streak nudges: ${g.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}${lastNudge}${backoff}`,
+						`Goal ${g.id}
+  text: ${g.text}
+  set: ${g.setAt} by ${g.setBy} (${age} min ago)
+  nudge interval: ${resolveGoalNudgeIntervalMs(g.nudgeIntervalMs)}ms${g.nudgeIntervalMs ? ` (durable override ${g.nudgeIntervalMs}ms)` : " (default)"}
+  idle-streak nudges: ${g.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}${lastNudge}${backoff}`,
 						"info",
 					);
 					return;
 				}
-				if (sub === "set") {
-						const text = rest.join(" ").trim();
-						if (!text) { ctx.ui.notify("Usage: /swarm goal set <text>", "warning"); return; }
+				if (sub === "set" || sub === "update") {
+						const isUpdate = sub === "update";
+						const flags = parseFlags(rest);
+						const text = flags.rest.join(" ").trim();
+						const rawInterval = flags.interval !== undefined ? String(flags.interval).trim() : "";
+						const hasInterval = rawInterval.length > 0;
+						const parsedInterval = hasInterval ? parseGoalSetInterval(rawInterval) : null;
+						// Issue 81: --origin flag validates against the allowed origin set.
+						const requestedOrigin = flags.origin ? String(flags.origin).trim() : undefined;
+						if (requestedOrigin !== undefined && !GOAL_ORIGIN_VALUES.has(requestedOrigin as any)) {
+							ctx.ui.notify(`/swarm goal set --origin must be one of: ${[...GOAL_ORIGIN_VALUES].join(", ")}`, "warning");
+							return;
+						}
+						const newOrigin = (requestedOrigin ?? GOAL_ORIGIN_ORCHESTRATOR) as import("./goals.ts").GoalOrigin;
+						const requestedSetByScope = flags["set-by-scope"] ? String(flags["set-by-scope"]).trim() : undefined;
+						if (hasInterval && !parsedInterval?.ok) { ctx.ui.notify(`Usage: /swarm goal ${isUpdate ? "update" : "set"} [-i|--interval <time>] [<text>] (${parsedInterval?.error}; time accepts raw ms, s, m, h)`, "warning"); return; }
+						if (!isUpdate && !text) {
+						// UX (user-reported): "/swarm goal set -i 30s" with no text. When a goal already
+						// exists and an interval was given, treat it as an interval-only update instead
+						// of erroring — the user's intent (change the cadence) is unambiguous. Without
+						// an interval (bare "goal set") or with no existing goal, the usage warning stays.
+						if (hasInterval && parsedInterval?.ok) {
+							const setMs = parsedInterval.ms;
+							const stU = await withLock(p, async () => {
+								const s = await readState(p, ctx.cwd);
+								if (!s.goal) return { noop: true, updated: false };
+								if (s.goal.nudgeIntervalMs !== setMs) {
+									s.goal.nudgeIntervalMs = setMs;
+									// Re-anchor under the same min-only policy as the update path below.
+									const idle = s.idleNudgeState ||= {};
+									const anchor = idle.allIdleSinceAt ? new Date(idle.allIdleSinceAt).getTime() : Date.now();
+									idle.nextGoalNudgeAt = idle.nextGoalNudgeAt
+										? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), anchor + setMs)).toISOString()
+										: new Date(anchor + setMs).toISOString();
+								}
+								await trace(p, "goal.updated", { goalId: s.goal.id, via: "command(set-as-update)", updatedText: false, updatedInterval: true });
+								await writeState(p, s);
+								return { updated: true, goal: s.goal };
+							});
+							if (stU.updated) {
+								ctx.ui.notify(`Goal ${stU.goal!.id} interval updated to ${setMs}ms (set with no text treated as interval update).`, "info");
+								return;
+							}
+						}
+						ctx.ui.notify("Usage: /swarm goal set [-i|--interval <time>] <text> (interval-only change on an existing goal: use 'update')", "warning");
+						return;
+					}
+						if (isUpdate && !text && !hasInterval) { ctx.ui.notify("Usage: /swarm goal update [-i|--interval <time>] [<text>]", "warning"); return; }
+						// Issue 85 (task-202608310905, bug #1): only resolve a default intervalMs up-front when
+						// this is the FRESH-SET path AND no -i was passed AND there's no prior goal to inherit
+						// from. When a prior goal exists and no -i was passed, leave intervalMs undefined so
+						// the withLock block can inherit the prior goal's nudgeIntervalMs (the original bug:
+						// `/swarm goal set <text>` after a tuned (e.g. 600 000 ms) goal was resetting the
+						// cadence to 5 s). Update path keeps `intervalMs = undefined` so it leaves the
+						// existing goal interval untouched (existing behaviour).
+						const intervalMs = hasInterval ? parsedInterval!.ms : (isUpdate ? undefined : undefined);
 						const st = await withLock(p, async () => {
 							const s = await readState(p, ctx.cwd);
+							if (isUpdate) {
+								if (!s.goal) return { noop: true, updated: false };
+								if (text) s.goal.text = text;
+if (intervalMs !== undefined && s.goal.nudgeIntervalMs !== intervalMs) {
+									s.goal.nudgeIntervalMs = intervalMs;
+									// Re-anchor the idle gate so the NEW interval applies immediately instead of at the
+									// next boundary of the OLD schedule (live bug: -i 30s at 02:20 left nextGoalNudgeAt
+									// pinned to 02:58 = 01:58 allIdleSince + old 1h; no nudge until then). Only pull it
+									// EARLIER (min) - a longer interval must never fire a nudge sooner than scheduled.
+									const idle = s.idleNudgeState ||= {};
+									const anchor = idle.allIdleSinceAt ? new Date(idle.allIdleSinceAt).getTime() : Date.now();
+									const fresh = anchor + intervalMs;
+									idle.nextGoalNudgeAt = idle.nextGoalNudgeAt
+										? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), fresh)).toISOString()
+										: new Date(fresh).toISOString();
+								}
+								// Issue 81: allow origin/setByScope update on the update path.
+								if (requestedOrigin !== undefined) s.goal.origin = newOrigin;
+								if (requestedSetByScope !== undefined) s.goal.setByScope = requestedSetByScope;
+								await trace(p, "goal.updated", { goalId: s.goal.id, via: "command", updatedText: Boolean(text), updatedInterval: intervalMs !== undefined, origin: s.goal.origin, setByScope: s.goal.setByScope });
+								await writeState(p, s);
+								return { updated: true, goal: s.goal };
+							}
+							// Issue 81: refuse to REPLACE a user-origin active goal via /swarm goal set <text>.
+							// Mirror of the tool path (tools/agents.ts swarm_set_goal replace branch).
+							if (s.goal) {
+								const guard = classifyGoalClearAuthority({
+									currentGoal: s.goal,
+									action: "replace",
+									actor: "orchestrator",
+									params: { origin: newOrigin },
+								});
+								if (!guard.allowed) {
+									await trace(p, "goal.clear_refused", {
+										goalId: s.goal.id,
+										origin: guard.origin,
+										reason: guard.reason,
+										actor: "orchestrator",
+										action: "replace",
+										via: "command",
+									});
+									return {
+										refused: true,
+										reason: guard.reason,
+										origin: guard.origin,
+										goalId: s.goal.id,
+									};
+								}
+							}
 							const ts = now();
 							const goalId = `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
 							const previousId = s.goal?.id;
+							// Issue 85 (task-202608310905, bug #1): on a fresh /swarm goal set that REPLACES an
+							// existing goal, inherit the prior nudgeIntervalMs when no -i/--interval was passed.
+							// Without this, `/swarm goal set <text>` after a tuned (e.g. 600 000 ms) goal resets
+							// the cadence back to the 5 s default (live incident 2026-08-31 09:00). Mirror of the
+							// tool path at tools/agents.ts:594. Only inherit when `hasInterval === false`; an
+							// explicit `-i` (resolved to a numeric ms) keeps its override semantics. The
+							// `resolveGoalNudgeIntervalMs()` default is the final fallback when there's no prior
+							// goal to inherit from.
+							const inheritedIntervalMs = !hasInterval ? s.goal?.nudgeIntervalMs : undefined;
+							const resolvedIntervalMs = intervalMs ?? inheritedIntervalMs ?? resolveGoalNudgeIntervalMs();
 							s.goal = {
 								id: goalId,
 								text,
 								setAt: ts,
 								setBy: "orchestrator",
+								origin: newOrigin,
+								setByScope: requestedSetByScope,
 								consecutiveNoResolveNudges: 0,
+								nudgeSeq: previousId === goalId ? (s.goal?.nudgeSeq ?? 0) : 0,
+								nudgeIntervalMs: resolvedIntervalMs,
 							};
 							delete s.goal.lastNudgeAt;
 							delete s.goal.lastResolvedAt;
 							delete s.goal.backoffTicksRemaining;
-							await trace(p, "goal.set", { goalId, previousId, via: "command", length: text.length });
+							await trace(p, "goal.set", { goalId, previousId, via: "command", length: text.length, nudgeIntervalMs: s.goal.nudgeIntervalMs, inheritedIntervalMs: inheritedIntervalMs ?? null, origin: newOrigin, setByScope: requestedSetByScope });
 							await writeState(p, s);
-							return s.goal;
+							return { updated: false, goal: s.goal, goalId, previousId };
 						});
-						ctx.ui.notify(`Goal set: ${st.id} — "${st.text.slice(0, 80)}${st.text.length > 80 ? "…" : ""}"`, "info");
+						if (st.refused) { ctx.ui.notify(`Goal clear refused: ${st.reason} (origin=${st.origin}, goalId=${st.goalId}). Clear first with /swarm goal done --force-user-clear, then set the new goal.`, "warning"); return; }
+						if (st.noop) { ctx.ui.notify("No active swarm goal to update.", "info"); return; }
+						if (isUpdate) {
+							ctx.ui.notify(`Goal updated: ${st.goal.id} — "${st.goal.text.slice(0, 80)}${st.goal.text.length > 80 ? "…" : ""}"${st.goal.nudgeIntervalMs ? ` (nudge interval ${st.goal.nudgeIntervalMs}ms)` : ""}`, "info");
+							return;
+						}
+						ctx.ui.notify(`Goal set: ${st.goalId} — "${st.goal.text.slice(0, 80)}${st.goal.text.length > 80 ? "…" : ""}"${st.goal.nudgeIntervalMs ? ` (nudge interval ${st.goal.nudgeIntervalMs}ms)` : ""}`, "info");
 						return;
 					}
-					if (sub === "done") {
-						const goalIdArg = rest.shift();
+				if (sub === "done") {
+						const forceUserClear = rest.includes("--force-user-clear");
+						const goalIdArg = rest.find((t) => t !== "--force-user-clear");
 						const result = await withLock(p, async () => {
 							const s = await readState(p, ctx.cwd);
 							if (!s.goal) return { cleared: true, noop: true };
 							if (goalIdArg && safeId(goalIdArg) !== s.goal.id) throw new Error(`goalId ${goalIdArg} does not match current goal ${s.goal.id}`);
+							// Issue 81: classify clear authority against the current goal's origin. --force-user-clear
+							// is the command-surface analog of approvedByUser: true on swarm_mark_goal_done.
+							const guard = classifyGoalClearAuthority({
+								currentGoal: s.goal,
+								action: "clear",
+								actor: "orchestrator",
+								params: { approvedByUser: forceUserClear },
+							});
+							if (!guard.allowed) {
+								await trace(p, "goal.clear_refused", {
+									goalId: s.goal.id,
+									origin: guard.origin,
+									reason: guard.reason,
+									actor: "orchestrator",
+									action: "clear",
+									via: "command",
+									approvedByUser: forceUserClear,
+								});
+								return {
+									cleared: false,
+									refused: true,
+									reason: guard.reason,
+									origin: guard.origin,
+									goalId: s.goal.id,
+								};
+							}
 							const clearedId = s.goal.id;
 							const nudges = s.goal.consecutiveNoResolveNudges;
+							const clearedOrigin = guard.origin;
 							delete s.goal;
-							await trace(p, "goal.cleared", { goalId: clearedId, nudges, via: "command" });
+							await trace(p, "goal.cleared", { goalId: clearedId, nudges, via: "command", origin: clearedOrigin });
 							await writeState(p, s);
 							return { cleared: true, clearedId, nudges };
 						});
+						if (result.refused) { ctx.ui.notify(`Goal clear refused: ${result.reason} (origin=${result.origin}). Use --force-user-clear to clear a user-origin goal.`, "warning"); return; }
 						ctx.ui.notify(result.noop ? "No active goal to clear." : `Goal ${result.clearedId} cleared.`, "info");
 						return;
 					}
-					ctx.ui.notify("Usage: /swarm goal show | set <text> | done [<goalId>]", "warning");
+					ctx.ui.notify("Usage: /swarm goal show | set [-i|--interval <time>] <text> | update [-i|--interval <time>] [<text>] | done [<goalId>]", "warning");
 					return;
 				}
 				if (cmd === "protocol") {

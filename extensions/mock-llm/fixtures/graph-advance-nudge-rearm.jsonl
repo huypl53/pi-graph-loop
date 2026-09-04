@@ -1,0 +1,17 @@
+# graph-advance-nudge-rearm: the orchestrator's graph-advance nudge must re-arm after a
+# deferral ack (NOTIFY_DEFAULT_MAX_NUDGES sends, NOTIFY_DEFAULT_COOLDOWN_MS between). The agent
+# receives the first nudge, acks it with a deferral note (NOT closing the node), then a later
+# idle turn confirms the next nudge can still land — proving the cap+cooldown re-send path
+# is in effect, not the old one-shot-per-node behavior.
+#
+# Issue F2 (task-202608310422): with the seq-suffixed key, the re-arm must deliver a NEW message
+# record (distinct id) under NOTIFY_KEY_GRAPH_ADVANCE:task:<taskId>:node:<nodeId>:nudge:assign:seq:2.
+# Turn 4 (verify) reads the orchestrator mailbox WITHOUT markDelivered so the lane harness can
+# observe at least 2 distinct records (seq:1 acked + seq:2 fresh) in the mailbox file after the
+# lane finishes. The lane seeding helper shifts messages[msg-1].createdAt > NOTIFY_DEFAULT_COOLDOWN_MS
+# ago so the cooldown gate passes on the next reconcile tick.
+{"name":"graph advance rearm turn 1","events":[{"type":"text","delayMs":15,"text":"I see the graph-advance nudge but the lease is still active; I'll ack with a deferral note so the nudge can re-arm later.","chunks":["I see the graph-advance nudge ","but the lease is still active; ","I'll ack with a deferral note ","so the nudge can re-arm later."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"markDelivered":true,"limit":20}},{"type":"toolcall","delayMs":10,"name":"swarm_ack_message","id":"ack-1","arguments":{"messageId":"graph-advance-nudge-msg-1","status":"seen","note":"deferred: lease still active, will reassign once it closes"}}]}
+{"name":"graph advance rearm idle","events":[{"type":"text","delayMs":15,"text":"Still idle and waiting; the graph-advance nudge must still be able to re-send after the cooldown.","chunks":["Still idle and waiting; ","the graph-advance nudge must still be able to re-send ","after the cooldown."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"mb-2","arguments":{"pendingOnly":true,"markDelivered":false,"limit":20}}]}
+{"name":"graph advance rearm settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Idle worker still tracking; the re-arm path keeps the watcher honest instead of going one-shot.","chunks":["Idle worker still tracking; ","the re-arm path keeps the watcher honest ","instead of going one-shot."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"graph advance rearm verify","events":[{"type":"text","delayMs":15,"text":"Reading the mailbox again without markDelivered so the lane harness can inspect the second distinct nudge record.","chunks":["Reading the mailbox again ","without markDelivered so the lane harness ","can inspect the second distinct nudge record."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"mb-3","arguments":{"pendingOnly":false,"markDelivered":false,"limit":20}}]}
+{"name":"graph advance rearm verify stop","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Lane complete: the verify turn confirms a second distinct message id was delivered after the deferral ack + cooldown.","chunks":["Lane complete: ","the verify turn confirms a second distinct message id ","was delivered after the deferral ack + cooldown."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

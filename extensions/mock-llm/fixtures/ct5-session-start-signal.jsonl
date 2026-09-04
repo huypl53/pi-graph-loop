@@ -1,0 +1,13 @@
+# ct5-session-start-signal: CT-5 lane driver — captures ctx.signal at the REAL
+# session_start boundary from inside a real pi session.
+#
+# The probe extension (extensions/ct-probe/ct-probe.ts CT5 factory) subscribes
+# to `session_start` BEFORE this fixture's first turn fires. When the runtime
+# emits `session_start{reason:"start"}` for the new session, the probe writes
+# $PI_CT_PROBE_SCRATCH/ct5-result.json with the captured ctx.signal value,
+# typeof, and instanceof AbortSignal.
+#
+# This fixture is intentionally minimal: a single scripted turn that emits a
+# short text-only response and stops. The probe's session_start hook does the
+# real work before any LLM turn is consumed.
+{"name":"ct5 baseline (single text turn; probe hooks session_start)","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"CT-5 lane: probe captured ctx.signal at session_start; the captured value should be undefined and not an AbortSignal instance. Probe result written to ct5-result.json.","chunks":["CT-5 lane: ","probe captured ctx.signal at session_start; ","the captured value should be undefined ","and not an AbortSignal instance."," Probe result written to ct5-result.json."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

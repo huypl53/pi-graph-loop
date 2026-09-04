@@ -1,0 +1,27 @@
+# ct1-prereload-sendmessage: CT-1 probe — captured pre-reload ctx.sendMessage requires no await.
+#
+# Reproduces the F1 footgun (pi-runtime-evidence.md:11-30) at the Pi runtime
+# contract boundary. Three scripted turns drive the probe:
+#   1. assistant turns register probe-only tools (`swarm_ct1_capture_ctx`,
+#      `swarm_ct1_send_no_await`, `swarm_ct1_send_throws`,
+#      `swarm_ct1_reload_then_send`) — these are NOT production swarm tools.
+#      The probe lane registers them via a separate extension to keep the
+#      probe orthogonal to swarm source.
+#   2. `swarm_ct1_capture_ctx` captures `pi` + `ctx` into module-level vars.
+#   3. `swarm_ct1_send_no_await` calls `capturedPi.sendMessage(...)` synchronously
+#      and immediately checks that the return value is `undefined` AND the
+#      wrapper was invoked on the same tick (no microtask gap).
+#   4. `swarm_ct1_send_throws` calls `capturedPi.sendMessage(...)` while the
+#      wrapper's stub `sendCustomMessage` rejects — asserts the rejection
+#      surfaces as `runner.emitError({ event: "send_message", error })` on a
+#      later microtask, NOT as a synchronous throw on the caller.
+#   5. `swarm_ct1_reload_then_send` awaits `capturedCtx.reload()`, then calls
+#      `capturedPi.sendMessage(...)` — asserts the pre-reload `pi` is still
+#      callable and emits a `send_message` error event for the stale session.
+#
+# Deterministic: scripted turns + delayMs gates. The probe outcome table is
+# printed by the test driver (`extensions/swarm/ct-contract-probes.test.mjs`
+# §CT-1) after the lane completes.
+{"name":"ct1 baseline (register probe-only tools)","events":[{"type":"text","delayMs":15,"text":"CT-1 probe: register probe-only tools and capture the pi+ctx into module-level vars. These are NOT production swarm tools; the probe lane owns them.","chunks":["CT-1 probe: ","register probe-only tools and capture the pi+ctx."," These are NOT production swarm tools; ","the probe lane owns them."],"actions":[{"type":"toolcall","name":"swarm_ct1_capture_ctx","id":"ct1-cap","arguments":{}}]}]}
+{"name":"ct1 A/B/C assertions","events":[{"type":"text","delayMs":20,"text":"Run the three CT-1 sub-cases: A (sendMessage returns void; no await required), B (async error surfaces via runner.emitError, NOT a synchronous throw), C (pre-reload ctx still usable after await ctx.reload(); error event surfaces). All counters at real mock pi boundary.","chunks":["Run the three CT-1 sub-cases: ","A: sendMessage returns void; no await required. ","B: async error via runner.emitError, not throw. ","C: pre-reload ctx still usable after ctx.reload()."],"actions":[{"type":"toolcall","name":"swarm_ct1_send_no_await","id":"ct1-a","arguments":{"customType":"ct1-probe-A","content":"fire-and-forget test","display":true,"details":{}}},{"type":"toolcall","name":"swarm_ct1_send_throws","id":"ct1-b","arguments":{"customType":"ct1-probe-B","content":"async-error test","display":true,"details":{}}},{"type":"toolcall","name":"swarm_ct1_reload_then_send","id":"ct1-c","arguments":{"customType":"ct1-probe-C","content":"pre-reload test","display":true,"details":{}}}]}]}
+{"name":"ct1 settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"CT-1 probe complete. The probe driver records the outcome table (CONTRACT_CONFIRMED / BUG_FOUND_R_ROW_NEEDED) per sub-case based on the R10-1 boundary counters at the mock pi boundary.","chunks":["CT-1 probe complete. ","The probe driver records the outcome table ","(CONTRACT_CONFIRMED / BUG_FOUND_R_ROW_NEEDED) per sub-case ","based on the R10-1 boundary counters."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

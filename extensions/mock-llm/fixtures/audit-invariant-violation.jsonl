@@ -1,0 +1,1 @@
+{"name":"audit invariant violation","events":[{"type":"toolcall","delayMs":10,"name":"swarm_ack_message","id":"ack-1","arguments":{"messageId":"msg-seeded","status":"processing"}},{"type":"text","delayMs":15,"text":"Acknowledged and working.","chunks":["Acknowledged ","and working."]},{"type":"hang","delayMs":10,"until":"abort"}]}

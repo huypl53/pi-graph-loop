@@ -366,7 +366,16 @@ export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: 
 	// Issue 22: filter slots through the role allow-list unless bypassed (manual operator rotate)
 	// or no roleKind was threaded (legacy callers — full backward compat).
 	const applyRoles = !opts.bypassRolesFilter && opts.roleKind !== undefined;
-	const visible = applyRoles ? slots.filter((s) => slotMatchesRole(s, opts.roleKind)) : slots;
+	let visible = applyRoles ? slots.filter((s) => slotMatchesRole(s, opts.roleKind)) : slots;
+	// Strict roles (user mandate 2026-08-31): when ANY slot is tagged for this roleKind, the roleKind
+	// is served by ONLY its tagged slots — untagged slots are no longer a silent fallback for it.
+	// Untagged slots remain the serving set for roleKinds that have no tags at all. When every
+	// tagged slot is benched there is NO candidate (swap keeps the current model; spawn falls back
+	// via the traced role_filter_all_filtered_fallback path).
+	if (applyRoles && visible.length) {
+		const tagged = visible.filter((s) => Array.isArray(s.roles) && s.roles.length > 0);
+		if (tagged.length) visible = tagged;
+	}
 	if (!visible.length) return undefined;
 	// Round-robin mutates the shared cursor, so the whole pick runs under the pool lock.
 	return withPoolLock(p, async () => {

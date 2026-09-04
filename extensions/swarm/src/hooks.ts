@@ -1,22 +1,73 @@
 // === swarm/hooks.ts — event hooks + orchestrator mailbox pump (verbatim from index.ts) ===
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname, relative, sep } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type { MessageResponseStatus, Paths } from "./types.ts";
 import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_KEY_SETTLE_STALE, ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, formatNotifyKey } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isOrchestratorSession } from "./session.ts";
 import type { ModelSlot } from "./types.ts";
-import { classifyProviderError } from "./types.ts";
+import { classifyProviderError, scrubErrorIdentity, type EngineRetryIncident } from "./types.ts";
 import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "./pool.ts";
-import { deliverMessageLocked, findIdempotentMessage, readMailbox, responseMissingRecords, upsertMessageRecord } from "./mailbox.ts";
+import { deliverMessageLocked, findIdempotentMessage, readMailbox, responseMissingRecords, unackedRequiresAckRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
-import { ensureDirs, identityPath, mailboxPath, paths, readState, trace, withLock, writeState, writeTaskState } from "./state.ts";
+import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "./state.ts";
 import { ensureOrchestrator, heartbeatOrchestratorLeader, readOrchestratorLeader } from "./identity.ts";
 import { formatSwarmMessageContent, parseSystemDelivery } from "./delivery.ts";
 import { pumpOrchestratorMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
-import { scanAgentOpenAssignments, checkStallNotificationStale } from "./taskgraph.ts";
+import { ensureNodeActivityStamp, scanAgentOpenAssignments, checkStallNotificationStale } from "./taskgraph.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { tmux } from "./tmux.ts";
 import { ensurePoolScaffold } from "./pool-scaffold.ts";
+import { maybeRotateTraces } from "./tools/audit.ts";
+import { DEFAULT_TRACE_ROTATE_BYTES } from "./constants.ts";
+
+// === R16 (2026-09-02): turn-end resolve-action detector (module-scope export) ===
+// A turn_end{stop, role=assistant} is a RESOLVE only if the orchestrator ADVANCED the goal
+// in that turn — i.e., the message contains a swarm tool call (swarm_spawn_agent /
+// swarm_assign_task / swarm_mark_goal_done / swarm_set_goal / swarm_restart_agent /
+// swarm_send_message / swarm_reconcile / swarm_update_task / swarm_create_task /
+// swarm_stop_agent / swarm_release_agent_task) OR an explicit user-direction message
+// was sent via a tool call in the same turn. Pure ack text does NOT count.
+// Exported for direct unit testing by r16-idle-goal-regression.test.mjs.
+export const SWARM_RESOLVE_TOOLS: ReadonlySet<string> = new Set([
+	"swarm_spawn_agent",
+	"swarm_assign_task",
+	"swarm_mark_goal_done",
+	"swarm_set_goal",
+	"swarm_restart_agent",
+	"swarm_send_message",
+	"swarm_reconcile",
+	"swarm_update_task",
+	"swarm_create_task",
+	"swarm_stop_agent",
+	"swarm_release_agent_task",
+]);
+export function turnEndIsResolveAction(event: any): { resolve: boolean; reason: string; toolNames?: string[] } {
+	const msg: any = event?.message;
+	const toolResults: any[] = Array.isArray(event?.toolResults) ? event.toolResults : [];
+	// Path A: content blocks expose tool_use calls.
+	const blocks: any[] = Array.isArray(msg?.content) ? msg.content : [];
+	const toolNamesFromContent: string[] = [];
+	for (const block of blocks) {
+		if (!block || typeof block !== "object") continue;
+		const t = block.type;
+		if (t === "tool_use" || t === "toolCall") {
+			const name = block.name || block.toolName;
+			if (typeof name === "string" && SWARM_RESOLVE_TOOLS.has(name)) toolNamesFromContent.push(name);
+		}
+	}
+	// Path B: toolResults carry the toolName too.
+	const toolNamesFromResults: string[] = [];
+	for (const tr of toolResults) {
+		const name = tr?.toolName || tr?.name;
+		if (typeof name === "string" && SWARM_RESOLVE_TOOLS.has(name)) toolNamesFromResults.push(name);
+	}
+	const swarmToolNames = Array.from(new Set([...toolNamesFromContent, ...toolNamesFromResults]));
+	if (swarmToolNames.length > 0) return { resolve: true, reason: "swarm_tool_call", toolNames: swarmToolNames };
+	// No tool calls: NOT a resolve (pure ack text or silent turn).
+	return { resolve: false, reason: "no_resolve_action" };
+}
 
 // Orchestrator mailbox pump state. Module-level so the PM pump can be (re)started from outside the
 // session_start hook — notably by `/swarm register here orchestrator`, which opts a running session in
@@ -43,6 +94,7 @@ let orchestratorMailboxTimer: NodeJS.Timeout | undefined;
 let orchestratorMailboxPumpRunning = false;
 let orchestratorPumpCtx: any = undefined;
 let orchestratorPumpCtxFresh: boolean = false;
+let traceRotationInFlight = false;
 
 // Pump tick interval (kept identical to the previous `setInterval` cadence so dashboards/expectations
 // don't shift). Exposed as a constant so tests can shorten the wait for the watchdog test.
@@ -97,18 +149,12 @@ export function _resetSwapChainForTests(agentId: string) {
 // Issue 19: ENGINE_MAX_RETRIES + ENGINE_RETRY_WINDOW_MS moved to constants.ts so they share a
 // single source of truth with the rest of the gate/pool constants. The values are unchanged.
 
-// Per-agent engine-retry incident. Same shape as EngineRetryIncident in types.ts; we keep the
-// runtime value here as a plain object for fast Map.set / Map.get inside the hot path. Cleared on
-// session_start, session_shutdown, agent_settled, and any successful turn_end (the engine recovered
-// on a later retry attempt). NEVER persisted — persistence would create a stuck "exhausted" gate
-// across restarts that have lost the engine retry context.
-const engineRetryIncidents = new Map<string, {
-	providerKey: string;
-	errorMessage: string;
-	firstSeenAt: number;
-	lastSeenAt: number;
-	count: number;
-}>();
+// Per-agent engine-retry incident (Issue 70: the runtime shape IS the shared
+// EngineRetryIncident type from types.ts — identity = providerKey + kind + scrubbed message).
+// Cleared on session_start, session_shutdown, agent_settled, and any successful turn_end (the
+// engine recovered on a later retry attempt). NEVER persisted — persistence would create a stuck
+// "exhausted" gate across restarts that have lost the engine retry context.
+const engineRetryIncidents = new Map<string, EngineRetryIncident>();
 
 // Exposed for tests + the `/swarm pool rotate` manual-override path so a caller can verify the
 // engine-retry gate owns its own incident lifecycle (manual override does NOT clear it). Returns
@@ -201,6 +247,14 @@ function armOrchestratorPumpWatchdog(ctx: any) {
 export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, agentId: string, reason: string) {
 	if (currentAgentId() !== agentId) return { surfaced: 0, ids: [] as string[] };
 	const idleAtStart = ctx.mode === "tui" ? ctx.isIdle() : false;
+	try {
+		if (existsSync(p.events) && statSync(p.events).size >= DEFAULT_TRACE_ROTATE_BYTES && !traceRotationInFlight) {
+			traceRotationInFlight = true;
+			void maybeRotateTraces(p, {}).catch((err: any) => trace(p, "trace.retention.rotate_error", { reason, error: String((err as Error)?.message || err) }).catch(() => {})).finally(() => { traceRotationInFlight = false; });
+		}
+	} catch (err: any) {
+		await trace(p, "trace.retention.rotate_probe_error", { reason, error: String((err as Error)?.message || err) }).catch(() => {});
+	}
 	const result = await withLock(p, async () => {
 		const st = await readState(p, ctx.cwd);
 		st.agentSurfaced ||= {};
@@ -385,16 +439,24 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		// ENGINE_RETRY_WINDOW_MS; only when the count reaches ENGINE_MAX_RETRIES do we conclude the
 		// engine has exhausted retries on this slot and allow the swap path to fire. Below the
 		// threshold, we trace the gated event and return — no swap, no bench, no streak bump.
-		// A different providerKey OR errorMessage OR a gap > ENGINE_RETRY_WINDOW_MS starts a FRESH
-		// incident (the old one aged out via the window check, not via a timer that could miss).
+		// A different providerKey OR a gap > ENGINE_RETRY_WINDOW_MS starts a FRESH incident (the old
+		// one aged out via the window check, not via a timer that could miss).
+		// Issue 70: the incident identity is the STABLE classification (providerKey + kind +
+		// digit-scrubbed message), NOT raw error-text equality. Provider 429 usage_limit_reached
+		// bodies embed a per-second-mutating resets_in_seconds; raw equality started a fresh
+		// incident at count:1 every turn so the threshold was never reached and quota-exhausted
+		// slots were never benched/rotated (live: 39x gated count:1, 0x exhausted). Scrubbed
+		// identity + kind keeps distinct transient messages distinct while collapsing mutating
+		// quota bodies into one incident.
 		const providerKey = slotKey(currentSlot);
-		const normErr = errorText.slice(0, 200);
+		const scrubErr = scrubErrorIdentity(errorText);
 		const prevIncident = engineRetryIncidents.get(agentId);
 		let engineExhausted = false;
 		let incidentCount = 1;
 		if (prevIncident
 			&& prevIncident.providerKey === providerKey
-			&& prevIncident.errorMessage === normErr
+			&& prevIncident.kind === kind
+			&& prevIncident.errorMessage === scrubErr
 			&& (nowMs - prevIncident.lastSeenAt) <= ENGINE_RETRY_WINDOW_MS) {
 			prevIncident.count++;
 			prevIncident.lastSeenAt = nowMs;
@@ -403,7 +465,8 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		} else {
 			engineRetryIncidents.set(agentId, {
 				providerKey,
-				errorMessage: normErr,
+				kind,
+				errorMessage: scrubErr,
 				firstSeenAt: nowMs,
 				lastSeenAt: nowMs,
 				count: 1,
@@ -420,7 +483,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				count: incidentCount,
 				windowMs: ENGINE_RETRY_WINDOW_MS,
 				threshold: ENGINE_MAX_RETRIES,
-				error: normErr.slice(0, 120),
+				error: errorText.slice(0, 120),
 			}).catch(() => {});
 			return;
 		}
@@ -474,19 +537,76 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		}
 	});
 
-	// === Issue 18: Goal idle-streak resolve detection ===
+	// === Orchestrator-busy resets the shared idle epoch (Row 68 semantics fix, 2026-08-31) ===
+	// The idle-streak nudge measures "all agents + ORCHESTRATOR idle for a full interval". Workers
+	// are covered by updateIdleEpochLocked (runtimeStatus busy/idle edges), but the ORCHESTRATOR's
+	// own activity was invisible to it: while the PM was busy answering the human (turns running),
+	// the epoch stayed anchored at the old all-idle edge, so a 30s interval elapsed "during" the
+	// PM's work and the nudge fired ~30s after every turn end (live: nudge 1/3 following each reply
+	// even though the PM had been busy the whole time). turn_start = busy edge for the orchestrator:
+	// drop the epoch (and pending boundary); turn_end (below) re-arms it via the next pump tick's
+	// fresh allIdleSinceAt, so the interval is measured from the END of the orchestrator's work.
+	pi.on("turn_start", async (_event, ctx) => {
+		if (currentAgentId() !== "orchestrator") return;
+		const p = paths(ctx.cwd);
+		try {
+			await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const idleState = st.idleNudgeState;
+				if (!idleState?.allIdleSinceAt && !idleState?.nextGoalNudgeAt && !idleState?.lastGoalNudgeAt) return;
+				const prev = idleState.allIdleSinceAt ?? null;
+				// === R23C (2026-09-03) — stamp orchestrator provenance at the turn_start clear site ===
+				// turn_start is the orchestrator's busy edge (the live R23 storm source — `agent_settled`
+				// fires at every orchestrator turn boundary, briefly marking the orchestrator busy/idle).
+				// The cap branch's worker-breaker guard reads `lastEpochBusyAgents` to distinguish a
+				// worker-driven fresh epoch (qualifies for reset) from orchestrator-turn churn (must
+				// NOT qualify). Without this stamp, every turn_start-cleared anchor reaches the cap
+				// branch with breaker=undefined → absent→reset legacy default → STORM. Stamping
+				// `["orchestrator"]` here lets the breaker reject orchestrator-churn anchors. Live
+				// evidence: tester-turnstart-probe.mjs (R23C artifacts; pre-fix RED 2 resets/4 emissions
+				// seq 4→7, post-fix GREEN ≤1 emission).
+				idleState.lastEpochBusyAgents = ["orchestrator"];
+				delete idleState.allIdleSinceAt;
+				delete idleState.nextGoalNudgeAt;
+				await trace(p, "idle.epoch.reset", { reason: "orchestrator_busy", previousAllIdleSinceAt: prev, busyAgents: ["orchestrator"] }).catch(() => {});
+				await writeState(p, st);
+			});
+		} catch (err: any) {
+			await trace(p, "idle.epoch.reset_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
+	});
+
+	// === Issue 18 + R16: Goal idle-streak resolve detection ===
 	// Registered AFTER the model-pool swap branch above so pi's per-event handler loop runs the
 	// resolve AFTER any in-process swap (binding C-2 of the plan review). Both handlers acquire the
 	// same withLock independently, so they serialise; source order ensures the resolve observes the
-	// post-swap state. This branch resets consecutiveNoResolveNudges on ANY orchestrator turn that
-	// ends stopReason="stop" + role="assistant" — the act of ending a turn (vs staying silent) is
-	// the resolve signal; we do not require an explicit ack or a result message. A turn_end
-	// {error} is intentionally NOT a resolve: tool/model failures are not "I addressed the goal".
-	// A non-orchestrator turn_end is also NOT a resolve: workers don't decide the goal.
+	// post-swap state.
+	//
+	// R16 fix: a turn_end{stop, role=assistant} is a RESOLVE only if the orchestrator actually
+	// ADVANCED the goal in that turn — i.e., the message contains a swarm tool call
+	// (swarm_spawn_agent / swarm_assign_task / swarm_mark_goal_done / swarm_set_goal /
+	// swarm_restart_agent / swarm_send_message / swarm_reconcile / swarm_update_task /
+	// swarm_create_task / swarm_stop_agent / swarm_release_agent_task) OR an explicit user-
+	// direction message was sent via a tool call in the same turn.
+	//
+	// Pure ack text ("Got it, will continue", "Acknowledged", "Will keep going") does NOT count:
+	// it would let an idle orchestrator reset the counter forever on the same template, never
+	// reaching MAX_CONSECUTIVE_NUDGES_DEFAULT, never engaging back-off, never surfacing the
+	// bounded escalation chain. Live incident 2026-09-02: 47 idle_nudge / 36 resolved in 10 min
+	// for goal-1788266039522-6eae40.
+	//
+	// A turn_end {error} is intentionally NOT a resolve: tool/model failures are not "I addressed
+	// the goal". A non-orchestrator turn_end is also NOT a resolve: workers don't decide the goal.
+	// An empty-message turn_end (silent) is NOT a resolve either — unchanged from pre-fix.
+	//
+	// The action detector is exported at module scope (SWARM_RESOLVE_TOOLS + turnEndIsResolveAction)
+	// so r16-idle-goal-regression.test.mjs can drive the PRODUCTION detector end-to-end. The
+	// turn_end handler below calls `turnEndIsResolveAction(event)` to gate the counter reset.
 	pi.on("turn_end", async (event, ctx) => {
 		const msg: any = (event as any)?.message;
 		if (!msg || msg.role !== "assistant" || msg.stopReason !== "stop") return;
 		if (currentAgentId() !== "orchestrator") return;
+		const action = turnEndIsResolveAction(event);
 		const p = paths(ctx.cwd);
 		try {
 			await withLock(p, async () => {
@@ -496,10 +616,32 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				const nudges = goal.consecutiveNoResolveNudges;
 				const hadBackoff = Boolean(goal.backoffTicksRemaining && goal.backoffTicksRemaining > 0);
 				if (nudges === 0 && !hadBackoff) return; // nothing to resolve
+				// R16: pure ack text does NOT count as a resolve. Track when a turn was a
+				// non-resolve so the trace distinguishes ack vs resolve clearly for ops/dashboards.
+				if (!action.resolve) {
+					goal.lastNonResolveTurnAt = new Date().toISOString();
+					await trace(p, "goal.nudge.turn_no_resolve_action", {
+						goalId: goal.id,
+						nudges,
+						hadBackoff,
+						detectionReason: action.reason,
+					}).catch(() => {});
+					await writeState(p, st);
+					return;
+				}
 				goal.consecutiveNoResolveNudges = 0;
 				delete goal.backoffTicksRemaining;
 				goal.lastResolvedAt = new Date().toISOString();
-				await trace(p, "goal.nudge.resolved", { goalId: goal.id, nudges, hadBackoff, by: "turn_end" });
+				goal.lastResolveActionAt = new Date().toISOString();
+				goal.lastResolveActionTools = action.toolNames;
+				await trace(p, "goal.nudge.resolved", {
+					goalId: goal.id,
+					nudges,
+					hadBackoff,
+					by: "turn_end",
+					actionReason: action.reason,
+					actionTools: action.toolNames,
+				});
 				await writeState(p, st);
 			});
 		} catch (err: any) {
@@ -731,6 +873,40 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 					}
 				}
 			}
+			// R25 — PM auto-notify for ack-debt (separate from response-missing + open-assignment
+			// cases). A worker that settles owing live, non-superseded requiresAck messages is
+			// invisible to the orchestrator today; this closes that gap. Storm guards mirror the
+			// response-missing branch: per-agent cooldown (`lastAckDebtNotifyAt`, distinct from
+			// `lastSettleNotifyAt` so the open-assignment cooldown is not coupled) +
+			// idempotencyKey=r25:ackdebt:<agent>:<sha8(sorted ids)> reused across settles.
+			// requiresAck=false (informational). deliverMessageLocked derives from=currentAgentId()
+			// which is the worker in this hook context — the correct author for the notify.
+			const ackDebt = unackedRequiresAckRecords(st, agentId);
+			if (ackDebt.length) {
+				const sinceAckDebt = agent.lastAckDebtNotifyAt ? Date.now() - new Date(agent.lastAckDebtNotifyAt).getTime() : Number.POSITIVE_INFINITY;
+				if (sinceAckDebt > SETTLE_NOTIFY_COOLDOWN_MS) {
+					const sortedIds = [...ackDebt.map((r) => r.id)].sort();
+					const hash = createHash("sha1").update(sortedIds.join("|")).digest("hex").slice(0, 8);
+					const idempotencyKey = `r25:ackdebt:${agentId}:${hash}`;
+					agent.lastAckDebtNotifyAt = ts;
+					const subjectList = ackDebt.map((r) => r.subject || "(no subject)").join("; ");
+					const idList = sortedIds.join(", ");
+					try {
+						await deliverMessageLocked(pi, ctx.cwd, p, st, {
+							to: "orchestrator",
+							subject: `agent ${agentId} settled owing ${ackDebt.length} unacked ack(s)`,
+							body: `Agent ${agentId} settled (agent_settled) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
+							requiresAck: false,
+							idempotencyKey,
+						});
+						await trace(p, "message.ack_debt.settled.notify", { agentId, messageIds: sortedIds });
+					} catch (err: any) {
+						await trace(p, "message.ack_debt.notify_failed", { agentId, error: String(err?.message || err) });
+					}
+				} else {
+					await trace(p, "message.ack_debt.settled.notify_cooldown", { agentId, cooldownMs: SETTLE_NOTIFY_COOLDOWN_MS });
+				}
+			}
 			// PM auto-notify (engine behavior): a settle while still holding open assignments is a
 			// stall/idle signal the orchestrator should not have to poll for. Enqueue a mailbox notify to
 			// the mailbox-only orchestrator. Loop-safe: (a) it targets the orchestrator, never the worker
@@ -830,6 +1006,34 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			agent.updatedAt = ts;
 			await writeState(p, st);
 		});
+		// === Issue 83a — stamp lastProgressAt on every tool execution (worker is making forward progress) ===
+		// I/O cost per tool call: 1 `withLock`+`readState` (swarm state) + N `readTaskState` (one per
+		// active task file) + M `writeTaskState` (one per dirty task). Where N = agent.activeTaskIds
+		// length, M ≤ N (only dirty tasks written). Bounded by agent load; agent load is bounded by
+		// `maxConcurrentTasks`. This is an EXTRA I/O cost vs the pre-83a baseline (which did not
+		// stamp on tool calls); the cost is honest and bounded, NOT free. The read-then-stamp is
+		// idempotent and safe under concurrent task-file writes because TaskNode.lastProgressAt is
+		// monotone non-decreasing per node. Calls the exported `ensureNodeActivityStamp` helper per
+		// node (single source of truth for the stamp invariant; unit tests exercise the same helper,
+		// so the helper is the production entry point). R10-KR5 compliance: even the bare-catch
+		// inner try/catch is wrapped in a test (C9) that asserts the durable side-effect; if the
+		// wrapped body throws, C9 fails loudly instead of silently no-opping.
+		{
+			const _ids = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const a = st.agents[agentId]; return a?.activeTaskIds ?? []; });
+			for (const taskId of _ids) {
+				try {
+					const tp = taskPaths(p, taskId);
+					if (!existsSync(tp.taskJson)) continue;
+					const task = await readTaskState(tp.taskJson);
+					const ts = new Date().toISOString();
+					let dirty = false;
+					for (const nodeId of Object.keys(task.nodes)) {
+						if (ensureNodeActivityStamp(task, nodeId, ts, agentId)) dirty = true;
+					}
+					if (dirty) await writeTaskState(tp, task).catch(() => {});
+				} catch { /* no progress stamp on this task; the agent may not be bound to it */ }
+			}
+		}
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
@@ -913,6 +1117,76 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			await writeState(p, st);
 		});
 		await trace(p, "message.input_intercept", { id: msg.id, from: msg.from, to: msg.to, agentId: currentAgentId(), status: "intercepted" });
+
+		const isHigh = msg.priority === "high";
+		const midTurn = !ctx.isIdle();
+
+		// === Issue 86: priority-high interrupt-on-delivery ===
+		// When a high-priority swarm message is intercepted mid-turn, call ctx.abort() (TUI-level
+		// interrupt, same channel as manual Escape) so urgent directives are consumed at the next-turn
+		// boundary instead of sitting intercepted for 20+ minutes (live incident 2026-08-31: STOP sat
+		// 23 min). Rate-limited per agent (~1/30s default) so a chatty orchestrator cannot livelock
+		// a worker. Graceful degrade on ctx.abort() failure: still queue the message as followUp so it
+		// lands at the next-turn boundary regardless.
+		if (isHigh && midTurn) {
+			const WINDOW_MS = Number(process.env.PI_SWARM_HIGH_INTERRUPT_WINDOW_MS ?? 30_000);
+			const me = currentAgentId();
+			let allowed = true;
+			let lastInterruptAt: string | undefined;
+			await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				// Orchestrator pseudo-agent is exempt from the ledger; the orchestrator has no in-flight
+				// turn in the TUI sense, and rate-limiting would block legitimate nudges.
+				const self = me === "orchestrator" ? undefined : st.agents[me];
+				lastInterruptAt = self?.lastHighInterruptAt;
+				if (lastInterruptAt && (Date.now() - new Date(lastInterruptAt).getTime()) < WINDOW_MS) {
+					allowed = false;
+				} else if (self) {
+					self.lastHighInterruptAt = new Date().toISOString();
+					self.updatedAt = new Date().toISOString();
+					await writeState(p, st);
+				}
+			});
+
+			if (!allowed) {
+				await trace(p, "message.interrupt_suppressed", {
+					id: msg.id, from: msg.from, to: msg.to, agentId: me,
+					reason: "rate_limited", windowMs: WINDOW_MS, lastInterruptAt,
+				}).catch(() => {});
+				// Still queue as followUp so the message is consumed at the next-turn boundary — just
+				// don't burn an extra interrupt budget on the second directive.
+				pi.sendMessage({
+					customType: "swarm-message",
+					content: formatSwarmMessageContent(msg),
+					display: true,
+					details: msg,
+				}, { triggerTurn: true, deliverAs: "followUp" });
+				return { action: "handled" };
+			}
+
+			await trace(p, "message.interrupt_requested", { id: msg.id, from: msg.from, to: msg.to, agentId: me }).catch(() => {});
+			let interruptEffective = false;
+			try {
+				await ctx.abort();
+				interruptEffective = true;
+			} catch (err) {
+				await trace(p, "message.interrupt_failed", { id: msg.id, from: msg.from, to: msg.to, agentId: me, error: String((err as Error)?.message || err) }).catch(() => {});
+				// Graceful degrade: still queue the message as followUp so it lands at the next-turn
+				// boundary even if the abort itself failed (matches the manual-Escape fallback pattern).
+			}
+			if (interruptEffective) {
+				await trace(p, "message.interrupt_effective", { id: msg.id, from: msg.from, to: msg.to, agentId: me }).catch(() => {});
+			}
+			pi.sendMessage({
+				customType: "swarm-message",
+				content: formatSwarmMessageContent(msg),
+				display: true,
+				details: msg,
+			}, { triggerTurn: true, deliverAs: "followUp" });
+			return { action: "handled" };
+		}
+
+		// === Existing behavior (preserved verbatim) ===
 		pi.sendMessage({
 			customType: "swarm-message",
 			content: formatSwarmMessageContent(msg),

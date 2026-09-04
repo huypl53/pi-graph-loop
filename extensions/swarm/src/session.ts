@@ -3,7 +3,7 @@ import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_M
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import type { ModelSlot, RotationConfig, RotationStrategy, SwarmSettings } from "./types.ts";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, EXT, FAST_MODEL, FAST_PROVIDER, SWARM_GUEST_ID } from "./constants.ts";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, EXT, SWARM_GUEST_ID } from "./constants.ts";
 import { ensureOrchestrator } from "./identity.ts";
 
 // Explicit opt-in for the orchestrator/PM identity. Truthy PI_SWARM_IS_ORCHESTRATOR (1/true/yes)
@@ -88,7 +88,6 @@ export function currentModel() {
 }
 
 export function providerForModel(model: string): string | undefined {
-	if (model === FAST_MODEL) return FAST_PROVIDER;
 	// Issue E: never force the zai hardcode onto an unknown model. Known presets win, then an explicit
 	// settings/env default; otherwise undefined — the caller decides (spawn falls back to
 	// DEFAULT_PROVIDER only at the final spawn-command boundary with a trace warning).

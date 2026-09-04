@@ -1,0 +1,8 @@
+# ct3-nextturn-idle: CT-3 lane driver — script the probe tool that captures
+# the real pi.sendMessage boundary for nextTurn + triggerTurn.
+#
+# The probe extension (extensions/ct-probe/ct-probe.ts CT3 factory) registers
+# `swarm_ct3_capture`. This fixture calls it on turn 1; the probe writes
+# $PI_CT_PROBE_SCRATCH/ct3-result.json with the real boundary observation.
+{"name":"ct3 turn 1 (probe tool swarm_ct3_capture fires; real pi.sendMessage captured)","stopReason":"toolUse","events":[{"type":"text","delayMs":15,"text":"CT-3 lane: turn 1 — the probe extension's swarm_ct3_capture tool performs the real pi.sendMessage({ deliverAs: nextTurn, triggerTurn: true }) call on the real runtime. The probe writes ct3-result.json with sendMessageReturnIsUndefined, same-tick deltaMs, and opts verification.","chunks":["CT-3 lane: ","turn 1 — ","the probe extension's swarm_ct3_capture tool ","performs the real pi.sendMessage({ deliverAs: nextTurn, triggerTurn: true }) call ","on the real runtime."," The probe writes ct3-result.json ","with sendMessageReturnIsUndefined, same-tick deltaMs, ","and opts verification."]},{"type":"toolcall","name":"swarm_ct3_capture","id":"ct3-capture","arguments":{}}]}
+{"name":"ct3 turn 2 (lane settle)","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"CT-3 lane complete. Probe result was written during turn 1; lane settles.","chunks":["CT-3 lane complete."," Probe result was written during turn 1; ","lane settles."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

@@ -1,0 +1,4 @@
+# heartbeat-gc-dead-pane: Issue 82 — heartbeat GC auto-marks dead-pane agents as stopped.
+# Lane harness seeds an agent with status:running + tmuxAlive:false + stale heartbeat, then
+# runs a pump tick; the GC must flip status to stopped and emit the heartbeat_gc.stopped trace.
+{"name":"heartbeat GC observes dead pane","events":[{"type":"text","delayMs":15,"text":"Seeded a dead-pane worker; the heartbeat GC should auto-mark it stopped.","chunks":["Seeded a dead-pane worker; ","the heartbeat GC should auto-mark it stopped."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

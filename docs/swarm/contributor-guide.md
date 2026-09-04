@@ -28,6 +28,37 @@ Implementation modules:
 - `extensions/swarm/src/command.ts` — `/swarm` command surface
 - `extensions/swarm/src/tools/` — tool registrations grouped by domain
 
+
+## Test layout
+
+All test suites live under `extensions/swarm/tests/` (not the repo root) and
+`extensions/mock-llm/tests/` for mock-llm-specific suites. The git mv preserved
+the original history. Imports of `./src/...` were rewritten to `../src/...`.
+
+- Run a single suite: `node extensions/swarm/tests/<name>.test.mjs`
+- Run the swarm inventory: `npm run test:swarm` (sets
+  `PI_SWARM_AGENT_ID=orchestrator PI_SWARM_IS_ORCHESTRATOR=1` so the
+  authority-gated suites do not crash)
+- Run the mock-llm inventory: `npm run test:mockllm`
+
+Pre-existing failures (kept byte-identical by this refactor — do NOT fix in this
+refactor; record new R-rows for fixes):
+
+```text
+ct-contract-probes.test.mjs         19 passed / 4 failed       (CT-2.B/C known)
+minimal-protocol-authoritative      29 pass / 18 fail
+model-routing.test.mjs              4 passed / 1 failed
+orchestrator-wake.test.mjs          31 passed / 3 failed
+functional.test.mjs                 env-crash (caller=implementer-01)
+pool-config.test.mjs                TypeError (provider-config-dependent)
+row75-graph-guardrails.test.mjs     assertion crash
+supersession-fencing.test.mjs       17 pass / 3 fail
+```
+
+Baseline inventory script: `.pi/swarm/tasks/task-20260903-structure-refactor/artifacts/baseline-inventory.sh`.
+This IS the refactor gate — diff the new run's `baseline-inventory.txt` line-by-line
+against the committed baseline to detect drift.
+
 ## Change discipline
 
 ### If you add a new tool
@@ -38,6 +69,28 @@ Checklist:
 4. document it in `docs/swarm/tools.md`
 5. mention it in `extensions/swarm/README.md` if it changes the contributor-facing map
 6. add validation coverage
+
+### If you add or change Pi-runtime semantics
+Checklist (mandatory per AGENTS.md "Pi runtime contract (mandatory consultation)"):
+- [ ] Consult [`docs/swarm/pi-runtime-contract.md`](./pi-runtime-contract.md) and
+      identify which of the four layers ([§1](./pi-runtime-contract.md#1-the-four-layers))
+      the change crosses (durable mailbox / Pi queue acceptance / visible surface /
+      LLM consumption).
+- [ ] Read the matching section in
+      [`docs/swarm/pi-runtime-evidence.md`](./pi-runtime-evidence.md) for the
+      `[VERIFIED]` / `[INFERRED]` / `[GAP]` citations.
+- [ ] Add or update a row in
+      [`pi-runtime-contract.md §10`](./pi-runtime-contract.md#10-r12r15-false--unproven-claims-register)
+      if the change introduces, removes, or modifies a false / unproven claim
+      about Pi runtime.
+- [ ] Include an R10-1 boundary-counting assertion if the change adds a new
+      code path that crosses a Pi runtime boundary (count at the real
+      `pi.sendMessage` / `ctx.abort` / `pi.registerTool` / `ctx.reload`
+      boundary, not at an internal helper).
+- [ ] If the change touches a claim in
+      [`pi-runtime-contract.md §10`](./pi-runtime-contract.md#10-r12r15-false--unproven-claims-register),
+      file a separate R-row task for the production fix — this KB task does
+      NOT ship swarm behavior changes.
 
 ### If you add a new message lifecycle state or field
 Checklist:
@@ -64,6 +117,33 @@ Checklist:
 2. document retention/purpose in `docs/swarm/operations.md`
 3. describe whether it is source-of-truth, cache, or trace output
 4. keep file format inspectable
+
+### Scope syntax (allowedFiles / file-scope ownership)
+
+The ownership preflight (`swarm_assign_task`, `src/taskgraph.ts`) compares each node's
+effective write scope — node `allowedFiles` → recursive `allowedFilesFrom` → task default —
+with a deterministic glob predicate. Pattern semantics (`normalizeScopePattern`):
+
+- **Trailing slash = directory subtree** — `dir/` ≡ `dir/**`. It covers the directory node
+  itself and every descendant. This is the ONLY form the task-default scope generator
+  emits (the orchestrator writes `artifacts/`, `extensions/swarm/src/`, `extensions/swarm/tests/`,
+  …). **Prefer trailing slash for directory scopes in plans** so two disjoint dirs are seen
+  as non-overlapping and can run in parallel.
+  - `('a/b/', 'c/d/')` → `false` (disjoint dirs coexist)
+  - `('a/b/', 'a/b/c.ts')` → `true` (dir covers a file inside it)
+  - `('a/b/', 'a/b')` → `true` (dir covers its own bare prefix)
+- **Bare path without slash = exact prefix** — `a/b` matches exactly `a/b` and NOT `a/b/c`.
+  This is the pre-existing semantics and is unchanged. Use a trailing slash (or `**`) when
+  you mean subtree.
+- **Glob** — `*` matches within a single segment (`src/*.ts`); `**` matches zero-or-more
+  segments (`src/**`); `{a,b}` / `?` / `[x]` / `!` are unsupported.
+- **Unknown syntax is conservatively conflicting** — `normalizeScopePattern` returns `null`
+  (absolute paths, `a/../b`, internal `//`, brace-globs), `scopesOverlap` reports
+  `{overlap:true, relation:"unknown-syntax"}`, and preflight fails with
+  `ACTIVE_SCOPE_CONFLICT`. Preflight can never pass on ambiguity.
+
+R26 added the trailing-slash → subtree mapping; prior to that, any trailing-slash pattern
+was treated as unknown syntax and blocked ALL parallel assignment of dir-scoped work.
 
 ## Invariants to protect
 
@@ -115,6 +195,15 @@ Required examples in this issue family:
 | agent lifecycle and tmux integration | `src/agents.ts`, `src/tmux.ts` |
 | tmux behavior | `src/tmux.ts` |
 
+## Review and evidence rules (R10 keepers)
+
+- **Cost-bound claims require counting assertions.** Any plan/comment/report claiming a bound (probe rate, lock-hold, message rate; trigger words: only/at most/bounded/throttled/rate-limited/once-per) must carry a counting test at the real I/O boundary that fails when violated. State assertions see "what happened once", never "how often". Template: heartbeat-gc C10-C13 (seed rejected population, counting mock at boundary, N≥2 passes, assert ≤bound, surgical-RED by reverting only the bound). Full checklist: docs/swarm/r10-postbatch-synthesis/consolidated-findings.md.
+- **No reject smell.** A clean batch with zero reviewer rejections is a review-depth smell, not a success metric. Reviewer rejections must cite: specific code location + concern + consequence + fix proposal.
+- **Name the red assertion.** Plans name the exact assertion that must go red; RED reports reference named assertions, not "tests fail". TypeError-class REDs prove newness, not discrimination.
+- **Every shipped fixture is exercised by an independent tester in a fresh tmux lane** (durable-state + trace census asserted), not just unit-test PASS counts.
+- **KR5 (silent-swallow anti-pattern).** A `try { ... } catch { /* swallow */ }` or `.catch(() => {})` wrapping an engine-wiring path (hook body, pump-tick phase, message-delivery callback) MUST have at least one integration test exercising the production factory/registration path that would FAIL if the wrapped body throws. Helper-only unit tests that bypass the wrapping layer cannot catch silent failures inside the swallowed region. Corollary: when the production entry point is a hook (`pi.on("tool_execution_end", ...)`), at least one assertion must go through the hook, not the helper.
+- **KR6 (seed diversity for threshold gates).** Tests that verify threshold/staleness/boundary logic MUST seed BOTH sides of the boundary: stale-above (gate SHOULD fire) + fresh-below (gate SHOULD NOT fire). One-sided suites cannot detect gate-polarity bugs (an implementer flipping the gate direction passes the one-sided suite). Apply at plan-writing time too: plans should specify the negative case explicitly.
+
 ## Documentation update checklist
 
 When you change behavior, update docs in this order:
@@ -132,8 +221,20 @@ Preferred validation layers:
 - typecheck of `extensions/swarm/index.ts`
 - scenario scripts such as `scripts/swarm_task_uat.sh`
 - fresh interactive tmux/pi validation for extension behavior changes
+- mock-LLM fixture replay lanes for any agent-facing behavior (see "Testing philosophy: real engine, scripted LLM" below)
 
 For docs-only changes, it is acceptable to skip interactive validation, but say so explicitly in the final report.
+
+## Testing philosophy: real engine, scripted LLM
+
+Every swarm behavior change ships a mock-LLM fixture (AGENTS.md makes this compulsory). The philosophy behind it:
+
+- **The engine is never mocked.** A fixture lane runs a real `pi` process with the real swarm extension: hooks fire, the orchestrator pump ticks, reconcile walks task.json, mailbox delivery + tmux injection + idempotency dedupe are all production code paths. Only the model is replaced by a scripted stream (`extensions/mock-llm/`, one JSONL turn per request; when the script runs out the provider returns `script_exhausted` rather than hanging).
+- **Engine-side behavior is driven by seeding, not scripting.** Pumps, nudges, cooldowns, caps, and fences react to *state on disk*. To test them you seed the precondition (a stale `allIdleSinceAt`, an acked deferral message older than the cooldown, a ready-but-unassigned node) and then assert the engine's side effects: trace events in `events.jsonl`, new mailbox records with distinct ids, task.json node transitions.
+- **Assertions read disk, not console.** Evidence is what the engine wrote: `.pi/mock-llm/transcripts/<fixture>/` (ordered tool calls + stopReasons), `swarm-state.json` ledgers (delivered/acked/idempotency keys/seq counters), `events.jsonl` traces, mailbox JSONL. A deterministic fixture replayed twice must produce semantically identical output (same final statuses, same ordered tool-call sequence, same boundary values).
+- **Deterministic and offline.** Milliseconds, no network, no provider keys. `delayMs` values are part of the contract; no hidden randomness or environment-sensitive branching. This is what makes a fixture a regression test rather than a demo.
+
+For multi-agent interaction patterns (handoff chains, seeded worlds, parallel lanes) see the `mock-llm-scenarios` skill — the authoring reference for fixtures.
 
 ## Suggested workflow for a non-trivial feature
 

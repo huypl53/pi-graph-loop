@@ -6,8 +6,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
-import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PREFLIGHT_ASSIGN_GRACE_MS, TERMINAL_NODE_STATUSES, TRACE_LIFECYCLE_DERIVED, TRACE_TASK_ATTEMPT_FORCE_REOPEN } from "../constants.ts";
-import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveNodeScope, scopesOverlap, suppressPriorAttemptForForceReopen, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
+import { CANCELLATION_REASON, PI_SWARM_MINIMAL_PROTOCOL, PI_SWARM_REASSIGN_RATE_LIMIT, PI_SWARM_REASSIGN_RATE_WINDOW_MS, PREFLIGHT_ASSIGN_GRACE_MS, REASSIGN_RATE_LIMITED, TERMINAL_NODE_STATUSES, TRACE_LATE_RESULT_REJECTED, TRACE_REASSIGN_RATE_LIMITED, TRACE_LIFECYCLE_DERIVED, TRACE_TASK_ATTEMPT_FORCE_REOPEN, LATE_RESULT_REFUSAL_REASON } from "../constants.ts";
+import { activateReworkNodes, applyGateUpdates, applySharedContextUpdates, applyTaskStatus, autoCloseOrchestratorTerminalNodes, buildAssignmentBody, buildGraphFromInput, buildTaskMarkdown, collectActiveLeases, collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary, isAllowedNodeTransition, isGraphTerminalNode, isTaskOrNodeCancelled, mintNodeAttempt, printGraphMermaid, printGraphText, releaseNodeAssignment, releaseTaskFromAllAgents, resolveCommitNodeEvidence, resolveNodeScope, scopesOverlap, suppressPriorAttemptForForceReopen, sweepTaskWorkersLocked, validateTaskGraph, checkClosureNotificationStale, checkStallNotificationStale, type EffectiveScope } from "../taskgraph.ts";
 import { resolveTaskStallLocked } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";
 import { deliverMessageLocked, deriveLifecycleFromTrigger, responseMissingRecords, supersedeOpenAssignments, supersedeTaskAssignmentMessages, validateResultMessage } from "../mailbox.ts";
@@ -19,6 +19,142 @@ import { findReusableAgent, spawnAgent, clearOrphanWatch, isSameOrchestratorLead
 import { reconcile, runtimeTaskWarnings } from "../reconcile.ts";
 import { tmux } from "../tmux.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
+
+// === Issue 83b — late-result rejection helper (exported for testing) ===
+// A worker (the prior assignee) holds an attemptId from its old assignment. The node has since been
+// reassigned to a newer active attempt. The worker now attempts `swarm_update_task` with the OLD
+// attemptId. This helper detects the situation and returns a refusal envelope WITHOUT mutating
+// the node. The caller (the tool body) is responsible for trace emission + durable stamp.
+//
+// Pure function: no I/O. Reads `node.attemptHistory` and `node.activeAttemptId`. Returns:
+//   - null when the caller's attemptId is the active attempt (positive path: caller wins)
+//   - null when no supersession has happened yet (legacy path: caller wins)
+//   - { refused: true, reason: "supersession", ... } when the caller holds a SUPERSEDED attempt
+//     AND the node has a NEWER active attempt (the late-result scenario)
+//   - { refused: true, reason: "supersession", ... } when the caller holds a non-active attempt
+//     in attemptHistory (covers attempts that were supersededBy="<rework>" or "<force-reopen>")
+//
+// Distinct from the existing `ATTEMPT_TOKEN_REQUIRED` / `ATTEMPT_TOKEN_MISMATCH` paths in the
+// attempt-fencing block (which use `failTaskTool` + `tp` to emit traces + write task.json). This
+// helper is a pure check; the caller can choose how to surface it.
+export type LateResultRefusal = {
+	refused: true;
+	reason: typeof LATE_RESULT_REFUSAL_REASON;
+	providedAttemptId: string;
+	providedAttemptStatus: string;
+	activeAttemptId: string;
+	activeAttemptNumber: number | "?";
+	supersededAt?: string;
+	lateArrivalAt: string;
+};
+export function checkLateResultRejection(node: TaskNode, providedAttemptId: string | undefined, nowIso: string): LateResultRefusal | null {
+	if (!providedAttemptId) return null; // no token: the fencing block handles this with ATTEMPT_TOKEN_REQUIRED
+	// Positive path: provided token IS the active attempt — caller wins.
+	if (node.activeAttemptId && providedAttemptId === node.activeAttemptId) return null;
+	// Caller's attempt must exist in history and be NON-active (superseded/etc).
+	const providedAttempt = node.attemptHistory?.find((a: any) => a.attemptId === providedAttemptId);
+	if (!providedAttempt) return null; // unknown token: not a late-result; the fencing block handles this
+	if (providedAttempt.status === "active") {
+		// The provided attempt is active but not the node.activeAttemptId. Edge case: caller is
+		// racing the mint. Refuse with supersession.
+	}
+	if (providedAttempt.status === "active" && node.activeAttemptId === providedAttemptId) return null; // explicit no-op
+	// Late-result scenario: caller holds a non-active attempt AND node has a newer active attempt.
+	if (!node.activeAttemptId) {
+		// Caller holds a non-active attempt AND node has no active attempt. Likely the caller is
+		// a legacy / pre-attempt-fencing worker. NOT a late-result (no supersession racing). Allow.
+		return null;
+	}
+	const activeAttempt = node.attemptHistory?.find((a: any) => a.attemptId === node.activeAttemptId);
+	const activeNumber = activeAttempt ? activeAttempt.attemptNumber : "?";
+	return {
+		refused: true,
+		reason: LATE_RESULT_REFUSAL_REASON,
+		providedAttemptId,
+		providedAttemptStatus: providedAttempt.status,
+		activeAttemptId: node.activeAttemptId,
+		activeAttemptNumber: activeNumber,
+		supersededAt: providedAttempt.supersededAt,
+		lateArrivalAt: nowIso,
+	};
+}
+
+// === Issue 83b — per-node reassign rate-limit gate (exported for testing) ===
+// Pure function. Reads `node.supersessionCount` + `node.supersessionWindowStart`. Returns:
+//   - null when the gate is open (caller may proceed to mintNodeAttempt)
+//   - { refused: true, reason: "rate_limited", ... } when the gate is closed
+//
+// Fixed-window semantics: simple O(1) per reassign. Window auto-resets when
+// (nowMs - supersessionWindowStartMs) > PI_SWARM_REASSIGN_RATE_WINDOW_MS. The caller is
+// responsible for stamping the count on a successful reassign (not on a refusal).
+export type ReassignRateLimited = {
+	refused: true;
+	reason: typeof REASSIGN_RATE_LIMITED;
+	currentCount: number;
+	limit: number;
+	windowMs: number;
+	windowStart: string;
+	windowResetAt: string;
+};
+export function checkReassignRateLimit(node: TaskNode, nowMs: number, nowIso: string): ReassignRateLimited | null {
+	const count = node.supersessionCount ?? 0;
+	const windowStart = node.supersessionWindowStart ? new Date(node.supersessionWindowStart).getTime() : 0;
+	const windowExpired = windowStart === 0 || (nowMs - windowStart) > PI_SWARM_REASSIGN_RATE_WINDOW_MS;
+	const effectiveCount = windowExpired ? 0 : count;
+	if (effectiveCount >= PI_SWARM_REASSIGN_RATE_LIMIT) {
+		// Window hasn't expired and count is at/above limit: refuse.
+		return {
+			refused: true,
+			reason: REASSIGN_RATE_LIMITED,
+			currentCount: effectiveCount,
+			limit: PI_SWARM_REASSIGN_RATE_LIMIT,
+			windowMs: PI_SWARM_REASSIGN_RATE_WINDOW_MS,
+			windowStart: node.supersessionWindowStart ?? nowIso,
+			windowResetAt: new Date(windowStart + PI_SWARM_REASSIGN_RATE_WINDOW_MS).toISOString(),
+		};
+	}
+	return null;
+}
+
+// Stamp the per-node supersession counter on a successful mint. Caller (swarm_assign_task) calls
+// this RIGHT AFTER `mintNodeAttempt({...})` returns `{ created: true }` (genuine reassign, not
+// duplicate retry). On `created: false`, no stamp — duplicate retries are not supersession.
+export function stampSupersessionCount(node: TaskNode, nowMs: number, nowIso: string): void {
+	const windowStart = node.supersessionWindowStart ? new Date(node.supersessionWindowStart).getTime() : 0;
+	const windowExpired = windowStart === 0 || (nowMs - windowStart) > PI_SWARM_REASSIGN_RATE_WINDOW_MS;
+	if (windowExpired) {
+		// Open a fresh window with this mint as count=1.
+		node.supersessionWindowStart = nowIso;
+		node.supersessionCount = 1;
+	} else {
+		node.supersessionCount = (node.supersessionCount ?? 0) + 1;
+	}
+}
+
+async function stampCloseEvidenceIfMissing(pi: ExtensionAPI, tp: ReturnType<typeof taskPaths>, task: TaskState, nodeId: string, attestationReport?: Awaited<ReturnType<typeof validateAttestations>>, diffStat?: Awaited<ReturnType<typeof attachGitDiffStat>>) {
+	const existing = task.evidence[nodeId];
+	if (existing && typeof existing === "object") return existing;
+	const node = task.nodes[nodeId];
+	if (!node) return undefined;
+	let record: Record<string, unknown>;
+	if (inferRoleKind(nodeId, node.role) === "orchestrator" && isGraphTerminalNode(task, nodeId)) {
+		const evidence = await resolveCommitNodeEvidence(pi, tp);
+		record = { status: evidence.verified ? "verified" : "unverified", reason: evidence.reason, baseline: evidence.baseline, head: evidence.head, at: now(), nodeId };
+	} else if (diffStat?.available || attestationReport) {
+		record = {
+			status: attestationReport && !(attestationReport as any).ok ? "unverified" : "verified",
+			reason: diffStat?.note || (attestationReport ? "attestation_diffstat" : "terminal_close"),
+			baseline: diffStat?.baseline,
+			stat: diffStat?.stat,
+			at: now(),
+			nodeId,
+		};
+	} else {
+		record = { status: "verified", reason: "terminal_close", at: now(), nodeId };
+	}
+	task.evidence[nodeId] = record;
+	return record;
+}
 
 export function registerTasksTools(pi: ExtensionAPI) {
 	registerEvidenceHooks(pi);
@@ -84,7 +220,10 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				const { ready, current } = computeReadyNodes(task);
 				task.currentNodes = current;
 				let createTaskStatusChange = applyTaskStatus(task); // engine-enforced closure: a fresh task derives `ready`
-				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
+				await mkdir(tp.root, { recursive: true });
+				await mkdir(tp.artifacts, { recursive: true });
+				await writeBaselineCommit(pi, tp);
+				const autoClosed = await autoCloseOrchestratorTerminalNodes(pi, tp, task);
 				if (autoClosed.closed.length) {
 					createTaskStatusChange = applyTaskStatus(task);
 					task.currentNodes = computeReadyNodes(task).current;
@@ -98,7 +237,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// that happens the auto-close path already released assignments via releaseNodeAssignment,
 				// but workers spawned-for-task with empty active-task sets still linger. The sweep runs
 				// only on terminal transitions and is a no-op when nothing is eligible.
-				if (createTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, taskId);
+				if (createTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, taskId, task);
 				// Actionable = newly-ready nodes PLUS already-ready unassigned nodes (e.g. a fresh task's start node,
 				// which is born status:"ready" and lands in `current`, not the raw `ready` set). Keeps the "Ready:"
 				// report consistent with swarm_next_nodes so orchestrators see what is assignable right now.
@@ -106,9 +245,6 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					...ready,
 					...current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
 				]));
-				await mkdir(tp.root, { recursive: true });
-				await mkdir(tp.artifacts, { recursive: true });
-				await writeBaselineCommit(pi, tp);
 				await writeTaskState(tp, task);
 				await writeFile(tp.taskMd, buildTaskMarkdown(task), "utf8");
 				await traceTask(tp, "task.create", { taskId, title: task.title, workflow: task.workflow, owner: task.owner, start: task.start, nodeCount: Object.keys(task.nodes).length, ready, actionable, autoClosed: autoClosed.closed });
@@ -270,6 +406,15 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			spawnIsolated: Type.Optional(Type.Boolean({ description: "Force a fresh agent for this node instead of reusing. Defaults to false." })),
 			replyTarget: Type.Optional(Type.String({ description: "Agent id the assignee should reply to. Defaults to the assigning agent (sender)." })),
 			note: Type.Optional(Type.String({ description: "Optional extra assignment note appended to the message body." })),
+			// === Issue 82: explicit reuse lease + park mechanism (stamp at assignment time) ===
+			// When passed, the assignee's record is stamped with the lease; the task-close sweep
+			// will honor it (reuse = skip, park = pause). Default: lease is absent and the
+			// worker is auto-stopped on task close unless a later /swarm agent lease call sets one.
+			lease: Type.Optional(Type.Object({
+				kind: Type.Union([Type.Literal("reuse"), Type.Literal("park")], { description: "Lease kind: 'reuse' = skip task-close sweep; 'park' = pause (preserve pane) on sweep." }),
+				until: Type.Optional(Type.String({ description: "ISO timestamp; lease auto-expires past this. Default: now+1h." })),
+				reason: Type.Optional(Type.String({ description: "Free-text reason recorded on the lease + trace." })),
+			}, { description: "Optional lease stamp at assignment time (Issue 82). When set, the task-close sweep honors the lease instead of stopping the worker." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_assign_task", async () => {
@@ -399,6 +544,30 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					node.attempts += 1;
 				}
 
+				// === Issue 83b — per-node supersession rate-limit gate ===
+				// Fixed-window per-node counter. The gate opens (resets the window) when the previous
+				// window has expired; otherwise it counts the current window's supersessions and refuses
+				// further reassigns once the limit is reached. Run BEFORE mintNodeAttempt so we never
+				// mint an attempt we'll then refuse. Duplicate retries (same-active-assignment) bypass
+				// the gate because `mintNodeAttempt` will return `created: false` and we never stamp.
+				{
+					const nowMs = Date.now();
+					const nowIso = new Date(nowMs).toISOString();
+					const rateRefusal = checkReassignRateLimit(node, nowMs, nowIso);
+					if (rateRefusal) {
+						await traceTask(tp, TRACE_REASSIGN_RATE_LIMITED, {
+							taskId, nodeId: params.nodeId, requestedAssignee: assignee.id, currentCount: rateRefusal.currentCount, limit: rateRefusal.limit, windowMs: rateRefusal.windowMs, windowStart: rateRefusal.windowStart, windowResetAt: rateRefusal.windowResetAt, by: me,
+						}).catch(() => {});
+						await failTaskTool(tp, p, REASSIGN_RATE_LIMITED,
+							`Cannot reassign node ${params.nodeId} of ${taskId}: supersession rate limit reached (${rateRefusal.currentCount}/${rateRefusal.limit} in the last ${rateRefusal.windowMs}ms). Window resets at ${rateRefusal.windowResetAt}. No state was modified.`,
+							{
+								taskId, nodeId: params.nodeId, requestedAssignee: assignee.id, currentCount: rateRefusal.currentCount, limit: rateRefusal.limit, windowMs: rateRefusal.windowMs, windowResetAt: rateRefusal.windowResetAt,
+								actionableHint: `Wait until the rate-limit window expires at ${rateRefusal.windowResetAt} before reassigning this node again. The gate is hard: refusals do not queue.`,
+							}
+						);
+					}
+				}
+
 				// Mint or reuse the attempt (Issue 24.a B5 — extracted helper). The helper inspects the
 				// prior state and returns { attemptId, created: false } when the existing active attempt
 				// can be preserved (duplicate retry), or { attemptId, created: true } on a genuine mint
@@ -415,12 +584,30 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						await traceTask(tp, "task.attempt.superseded", { taskId, nodeId: params.nodeId, priorAttemptId: priorSuperseded.attemptId, supersededBy: attemptId, reason: "reassign" });
 					}
 					await traceTask(tp, "task.attempt.minted", { taskId, nodeId: params.nodeId, attemptId, assignee: assignee.id, reason: "assign" });
+					// === Issue 83b — stamp per-node supersession counter ===
+					// Fresh mint = genuine supersession (not duplicate retry). Stamp count + window.
+					stampSupersessionCount(node, Date.now(), now());
 				}
 				node.assignee = assignee.id;
 				node.status = "assigned";
 				node.lastActivityAt = now();
 				if (node.staleAt) { const prevStaleAt = node.staleAt; delete node.staleAt; await traceTask(tp, "task.stale.cleared", { taskId, nodeId: params.nodeId, prevStaleAt, reason: "assign", by: currentAgentId() }); }
 				if (!assignee.activeTaskIds.includes(task.taskId)) assignee.activeTaskIds.push(task.taskId);
+				// === Issue 82: stamp lease on the assignee at assignment time (optional) ===
+				// When the caller passes a `lease` parameter, stamp the assignee's record with the
+				// lease fields so the task-close sweep honors it (reuse = skip, park = pause).
+				// Default behavior unchanged when lease is absent.
+				if (params.lease) {
+					const leaseUntil = params.lease.until && !Number.isNaN(new Date(params.lease.until).getTime())
+						? new Date(params.lease.until).toISOString()
+						: new Date(Date.now() + 3_600_000).toISOString();
+					const leaseReason = params.lease.reason || `assigned with ${params.lease.kind} lease`;
+					assignee.leaseKind = params.lease.kind;
+					assignee.leaseUntil = leaseUntil;
+					assignee.leaseReason = leaseReason;
+					assignee.updatedAt = now();
+					await traceTask(tp, TRACE_TASK_LEASE_STAMPED, { taskId, nodeId: params.nodeId, assignee: assignee.id, leaseKind: params.lease.kind, leaseUntil, leaseReason });
+				}
 				const assignTaskStatusChange = applyTaskStatus(task);
 				task.currentNodes = computeReadyNodes(task).current;
 				// Issue 23 — resolve any stalled task-stall counter for this task (an actionable node
@@ -429,7 +616,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// Issue 26 — task-close worker sweep (terminal transition site #2). Auto-closing an
 				// orchestrator terminal node via this assign (e.g. a one-node graph or terminal-edge
 				// node) drives the task terminal; sweep the freshly-spawned exclusive workers.
-				if (assignTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId);
+				if (assignTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId, task);
 
 				const replyTarget = params.replyTarget || me;
 				const conversationId = `task:${task.taskId}:${params.nodeId}`;
@@ -443,7 +630,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// sequence that leaves the node in an inconsistent state. The assignment record still
 				// mutates (the worker holds the lease) but the canonical assignment message is suppressed
 				// and replaced with an informational fence trace.
-				const assignStaleCheck = checkStallNotificationStale(st, task, params.nodeId, assignee.id, Date.now());
+				const assignStaleCheck = checkStallNotificationStale(st, task, params.nodeId, assignee.id, Date.now(), { freshAssignment: true });
 				if (assignStaleCheck.stale) {
 					await traceTask(tp, "notification.stale.suppressed", { site: "swarm_assign_task.assignment", taskId, nodeId: params.nodeId, reason: assignStaleCheck.reason, evidence: assignStaleCheck.evidence });
 					const fencedKey = `${idempotencyKey}:fenced`;
@@ -613,7 +800,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						resolveTaskStallLocked(p, st, task.taskId, "claim");
 						// Issue 26 — task-close worker sweep (terminal transition site #3). A claim
 						// that closes the task (e.g. a terminal-node claim) drives the sweep path.
-						if (claimTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId);
+						if (claimTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId, task);
 						await writeTaskState(tp, task);
 						await writeState(p, st);
 						await traceTask(tp, "task.node.claimed", { taskId, nodeId: params.nodeId, claimer: me, priorAssignee: null, priorStatus, attemptId, created: minted.created });
@@ -663,7 +850,54 @@ export function registerTasksTools(pi: ExtensionAPI) {
 							const providedStatus = providedAttempt ? providedAttempt.status : "unknown";
 							const activeAttempt = node.attemptHistory?.find((a: any) => a.attemptId === node.activeAttemptId);
 							const activeNumber = activeAttempt ? activeAttempt.attemptNumber : "?";
-							
+
+							// === Issue 83b — late-result rejection ===
+							// The caller's attemptId is in attemptHistory as NON-active (e.g. superseded)
+							// AND the node has a NEWER active attempt. The caller is the prior assignee
+							// trying to apply a stale result. Refuse with a distinct envelope so the
+							// caller can self-correct (read latest assignment) without retrying.
+							// Emits TRACE_LATE_RESULT_REJECTED + (optionally) stamps lateResultRejectionCount
+							// on the inbound message record. No node mutation.
+							const lateRefusal = checkLateResultRejection(node, params.attemptId, now());
+							if (lateRefusal && providedAttempt && providedAttempt.status !== "active") {
+								await traceTask(tp, TRACE_LATE_RESULT_REJECTED, {
+									taskId,
+									nodeId: params.nodeId,
+									providedAttemptId: lateRefusal.providedAttemptId,
+									providedAttemptStatus: lateRefusal.providedAttemptStatus,
+									activeAttemptId: lateRefusal.activeAttemptId,
+									activeAttemptNumber: lateRefusal.activeAttemptNumber,
+									supersededAt: lateRefusal.supersededAt,
+									lateArrivalAt: lateRefusal.lateArrivalAt,
+									attemptedBy: me,
+									requestedStatus: params.status,
+									reason: "superseded_attempt_late_result",
+								}).catch(() => {});
+								// === Issue 83b — stamp MessageRecord.lateResultRejectionCount (round-4) ===
+								// Find the assignment message record that carried the caller's (now-superseded)
+								// attemptId by walking `node.attemptHistory` for the matching attempt's
+								// `assignmentMessageId`. Stamp `lateResultRejectionCount` + `lastLateResultRejectionAt`
+								// on that record so operators can count late-arrival rejections per message.
+								// Distinct from `rec.superseded` (which records the supersede event itself):
+								// the counter measures REJECTION EVENTS, not the single supersede stamp.
+								const attempted = node.attemptHistory?.find((a: any) => a.attemptId === params.attemptId);
+								const inboundMsgId = attempted?.assignmentMessageId;
+								if (inboundMsgId && st.messages[inboundMsgId]) {
+									const inboundMsg = st.messages[inboundMsgId];
+									inboundMsg.lateResultRejectionCount = (inboundMsg.lateResultRejectionCount ?? 0) + 1;
+									inboundMsg.lastLateResultRejectionAt = now();
+									await traceTask(tp, TRACE_LATE_RESULT_REJECTED, {
+										taskId,
+										nodeId: params.nodeId,
+										inboundMessageId: inboundMsgId,
+										lateResultRejectionCount: inboundMsg.lateResultRejectionCount,
+										lastLateResultRejectionAt: inboundMsg.lastLateResultRejectionAt,
+										reason: "message_counter_stamped",
+									}).catch(() => {});
+								}
+								throw new Error(`__LATE_RESULT_REFUSED__:${JSON.stringify(lateRefusal)}`);
+							}
+
 							await failTaskTool(tp, p, "ATTEMPT_TOKEN_MISMATCH", `Your attempt token ${params.attemptId} is not the active attempt for node ${params.nodeId}. Your attempt is ${providedStatus}; the current attempt is #${activeNumber} (${node.activeAttemptId}). This update is rejected as a stale write.`, { taskId, nodeId: params.nodeId, expected: { activeAttemptId: node.activeAttemptId, activeAttemptNumber: activeNumber }, received: { attemptId: params.attemptId, attemptStatus: providedStatus }, blocked: true, actionableHint: "Your attempt has been superseded by a new assignment. Read the latest message in your mailbox (or call swarm_next_nodes to see the current assignment) before retrying." });
 						}
 						
@@ -721,6 +955,16 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				// Validation complete; apply (no earlier writes occurred).
 				node.status = newStatus;
 				if ((newStatus === "assigned" || newStatus === "in_progress" || newStatus === "ready") && node.staleAt) { delete node.staleAt; }
+				// === R20: forward-transition resets the artifact-progress nudge cycle ===
+				// Any forward progress stamp (assigned/in_progress/ready) OR a terminal transition
+				// (done/failed/blocked) signals fresh agent activity; clear the nudge bookkeeping so
+				// a future re-open of the node starts from a clean counter. This mirrors the existing
+				// `staleOpenSurfacedAt` clearing pattern (above) and the Issue 83a lastProgressAt stamp.
+				if (newStatus === "assigned" || newStatus === "in_progress" || newStatus === "ready" || newStatus === "done" || newStatus === "failed" || newStatus === "blocked") {
+					if (node.artifactProgressNudgeAt) { delete node.artifactProgressNudgeAt; await traceTask(tp, "task.artifact_progress_nudge_count_reset", { taskId, nodeId: params.nodeId, reason: "forward_transition", by: me }); }
+					if (node.artifactProgressNudgeCount) { node.artifactProgressNudgeCount = 0; }
+					if (node.artifactProgressCapSurfaced) { delete node.artifactProgressCapSurfaced; }
+				}
 				if (params.outcome !== undefined) node.outcome = params.outcome;
 				node.lastActivityAt = now();
 
@@ -742,7 +986,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 				if (params.sharedContextUpdates) applySharedContextUpdates(task, params.sharedContextUpdates as { summary?: string; decisions?: Array<{ text: string; severity?: string }>; risks?: Array<{ text: string; severity?: string }>; openQuestions?: Array<{ text: string }> }, me);
 				if (params.artifact) node.writeArtifacts = Array.from(new Set([...(node.writeArtifacts || []), params.artifact]));
 				releaseNodeAssignment(st, task, params.nodeId);
-				const reopened = activateReworkNodes(task);
+				const reopened = activateReworkNodes(task, tp);
 				const closingAssignee = node.assignee || undefined; // persisted on the node (not cleared by release)
 				// Orchestrator-explicit cancellation (issue 3): sticky terminal state. Strengthened to:
 				//   1. mark every active attempt in the task as `cancelled` (revoke the lease)
@@ -868,7 +1112,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						}
 					}
 				}
-				const autoClosed = autoCloseOrchestratorTerminalNodes(task);
+				const autoClosed = await autoCloseOrchestratorTerminalNodes(pi, tp, task);
 				for (const nodeId of autoClosed.closed) releaseNodeAssignment(st, task, nodeId);
 				if (autoClosed.closed.length) taskStatusChange = applyTaskStatus(task);
 				if (taskStatusChange.terminal) {
@@ -880,7 +1124,11 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					// sweep runs AFTER releaseTaskFromAllAgents so every closed-task pointer is
 					// gone from agents before eligibility is computed. Safe under concurrent
 					// close because we are inside the same withLock(p) the caller holds.
-					await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId);
+					await sweepTaskWorkersLocked(pi, ctx.cwd, st, task.taskId, task);
+				}
+				const isNodeClosing = newStatus === "done" || newStatus === "failed" || newStatus === "blocked" || newStatus === "cancelled";
+				if (isNodeClosing || taskStatusChange.terminal) {
+					await stampCloseEvidenceIfMissing(pi, tp, task, params.nodeId, attestationReport);
 				}
 				const nextReady = computeReadyNodes(task);
 				task.currentNodes = nextReady.current;
@@ -936,7 +1184,30 @@ export function registerTasksTools(pi: ExtensionAPI) {
 					}
 				}
 				return { task, prevStatus, newStatus, taskStatus: task.status, cancelled, autoClosed: autoClosed.closed, reopened, diffStat };
+			}).catch((err: any) => {
+				// === Issue 83b — late-result refusal conversion ===
+				// The attempt-fencing block throws a marker Error when it detects a superseded-attempt
+				// late-result with a newer active attempt on the node. Convert it to a refusal envelope
+				// (no node mutation) and return. This catch runs INSIDE the same tool execute body so
+				// the outer wrapSwarmToolInvocation still records `tool.invoked` for the call.
+				if (err && typeof err.message === "string" && err.message.startsWith("__LATE_RESULT_REFUSED__:")) {
+					try {
+						const refusal = JSON.parse(err.message.slice("__LATE_RESULT_REFUSED__:".length));
+						return { __lateResultRefused: true, refusal };
+					} catch {
+						throw err;
+					}
+				}
+				throw err;
 			});
+			// Handle late-result refusal: convert the marker result to a refusal textResult (NO mutation).
+			if ((result as any)?.__lateResultRefused) {
+				const refusal = (result as any).refusal;
+				return textResult(
+					`Refused: late result from superseded attempt ${refusal.providedAttemptId} (status=${refusal.providedAttemptStatus}) for node ${params.nodeId} of ${params.taskId}. The active attempt is #${refusal.activeAttemptNumber} (${refusal.activeAttemptId}). Your attempt was superseded at ${refusal.supersededAt ?? "(unknown)"}; this update was rejected to prevent stale state. Read your mailbox for the latest assignment, then retry.`,
+					{ taskId: params.taskId, nodeId: params.nodeId, refused: true, reason: refusal.reason, providedAttemptId: refusal.providedAttemptId, activeAttemptId: refusal.activeAttemptId, activeAttemptNumber: refusal.activeAttemptNumber, lateArrivalAt: refusal.lateArrivalAt, actionableHint: "Your attempt was superseded by a newer assignment. Read your mailbox for the latest assignment message before retrying." }
+				);
+			}
 			const diffSuffix = (result as any).diffStat ? `\n\nAttestation diffstat:\n${(result as any).diffStat.available ? (result as any).diffStat.stat : `(git diff unavailable: ${(result as any).diffStat.note || "unknown"})`}` : "";
 			return textResult(`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${result.cancelled ? " Task marked cancelled; all assignments released." : ""}${result.reopened?.length ? ` Reopened rework nodes: ${result.reopened.join(", ")}.` : ""}${params.note ? ` Note: ${params.note}` : ""}${diffSuffix}`, { taskId: result.task.taskId, nodeId: params.nodeId, status: result.newStatus, outcome: params.outcome, taskStatus: result.taskStatus, cancelled: result.cancelled, by: me, autoClosed: result.autoClosed, reopened: result.reopened, attestation: (result as any).diffStat || null });
 		});

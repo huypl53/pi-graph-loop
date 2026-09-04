@@ -88,6 +88,7 @@ export function defaultState(cwd: string): SwarmState {
 		agents: {},
 		delivered: {},
 		messages: {},
+		proxyMetrics: { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0 },
 		createdAt: ts,
 		updatedAt: ts,
 	};
@@ -140,6 +141,18 @@ export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	// receipts for legacy `requiresAck: true` messages that are no longer actionable.
 	st.consumerReceipts ||= {};
 	st.consumerReceipts.orchestrator ||= { entries: {}, revision: 0 };
+	// === R16 Fix B (2026-09-02): SwarmIdleNudgeState back-fill for legacy swarm-state.json ===
+	// Pre-R14 swarms do NOT have `lastWasVacuous` or `lastPoolEmptyEscalationAt` on their
+	// `idleNudgeState` object. The fields are optional (SwarmIdleNudgeState marks them with
+	// `?`), so the JSON parser returns undefined for absent keys — which the evaluator
+	// already treats as falsy. The actual robustness concern is structural: a legacy file
+	// with `idleNudgeState: null` or a non-object value would crash the evaluator when it
+	// reads `idleNudgeState.lastWasVacuous`. The two lines below narrow to a plain object
+	// in any case so downstream code can safely read optional fields. Mirrors the
+	// `consumerReceipts` pattern at line 132.
+	if (!st.idleNudgeState || typeof st.idleNudgeState !== "object" || Array.isArray(st.idleNudgeState)) {
+		st.idleNudgeState = {};
+	}
 	// === Binding C-1 (Issue 18 plan review): goal field back-fill ===
 	// The `goal` field on SwarmState is OPTIONAL. A pre-policy swarm-state.json file has no `goal` key
 	// (JSON parses absent keys to `undefined`), and undefined is the correct initial state — the pump
@@ -222,6 +235,7 @@ export async function readTaskState(file: string): Promise<TaskState> {
 	task.gates ||= {};
 	task.editLocks ||= {};
 	task.evidence ||= {};
+	task.reworkConsumption ||= [];
 	task.sharedContext ||= { summary: "", decisions: [], openQuestions: [], risks: [] };
 	return task;
 }

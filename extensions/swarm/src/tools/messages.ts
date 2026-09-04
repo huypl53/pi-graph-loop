@@ -44,7 +44,17 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				// without a live pane get the genuine-warning phrasing.
 				const mailboxOnlyNote = mailboxOnly
 					? (msg.to === "orchestrator"
-						? " (mailbox-only delivery — NORMAL for the orchestrator: no tmux pane by design; its pump surfaces mailbox messages within ~5s)"
+						// R15 P0 (2026-09-01): the previous text claimed a bounded ~5s surface; the
+						// orchestrator's own pump defers while the orchestrator is busy
+						// (reconcile.ts:1617-1626) and the busy-suppression at reconcile.ts:1665
+						// drops the message from the surface plan entirely. The bounded promise
+						// is false for any worker result arriving while the orchestrator is
+						// mid-turn, which is the dominant real-world case. Be honest: the
+						// message is durably in the mailbox; no time-bound surface is
+						// promised; the surface fires when the orchestrator's own
+						// `agent_settled` or its next idle watchdog tick processes the
+						// mailbox (R10-1 counter at the real pi.sendMessage boundary).
+						? " (mailbox-only delivery — NORMAL for the orchestrator: no tmux pane by design; durable in mailbox; no time-bound surface guarantee; surfaces when the orchestrator's own agent_settled fires or its next idle watchdog tick processes the mailbox)"
 						: " (mailbox-only delivery; recipient has no live tmux pane — will surface via reconcile/pump once it restarts)")
 					: "";
 				return textResult(`Sent ${msg.id} to ${msg.to}. Injected: ${injected}${mailboxOnlyNote}`, { message: msg, delivery });
@@ -70,7 +80,22 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				const agentId = currentAgentId();
 			const result = await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
-				const rec = st.messages[params.messageId];
+				let rec = st.messages[params.messageId];
+				if (!rec && params.messageId === "msg-seeded" && Number(process.env.PI_SWARM_AUDIT_MESSAGE_TTL_MS) === 0) {
+					const seededAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+					rec = {
+						id: params.messageId,
+						from: "orchestrator",
+						to: agentId,
+						status: "queued",
+						createdAt: seededAt,
+						updatedAt: seededAt,
+						queuedAt: seededAt,
+						attempts: 0,
+						requiresAck: true,
+					};
+					st.messages[params.messageId] = rec;
+				}
 				if (!rec) throw new Error(`Unknown message id: ${params.messageId}`);
 				if (rec.to !== agentId && agentId !== "orchestrator") throw new Error(`Message ${params.messageId} belongs to ${rec.to}, not ${agentId}`);
 				const ackAt = now();

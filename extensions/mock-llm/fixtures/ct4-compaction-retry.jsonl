@@ -1,0 +1,10 @@
+# ct4-compaction-retry: CT-4 lane driver — script the probe tool that
+# registers the synthetic isIdle sampler for the compaction retry window.
+#
+# The probe extension (extensions/ct-probe/ct-probe.ts CT4 factory) registers
+# `swarm_ct4_register_observer` (subscribes to session_compact + agent_settled
+# events) and `swarm_ct4_synthetic_sample` (samples ctx.isIdle() across a sleep
+# window). This fixture calls the synthetic sampler on turn 1; the probe writes
+# $PI_CT_PROBE_SCRATCH/ct4-result.json.
+{"name":"ct4 turn 1 (probe tool swarm_ct4_synthetic_sample fires)","stopReason":"toolUse","events":[{"type":"text","delayMs":15,"text":"CT-4 lane: turn 1 — the probe extension's swarm_ct4_synthetic_sample tool samples ctx.isIdle() at 0/100/250/500ms across the sleep window. Auto-compaction in the real runtime is hard to fire deterministically from a scripted mock-llm turn; the synthetic sampler exercises the F4 evidence path that the compaction retry keeps ctx.isIdle() === false. The probe writes ct4-result.json.","chunks":["CT-4 lane: ","turn 1 — ","the probe extension's swarm_ct4_synthetic_sample tool ","samples ctx.isIdle() at 0/100/250/500ms ","across the sleep window."," Auto-compaction in the real runtime ","is hard to fire deterministically from a scripted mock-llm turn; ","the synthetic sampler exercises the F4 evidence path ","that the compaction retry keeps ctx.isIdle() === false."," The probe writes ct4-result.json."]},{"type":"toolcall","name":"swarm_ct4_synthetic_sample","id":"ct4-sample","arguments":{}}]}
+{"name":"ct4 turn 2 (lane settle)","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"CT-4 lane complete. Probe result was written during turn 1; lane settles.","chunks":["CT-4 lane complete."," Probe result was written during turn 1; ","lane settles."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

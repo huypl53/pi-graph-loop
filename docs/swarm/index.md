@@ -16,6 +16,12 @@ Use it when you need to understand, extend, or debug swarm without reading one l
 ### I want to change swarm
 - [Contributor guide](./contributor-guide.md) — where code lives, how to add features, change checklists
 - [Architecture overview](./architecture.md) — subsystem boundaries and source-of-truth rules
+- [Pi runtime contract](./pi-runtime-contract.md) — single source of truth for swarm
+  assumptions about Pi lifecycle, delivery, interrupt, reload semantics. **Read before
+  changing swarm code that crosses a Pi runtime boundary** (the four layers in
+  [§1](./pi-runtime-contract.md#1-the-four-layers) and the false-claim register in
+  [§10](./pi-runtime-contract.md#10-r12r15-false--unproven-claims-register) are the
+  binding artifacts). Cross-reference: [`AGENTS.md`](../../AGENTS.md#pi-runtime-contract-mandatory-consultation).
 - [`extensions/swarm/README.md`](../../extensions/swarm/README.md) — implementation module map
 
 ### I need detailed legacy/reference material
@@ -25,6 +31,7 @@ Use it when you need to understand, extend, or debug swarm without reading one l
 - [`../swarm-new-project-setup.md`](../swarm-new-project-setup.md) — setup recipe for a new project
 - [`../swarm-graph-uat-scenario.md`](../swarm-graph-uat-scenario.md) — UAT scenario and review flow
 - [`../swarm-iteration-demo.md`](../swarm-iteration-demo.md) — legacy iteration demo scenario
+- [`./pi-runtime-evidence.md`](./pi-runtime-evidence.md) — raw citations and reproduction probes backing the [Pi runtime contract](./pi-runtime-contract.md)
 
 ## Recommended reading order for contributors
 1. [Architecture overview](./architecture.md)

@@ -46,7 +46,10 @@ export type ProviderErrorKind = "quota" | "auth" | "rate_limit" | "transient" | 
 
 export function classifyProviderError(message: string): ProviderErrorKind {
 	const m = (message || "").toLowerCase();
-	if (/quota|insufficient|billing|balance|exceeded your current quota|prepaid/.test(m)) return "quota";
+	// Issue 70: usage_limit_reached / "usage limit has been reached" (live 429 quota bodies) must
+	// classify quota — they route into the pool's immediate-bench policy (lastBenchReason=quota).
+	// This branch runs BEFORE the 429/rate_limit branch so plain "429 rate limit" stays rate_limit.
+	if (/quota|insufficient|billing|balance|exceeded your current quota|prepaid|usage_limit|usage limit/.test(m)) return "quota";
 	if (/rate.?limit|too many requests|429|overloaded/.test(m)) return "rate_limit";
 	if (/invalid api key|unauthorized|forbidden|401|403|authentication|api key/.test(m)) return "auth";
 	if (/timeout|timed out|econnrefused|econnreset|enotfound|5\d\d|network|connection/.test(m)) return "transient";
@@ -116,11 +119,27 @@ export type PoolHealthState = {
 // In-process only — never persisted. See pool-retry.test.mjs for fixture coverage.
 export type EngineRetryIncident = {
 	providerKey: string;    // `${provider}/${model}` of the slot being retried by the engine
-	errorMessage: string;   // normalized (slice 0..200) for comparison
+	kind: ProviderErrorKind; // Issue 70: classified error kind — part of the incident identity
+	errorMessage: string;   // Issue 70: scrubErrorIdentity() output (digits erased, lowercase) for
+	                        // comparison — raw text equality broke on mutating 429 bodies
 	firstSeenAt: number;    // ms epoch — first turn_end {error} for this incident
 	lastSeenAt: number;     // ms epoch — most recent turn_end {error} for this incident
 	count: number;          // number of consecutive turn_end {error} events in this incident
 };
+
+// Issue 70: stable incident-identity string for an error message. Erases every digit run
+// (resets_in_seconds, resets_at, request ids, ports, counts) and collapses whitespace so
+// provider 429 bodies that mutate per-second normalize to ONE identity while genuinely
+// different messages stay distinct. Paired with classifyProviderError kind + providerKey this
+// forms the engine-retry incident identity (replaces raw error-text equality).
+export function scrubErrorIdentity(message: string): string {
+	return (message || "")
+		.toLowerCase()
+		.replace(/\d+/g, "n")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 200);
+}
 
 export type MessageRecord = {
 	id: string;
@@ -163,6 +182,17 @@ export type MessageRecord = {
 	// Set when a newer assignment supersedes this open assignment message (idempotency/supersede fix).
 	superseded?: { at: string; by: string; supersededBy: string };
 
+	// === Issue 83b — late-result rejection count ===
+	// Number of times a worker attempted to apply a result against this message's `attemptId`
+	// after the attempt was superseded. Distinct from the message-level `superseded` field
+	// (which records the supersede event itself): `lateResultRejectionCount` counts the
+	// late-arrival rejections — a quality signal for orchestrators to detect a stuck worker
+	// that is still trying to apply results against its old lease.
+	lateResultRejectionCount?: number;
+	// ISO timestamp of the most recent late-result rejection. Paired with `lateResultRejectionCount`
+	// for ops dashboards (`/swarm status` / trace census).
+	lastLateResultRejectionAt?: string;
+
 	// --- Issue 25 Phase 1: v2 lifecycle evidence schema ---
 	// Each field has a distinct meaning (see proposal §A); none of them overloads the
 	// existing delivered/ack fields. Under gate=0 these are SHADOW ONLY: the engine does
@@ -204,6 +234,14 @@ export type SwarmAgent = {
 	lastAgentStartAt?: string;
 	lastAgentSettledAt?: string;
 	lastSettleNotifyAt?: string; // persisted cooldown for agent_settled->orchestrator idle/open-work notify
+	lastAckDebtNotifyAt?: string; // R25: persisted cooldown for agent_settled/stopAgent→orchestrator ack-debt notify
+	// === Issue 86: priority-high interrupt-on-delivery (recipient-side rate-limit ledger) ===
+	// Last timestamp a `ctx.abort()` was invoked by the recipient's input hook in response to a
+	// priority:"high" swarm message. Persisted on the recipient agent record; orchestrator pseudo-
+	// agent is exempt. A second high-priority inject within PI_SWARM_HIGH_INTERRUPT_WINDOW_MS
+	// (default 30000) does NOT re-abort (suppressed via `message.interrupt_suppressed` trace).
+	// Cleared on respawn via ensureAgentDefaults (existing pattern); no extra logic needed.
+	lastHighInterruptAt?: string;
 	// === Issue 25 Phase 2: worker dry-run reconcile rate-limit ledger (proposal §K.1) ===
 	// Last worker dry-run reconcile timestamp. Persisted so a worker that calls swarm_reconcile
 	// more often than PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS gets RECONCILE_RATE_LIMITED without
@@ -215,6 +253,25 @@ export type SwarmAgent = {
 	// Park/drain flag: a paused agent is skipped by the reuse pool (findReusableAgent) but is NOT killed
 	// and still appears in status/list. Cleared by resume (delete) so absent == not paused.
 	paused?: boolean;
+	// === Issue 82: explicit reuse lease + park mechanism (P0, R9 a3 graveyard) ===
+	// When the orchestrator wants a worker to outlive its task scope, it stamps a lease on the
+	// agent record. The task-close sweep honors the lease: `reuse` skips the sweep entirely
+	// (worker is kept alive for cross-task reuse); `park` pauses (`paused=true`) instead of
+	// stopping (worker pane is preserved for inspection / revival). Both leases auto-expire at
+	// `leaseUntil`; the default behavior (retire on task close) applies once expired. Additive;
+	// absent fields == default behavior. Cleared by `/swarm agent lease <id> --clear` or by
+	// any explicit lease-removal call (e.g. assignment-tool resets).
+	leaseKind?: "reuse" | "park";
+	leaseUntil?: string;
+	leaseReason?: string;
+	// === Issue 82 (review item 1): heartbeat-GC probe-throttle ledger ===
+	// ISO timestamp of the most recent tmux probe fired by `agentHeartbeatGCLocked` gate 2.
+	// Pre-policy agents simply lack the field (== never probed). The GC skips a gate-2 probe
+	// unless `lastProbeAt` is older than `probeAfterMs` (2× PI_SWARM_AGENT_HEARTBEAT_STALE_MS),
+	// so the per-tick probe rate is bounded at roughly one probe per agent per 20 minutes by
+	// default — even for a graveyard-shape swarm where lastHeartbeatAt is stale forever.
+	// Absent on legacy agents; treated as "never probed" by the gate.
+	lastProbeAt?: string;
 	tmuxSession: string;
 	tmuxWindow: string;
 	tmuxTarget: string;
@@ -269,13 +326,34 @@ export type OrchestratorReceiptEntry = {
 // pump increments consecutiveNoResolveNudges on each emitted nudge and resets the counter when the
 // task graph advances (reassignment, claim, or task leaving in_progress). Anti-loop cap at
 // MAX_TASK_STALL_NUDGES; back-off at GOAL_NUDGE_BACKOFF_TICKS. Mirrors SwarmGoal's shape.
+// Row 68: emissions and back-off decrements are interval-spaced via nextStallNudgeAt — pump tick
+// rate no longer drives the cadence (mirrors the goal nudge's nextGoalNudgeAt gate).
 export type SwarmTaskStallState = {
 	taskId: string;                      // safe-id (validated by formatNotifyKey)
 	consecutiveNoResolveNudges: number;  // monotonic; reset when node leaves ready+unassigned or task leaves in_progress
 	nudgeSeq?: number;                   // monotonic emit counter (NEVER reset) — idempotency key component so each nudge gets a fresh dedupe slot
 	lastNudgeAt?: string;                // ISO; set on every successful nudge emission
 	lastResolvedAt?: string;             // ISO; set on every successful counter reset
-	backoffTicksRemaining?: number;      // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
+	backoffTicksRemaining?: number;      // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next interval opportunit(ies)
+	nextStallNudgeAt?: string;           // ISO; earliest ts the next stall nudge/backoff decrement may fire (interval spacing)
+};
+
+// Per-(taskId, nodeId) monotonic seq store for the graph-advance safety net (Issue F2,
+// task-202608310422). Mirrors the per-task shape of SwarmTaskStallState but at node granularity so a
+// single task with multiple ready-but-unassigned nodes keeps independent counters. The seq is the
+// `{seq}` slot in NOTIFY_KEY_GRAPH_ADVANCE — it is NEVER reset (survives acks + node-leaves/re-enters
+// ready) so a future re-stall still climbs past the cap rather than starting over. lastResolvedAt is
+// stamped (without resetting nudgeSeq) when the node leaves ready+unassigned — see
+// reconcileGraphAdvanceLocked:170-180. Bounded by active task surface; pruned alongside the message
+// ledger by swarm_gc.
+export type SwarmGraphAdvanceNudgeState = {
+	[taskId: string]: {
+		[nodeId: string]: {
+			nudgeSeq?: number;        // monotonic emit counter (NEVER reset)
+			lastNudgeAt?: string;     // ISO; set on every successful emit
+			lastResolvedAt?: string;  // ISO; set when node leaves ready+unassigned (seq survives)
+		};
+	};
 };
 
 // Durable goal the orchestrator wants the swarm to advance toward (Issue 18). Set via
@@ -290,11 +368,60 @@ export type SwarmGoal = {
 	text: string;                       // the goal text the orchestrator set
 	setAt: string;                      // ISO; durable on set
 	setBy: string;                      // agentId that set it (orchestrator in practice; recorded for audit)
+	// Issue 81: durable origin metadata so a standing user goal cannot be silently cleared by
+	// batch workflow. Absent on pre-policy goals (== historical default; legacy goals treat as
+	// origin="orchestrator" for the guard, which is the LENIENT pre-policy path). New goals stamp
+	// origin explicitly via swarm_set_goal({ origin }) or default to "orchestrator" for backwards-
+	// compatible tool behavior. See classifyGoalClearAuthority in goals.ts.
+	origin?: "user" | "orchestrator" | "system" | "batch";
+	// Human-readable provenance hint ("pm-cli", "batch-worker-r80", etc.) — not enforced by the
+	// guard but useful for audit traces. Optional; absent on pre-policy goals.
+	setByScope?: string;
 	consecutiveNoResolveNudges: number; // monotonic; reset on orchestrator turn_end {stop} resolve
 	nudgeSeq?: number;                   // monotonic emit counter (NEVER reset, survives resolve) — idempotency key component so each nudge gets a fresh dedupe slot
+	nudgeIntervalMs?: number;           // optional durable per-goal idle interval override; positive integer milliseconds only
 	lastNudgeAt?: string;               // ISO; set on every successful nudge emission
 	lastResolvedAt?: string;            // ISO; set on every successful counter reset
 	backoffTicksRemaining?: number;     // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
+	// R16 (2026-09-02): track orchestrator turns that did NOT resolve the goal (pure ack text or
+	// silent) so dashboards can distinguish ack from resolve. Not used by the evaluator — purely
+	// observational metadata that mirrors the `goal.nudge.turn_no_resolve_action` trace.
+	lastNonResolveTurnAt?: string;
+	lastResolveActionAt?: string;
+	lastResolveActionTools?: string[];
+};
+
+// Row 68 idle-nudge state. `allIdleSinceAt` anchors the continuous all-idle interval used by the
+// goal fallback; `lastGoalNudgeAt` and `goalConsecutiveNoResolveNudges` keep the emission/backoff
+// accounting on actual nudge emissions rather than pump ticks.
+// R14 (2026-09-02): `lastWasVacuous` is the once-per-transition dedupe gate for the
+// `goal.nudge.held_no_live_workers` trace; `lastPoolEmptyEscalationAt` is the cooldown
+// anchor for the bounded user-origin escalation nudge.
+// R23 (2026-09-02): `r23LastEpochAnchor` is the once-per-anchor memo for the cap-branch
+// saturation reset. Cleared at the anchor mint (updateIdleEpochLocked — R23C) and stamped
+// by the cap branch itself only AFTER a reset, so the reset fires at most once per anchor
+// (a legacy memo===anchor state is also cleared by the cap branch's stale-memo check).
+// R23B (2026-09-02): `lastEpochBusyAgents` is the worker-breaker guard for the cap-branch
+// reset — the PROVENANCE of the most recent anchor clear. Stamped at every anchor-clear
+// site (the busy edge in updateIdleEpochLocked stamps real worker ids; since R23C the
+// hooks.ts turn_start handler stamps ["orchestrator"]) and PRESERVED across the anchor
+// mint (R23C — the previous mint-clear left the cap branch blind to provenance), so it
+// survives from the clear site to the next atCap evaluation. The reset fires only when
+// this array contains at least one NON-orchestrator id (a worker caused the break) —
+// orchestrator-turn churn does NOT qualify. Absent (legacy state that never saw a clear)
+// → reset, matching pre-R23B behavior.
+export type SwarmIdleNudgeState = {
+	allIdleSinceAt?: string;
+	nextGoalNudgeAt?: string;
+	lastGoalNudgeAt?: string;
+	goalConsecutiveNoResolveNudges?: number;
+	goalBackoffTicksRemaining?: number;
+	lastGoalActiveTaskScanAt?: string;
+	lastGoalActiveTaskWork?: { taskId: string; nodeId: string; assignee?: string; status: "assigned" | "in_progress" } | null;
+	lastWasVacuous?: boolean;
+	lastPoolEmptyEscalationAt?: string;
+	r23LastEpochAnchor?: string;
+	lastEpochBusyAgents?: string[];
 };
 
 // In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent
@@ -366,10 +493,22 @@ export type SwarmState = {
 	// MUST NOT add `st.goal ||= {}` here, since that would replace undefined with an empty object
 	// and crash `goal.id` access in the pump.
 	goal?: SwarmGoal;
+	// Row 68 idle-epoch bookkeeping (swarm-level, not goal-level): tracks when the effective-live
+	// non-orchestrator set last became all-idle and the interval anchor for the goal fallback
+	// backoff loop.
+	idleNudgeState?: SwarmIdleNudgeState;
 	// Issue 23 — task-graph-state idle nudge. Per-(taskId) counter + back-off so a stalled
 	// task graph doesn't spam the orchestrator's mailbox. Reset on first reassignment of the
 	// actionable node OR on the task leaving `in_progress` state.
 	taskStallState?: Record<string, SwarmTaskStallState>;
+	// Issue F2 (task-202608310422): per-(taskId, nodeId) monotonic nudgeSeq store for the graph-advance
+	// safety net. The seq is the `{seq}` slot in NOTIFY_KEY_GRAPH_ADVANCE so each successful emit gets a
+	// fresh dedupe slot. NEVER reset (survives acks + node-leaves/re-enters ready); the durable map is
+	// bounded by the active task surface and pruned alongside the message ledger by swarm_gc. Absent on
+	// pre-policy swarms — lazily initialized inside reconcileGraphAdvanceLocked's lock.
+	graphAdvanceNudgeState?: SwarmGraphAdvanceNudgeState;
+	// Issue 83c — proxy metric snapshot surfaced by the pump + /swarm metrics.
+	proxyMetrics?: { hungButAlive: number; staleOpen: number; supersessionChurn: number; lastEmitAt?: string };
 	// Issue 20: pool-scaffold write-once flag. Set by the orchestrator session_start hook AFTER the
 	// first successful `.pi/settings.json` scaffold + notify emission. Absent === never notified, which
 	// is the correct initial state. `readState` does NOT back-fill this field (mirrors `goal`): a
@@ -495,6 +634,48 @@ export type TaskNode = {
 	activeAttemptId?: string;
 	// NEW: Audit history of all attempts (never cleared, append-only)
 	attemptHistory?: TaskNodeAttempt[];
+	// === Issue 83a — liveness/progress detection + stale-open surfacing ===
+	// ISO timestamp of the most recent forward-progress signal on this node. Stamped by
+	// `ensureNodeActivityStamp` from the `tool_execution_end` hook (the worker is making tool
+	// calls) and from `tools/tasks.ts:swarm_update_task` (forward state transitions). NOT
+	// stamped on `agent_settled` / pure-idle events (those are NOT progress). Consumed by
+	// the `staleOpenAssignmentScanLocked` pump-tick phase: a node in `assigned`/`in_progress`
+	// past `PI_SWARM_STALE_OPEN_THRESHOLD_MS` (default 5 min) without a `lastProgressAt` is
+	// surfaced once per window to the orchestrator mailbox. Absent on pre-policy nodes
+	// (== never seen progress; the scan treats absent as the oldest possible timestamp).
+	lastProgressAt?: string;
+	// Last time the orchestrator was nudged about this node's stale-open state. Idempotent
+	// gate for the pump-tick scan: absent or older than the threshold => surface; otherwise
+	// skip (already surfaced within the window). Cleared on `swarm_update_task` forward
+	// transitions so progress resets the surface cycle.
+	staleOpenSurfacedAt?: string;
+	// === Issue 83b — supersession fencing ===
+	// Per-node fixed-window supersession counter. Incremented on every fresh mintNodeAttempt
+	// (genuine reassign, not duplicate retry). Reset when `supersessionWindowStart` is older
+	// than `PI_SWARM_REASSIGN_RATE_WINDOW_MS` ms. Read+written by the per-node rate-limit gate
+	// in `swarm_assign_task` (refuses with REASSIGN_RATE_LIMITED when count > PI_SWARM_REASSIGN_RATE_LIMIT).
+	supersessionCount?: number;
+	// ISO timestamp anchoring the current rate-limit window. Set on first supersession within a
+	// window; reset when the window expires (`now - supersessionWindowStart > window`).
+	supersessionWindowStart?: string;
+	// === R20 — artifact-progress self-nudge bookkeeping ===
+	// ISO timestamp of the most recent artifact-progress nudge delivered for this node. Acts as
+	// the backoff dedupe gate: subsequent nudges are suppressed until
+	// `nowMs - artifactProgressNudgeAt > ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS`. Pendant of
+	// `staleOpenSurfacedAt` (orchestrator-facing surfacing) but agent-facing (the nudge targets
+	// the worker, not the orchestrator). Cleared on `swarm_update_task` forward transitions in
+	// tools/tasks.ts so a successful close resets the nudge cycle for future node re-opens.
+	artifactProgressNudgeAt?: string;
+	// Per-node monotonic count of artifact-progress nudges emitted. Reset to 0 on forward
+	// transitions (alongside `lastProgressAt`/`staleOpenSurfacedAt`). When this exceeds
+	// `ARTIFACT_PROGRESS_NUDGE_CAP` the trigger short-circuits to a one-line orchestrator
+	// escalation (`worker.artifact_progress_cap_exceeded`) instead of a worker nudge.
+	artifactProgressNudgeCount?: number;
+	// One-shot flag: true after the cap-exceeded escalation has fired for this cycle. Cleared
+	// on forward transitions (same pattern as the other R20 bookkeeping). Prevents repeated
+	// escalations within a single stalled cycle (each nudge count past the cap would otherwise
+	// re-emit the trace; cap_exceeded is per-cycle, not per-nudge).
+	artifactProgressCapSurfaced?: boolean;
 };
 
 export type TaskEdge = {
@@ -508,6 +689,16 @@ export type TaskEdge = {
 		assigneePolicy?: string;
 		message?: string;
 	};
+};
+
+export type ReworkConsumptionRecord = {
+	edgeKey: string;
+	sourceNodeId: string;
+	sourceAttemptId: string;
+	reopenedNodeId: string;
+	consumedAt: string;
+	sourceStatus?: TaskNodeStatus;
+	sourceOutcome?: string | null;
 };
 
 export type TaskGate = {
@@ -608,6 +799,7 @@ export type TaskState = {
 	gates: Record<string, TaskGate>;
 	editLocks: Record<string, { nodeId: string; by: string; at: string; expiresAt?: string }>;
 	evidence: Record<string, unknown>;
+	reworkConsumption?: ReworkConsumptionRecord[];
 	// V1.5 opt-in post-iteration loop config. Absent or enabled !== true => no behavior change.
 	loop?: LoopConfig;
 };

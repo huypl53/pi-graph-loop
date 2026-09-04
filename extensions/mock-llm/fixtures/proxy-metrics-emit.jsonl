@@ -1,0 +1,5 @@
+# proxy-metrics-emit: Issue 83c — proxy metric capture.
+# The pump emits proxy.metric_emit snapshots for hung-but-alive residuals, stale-open counts,
+# and supersession churn, and /swarm metrics surfaces the current snapshot read-only.
+{"name":"proxy metrics snapshot emits aggregate counters","events":[{"type":"text","delayMs":15,"text":"Proxy metrics should snapshot the current swarm shape.","chunks":["Proxy metrics should snapshot ","the current swarm shape."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"/swarm metrics is read-only and orchestrator-only","events":[{"type":"text","delayMs":15,"text":"The metrics view is a read-only operator snapshot.","chunks":["The metrics view is a read-only ","operator snapshot."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

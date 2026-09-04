@@ -1,0 +1,13 @@
+# ct7-end-vs-settled: CT-7 lane driver — script the probe tool that subscribes
+# to agent_end and agent_settled + queues a followUp. The probe writes its
+# result on the FIRST agent_settled event (capturing the timeline before it can
+# be overwritten by subsequent turns).
+#
+# The probe extension (extensions/ct-probe/ct-probe.ts CT7 factory) registers
+# `swarm_ct7_register_observer` (subscribes to agent_end/agent_settled, queues
+# a followUp) and writes the timeline as probe-result.json from the
+# agent_settled listener itself. This fixture calls register_observer on turn 1
+# and emits a "settle" turn 2 so the queued followUp can be processed before
+# the lane settles.
+{"name":"ct7 turn 1 (probe tool swarm_ct7_register_observer fires; followUp queued)","stopReason":"toolUse","events":[{"type":"text","delayMs":15,"text":"CT-7 lane: turn 1 — the probe extension's swarm_ct7_register_observer tool subscribes to agent_end and agent_settled lifecycle hooks and queues a followUp via pi.sendMessage. The probe writes ct7-result.json from the agent_settled listener.","chunks":["CT-7 lane: ","turn 1 — ","the probe extension's swarm_ct7_register_observer tool ","subscribes to agent_end and agent_settled lifecycle hooks ","and queues a followUp via pi.sendMessage."," The probe writes ct7-result.json ","from the agent_settled listener."]},{"type":"toolcall","name":"swarm_ct7_register_observer","id":"ct7-register","arguments":{}}]}
+{"name":"ct7 turn 2 (lane settle after followUp is consumed)","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"CT-7 lane complete. Probe result was written by the agent_settled listener; lane settles.","chunks":["CT-7 lane complete."," Probe result was written ","by the agent_settled listener; ","lane settles."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
