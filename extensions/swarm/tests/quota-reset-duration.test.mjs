@@ -72,6 +72,39 @@ await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [
 		JSON.stringify(v.errors.filter((e) => e.kind === "slot_bad_quota_reset").map((e) => e.message)));
 }
 
+// === Rename (2026-09-05, user): `quotaReset` is the canonical field name ===
+// quotaResetMs stays as a back-compat alias. When both are set, quotaReset wins.
+{
+	const scratch2 = await mkdtemp(join(tmpdir(), "quota-rename-"));
+	await mkdir(join(scratch2, ".pi"), { recursive: true });
+	const sp = join(scratch2, ".pi", "settings.json");
+	await writeFile(sp, JSON.stringify({ swarm: { modelPool: [
+		{ model: "new", provider: "ccs", quotaReset: "45m" },
+		{ model: "alias", provider: "ccs", quotaResetMs: 900000 },
+		{ model: "both", provider: "ccs", quotaReset: "1h", quotaResetMs: 60000 },
+		{ model: "bad", provider: "ccs", quotaReset: "18min" },
+	] } }));
+	const v = validateSwarmSettings(scratch2);
+	ok("rename: quotaReset duration accepted", !v.errors.some((e) => e.field === "modelPool[0].quotaReset"), JSON.stringify(v.errors.map((e) => e.field)));
+	ok("rename: quotaResetMs alias still accepted", !v.errors.some((e) => e.field === "modelPool[1].quotaResetMs"));
+	ok("rename: bad quotaReset flagged", v.errors.some((e) => e.field === "modelPool[3].quotaReset"));
+
+	_clearQuotaResetCacheForTests();
+	const { readSwarmSettings } = await import("../src/session.ts");
+	process.env.PI_SWARM_SKIP_DIRTY_CHECK = "1";
+	const st = readSwarmSettings(scratch2);
+	const get = (m) => st?.modelPool?.find((x) => x.model === m)?.quotaResetMs;
+	ok("rename: quotaReset '45m' parsed to 2_700_000", get("new") === 2_700_000, `got ${get("new")}`);
+	ok("rename: alias quotaResetMs 900000 forwarded", get("alias") === 900_000, `got ${get("alias")}`);
+	ok("rename: both set -> quotaReset wins (3_600_000)", get("both") === 3_600_000, `got ${get("both")}`);
+	ok("rename: bad quotaReset dropped (undefined)", get("bad") === undefined, `got ${get("bad")}`);
+
+	_clearQuotaResetCacheForTests();
+	const bench = effectiveBenchMs({ model: "new", provider: "ccs" }, { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 }, scratch2);
+	ok("rename: bench floor honors quotaReset field", bench === 2_700_000, `got ${bench}`);
+	await rm(scratch2, { recursive: true, force: true });
+}
+
 // === Integration: bench floor honors duration strings from raw config ===
 {
 	_clearQuotaResetCacheForTests();

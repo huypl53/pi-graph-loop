@@ -90,7 +90,7 @@ await rm(settingsPath, { force: true });
 	ok("F1b: full template — modelPool example commented", /#\s*-\s*model:/.test(text));
 	ok("F1b: full template — weight documented", /#\s*weight:/.test(text));
 	ok("F1b: full template — roles documented", /#\s*roles:/.test(text));
-	ok("F1b: full template — quotaResetMs documented", /#\s*quotaResetMs:/.test(text));
+	ok("F1b: full template — quotaReset documented", /#\s*quotaReset:/.test(text));
 	ok("F1b: full template — rotation block commented", /#\s*rotation:/.test(text) && /#\s*strategy:/.test(text) && /#\s*cooldownMs:/.test(text) && /#\s*maxRetries:/.test(text));
 	ok("F1b: full template — defaultModel/defaultProvider documented", /#\s*defaultModel:/.test(text) && /#\s*defaultProvider:/.test(text));
 	ok("F1b: no active model: null junk lines", !/^\s*-\s*model:\s*null\s*$/m.test(text) && !/^\s*model:\s*null\s*$/m.test(text));

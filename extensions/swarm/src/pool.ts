@@ -89,7 +89,7 @@ function readQuotaResetMsFor(cwd: string, key: string): number {
 			if (cfg && Array.isArray(cfg.modelPool)) {
 				for (const s of cfg.modelPool) {
 					if (!s || typeof s !== "object") continue;
-					const qrm = parseQuotaResetMs(s.quotaResetMs);
+					const qrm = parseQuotaResetMs(s.quotaReset !== undefined ? s.quotaReset : s.quotaResetMs);
 					if (qrm !== undefined) {
 						const provider = typeof s.provider === "string" && s.provider ? s.provider : "(default)";
 						const model = typeof s.model === "string" ? s.model : "";
@@ -201,12 +201,13 @@ export function effectiveConfig(): { slots: ModelSlot[]; rotation: Required<Rota
 // Kept in lock-step with the schema in docs/swarm/operations.md (see "Model pool configuration").
 // Issue 21: quotaResetMs is optional (omit for slots without a known reset window). When set, the
 // effective bench for a quota error becomes max(rotation.cooldownMs, quotaResetMs) — see
-// effectiveBenchMs(). Accepts a duration string ("30m", "2h", "1h30m", "1d") or bare ms —
+// effectiveBenchMs()). Canonical key: `quotaReset` (duration-friendly); `quotaResetMs` is a
+// legacy alias. Accepts a duration string ("30m", "2h", "1h30m", "1d") or bare ms —
 // parseQuotaResetMs().
 export const POOL_FORMAT_EXAMPLE = {
 	modelPool: [
 		{ model: "gpt-5.4-mini", provider: "openai", weight: 50 },
-		{ model: "claude-sonnet-4", provider: "anthropic", weight: 30, quotaResetMs: "30d" },
+		{ model: "claude-sonnet-4", provider: "anthropic", weight: 30, quotaReset: "30d" },
 		{ model: "glm-5.1", provider: "zai-coding-cn", weight: 0 },
 	],
 	rotation: { strategy: "weighted", cooldownMs: 900000, maxRetries: 2 },
@@ -324,8 +325,15 @@ export function validateSwarmSettings(cwd = process.cwd(), opts: { registryProbe
 			if (model) seen.add(key);
 			// Issue 21: validate the optional quotaResetMs field. Reject non-numeric / negative / NaN
 			// values so a typo is caught at validate time rather than silently treated as 0.
-			if (s.quotaResetMs !== undefined && parseQuotaResetMs(s.quotaResetMs) === undefined) {
-				errors.push({ kind: "slot_bad_quota_reset", field: `modelPool[${idx}].quotaResetMs`, message: `Slot #${idx + 1} quotaResetMs must be a duration ("30m", "2h", "1h30m", "1d") or a non-negative number of milliseconds (floor for quota benches; 24h cap still applies)` });
+			// quotaReset is canonical; quotaResetMs is a back-compat alias (same semantics). When
+			// both are present, quotaReset wins. Validate whichever field(s) the user actually set.
+			const qrRaw = s.quotaReset !== undefined ? s.quotaReset : s.quotaResetMs;
+			if (qrRaw !== undefined && parseQuotaResetMs(qrRaw) === undefined) {
+				const fname = s.quotaReset !== undefined ? "quotaReset" : "quotaResetMs";
+				errors.push({ kind: "slot_bad_quota_reset", field: `modelPool[${idx}].${fname}`, message: `Slot #${idx + 1} ${fname} must be a duration ("30m", "2h", "1h30m", "1d") or a non-negative number of milliseconds (floor for quota benches; 24h cap still applies)` });
+			}
+			if (s.quotaReset === undefined && s.quotaResetMs !== undefined && parseQuotaResetMs(s.quotaResetMs) !== undefined) {
+				warnings.push({ kind: "quota_reset_alias", field: `modelPool[${idx}].quotaResetMs`, message: `Slot #${idx + 1} uses the legacy field name quotaResetMs — rename it to quotaReset (same semantics, duration-friendly). The alias keeps working.` });
 			}
 			// Issue 22: validate the optional roles allow-list (warning-grade, informational — the
 			// malformed value is treated as "no filter" by parseModelPool, but the operator should see it).

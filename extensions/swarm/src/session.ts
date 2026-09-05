@@ -45,11 +45,12 @@ function parseModelPool(raw: unknown): ModelSlot[] | undefined {
 		const model = typeof (s as any).model === "string" ? (s as any).model.trim() : "";
 		if (!model) continue;
 		const weight = typeof (s as any).weight === "number" && Number.isFinite((s as any).weight) ? Math.max(0, (s as any).weight) : 1;
-		// Quota-reset duration format (2026-09-05): quotaResetMs may be a duration string
-		// ("30m", "2h", "1h30m") or a bare number (ms). Parse to ms here so every downstream
+		// Quota-reset duration format (2026-09-05): quotaReset (canonical) / quotaResetMs
+		// (legacy alias) may be a duration string ("30m", "2h", "1h30m") or a bare number
+		// (ms). quotaReset wins when both are set. Parse to ms here so every downstream
 		// consumer (pickSlot quotas, poolStatus display, effectiveBenchMs) sees a number.
 		// Malformed values are dropped (undefined) — validateSwarmSettings reports them.
-		const qrmRaw = (s as any).quotaResetMs;
+		const qrmRaw = (s as any).quotaReset !== undefined ? (s as any).quotaReset : (s as any).quotaResetMs;
 		const qrm = qrmRaw === undefined ? undefined : parseQuotaResetMs(qrmRaw);
 		slots.push({
 			model,

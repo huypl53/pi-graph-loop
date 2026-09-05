@@ -31,6 +31,9 @@ export type ModelSlot = {
 	// benches this slot, the effective bench = max(rotation.cooldownMs, quotaResetMs ?? env-default).
 	// The 24h exponential cap still applies — quotaResetMs is a floor only, not a ceiling. Absent or
 	// 0 falls back to rotation.cooldownMs (unchanged behavior).
+	// NOTE: this is the INTERNAL field — always parsed milliseconds. In CONFIG, the canonical key
+	// is `quotaReset` (duration-friendly: "30m", "2h"); `quotaResetMs` is a legacy alias that
+	// parseModelPool/readQuotaResetMsFor still accept (quotaReset wins when both are set).
 	quotaResetMs?: number;
 	// Issue 22 roles-filter: optional allow-list of roleKind names; when set & non-empty, the slot
 	// is only eligible for pickSlot() when the agent's roleKind is in the list. Absent / empty =

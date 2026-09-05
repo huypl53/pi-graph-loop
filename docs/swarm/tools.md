@@ -66,7 +66,8 @@ modelPool:
     provider: zai-coding-cn   # provider id (recommended)
     weight: 10                # optional; 0 = fallback-only
     roles: [implementer]      # optional role-kind allow-list
-    quotaResetMs: 2h          # optional quota-bench floor: duration ("30m", "2h", "1h30m", "1d") or ms
+    quotaReset: 2h           # optional quota-bench floor: duration ("30m", "2h", "1h30m", "1d") or ms
+    # (legacy alias quotaResetMs still accepted)
   - model: gpt-5.4-mini
     provider: openai
 rotation:
