@@ -51,3 +51,4 @@ tmux-snapshots
 Session.vim
 .pi/delegate/
 .worktrees
+.pi/swarm.yml

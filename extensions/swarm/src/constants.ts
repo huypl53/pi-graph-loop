@@ -83,7 +83,7 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 #     weight: 10                 # optional, default 1; 0 = fallback-only
 #     roles: [implementer]       # optional role-kind allow-list (root, planner, reviewer,
 #                                #   tester, implementer, worker, observer)
-#     quotaResetMs: 7200000      # optional quota-bench floor in ms (default 24h cap)
+#     quotaResetMs: 2h            # optional quota-bench floor: "30m", "2h", "1h30m", "1d" or ms
 #   - model: gpt-5.4-mini        # a second slot; add as many as you like
 #     provider: openai
 
