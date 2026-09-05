@@ -8,7 +8,7 @@ import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_
 import { currentAgentId, currentModel, currentProvider, isRootSession } from "./session.ts";
 import type { ModelSlot } from "./types.ts";
 import { classifyProviderError, scrubErrorIdentity, type EngineRetryIncident } from "./types.ts";
-import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "./pool.ts";
+import { pickSlot, recordProviderError, recordSlotSuccess, slotKey, validateSwarmSettings } from "./pool.ts";
 import { deliverMessageLocked, findIdempotentMessage, readMailbox, responseMissingRecords, unackedRequiresAckRecords, upsertMessageRecord } from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "./state.ts";
@@ -704,6 +704,27 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			} catch (err: any) {
 				await trace(p, "pool.scaffold_error", { error: String((err as Error)?.message || err) }).catch(() => {});
 			}
+		// === Follow-up F3 (2026-09-05): launch-time pool health warning ===
+		// The PM launches a session whose spawn pool may be entirely dead (unresolvable models /
+		// missing credentials). Surfacing that NOW beats discovering it at the first spawn failure.
+		// Uses the live registry probe when available; without one, only structural checks run.
+		// Degrades silently (never blocks session_start); traced as pool.launch_health.
+		try {
+			const validation = validateSwarmSettings(ctx.cwd, { registryProbe: ctx.modelRegistry as any });
+			if (!validation.ok) {
+				const lines = [`Swarm pool config has ${validation.errors.length} issue(s) — /swarm pool validate for details:`];
+				for (const e of validation.errors.slice(0, 3)) lines.push(`  \u2717 ${e.field || "config"}: ${e.message}`);
+				if (validation.errors.length > 3) lines.push(`  … and ${validation.errors.length - 3} more`);
+				if (ctx.hasUI) { try { ctx.ui.notify(lines.join("\n"), "warning"); } catch { /* best-effort */ } }
+				await trace(p, "pool.launch_health", { ok: false, errors: validation.errors.length, warnings: validation.warnings.length }).catch(() => {});
+			} else if (validation.warnings.length && ctx.hasUI) {
+				// Advisory-only: surface the first warning (e.g. both_sources_present / swarm_yml_empty)
+				// once at launch so the operator knows which file is actually in effect.
+				const w = validation.warnings[0];
+				try { ctx.ui.notify(`Swarm pool: ${w.message}`, "warning"); } catch { /* best-effort */ }
+				await trace(p, "pool.launch_health", { ok: true, errors: 0, warnings: validation.warnings.length }).catch(() => {});
+			}
+		} catch { /* launch-health check must never break session_start */ }
 		}
 		const ts = now();
 		await withLock(p, async () => {

@@ -79,8 +79,16 @@ rotation:
 
 When settings.json declares a swarm block AND `.pi/swarm.yml` carries recognized config,
 `/swarm pool validate` emits a **warning** (never an error): the JSON wins and the yml
-contents are ignored. Corrupt YAML is reported as `swarm_yml_unreadable` (`ok:false`);
+contents are ignored. An **empty** (0-byte / comments-only) swarm.yml also warns
+(`swarm_yml_empty`) — the file exists but declares nothing, so the JSON config keeps winning.
+Corrupt YAML is reported as `swarm_yml_unreadable` (`ok:false`);
 all readers degrade to defaults exactly like corrupt JSON does today.
+
+`/swarm pool validate` (and the root's launch-time pool-health check) also runs **live
+resolvability checks** per slot when the model registry is available in the session:
+`slot_unresolvable` for a provider/model pair not in the registry, and `slot_no_credential`
+for a provider without a stored API key. The root session surfaces a warning at launch when
+the pool config has errors (or an advisory when warnings exist), traced as `pool.launch_health`.
 
 ### Model pool auto-scaffold on first root session (Issue 20)
 
@@ -88,7 +96,9 @@ When the root (`PI_SWARM_IS_ROOT=1`) starts a session and NO source declares
 `modelPool`, the extension writes a **commented placeholder into `.pi/swarm.yml`** (the
 new default home for fresh projects — settings.json is not created). If settings.json
 already has a `swarm`/`extensions.swarm` block without `modelPool`, the placeholder
-merges into that JSON block instead (unchanged behavior). The placeholder is intentionally
+merges into that JSON block instead (unchanged behavior). An **empty** swarm.yml
+(0 bytes / comments-only) is treated as not-yet-declared: the scaffold fills the commented
+placeholder into it when no other source declares a pool. The placeholder is intentionally
 invalid against `validateSwarmSettings()` so the user is steered toward replacing it with a
 real slot.
 

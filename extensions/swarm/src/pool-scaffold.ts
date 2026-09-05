@@ -123,9 +123,11 @@ export async function ensurePoolScaffold(
 	}
 	if (raw === undefined) raw = {};
 
-	// swarm.yml check: if the yml file already declares a modelPool, the user chose yml as their
-	// home — never scaffold over it, never write settings.json. Corrupt yml: skip too (we must not
-	// clobber a file we cannot parse; trace for visibility).
+	// swarm.yml check: decide whether the yml declares a pool. An EMPTY yml (0 bytes /
+	// comments-only, parses to null) is NOT a user declaration — it is a fresh-scaffold
+	// opportunity (follow-up F1b): if no other source declares modelPool we fill the commented
+	// placeholder INTO the yml. Only a yml that parses AND has a modelPool key (or a corrupt one
+	// we refuse to clobber) counts as modelpool_present.
 	const ymlPath = swarmYmlPath(cwd);
 	if (existsSync(ymlPath)) {
 		let yml: any = null;
@@ -138,6 +140,8 @@ export async function ensurePoolScaffold(
 		if (yml && Object.prototype.hasOwnProperty.call(yml, "modelPool")) {
 			return { wrote: false, skipped: "modelpool_present", path: ymlPath };
 		}
+		// yml === null (empty/comments-only): fall through to the JSON plan; if the JSON side also
+		// declares nothing, the absent-branch below writes the placeholder into THIS yml file.
 	}
 
 	// Resolve the scaffold plan: which block to write into, whether to skip, and the existing keys.

@@ -228,7 +228,12 @@ export type PoolValidationError = { kind: string; field?: string; message: strin
 // advisory (never flip ok): the both_sources_present warning fires when settings.json declares a
 // swarm block AND .pi/swarm.yml exists with recognized config — precedence means the JSON wins, so
 // the operator should know their yml edits are being masked.
-export function validateSwarmSettings(cwd = process.cwd()): { ok: boolean; errors: PoolValidationError[]; warnings: PoolValidationError[]; shape: SettingsShape } {
+//
+// Follow-up 2026-09-05 (user report): `opts.registryProbe` (mirrors ctx.modelRegistry.find)
+// enables LIVE resolvability checks per slot: `slot_unresolvable` when the provider/model pair
+// is not in the registry, `slot_no_credential` when the provider has no API key (auth.json/env
+// probe). Without a probe, validation degrades to structural-only (back-compat).
+export function validateSwarmSettings(cwd = process.cwd(), opts: { registryProbe?: { find: (provider: string, modelId: string) => any } } = {}): { ok: boolean; errors: PoolValidationError[]; warnings: PoolValidationError[]; shape: SettingsShape } {
 	const errors: PoolValidationError[] = [];
 	const warnings: PoolValidationError[] = [];
 	let shape: SettingsShape;
@@ -251,11 +256,16 @@ export function validateSwarmSettings(cwd = process.cwd()): { ok: boolean; error
 	const source = resolved.source!;
 
 	// Both-sources warning: settings.json declares a swarm block AND swarm.yml carries config.
+	// Follow-up F1: an EMPTY (0-byte / comments-only) swarm.yml is also worth flagging — the user
+	// created the file (clear intent to migrate) but it declares nothing, so the JSON config keeps
+	// winning silently. swarm_yml_empty steers them to either fill it or delete it.
 	if (source !== "swarm.yml" && existsSync(swarmYmlPath(cwd))) {
 		let ymlCfg: any = null;
 		try { ymlCfg = readSwarmYml(cwd); } catch { /* corrupt already reported above */ }
 		if (ymlCfg && (Array.isArray(ymlCfg.modelPool) || ymlCfg.defaultModel || ymlCfg.defaultProvider || ymlCfg.rotation)) {
 			warnings.push({ kind: "both_sources_present", field: ".pi/swarm.yml", message: `Both .pi/settings.json (swarm block) and .pi/swarm.yml declare swarm config — settings.json (${source}) wins and the .pi/swarm.yml contents are ignored. Move your config into one file.` });
+		} else if (!ymlCfg) {
+			warnings.push({ kind: "swarm_yml_empty", field: ".pi/swarm.yml", message: `.pi/swarm.yml exists but declares no config (empty or comments-only) — settings.json (${source}) remains in effect. Fill it in (see /swarm pool help) or remove it to silence this warning.` });
 		}
 	}
 	const slots = Array.isArray(cfg.modelPool) ? cfg.modelPool : null;
@@ -287,6 +297,17 @@ export function validateSwarmSettings(cwd = process.cwd()): { ok: boolean; error
 			// malformed value is treated as "no filter" by parseModelPool, but the operator should see it).
 			if (s.roles !== undefined && (!Array.isArray(s.roles) || !s.roles.every((r: any) => typeof r === "string" && r.length > 0))) {
 				errors.push({ kind: "slot_bad_roles", field: `modelPool[${idx}].roles`, message: `Slot #${idx + 1} roles must be a string array of role-kind names (see completion.ts ROLE_KINDS for the closed set: root, planner, reviewer, tester, implementer, worker, observer)` });
+			}
+			// Follow-up F2 (2026-09-05): live resolvability probe — only when a registry probe is
+			// supplied (the /swarm tool path passes ctx.modelRegistry; structural callers don't).
+			// A slot that cannot resolve is a launch-time failure for spawns: flag it now.
+			if (opts.registryProbe && model && provider) {
+				const found = opts.registryProbe.find(provider, model);
+				if (!found) {
+					errors.push({ kind: "slot_unresolvable", field: `modelPool[${idx}]`, message: `Slot #${idx + 1} ${provider}/${model} is not resolvable: no such model registered under that provider (pi auth / --list-models to inspect). Spawns targeting it would fail.` });
+				} else if (missingProviderCredential(provider)) {
+					errors.push({ kind: "slot_no_credential", field: `modelPool[${idx}]`, message: `Slot #${idx + 1} provider '${provider}' has no stored API key — a spawned pi would exit with 'No API key found for ${provider}'. Authenticate it (pi auth) or set ${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY.` });
+				}
 			}
 		});
 	}

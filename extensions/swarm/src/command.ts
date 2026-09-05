@@ -883,7 +883,9 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					}
 					if (sub === "validate") {
 						// Read-only structural check; never edits .pi/settings.json or .pi/swarm.yml.
-						const v = validateSwarmSettings();
+						// Registry probe wired (follow-up F2): live resolvability checks when the
+						// model registry is available in this session's ctx.
+						const v = validateSwarmSettings(ctx.cwd, { registryProbe: ctx.modelRegistry as any });
 						const lines: string[] = [];
 						if (v.ok) {
 							lines.push("Config validation: PASSED");
