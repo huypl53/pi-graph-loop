@@ -125,7 +125,7 @@ await resetScratch();
 	ok("R4: yml file exists", existsSync(ymlPath));
 	ok("R4: settings.json NOT created", !existsSync(settingsPath));
 	const text = await readFile(ymlPath, "utf8");
-	ok("R4: scaffold contains placeholder model: null", /model:\s*null/.test(text));
+	ok("R4: scaffold documents full surface (commented), no active null", /#\s*-\s*model:/.test(text) && !/^\s*-?\s*model:\s*null\s*$/m.test(text));
 	ok("R4: scaffold is YAML (comment guidance present)", /#/.test(text));
 }
 // R4b: yml declares a pool -> skip

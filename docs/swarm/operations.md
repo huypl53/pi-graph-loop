@@ -155,10 +155,14 @@ Trace events (durable in `.pi/swarm/traces/events.jsonl`):
   unexpected error (e.g. an EACCES from a read-only mount). The session_start
   handler swallows this and continues; the user can diagnose via `swarm_trace`.
 
-Placeholder `model: null` (JSON) / `model: null` inside the commented yml template
-is intentionally invalid against `validateSwarmSettings()` (which reports
-`slot_empty_model`); this nudges the user to replace it with a real slot before
-running `/swarm pool validate`.
+The JSON placeholder (`model: null`) is intentionally invalid against
+`validateSwarmSettings()` (which reports `slot_empty_model`); this nudges the user
+to replace it with a real slot before running `/swarm pool validate`. The yml
+scaffold is a **comments-only teaching template**: the full config surface
+(`modelPool` slots with every optional field, `rotation` policy,
+`defaultModel`/`defaultProvider`) is documented as commented examples —
+uncomment-and-edit — and the file parses to `null` until the user fills it in,
+so it declares no active config and never trips the placeholder validation.
 Concurrent root session_starts (two PM panes racing) both call
 `ensurePoolScaffold`; both observe `modelPool` absent; the first
 `atomicWriteFile` wins and the second sees the post-write state on its next read

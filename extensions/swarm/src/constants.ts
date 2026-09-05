@@ -71,21 +71,29 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 # This file is read by the swarm extension only; pi core ignores it (pi core reads .pi/settings.json).
 # Precedence: extensions.swarm > swarm (in .pi/settings.json) > this file.
 # Full reference: docs/swarm/tools.md#configuration
+#
+# Everything below is a commented example — uncomment and edit what you need.
+# After editing, run /swarm pool validate to check your config (it also verifies
+# each model resolves and its provider has an API key).
 
-modelPool:
-  # - model: glm-5.1          # pi model id (required)
-  #   provider: zai-coding-cn  # provider id (recommended — resolves the model registry entry)
-  #   weight: 10               # optional, default 1; 0 = fallback-only
-  #   roles: [implementer]     # optional role-kind allow-list
-  #   quotaResetMs: 7200000    # optional quota-bench floor (ms)
-  - model: null
-    provider: null
+# --- Model pool: the slots spawned agents rotate through ----------------------
+# modelPool:
+#   - model: glm-5.1             # pi model id (required)
+#     provider: zai-coding-cn    # provider id (recommended — resolves the model registry entry)
+#     weight: 10                 # optional, default 1; 0 = fallback-only
+#     roles: [implementer]       # optional role-kind allow-list (root, planner, reviewer,
+#                                #   tester, implementer, worker, observer)
+#     quotaResetMs: 7200000      # optional quota-bench floor in ms (default 24h cap)
+#   - model: gpt-5.4-mini        # a second slot; add as many as you like
+#     provider: openai
 
+# --- Rotation policy (optional; defaults shown) -------------------------------
 # rotation:
-#   strategy: weighted        # weighted | round-robin | sticky
-#   cooldownMs: 900000
-#   maxRetries: 2
+#   strategy: weighted           # weighted | round-robin | sticky
+#   cooldownMs: 900000           # park a slot after an error, ms
+#   maxRetries: 2                # hand-offs to other slots before failing
 
+# --- Singleton default (optional — used when no modelPool is declared) --------
 # defaultModel: glm-5.1
 # defaultProvider: zai-coding-cn
 `;

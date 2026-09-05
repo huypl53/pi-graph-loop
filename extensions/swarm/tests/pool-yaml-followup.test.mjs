@@ -78,13 +78,23 @@ await writeFile(ymlPath, "");
 	ok("F1: warning names .pi/swarm.yml", v.warnings.some((w) => w.kind === "swarm_yml_empty" && /swarm\.yml/.test(w.message)));
 	ok("F1: ok not flipped by the empty-yml warning (JSON pool drives ok)", v.ok === false); // false due to F2 errors, not the warning
 }
-// === F1b: empty yml + NO JSON pool → scaffold fills the commented placeholder ===
+// F1b: empty yml + NO JSON pool → scaffold fills the commented placeholder
 await rm(settingsPath, { force: true });
 {
 	const res = await ensurePoolScaffold(scratch);
 	ok("F1b: empty yml is treated as fresh-scaffold (wrote placeholder into it)", res.wrote === true && res.path === ymlPath);
 	const text = await (await import("node:fs/promises")).readFile(ymlPath, "utf8");
-	ok("F1b: placeholder is the commented template with model: null", /model:\s*null/.test(text) && /#/.test(text));
+	// Follow-up (2026-09-05, user): the yml scaffold must teach the FULL config surface —
+	// every documented key present as a commented example (complete settings, commented out),
+	// no active `model: null` junk lines. Parse-validity of the uncommented body is a bonus.
+	ok("F1b: full template — modelPool example commented", /#\s*-\s*model:/.test(text));
+	ok("F1b: full template — weight documented", /#\s*weight:/.test(text));
+	ok("F1b: full template — roles documented", /#\s*roles:/.test(text));
+	ok("F1b: full template — quotaResetMs documented", /#\s*quotaResetMs:/.test(text));
+	ok("F1b: full template — rotation block commented", /#\s*rotation:/.test(text) && /#\s*strategy:/.test(text) && /#\s*cooldownMs:/.test(text) && /#\s*maxRetries:/.test(text));
+	ok("F1b: full template — defaultModel/defaultProvider documented", /#\s*defaultModel:/.test(text) && /#\s*defaultProvider:/.test(text));
+	ok("F1b: no active model: null junk lines", !/^\s*-\s*model:\s*null\s*$/m.test(text) && !/^\s*model:\s*null\s*$/m.test(text));
+	ok("F1b: placeholder parses as valid YAML (comments-only body)", await (async () => { try { const y = await (await import("yaml")).parse(text); return y === null || y === undefined || Object.keys(y ?? {}).length === 0; } catch { return false; } })());
 }
 
 // cleanup

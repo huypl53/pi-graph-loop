@@ -93,14 +93,16 @@ the pool config has errors (or an advisory when warnings exist), traced as `pool
 ### Model pool auto-scaffold on first root session (Issue 20)
 
 When the root (`PI_SWARM_IS_ROOT=1`) starts a session and NO source declares
-`modelPool`, the extension writes a **commented placeholder into `.pi/swarm.yml`** (the
-new default home for fresh projects — settings.json is not created). If settings.json
-already has a `swarm`/`extensions.swarm` block without `modelPool`, the placeholder
-merges into that JSON block instead (unchanged behavior). An **empty** swarm.yml
-(0 bytes / comments-only) is treated as not-yet-declared: the scaffold fills the commented
-placeholder into it when no other source declares a pool. The placeholder is intentionally
-invalid against `validateSwarmSettings()` so the user is steered toward replacing it with a
-real slot.
+`modelPool`, the extension writes a **comments-only teaching template into
+`.pi/swarm.yml`** — the full config surface (modelPool slots with every optional
+field, rotation policy, defaultModel/defaultProvider) documented as commented
+examples; the file parses to `null` (declares nothing) until the user fills it
+in. settings.json is not created. If settings.json already has a `swarm` /
+`extensions.swarm` block without `modelPool`, the JSON placeholder merges into
+that block instead (unchanged behavior). An **empty** swarm.yml (0 bytes /
+comments-only) is treated as not-yet-declared: the scaffold (re)writes the
+idempotent template bytes into it when no other source declares a pool; the
+durable `poolScaffoldNotifiedAt` flag keeps the notify one-shot.
 
 A one-shot TUI notify fires ONLY when (a) the scaffold actually wrote AND
 (b) the durable flag `SwarmState.poolScaffoldNotifiedAt` is absent. After the
