@@ -1,0 +1,4 @@
+# reconcile-offset: first inspect the full action list, then continue from offset 2 without repeating the old prefix.
+{"name":"initial reconcile","events":[{"type":"text","delayMs":5,"text":"I will inspect the current reconciliation actions."},{"type":"toolcall","delayMs":5,"name":"swarm_reconcile","id":"reconcile-initial","arguments":{"dryRun":true,"scope":"all"}}]}
+{"name":"offset reconcile","events":[{"type":"text","delayMs":5,"text":"I will continue after the first two already-seen actions."},{"type":"toolcall","delayMs":5,"name":"swarm_reconcile","id":"reconcile-offset","arguments":{"dryRun":true,"scope":"all","offset":2}}]}
+{"name":"offset complete","stopReason":"stop","events":[{"type":"text","delayMs":5,"text":"The offset call returned only the remaining reconciliation action."},{"type":"stop","delayMs":5,"reason":"stop"}]}

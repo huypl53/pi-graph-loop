@@ -119,7 +119,7 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 	return actions;
 }
 
-export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { agentId?: string; dryRun?: boolean; mark?: boolean }) {
+export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { agentId?: string; dryRun?: boolean; mark?: boolean; offset?: number }) {
 	const result = await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		if (options.mark) requireRootAuthority(currentAgentId(), "swarm_reconcile(mark=true)");
@@ -336,11 +336,27 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 		// task.json writes are consistent with swarm state. Ignored when scoped to a single agent's mail.
 		const taskActions = options.agentId ? [] : await reconcileTasks(pi, p, st, { dryRun: options.dryRun, mark: options.mark, nowMs });
 		const allActions = [...actions, ...taskActions];
+		const offset = Math.max(0, Math.floor(options.offset || 0));
+		const returnedActions = allActions.slice(offset);
+		const returnedMessageCount = Math.max(0, actions.length - offset);
+		const returnedTaskCount = Math.max(0, returnedActions.length - returnedMessageCount);
 
 		if (!options.dryRun) {
 			await writeState(p, st);
 		}
-		return { actions: allActions, count: allActions.length, messageCount: actions.length, taskCount: taskActions.length, dryRun: Boolean(options.dryRun) };
+		return {
+			actions: returnedActions,
+			count: returnedActions.length,
+			messageCount: returnedMessageCount,
+			taskCount: returnedTaskCount,
+			totalCount: allActions.length,
+			totalMessageCount: actions.length,
+			totalTaskCount: taskActions.length,
+			offset,
+			nextOffset: offset + returnedActions.length,
+			hasMore: offset + returnedActions.length < allActions.length,
+			dryRun: Boolean(options.dryRun),
+		};
 	});
 	await trace(p, "reconcile.complete", { agentId: options.agentId, dryRun: options.dryRun, mark: options.mark, result });
 	return result;

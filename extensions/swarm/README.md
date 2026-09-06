@@ -151,7 +151,7 @@ Useful tools:
 - `swarm_check_mailbox`
 - `swarm_ack_message`
 - `swarm_message_status`
-- `swarm_reconcile` (mail + task sweep; `mark=true` repairs task status drift)
+- `swarm_reconcile` (mail + task sweep; `mark=true` repairs task status drift; `offset` skips already-seen result actions and returns `nextOffset`)
 - `swarm_prune` (root-only after Issue 10; dry-run by default)
 - `swarm_dead_letters`
 - `swarm_trace`

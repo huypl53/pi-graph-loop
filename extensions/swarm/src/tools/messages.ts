@@ -280,13 +280,14 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "swarm_reconcile",
 		label: "Swarm Reconcile",
-		description: "Reconcile swarm mailbox state AND task graph state. Mailbox: inspects queued/failed/injected messages requiring ack, retries failed/queued injections when recipient tmux is running, marks expired or max-attempt messages dead_letter. Task sweep: re-reads every task.json, reports stored-vs-derived status drift and stale/nudge signals (dead assignee, dead-lettered assignment, in_progress too long, ack_missing), and stamps advisory node.staleAt. Mark-only by default; pass mark=true to also persist the recomputed task.status. Never auto-fails a node.",
-		promptGuidelines: ["Use `swarm_reconcile` to recover stuck messages, retry failed deliveries, move expired/unrecoverable messages to dead_letter, and surface stale/stalled task nodes. Run with dryRun=true first to preview; use mark=true to repair task status drift."],
+		description: "Reconcile swarm mailbox state AND task graph state. Mailbox: inspects queued/failed/injected messages requiring ack, retries failed/queued injections when recipient tmux is running, marks expired or max-attempt messages dead_letter. Task sweep: re-reads every task.json, reports stored-vs-derived status drift and stale/nudge signals (dead assignee, dead-lettered assignment, in_progress too long, ack_missing), and stamps advisory node.staleAt. Use offset to skip reconciliation actions already returned by an earlier call. Mark-only by default; pass mark=true to also persist the recomputed task.status. Never auto-fails a node.",
+		promptGuidelines: ["Use `swarm_reconcile` to recover stuck messages, retry failed deliveries, move expired/unrecoverable messages to dead_letter, and surface stale/stalled task nodes. Run with dryRun=true first to preview; reuse the returned nextOffset as offset to skip already-seen actions; use mark=true to repair task status drift."],
 		parameters: Type.Object({
 			agentId: Type.Optional(Type.String({ description: "Optional agent id to reconcile only that agent's messages. Task sweep is skipped when scoped to one agent." })),
 			dryRun: Type.Optional(Type.Boolean({ description: "If true, inspect and report actions without modifying state. Defaults to false." })),
 			mark: Type.Optional(Type.Boolean({ description: "Persist the recomputed task.status when stored/derived drift is detected (repairs closure). Still never auto-fails nodes. Defaults to false." })),
 			scope: Type.Optional(Type.Union([Type.Literal("self"), Type.Literal("all")], { description: "Reconcile scope: 'self' restricts to the caller's mailbox; 'all' walks the whole swarm. Workers are forced to 'self'; root/admin may select either. Defaults to caller-tier (worker=self, root=all)." })),
+			offset: Type.Optional(Type.Number({ minimum: 0, description: "Zero-based action offset. Skips this many actions from the current deterministic reconcile result; pass the prior result's nextOffset to avoid returning old actions again. Defaults to 0." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_reconcile", async () => {
@@ -336,9 +337,12 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 						await writeState(p, st);
 					});
 				}
-				const result = await reconcile(pi, ctx.cwd, p, { agentId: params.agentId, dryRun: params.dryRun, mark: params.mark });
+				const result = await reconcile(pi, ctx.cwd, p, { agentId: params.agentId, dryRun: params.dryRun, mark: params.mark, offset: params.offset });
 				const summary = result.actions.map((a) => `  ${a.messageId}: ${a.action} (${a.reason})`).join("\n");
-				return textResult(`Reconciled ${result.count} item(s): ${result.messageCount} message(s), ${result.taskCount} task(s) (${result.dryRun ? "dry run" : "applied"}).\n${summary}`, result);
+				const page = result.offset > 0 || result.count !== result.totalCount
+					? `Reconciled ${result.count} of ${result.totalCount} item(s) from offset ${result.offset}: ${result.messageCount} message(s), ${result.taskCount} task(s)`
+					: `Reconciled ${result.count} item(s): ${result.messageCount} message(s), ${result.taskCount} task(s)`;
+				return textResult(`${page} (${result.dryRun ? "dry run" : "applied"}). Next offset: ${result.nextOffset}.\n${summary}`, result);
 			});
 		},
 	}))
