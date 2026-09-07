@@ -48,10 +48,16 @@ const { staleOpenNudgeLocked } = await import(join(here, "..", "src/taskgraph.ts
 const scratch = mkdtempSync(join(tmpdir(), `swarm-r13-unk-target-${process.pid}-${Date.now()}`));
 mkdirSync(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, info) => {
-	if (cond) { pass++; console.log("  ok  ", name); }
-	else { fail++; console.error("  FAIL", name, info ?? ""); }
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
 };
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
@@ -61,7 +67,17 @@ function readEvents() {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	if (!existsSync(p)) return [];
 	const txt = readFileSync(p, "utf8").trim();
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 function clearEvents() {
 	mkdirSync(join(scratch, ".pi/swarm/traces"), { recursive: true });
@@ -71,7 +87,17 @@ function readRootMailbox() {
 	const p = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 	if (!existsSync(p)) return [];
 	const txt = readFileSync(p, "utf8").trim();
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 
 // Build a scratch swarm state with the R13 incident shape:
@@ -86,21 +112,38 @@ async function seedIncidentShape({ taskId = "task-r13-x", workerId = "fs-impleme
 	// Threshold default is 30_000ms; seed 10_000ms ago so the threshold check passes with margin.
 	const surfaceTs = new Date(nowMs - 10_000).toISOString();
 	const initial = {
-		version: 1, swarmId: "r13-test", cwd: scratch, tmuxSession: "r13",
+		version: 1,
+		swarmId: "r13-test",
+		cwd: scratch,
+		tmuxSession: "r13",
 		agents: {
 			[workerId]: {
-				id: workerId, role: workerId, roleKind: "implementer", capabilities: [],
-				activeTaskIds: [taskId], maxConcurrentTasks: 1,
-				status: "running", runtimeStatus: "tool_running", health: "healthy",
+				id: workerId,
+				role: workerId,
+				roleKind: "implementer",
+				capabilities: [],
+				activeTaskIds: [taskId],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "tool_running",
+				health: "healthy",
 				tmuxAlive: true, // explicit — prevent the heartbeat GC from flipping to stopped (R10-1 fixture shape)
-				tmuxSession: "r13", tmuxWindow: workerId, tmuxTarget: `r13:${workerId}.0`,
-				model: "gpt-5.4-mini", provider: "openai",
-				cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
-				createdAt: workerTs, updatedAt: workerTs, lastHeartbeatAt: new Date(nowMs - 1_000).toISOString(),
+				tmuxSession: "r13",
+				tmuxWindow: workerId,
+				tmuxTarget: `r13:${workerId}.0`,
+				model: "gpt-5.4-mini",
+				provider: "openai",
+				cwd: scratch,
+				mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
+				createdAt: workerTs,
+				updatedAt: workerTs,
+				lastHeartbeatAt: new Date(nowMs - 1_000).toISOString(),
 			},
 		},
-		delivered: {}, messages: {},
-		createdAt: workerTs, updatedAt: workerTs,
+		delivered: {},
+		messages: {},
+		createdAt: workerTs,
+		updatedAt: workerTs,
 	};
 	writeFileSync(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(initial, null, 2));
 
@@ -108,20 +151,41 @@ async function seedIncidentShape({ taskId = "task-r13-x", workerId = "fs-impleme
 	const taskDir = join(scratch, ".pi/swarm/tasks", taskId);
 	mkdirSync(taskDir, { recursive: true });
 	const task = {
-		version: 1, taskId, title: "R13 victim task", goal: "test", status: "in_progress",
-		priority: "normal", createdAt: workerTs, updatedAt: workerTs, owner: "root",
-		workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
-		start: "implement", currentNodes: ["implement"],
+		version: 1,
+		taskId,
+		title: "R13 victim task",
+		goal: "test",
+		status: "in_progress",
+		priority: "normal",
+		createdAt: workerTs,
+		updatedAt: workerTs,
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "implement",
+		currentNodes: ["implement"],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: {
 			implement: {
-				status: "in_progress", role: "implementer", assignee: workerId, dependsOn: [],
-				allowedFiles: [], messageIds: [], attempts: 1, maxAttempts: 3,
+				status: "in_progress",
+				role: "implementer",
+				assignee: workerId,
+				dependsOn: [],
+				allowedFiles: [],
+				messageIds: [],
+				attempts: 1,
+				maxAttempts: 3,
 				lastActivityAt: workerTs,
 				staleOpenSurfacedAt: surfaceTs,
 			},
 		},
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 	writeFileSync(join(taskDir, "task.json"), JSON.stringify(task, null, 2));
 
@@ -165,15 +229,41 @@ async function fireStaleOpenNudge(taskId = "task-r13-x", workerId = "fs-implemen
 		if (priority === "high") {
 			// Production path — emits stale_open.nudge_emitted trace + idempotency-keyed durable append.
 			await staleOpenNudgeLocked(
-				{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
-				scratch, p, st, taskId, "implement",
+				{
+					exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+					setModel: async () => true,
+					sendMessage: () => {},
+					getAllTools: () => [],
+					getActiveTools: () => [],
+					setActiveTools: () => {},
+					registerTool: () => {},
+					registerCommand: () => {},
+					on: () => {},
+				},
+				scratch,
+				p,
+				st,
+				taskId,
+				"implement",
 			);
 		} else {
 			// Normal-priority control: same body shape but normal priority (the production path forces
 			// high, so we use deliverMessageLocked directly to keep the same body/keys/requiresAck shape).
 			await deliverMessageLocked(
-				{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
-				scratch, p, st,
+				{
+					exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+					setModel: async () => true,
+					sendMessage: () => {},
+					getAllTools: () => [],
+					getActiveTools: () => [],
+					setActiveTools: () => {},
+					registerTool: () => {},
+					registerCommand: () => {},
+					on: () => {},
+				},
+				scratch,
+				p,
+				st,
 				{
 					to: "root",
 					priority,
@@ -198,8 +288,12 @@ function makePiMockWithCounters() {
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
 		sendMessage: (m, opts) => sendMessages.push({ customType: m.customType, options: opts, msg: m }),
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 	return { pi, sendMessages };
 }
@@ -215,7 +309,14 @@ console.log("\n[R13-S1] priority-high nudge to unknown-target + busy worker → 
 	await fireStaleOpenNudge(taskId, workerId, "high");
 
 	const { pi, sendMessages } = makePiMockWithCounters();
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	const p = paths(scratch);
 	const result = await pumpRootMailbox(pi, ctx, p, "test_r13_s1");
 	ok("R13-S1 result.delivered >= 1", result.delivered >= 1, { delivered: result.delivered, ids: result.ids });
@@ -228,15 +329,29 @@ console.log("\n[R13-S1] priority-high nudge to unknown-target + busy worker → 
 
 	const events = readEvents();
 	const mailboxOnly = events.filter((e) => e.event === "message.deliver.mailbox_only");
-	ok("R13-S1 message.deliver.mailbox_only trace present (durable semantics intact)", mailboxOnly.length >= 1, { count: mailboxOnly.length });
+	ok("R13-S1 message.deliver.mailbox_only trace present (durable semantics intact)", mailboxOnly.length >= 1, {
+		count: mailboxOnly.length,
+	});
 	const bypassTrace = events.filter((e) => e.event === "notification.surface.bypass_high_unknown_target");
-	ok("R13-S1 notification.surface.bypass_high_unknown_target trace present (R13 fix fired)", bypassTrace.length >= 1, `got ${bypassTrace.length}`);
+	ok(
+		"R13-S1 notification.surface.bypass_high_unknown_target trace present (R13 fix fired)",
+		bypassTrace.length >= 1,
+		`got ${bypassTrace.length}`,
+	);
 	if (bypassTrace.length >= 1) {
-		ok("R13-S1 bypass trace.suppressedReason === 'agent_busy'", bypassTrace[0].suppressedReason === "agent_busy", `got ${bypassTrace[0].suppressedReason}`);
+		ok(
+			"R13-S1 bypass trace.suppressedReason === 'agent_busy'",
+			bypassTrace[0].suppressedReason === "agent_busy",
+			`got ${bypassTrace[0].suppressedReason}`,
+		);
 		ok("R13-S1 bypass trace.by === 'R13 P0'", bypassTrace[0].by === "R13 P0", `got ${bypassTrace[0].by}`);
 	}
 	const staleSuppressed = events.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface");
-	ok("R13-S1 NO notification.stale.suppressed for priority-high nudge (post-fix)", staleSuppressed.length === 0, `got ${staleSuppressed.length}`);
+	ok(
+		"R13-S1 NO notification.stale.suppressed for priority-high nudge (post-fix)",
+		staleSuppressed.length === 0,
+		`got ${staleSuppressed.length}`,
+	);
 	const nudgeEmitted = events.filter((e) => e.event === "stale_open.nudge_emitted");
 	ok("R13-S1 stale_open.nudge_emitted trace present (bell rang)", nudgeEmitted.length >= 1, { count: nudgeEmitted.length });
 
@@ -253,7 +368,14 @@ console.log("\n[R13-S2] replay guard — no duplicate surface for the same nudge
 	await fireStaleOpenNudge(taskId, workerId, "high");
 
 	const { pi, sendMessages } = makePiMockWithCounters();
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	const p = paths(scratch);
 	const r1 = await pumpRootMailbox(pi, ctx, p, "test_r13_s2_t1");
 	ok("R13-S2 first tick sendMessages.length === 1", sendMessages.length === 1, `got ${sendMessages.length}`);
@@ -276,8 +398,20 @@ console.log("\n[R13-S3] normal-priority nudge preserves busy suppression (no reg
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
 		await deliverMessageLocked(
-			{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
-			scratch, p, st,
+			{
+				exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+				setModel: async () => true,
+				sendMessage: () => {},
+				getAllTools: () => [],
+				getActiveTools: () => [],
+				setActiveTools: () => {},
+				registerTool: () => {},
+				registerCommand: () => {},
+				on: () => {},
+			},
+			scratch,
+			p,
+			st,
 			{
 				to: "root",
 				priority: "normal",
@@ -293,16 +427,31 @@ console.log("\n[R13-S3] normal-priority nudge preserves busy suppression (no reg
 	});
 
 	const { pi, sendMessages } = makePiMockWithCounters();
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	const result = await pumpRootMailbox(pi, ctx, p, "test_r13_s3");
 	ok("R13-S3 sendMessages.length === 0 (normal priority stays suppressed)", sendMessages.length === 0, `got ${sendMessages.length}`);
 	ok("R13-S3 result.delivered === 0", result.delivered === 0, { delivered: result.delivered });
 
 	const events = readEvents();
 	const staleSuppressed = events.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface");
-	ok("R13-S3 normal-priority nudge DOES suppress with agent_busy", staleSuppressed.length >= 1, `got ${staleSuppressed.length} — events: ${events.map((e) => e.event).join(",")}`);
+	ok(
+		"R13-S3 normal-priority nudge DOES suppress with agent_busy",
+		staleSuppressed.length >= 1,
+		`got ${staleSuppressed.length} — events: ${events.map((e) => e.event).join(",")}`,
+	);
 	if (staleSuppressed.length >= 1) {
-		ok("R13-S3 stale_suppressed reason === 'agent_busy'", staleSuppressed[0].reason === "agent_busy", `got reason: ${staleSuppressed[0].reason}`);
+		ok(
+			"R13-S3 stale_suppressed reason === 'agent_busy'",
+			staleSuppressed[0].reason === "agent_busy",
+			`got reason: ${staleSuppressed[0].reason}`,
+		);
 	}
 }
 
@@ -318,8 +467,20 @@ console.log("\n[R13-S4] priority-high nudge to known-target worker → not via r
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
 		await deliverMessageLocked(
-			{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
-			scratch, p, st,
+			{
+				exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+				setModel: async () => true,
+				sendMessage: () => {},
+				getAllTools: () => [],
+				getActiveTools: () => [],
+				setActiveTools: () => {},
+				registerTool: () => {},
+				registerCommand: () => {},
+				on: () => {},
+			},
+			scratch,
+			p,
+			st,
 			{
 				to: workerId,
 				priority: "high",
@@ -334,7 +495,14 @@ console.log("\n[R13-S4] priority-high nudge to known-target worker → not via r
 	});
 
 	const { pi, sendMessages } = makePiMockWithCounters();
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	const result = await pumpRootMailbox(pi, ctx, p, "test_r13_s4");
 	ok("R13-S4 sendMessages.length === 0 (worker-bound not surfaced via root)", sendMessages.length === 0, `got ${sendMessages.length}`);
 	ok("R13-S4 result.delivered === 0", result.delivered === 0, { delivered: result.delivered });
@@ -396,20 +564,37 @@ console.log("\n[R13-S7] RED: high stale-open nudge whose task/node is now termin
 	// regression) wrongly bypasses because the only condition checked is
 	// priority=high AND unknown-target AND reason=agent_busy.
 	const { pi, sendMessages } = makePiMockWithCounters();
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	const result = await pumpRootMailbox(pi, ctx, p, "test_r13_s7");
 
 	// RED assertions: these will FAIL under the current code (proving the regression),
 	// and must PASS after the fix-node repairs the bypass to also gate on
 	// live-task/node.
-	ok("R13-S7 sendMessages.length === 0 (no surface for terminal-task high nudge)", sendMessages.length === 0, `got ${sendMessages.length} — bypass incorrectly surfaced a stale alert for a now-closed task`);
+	ok(
+		"R13-S7 sendMessages.length === 0 (no surface for terminal-task high nudge)",
+		sendMessages.length === 0,
+		`got ${sendMessages.length} — bypass incorrectly surfaced a stale alert for a now-closed task`,
+	);
 	ok("R13-S7 result.delivered === 0", result.delivered === 0, { delivered: result.delivered });
 
 	const events = readEvents();
 	const staleSuppressed = events.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface");
-	const terminalTrace = events.filter((e) => e.event === "notification.surface.task_terminal" || (e.event === "notification.batch.suppressed" && (e.counts?.task_done >= 1 || e.counts?.node_terminal >= 1 || e.counts?.task_done || e.counts?.node_terminal)));
+	const terminalTrace = events.filter(
+		(e) =>
+			e.event === "notification.surface.task_terminal" ||
+			(e.event === "notification.batch.suppressed" &&
+				(e.counts?.task_done >= 1 || e.counts?.node_terminal >= 1 || e.counts?.task_done || e.counts?.node_terminal)),
+	);
 	const batchSuppressed = events.find((e) => e.event === "notification.batch.suppressed");
-	const hasTaskDoneOrNodeTerminalInBatch = batchSuppressed && (Number(batchSuppressed.counts?.task_done ?? 0) >= 1 || Number(batchSuppressed.counts?.node_terminal ?? 0) >= 1);
+	const hasTaskDoneOrNodeTerminalInBatch =
+		batchSuppressed && (Number(batchSuppressed.counts?.task_done ?? 0) >= 1 || Number(batchSuppressed.counts?.node_terminal ?? 0) >= 1);
 	// Either the per-tick batch counter OR the one-time migration back-fill wrote a
 	// consumerReceipt for the terminal nudge. The migration runs on the first pump tick
 	// (when revision === 0) and writes receipts for every non-actionable message; later
@@ -417,11 +602,19 @@ console.log("\n[R13-S7] RED: high stale-open nudge whose task/node is now termin
 	// re-counting task_done in the per-tick batch counter. Both paths prove the predicate
 	// returned task_done and the message was NOT surfaced.
 	const mailboxPath = join(p.mailboxes, "root.jsonl");
-	const allM = readFileSync(mailboxPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+	const allM = readFileSync(mailboxPath, "utf8")
+		.trim()
+		.split("\n")
+		.map((l) => JSON.parse(l));
 	const st2 = await readState(p, scratch);
-	const receiptsForS7 = Object.entries(st2.consumerReceipts?.root?.entries || {})
-		.filter(([id]) => allM.some((m) => m.id === id && m.idempotencyKey?.startsWith("task:task-r13-x:node:implement:nudge:stale-open")));
-	ok("R13-S7 durable trace records terminal-task suppression (task_done/node_terminal/notification.surface.task_terminal OR consumerReceipt for terminal nudge)", terminalTrace.length >= 1 || hasTaskDoneOrNodeTerminalInBatch || receiptsForS7.length >= 1, `staleSuppressed=${staleSuppressed.length}, terminalTrace=${terminalTrace.length}, batch=${JSON.stringify(batchSuppressed?.counts ?? {})}, receiptsForS7=${receiptsForS7.length}`);
+	const receiptsForS7 = Object.entries(st2.consumerReceipts?.root?.entries || {}).filter(([id]) =>
+		allM.some((m) => m.id === id && m.idempotencyKey?.startsWith("task:task-r13-x:node:implement:nudge:stale-open")),
+	);
+	ok(
+		"R13-S7 durable trace records terminal-task suppression (task_done/node_terminal/notification.surface.task_terminal OR consumerReceipt for terminal nudge)",
+		terminalTrace.length >= 1 || hasTaskDoneOrNodeTerminalInBatch || receiptsForS7.length >= 1,
+		`staleSuppressed=${staleSuppressed.length}, terminalTrace=${terminalTrace.length}, batch=${JSON.stringify(batchSuppressed?.counts ?? {})}, receiptsForS7=${receiptsForS7.length}`,
+	);
 }
 
 // =============================================================================
@@ -432,7 +625,9 @@ process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 
 console.log(`\nR13-ROOT-UNKNOWN-TARGET ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 if (fail > 0) {
-	console.error("\n  ↳ RED regression reproduced — fix the busy-suppression site at reconcile.ts:1665/1763 to bypass for priority-high unknown-target root nudges.");
+	console.error(
+		"\n  ↳ RED regression reproduced — fix the busy-suppression site at reconcile.ts:1665/1763 to bypass for priority-high unknown-target root nudges.",
+	);
 	process.exit(1);
 }
 process.exit(0);

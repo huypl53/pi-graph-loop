@@ -17,25 +17,44 @@ const factory = mod.default;
 if (typeof factory !== "function") throw new Error("no default export");
 
 // --- faithful mock pi with REAL active-tool bookkeeping ---
-const toolDefs = new Map();      // name -> definition
-const activeTools = new Set();   // the live "active" set
+const toolDefs = new Map(); // name -> definition
+const activeTools = new Set(); // the live "active" set
 const commands = [];
 const handlers = {};
 const pi = {
-	registerTool: (def) => { toolDefs.set(def.name, def); activeTools.add(def.name); }, // registered => active by default
-	registerCommand: (name) => { commands.push(name); },
-	on: (ev, fn) => { (handlers[ev] ??= []).push(fn); },
+	registerTool: (def) => {
+		toolDefs.set(def.name, def);
+		activeTools.add(def.name);
+	}, // registered => active by default
+	registerCommand: (name) => {
+		commands.push(name);
+	},
+	on: (ev, fn) => {
+		(handlers[ev] ??= []).push(fn);
+	},
 	getActiveTools: () => [...activeTools],
 	getAllTools: () => [...toolDefs.values()].map((d) => ({ name: d.name })),
-	setActiveTools: (names) => { activeTools.clear(); for (const n of names) activeTools.add(n); },
+	setActiveTools: (names) => {
+		activeTools.clear();
+		for (const n of names) activeTools.add(n);
+	},
 	exec: async () => ({ code: 1, stdout: "", stderr: "" }),
 	sendMessage: () => {},
 };
 
 factory(pi);
 
-let pass = 0, fail = 0;
-const ok = (n, c, extra = "") => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n, extra); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c, extra = "") => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n, extra);
+	}
+};
 const swarmActive = () => [...activeTools].filter((n) => n.startsWith("swarm_"));
 const nonSwarmSample = () => [...activeTools].filter((n) => !n.startsWith("swarm_"));
 
@@ -46,13 +65,15 @@ ok("swarm tools registered (>0)", swarmCount > 0, `count=${swarmCount}`);
 ok("all registered swarm tools active by default", swarmActive().length === swarmCount, `${swarmActive().length}/${swarmCount}`);
 
 // The mock registers synthetic non-swarm tools so we can prove gating never touches them.
-pi.registerTool({ name: "bash" }); pi.registerTool({ name: "read" }); pi.registerTool({ name: "edit" });
+pi.registerTool({ name: "bash" });
+pi.registerTool({ name: "read" });
+pi.registerTool({ name: "edit" });
 
 const cwd = mkdtempSync(join(tmpdir(), "swarm-gate-"));
 const mkCtx = () => ({ cwd, mode: "tui", hasUI: false, ui: { setStatus() {} }, isIdle: () => false });
 
 const runSessionStart = async () => {
-	for (const fn of (handlers.session_start || [])) await fn({}, mkCtx());
+	for (const fn of handlers.session_start || []) await fn({}, mkCtx());
 };
 
 // Re-gating helper mirroring what `/swarm register here` does in command.ts (set env then gate).
@@ -85,15 +106,19 @@ ok("root: swarm tools present", swarmActive().length === swarmCount, `${swarmAct
 console.log("\n[5] Opt-in escape hatch: guest -> register here -> tools re-enabled in-process");
 delete process.env.PI_SWARM_AGENT_ID;
 delete process.env.PI_SWARM_IS_ROOT;
-await runSessionStart();                                  // back to guest: tools off
+await runSessionStart(); // back to guest: tools off
 ok("opt-in start: guest has no swarm tools", swarmActive().length === 0);
-process.env.PI_SWARM_AGENT_ID = "worker";                 // mimic `/swarm register here worker`
-applySwarmToolGating(pi);                                 // mimic command.ts re-gate
+process.env.PI_SWARM_AGENT_ID = "worker"; // mimic `/swarm register here worker`
+applySwarmToolGating(pi); // mimic command.ts re-gate
 ok("opt-in end: swarm tools re-enabled", swarmActive().length === swarmCount, `${swarmActive().length}/${swarmCount}`);
 
 console.log("\n[6] Slash COMMAND is still registered for a guest (escape hatch intact)");
 ok("/swarm command registered", commands.includes("swarm"));
-ok("scoped /swarm-* commands registered", ["swarm-agents", "swarm-tasks", "swarm-msg"].every((c) => commands.includes(c)), `[${commands.join(",")}]`);
+ok(
+	"scoped /swarm-* commands registered",
+	["swarm-agents", "swarm-tasks", "swarm-msg"].every((c) => commands.includes(c)),
+	`[${commands.join(",")}]`,
+);
 
 // Re-seed a writable scratch (the cwd above was wiped at end of [4] in some failures; use a fresh one).
 const gateScratch = mkdtempSync(join(tmpdir(), "swarm-gate-prune-"));
@@ -106,8 +131,19 @@ console.log("\n[7] ROLE-GATED destructive tools (Issue 10) reject non-root calle
 
 	// Seed a minimal swarm-state.json so prune/gc can read+write it.
 	await import("node:fs/promises").then((fs) => fs.mkdir(join(gateScratch, ".pi/swarm"), { recursive: true }));
-	const seedState = { version: 1, swarmId: "swarm-test", cwd: gateScratch, tmuxSession: "test", agents: {}, delivered: {}, messages: {}, rootPumpSessions: {} };
-	await import("node:fs/promises").then((fs) => fs.writeFile(join(gateScratch, ".pi/swarm/swarm-state.json"), JSON.stringify(seedState, null, 2)));
+	const seedState = {
+		version: 1,
+		swarmId: "swarm-test",
+		cwd: gateScratch,
+		tmuxSession: "test",
+		agents: {},
+		delivered: {},
+		messages: {},
+		rootPumpSessions: {},
+	};
+	await import("node:fs/promises").then((fs) =>
+		fs.writeFile(join(gateScratch, ".pi/swarm/swarm-state.json"), JSON.stringify(seedState, null, 2)),
+	);
 
 	const pruneTool = toolDefs.get("swarm_prune");
 	const gcTool = toolDefs.get("swarm_gc");
@@ -115,10 +151,12 @@ console.log("\n[7] ROLE-GATED destructive tools (Issue 10) reject non-root calle
 	// --- (a) non-root caller is rejected BEFORE any state mutation ---
 	process.env.PI_SWARM_AGENT_ID = "worker";
 	delete process.env.PI_SWARM_IS_ROOT;
-	const denyPrune = await pruneTool.execute("call", { dryRun: false, removeStopped: false, markDead: false }, undefined, undefined, mkGateCtx()).then(
-		() => "ALLOWED",
-		(err) => String(err?.message || err),
-	);
+	const denyPrune = await pruneTool
+		.execute("call", { dryRun: false, removeStopped: false, markDead: false }, undefined, undefined, mkGateCtx())
+		.then(
+			() => "ALLOWED",
+			(err) => String(err?.message || err),
+		);
 	ok("non-root: swarm_prune rejected with ROOT_AUTHORITY_REQUIRED", denyPrune.includes("ROOT_AUTHORITY_REQUIRED"), denyPrune);
 	const denyGc = await gcTool.execute("call", { dryRun: false }, undefined, undefined, mkGateCtx()).then(
 		() => "ALLOWED",
@@ -141,8 +179,10 @@ console.log("\n[7] ROLE-GATED destructive tools (Issue 10) reject non-root calle
 	ok("root: swarm_gc dry-run default succeeds", /dry run|applied/.test(allowGc), allowGc.slice(0, 80));
 
 	// Restore
-	if (savedId === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = savedId;
-	if (savedOrch === undefined) delete process.env.PI_SWARM_IS_ROOT; else process.env.PI_SWARM_IS_ROOT = savedOrch;
+	if (savedId === undefined) delete process.env.PI_SWARM_AGENT_ID;
+	else process.env.PI_SWARM_AGENT_ID = savedId;
+	if (savedOrch === undefined) delete process.env.PI_SWARM_IS_ROOT;
+	else process.env.PI_SWARM_IS_ROOT = savedOrch;
 	rmSync(gateScratch, { recursive: true, force: true });
 }
 

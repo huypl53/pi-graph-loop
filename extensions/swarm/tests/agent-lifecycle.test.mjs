@@ -27,7 +27,9 @@ rmSync(scratch, { recursive: true, force: true });
 const tools = {};
 const sentKeys = [];
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
 	sendMessage: () => {},
@@ -37,9 +39,12 @@ const pi = {
 			return { code: 1, stdout: "", stderr: "" };
 		}
 		const sub = args[0];
-		if (sub === "display-message") return { code: 0, stdout: "%99\n", stderr: "" };   // pane alive
+		if (sub === "display-message") return { code: 0, stdout: "%99\n", stderr: "" }; // pane alive
 		if (sub === "capture-pane") return { code: 0, stdout: "pi swarm session\nYou are reviewer\n", stderr: "" };
-		if (sub === "send-keys") { sentKeys.push(args.slice(1).join(" ")); return { code: 0, stdout: "", stderr: "" }; }
+		if (sub === "send-keys") {
+			sentKeys.push(args.slice(1).join(" "));
+			return { code: 0, stdout: "", stderr: "" };
+		}
 		if (sub === "kill-window" || sub === "kill-pane") return { code: 0, stdout: "", stderr: "" };
 		if (sub === "has-session") return { code: 0, stdout: "", stderr: "" };
 		if (sub === "new-window" || sub === "new-session") return { code: 0, stdout: "", stderr: "" };
@@ -49,21 +54,45 @@ const pi = {
 factory(pi);
 
 const call = async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd: params.cwd || scratch });
 };
 const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
 const readSwarmState = () => JSON.parse(readFileSync(statePath, "utf8"));
 const writeSwarmState = (st) => writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
 
-let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n); } };
-const throws = async (n, p) => { try { await p; fail++; console.error("  FAIL", n, "(did not throw)"); } catch { pass++; console.log("  ok  ", n); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n);
+	}
+};
+const throws = async (n, p) => {
+	try {
+		await p;
+		fail++;
+		console.error("  FAIL", n, "(did not throw)");
+	} catch {
+		pass++;
+		console.log("  ok  ", n);
+	}
+};
 
 console.log("\n[1] register adopts an existing pane under a role (tmuxTarget NOT unknown)");
 {
 	sentKeys.length = 0;
-	const r = await call("swarm_register_agent", { tmuxTarget: "mysess:research.1", id: "researcher", role: "Research planner", cwd: scratch });
+	const r = await call("swarm_register_agent", {
+		tmuxTarget: "mysess:research.1",
+		id: "researcher",
+		role: "Research planner",
+		cwd: scratch,
+	});
 	ok("register returns text", /Registered researcher/.test(r?.content?.[0]?.text || ""));
 	const a = readSwarmState().agents.researcher;
 	ok("agent record exists", !!a);
@@ -73,13 +102,22 @@ console.log("\n[1] register adopts an existing pane under a role (tmuxTarget NOT
 	ok("runtimeStatus idle (operator assertion)", a.runtimeStatus === "idle");
 	ok("roleKind derived from role text", a.roleKind === "planner");
 	ok("identity file written", existsSync(join(scratch, ".pi", "swarm", "agents", "researcher.md")));
-	ok("kickoff injected into pane", sentKeys.some((k) => k.includes("[PI-SWARM IDENTITY]")));
+	ok(
+		"kickoff injected into pane",
+		sentKeys.some((k) => k.includes("[PI-SWARM IDENTITY]")),
+	);
 }
 
 console.log("\n[2] register retargets an existing agent (fixes the ghost 'unknown' target)");
 {
 	sentKeys.length = 0;
-	await call("swarm_register_agent", { tmuxTarget: "mysess:research.2", id: "researcher", role: "Research planner", inject: false, cwd: scratch });
+	await call("swarm_register_agent", {
+		tmuxTarget: "mysess:research.2",
+		id: "researcher",
+		role: "Research planner",
+		inject: false,
+		cwd: scratch,
+	});
 	const a = readSwarmState().agents.researcher;
 	ok("retarget updates tmuxTarget", a.tmuxTarget === "mysess:research.2");
 	ok("retarget keeps id/mailbox identity (createdAt preserved)", !!a.createdAt);
@@ -91,13 +129,22 @@ console.log("\n[3] set_role mutates role/roleKind, pins explicit kind, bumps ide
 	sentKeys.length = 0;
 	const before = readSwarmState().agents.researcher;
 	const v0 = before.identityVersion || 0;
-	const r = await call("swarm_set_role", { agentId: "researcher", role: "Senior reviewer", roleKind: "reviewer", capabilities: ["review", "risk"], cwd: scratch });
+	const r = await call("swarm_set_role", {
+		agentId: "researcher",
+		role: "Senior reviewer",
+		roleKind: "reviewer",
+		capabilities: ["review", "risk"],
+		cwd: scratch,
+	});
 	const a = readSwarmState().agents.researcher;
 	ok("role updated", a.role === "Senior reviewer");
 	ok("roleKind pinned", a.roleKind === "reviewer" && a.roleKindExplicit === true);
 	ok("capabilities replaced", Array.isArray(a.capabilities) && a.capabilities.length === 2);
 	ok("identity version bumped", (a.identityVersion || 0) > v0);
-	ok("reload prompt injected", sentKeys.some((k) => k.includes("PI-SWARM IDENTITY RELOAD")));
+	ok(
+		"reload prompt injected",
+		sentKeys.some((k) => k.includes("PI-SWARM IDENTITY RELOAD")),
+	);
 	ok("tool returns provenance version", /v\d/.test(r?.content?.[0]?.text || ""));
 }
 
@@ -108,13 +155,57 @@ console.log("\n[4] pause/resume flip the drain flag; findReusableAgent skips pau
 	// Synthetic reuse lookup: one paused + one free agent of the same roleKind.
 	const st = {
 		agents: {
-			busy1: { id: "busy1", role: "r", roleKind: "reviewer", roleKindExplicit: true, capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "s", tmuxWindow: "busy1", tmuxTarget: "s:busy1.0", model: "m", provider: "p", cwd: scratch, mailbox: "x", createdAt: "t", updatedAt: "t", paused: true },
-			free1: { id: "free1", role: "r", roleKind: "reviewer", roleKindExplicit: true, capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "s", tmuxWindow: "free1", tmuxTarget: "s:free1.0", model: "m", provider: "p", cwd: scratch, mailbox: "x", createdAt: "t", updatedAt: "t" },
+			busy1: {
+				id: "busy1",
+				role: "r",
+				roleKind: "reviewer",
+				roleKindExplicit: true,
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "s",
+				tmuxWindow: "busy1",
+				tmuxTarget: "s:busy1.0",
+				model: "m",
+				provider: "p",
+				cwd: scratch,
+				mailbox: "x",
+				createdAt: "t",
+				updatedAt: "t",
+				paused: true,
+			},
+			free1: {
+				id: "free1",
+				role: "r",
+				roleKind: "reviewer",
+				roleKindExplicit: true,
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "s",
+				tmuxWindow: "free1",
+				tmuxTarget: "s:free1.0",
+				model: "m",
+				provider: "p",
+				cwd: scratch,
+				mailbox: "x",
+				createdAt: "t",
+				updatedAt: "t",
+			},
 		},
 		messages: {},
 	};
 	const { matches, recommended } = await findReusableAgent(pi, st, { roleKind: "reviewer" });
-	ok("reuse excludes paused agent", matches.every((m) => m.agentId !== "busy1"));
+	ok(
+		"reuse excludes paused agent",
+		matches.every((m) => m.agentId !== "busy1"),
+	);
 	ok("reuse recommends the free agent", recommended === "free1");
 	await call("swarm_set_agent_paused", { agentId: "researcher", paused: false, cwd: scratch });
 	ok("resume clears paused flag", readSwarmState().agents.researcher.paused === undefined);
@@ -155,7 +246,10 @@ console.log("\n[7] send_keys + attach (convenience wrappers over existing intern
 {
 	sentKeys.length = 0;
 	await call("swarm_send_keys", { agentId: "researcher", keys: "C-c", cwd: scratch });
-	ok("send_keys issued a C-c", sentKeys.some((k) => k.includes("C-c")));
+	ok(
+		"send_keys issued a C-c",
+		sentKeys.some((k) => k.includes("C-c")),
+	);
 	const a = await call("swarm_attach_agent", { agentId: "researcher", cwd: scratch });
 	const txt = a?.content?.[0]?.text || "";
 	ok("attach returns tmux commands", txt.includes("tmux attach -t") && txt.includes("tmux select-window -t"));

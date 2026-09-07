@@ -19,17 +19,56 @@ const stateDir = process.argv[3] || "/tmp/pool-uat";
 const scenarioFile = join(stateDir, "scenario.json");
 
 const ERRORS = {
-	quota: { status: 429, body: { error: { message: "You exceeded your current quota, please check your plan and billing details", type: "insufficient_quota", code: "insufficient_quota" } } },
-	rate_limit: { status: 429, body: { error: { message: "Rate limit reached for requests. Limit: 3 requests per minute.", type: "requests", code: "rate_limit_exceeded" } } },
-	auth: { status: 401, body: { error: { message: "Incorrect API key provided: sk-mock. You can find your API key at https://platform.openai.com/account/api-keys.", type: "invalid_request_error", code: "invalid_api_key" } } },
-	transient: { status: 500, body: { error: { message: "The server had an error while processing your request (overloaded).", type: "server_error", code: "internal_server_error" } } },
+	quota: {
+		status: 429,
+		body: {
+			error: {
+				message: "You exceeded your current quota, please check your plan and billing details",
+				type: "insufficient_quota",
+				code: "insufficient_quota",
+			},
+		},
+	},
+	rate_limit: {
+		status: 429,
+		body: {
+			error: {
+				message: "Rate limit reached for requests. Limit: 3 requests per minute.",
+				type: "requests",
+				code: "rate_limit_exceeded",
+			},
+		},
+	},
+	auth: {
+		status: 401,
+		body: {
+			error: {
+				message: "Incorrect API key provided: sk-mock. You can find your API key at https://platform.openai.com/account/api-keys.",
+				type: "invalid_request_error",
+				code: "invalid_api_key",
+			},
+		},
+	},
+	transient: {
+		status: 500,
+		body: {
+			error: {
+				message: "The server had an error while processing your request (overloaded).",
+				type: "server_error",
+				code: "internal_server_error",
+			},
+		},
+	},
 };
 
 let failNextRemaining = 0;
 
 async function readScenario() {
-	try { return JSON.parse(await readFile(scenarioFile, "utf8")); }
-	catch { return { mode: "ok" }; }
+	try {
+		return JSON.parse(await readFile(scenarioFile, "utf8"));
+	} catch {
+		return { mode: "ok" };
+	}
 }
 
 const server = createServer(async (req, res) => {
@@ -65,7 +104,11 @@ const server = createServer(async (req, res) => {
 	// Minimal SSE chat completion (one chunk then done).
 	res.writeHead(200, { "content-type": "text/event-stream" });
 	const chunks = [
-		{ id: "chatcmpl-mock", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: "mock-ok" }, finish_reason: null }] },
+		{
+			id: "chatcmpl-mock",
+			object: "chat.completion.chunk",
+			choices: [{ index: 0, delta: { content: "mock-ok" }, finish_reason: null }],
+		},
 		{ id: "chatcmpl-mock", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
 	];
 	for (const c of chunks) res.write(`data: ${JSON.stringify(c)}\n\n`);

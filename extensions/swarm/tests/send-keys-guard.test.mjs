@@ -150,14 +150,19 @@ writeFileSync(join(scratch, ".pi", "swarm", "swarm-state.json"), JSON.stringify(
 const tools = {};
 const sentKeys = [];
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
 	sendMessage: () => {},
 	exec: async (cmd, args) => {
 		if (cmd !== "tmux") return { code: 1, stdout: "", stderr: "" };
 		const sub = args[0];
-		if (sub === "send-keys") { sentKeys.push(args.slice(1).join(" ")); return { code: 0, stdout: "", stderr: "" }; }
+		if (sub === "send-keys") {
+			sentKeys.push(args.slice(1).join(" "));
+			return { code: 0, stdout: "", stderr: "" };
+		}
 		// Allow other subcommands the factory may invoke (e.g. trace helpers) to be no-ops.
 		return { code: 0, stdout: "", stderr: "" };
 	},
@@ -165,13 +170,32 @@ const pi = {
 factory(pi);
 
 const call = async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd: scratch });
 };
 
-let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n); } };
-const throws = async (n, p) => { try { await p; fail++; console.error("  FAIL", n, "(did not throw)"); } catch { pass++; console.log("  ok  ", n); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n);
+	}
+};
+const throws = async (n, p) => {
+	try {
+		await p;
+		fail++;
+		console.error("  FAIL", n, "(did not throw)");
+	} catch {
+		pass++;
+		console.log("  ok  ", n);
+	}
+};
 
 console.log("\n[A] reject when agentId resolves to root record (tmuxTarget === 'unknown')");
 {
@@ -183,7 +207,10 @@ console.log("\n[A] reject when agentId resolves to root record (tmuxTarget === '
 		caught = e;
 	}
 	ok("A: throws an Error", caught instanceof Error);
-	ok("A: error message starts with ROOT_PANE_REJECTED:", typeof caught?.message === "string" && caught.message.startsWith("ROOT_PANE_REJECTED:"));
+	ok(
+		"A: error message starts with ROOT_PANE_REJECTED:",
+		typeof caught?.message === "string" && caught.message.startsWith("ROOT_PANE_REJECTED:"),
+	);
 	ok("A: error names the offending target", typeof caught?.message === "string" && caught.message.includes("unknown"));
 	ok("A: error names the offending agentId", typeof caught?.message === "string" && caught.message.includes("agentId=root"));
 	ok("A: send-keys spy NEVER invoked", sentKeys.length === 0);
@@ -198,7 +225,10 @@ console.log("\n[B] reject when ANY agent's resolved target equals the root targe
 	} catch (e) {
 		caught = e;
 	}
-	ok("B: throws ROOT_PANE_REJECTED (principle-based, NOT id-based)", caught instanceof Error && caught.message.startsWith("ROOT_PANE_REJECTED:"));
+	ok(
+		"B: throws ROOT_PANE_REJECTED (principle-based, NOT id-based)",
+		caught instanceof Error && caught.message.startsWith("ROOT_PANE_REJECTED:"),
+	);
 	ok("B: error names ghost agentId", caught?.message?.includes("agentId=ghost"));
 	ok("B: send-keys spy NEVER invoked", sentKeys.length === 0);
 }
@@ -234,7 +264,10 @@ console.log("\n[E] worker with empty tmuxTarget falls through to helper's existi
 	} catch (e) {
 		caught = e;
 	}
-	ok("E: throws 'agent has no tmux pane target' (helper error, NOT the new guard)", caught instanceof Error && caught.message === "agent has no tmux pane target");
+	ok(
+		"E: throws 'agent has no tmux pane target' (helper error, NOT the new guard)",
+		caught instanceof Error && caught.message === "agent has no tmux pane target",
+	);
 	ok("E: send-keys spy NEVER invoked (helper refused before tmux call)", sentKeys.length === 0);
 }
 
@@ -247,7 +280,10 @@ console.log("\n[F] worker with tmuxTarget=undefined also falls through (binding 
 	} catch (e) {
 		caught = e;
 	}
-	ok("F: throws 'agent has no tmux pane target' (helper error, NOT the new guard)", caught instanceof Error && caught.message === "agent has no tmux pane target");
+	ok(
+		"F: throws 'agent has no tmux pane target' (helper error, NOT the new guard)",
+		caught instanceof Error && caught.message === "agent has no tmux pane target",
+	);
 	ok("F: send-keys spy NEVER invoked", sentKeys.length === 0);
 }
 

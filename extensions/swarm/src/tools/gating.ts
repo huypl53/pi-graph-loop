@@ -32,7 +32,9 @@ export const SWARM_TOOL_PREFIX = "swarm_";
 export function swarmToolNames(pi: ExtensionAPI): string[] {
 	try {
 		const all = (pi as any).getAllTools?.() ?? [];
-		return (Array.isArray(all) ? all : []).map((t: any) => t?.name).filter((n: any): n is string => typeof n === "string" && n.startsWith(SWARM_TOOL_PREFIX));
+		return (Array.isArray(all) ? all : [])
+			.map((t: any) => t?.name)
+			.filter((n: any): n is string => typeof n === "string" && n.startsWith(SWARM_TOOL_PREFIX));
 	} catch {
 		return [];
 	}
@@ -71,8 +73,11 @@ export function applySwarmToolGating(pi: ExtensionAPI): void {
 	const setActive = (pi as any).setActiveTools;
 	if (typeof getActive !== "function" || typeof setActive !== "function") return;
 	let active: string[];
-	try { active = Array.from((getActive.call(pi) as string[]) || []); }
-	catch { return; }
+	try {
+		active = Array.from((getActive.call(pi) as string[]) || []);
+	} catch {
+		return;
+	}
 	const swarm = new Set(swarmToolNames(pi));
 	const next = new Set(active);
 	if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
@@ -95,14 +100,18 @@ export function applySwarmToolGating(pi: ExtensionAPI): void {
 			for (const n of swarm) next.add(n);
 		} else {
 			// Tier filter: root vs worker (read roleKind for forward-compat w/ new roles).
-			const roleKind = isOrch ? "root" : (readRoleKindForAgent(me) || "worker");
+			const roleKind = isOrch ? "root" : readRoleKindForAgent(me) || "worker";
 			const allow = roleKind === "root" ? ROOT_TOOL_ALLOWLIST : WORKER_TOOL_ALLOWLIST;
 			for (const n of swarm) {
-				if (allow.has(n)) next.add(n); else next.delete(n);
+				if (allow.has(n)) next.add(n);
+				else next.delete(n);
 			}
 		}
 	}
 	if (sameSet(new Set(active), next)) return; // nothing to do
-	try { setActive.call(pi, [...next]); }
-	catch { /* gating is advisory; never fail a session/command on it */ }
+	try {
+		setActive.call(pi, [...next]);
+	} catch {
+		/* gating is advisory; never fail a session/command on it */
+	}
 }

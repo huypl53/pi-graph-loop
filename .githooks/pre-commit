@@ -1,0 +1,18 @@
+#!/bin/sh
+# Pre-commit hook: verify staged static code is formatted with Prettier.
+
+if git diff --cached --quiet -- '*.ts' '*.js' '*.mjs' '*.cjs'; then
+	exit 0
+fi
+
+echo "[pre-commit] checking staged code formatting..."
+
+if ! git diff --cached --name-only --diff-filter=ACM -z -- '*.ts' '*.js' '*.mjs' '*.cjs' \
+	| xargs -0 -r bunx prettier --check; then
+	echo ""
+	echo "[pre-commit] Prettier found unformatted staged files."
+	echo "Run: bun run format"
+	exit 1
+fi
+
+exit 0

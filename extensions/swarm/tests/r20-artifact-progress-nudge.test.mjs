@@ -41,7 +41,6 @@ process.env.PI_SWARM_ARTIFACT_PROGRESS_MAX_FILES ||= "50";
 // must remain in effect so the active-agent skip branch is exercised correctly in S5/S6.
 // (Overriding to a tiny value would make the predicate trivially false.)
 
-
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs, trace } = await import(join(here, "..", "src", "state.ts"));
 // RED: this function does not exist pre-fix. Import will be undefined.
@@ -55,10 +54,16 @@ try {
 const { ensureRoot } = await import(join(here, "..", "src", "identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "..", "src", "mailbox.ts"));
 
-let passed = 0, failed = 0;
+let passed = 0,
+	failed = 0;
 const ok = (n, c, info) => {
-	if (c) { passed++; console.log("  ok  ", n); }
-	else { failed++; console.error("  FAIL:", n, info ?? ""); }
+	if (c) {
+		passed++;
+		console.log("  ok  ", n);
+	} else {
+		failed++;
+		console.error("  FAIL:", n, info ?? "");
+	}
 };
 
 const SAVED_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
@@ -78,15 +83,29 @@ const pi = {
 	registerCommand: () => {},
 	on: () => {},
 	setModel: async () => true,
-	sendMessage: (m, o) => { sentMessages.push({ m, o }); },
+	sendMessage: (m, o) => {
+		sentMessages.push({ m, o });
+	},
 	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 };
 
 async function readEventsFile(p) {
 	try {
 		const raw = await readFile(p.events, "utf8");
-		return raw.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-	} catch { return []; }
+		return raw
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.filter(Boolean);
+	} catch {
+		return [];
+	}
 }
 async function countEvents(p, name) {
 	const events = await readEventsFile(p);
@@ -96,8 +115,20 @@ async function readMailboxMessages(p, agentId) {
 	try {
 		const path = join(p.mailboxes, `${agentId}.jsonl`);
 		const raw = await readFile(path, "utf8");
-		return raw.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-	} catch { return []; }
+		return raw
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.filter(Boolean);
+	} catch {
+		return [];
+	}
 }
 async function mailboxMessageCount(p, agentId) {
 	return (await readMailboxMessages(p, agentId)).length;
@@ -106,7 +137,10 @@ async function mailboxMessageCount(p, agentId) {
 async function buildScratchDir() {
 	const dir = await mkdtemp(join(tmpdir(), "r20-artifact-progress-nudge-"));
 	await mkdir(join(dir, ".pi"), { recursive: true });
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }),
+	);
 	process.chdir(dir);
 	const p = paths(dir);
 	await ensureDirs(p);
@@ -116,16 +150,27 @@ async function buildScratchDir() {
 function makeAgentRecord(st, dir, id, overrides = {}) {
 	const nowIso = new Date().toISOString();
 	return {
-		id, role: overrides.role || "implementer", roleKind: overrides.roleKind || "worker", capabilities: [],
-		activeTaskIds: overrides.activeTaskIds || [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: overrides.runtimeStatus || "idle", health: "healthy",
-		tmuxSession: st.tmuxSession, tmuxWindow: id, tmuxTarget: `sess:${id}.0`,
-		model: "glm-5.1", provider: "zai-coding-cn", cwd: dir,
+		id,
+		role: overrides.role || "implementer",
+		roleKind: overrides.roleKind || "worker",
+		capabilities: [],
+		activeTaskIds: overrides.activeTaskIds || [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: overrides.runtimeStatus || "idle",
+		health: "healthy",
+		tmuxSession: st.tmuxSession,
+		tmuxWindow: id,
+		tmuxTarget: `sess:${id}.0`,
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: dir,
 		mailbox: `.pi/swarm/mailboxes/${id}.jsonl`,
 		lastHeartbeatAt: nowIso,
 		lastToolAt: overrides.lastToolAt ?? nowIso,
 		lastAgentSettledAt: overrides.lastAgentSettledAt ?? nowIso,
-		createdAt: nowIso, updatedAt: nowIso,
+		createdAt: nowIso,
+		updatedAt: nowIso,
 		...overrides,
 	};
 }
@@ -142,7 +187,19 @@ async function seedState(p, dir, overrides = {}) {
 	return st;
 }
 
-async function writeTaskWithAllowedFile(p, dir, { taskId = "task-r20-1", allowedFiles, status = "in_progress", nodes, assignmentMessageId = "msg-assign-1", lastProgressAt, writeArtifactNow = false } = {}) {
+async function writeTaskWithAllowedFile(
+	p,
+	dir,
+	{
+		taskId = "task-r20-1",
+		allowedFiles,
+		status = "in_progress",
+		nodes,
+		assignmentMessageId = "msg-assign-1",
+		lastProgressAt,
+		writeArtifactNow = false,
+	} = {},
+) {
 	const tp = taskPaths(p, taskId);
 	await mkdir(tp.root, { recursive: true });
 	const nowMs = Date.now();
@@ -221,7 +278,7 @@ console.log("\n=== R20-S1: artifact detected + node open + agent settled idle (R
 		agents: {
 			"worker-a": {
 				activeTaskIds: ["task-r20-1"],
-				lastToolAt: twoMinAgo,        // 2 min ago (real work happened)
+				lastToolAt: twoMinAgo, // 2 min ago (real work happened)
 				lastAgentSettledAt: thirtySecAgo, // settled without closing node
 			},
 		},
@@ -330,7 +387,7 @@ console.log("\n=== R20-S3: 3 ticks within backoff window → only 1 nudge ===");
 	}
 	const traceCount = await countEvents(p, "worker.artifact_progress_no_status_update");
 	const mailboxCount = await mailboxMessageCount(p, "worker-a");
-	console.log("  R20-S3 results: trace=", traceCount, "mailbox=", mailboxCount, "ticks=", results.map(r => r.tick).join(","));
+	console.log("  R20-S3 results: trace=", traceCount, "mailbox=", mailboxCount, "ticks=", results.map((r) => r.tick).join(","));
 	ok("R20-S3: only 1 nudge across 3 backoff ticks (C-R20-1)", traceCount === 1, `got=${traceCount}`);
 	ok("R20-S3: only 1 mailbox delivery (C-R20-3)", mailboxCount === 1, `got=${mailboxCount}`);
 	await rm(dir, { recursive: true, force: true });

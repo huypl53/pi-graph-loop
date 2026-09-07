@@ -29,8 +29,17 @@ const tg = await import(join(here, "..", "src/taskgraph.ts"));
 const { staleOpenAssignmentScanLocked, ensureNodeActivityStamp } = tg;
 const { paths, withLock, readState, writeState } = await import(join(here, "..", "src/state.ts"));
 
-let pass = 0, fail = 0;
-const ok = (name, cond, info) => { if (cond) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, info) => {
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
+};
 
 async function newScratch() {
 	const dir = await mkdtemp(join(tmpdir(), `swarm-83a-${process.pid}-${Date.now()}-`));
@@ -63,7 +72,17 @@ async function readEvents(scratch) {
 		}
 	} catch {}
 	const all = [traces, swarm, perTask].join("\n");
-	return all.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return all
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function clearEvents(scratch) {
 	await writeFile(join(scratch, ".pi/swarm/traces/events.jsonl"), "");
@@ -93,20 +112,64 @@ function makeNode(overrides = {}) {
 }
 function makeTask(taskId, nodes) {
 	return {
-		version: 1, taskId, title: taskId, goal: taskId, status: "in_progress", priority: "normal",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		owner: "root", workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [],
-		validationCommands: [], start: "n1", currentNodes: Object.keys(nodes),
+		version: 1,
+		taskId,
+		title: taskId,
+		goal: taskId,
+		status: "in_progress",
+		priority: "normal",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "n1",
+		currentNodes: Object.keys(nodes),
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
-		nodes, edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		nodes,
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 }
 function makeState(scratch, tasks) {
 	return {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "s",
-		agents: { root: { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: tasks, maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", lastHeartbeatAt: new Date().toISOString(), pid: 1, tmuxSession: "s", tmuxWindow: "w", tmuxTarget: "s:w.0", model: "m", provider: "p", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } },
-		delivered: {}, messages: {},
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "s",
+		agents: {
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: tasks,
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				lastHeartbeatAt: new Date().toISOString(),
+				pid: 1,
+				tmuxSession: "s",
+				tmuxWindow: "w",
+				tmuxTarget: "s:w.0",
+				model: "m",
+				provider: "p",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			},
+		},
+		delivered: {},
+		messages: {},
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
 	};
 }
 
@@ -120,7 +183,6 @@ function makeState(scratch, tasks) {
 	const { DEFAULT_STALE_OPEN_THRESHOLD_MS } = await import(join(here, "..", "src", "constants.ts"));
 	ok("C-default stale-open threshold is 30_000", DEFAULT_STALE_OPEN_THRESHOLD_MS === 30_000, String(DEFAULT_STALE_OPEN_THRESHOLD_MS));
 }
-
 
 console.log("\n[C1] ensureNodeActivityStamp stamps lastProgressAt on tool execution (in-memory + durable)");
 {
@@ -261,7 +323,12 @@ console.log("\n[C6] progress recovery: node with lastProgressAt 1 min ago is NOT
 	await clearEvents(scratch);
 	const now = Date.now();
 	const oneMinAgo = new Date(now - 60_000).toISOString();
-	const node = makeNode({ assignee: "worker-q", status: "in_progress", lastActivityAt: new Date(now - 360_000).toISOString(), lastProgressAt: oneMinAgo });
+	const node = makeNode({
+		assignee: "worker-q",
+		status: "in_progress",
+		lastActivityAt: new Date(now - 360_000).toISOString(),
+		lastProgressAt: oneMinAgo,
+	});
 	const task = makeTask("task-c6", { n1: node });
 	await writeTaskFile(scratch, task);
 	await writeStateFile(scratch, makeState(scratch, ["task-c6"]));
@@ -274,7 +341,10 @@ console.log("\n[C6] progress recovery: node with lastProgressAt 1 min ago is NOT
 	});
 	ok("C6 result.surfaced === 0 (fresh lastProgressAt blocks surfacing)", result.surfaced === 0);
 	const events = await readEvents(scratch);
-	ok("C6 zero stale_open_surfaced traces for node with fresh progress", !events.some((e) => e.event === "stale_open_surfaced" && e.taskId === "task-c6"));
+	ok(
+		"C6 zero stale_open_surfaced traces for node with fresh progress",
+		!events.some((e) => e.event === "stale_open_surfaced" && e.taskId === "task-c6"),
+	);
 }
 
 // =============================================================================
@@ -317,7 +387,13 @@ console.log("\n[C8] forward progress clears staleOpenSurfacedAt → re-surface c
 	await clearEvents(scratch);
 	const now = Date.now();
 	const eightMinAgo = new Date(now - 480_000).toISOString();
-	const node = makeNode({ assignee: "worker-r", status: "in_progress", lastActivityAt: eightMinAgo, lastProgressAt: eightMinAgo, staleOpenSurfacedAt: eightMinAgo });
+	const node = makeNode({
+		assignee: "worker-r",
+		status: "in_progress",
+		lastActivityAt: eightMinAgo,
+		lastProgressAt: eightMinAgo,
+		staleOpenSurfacedAt: eightMinAgo,
+	});
 	const task = makeTask("task-c8", { n1: node });
 	await writeTaskFile(scratch, task);
 	await writeStateFile(scratch, makeState(scratch, ["task-c8"]));
@@ -361,21 +437,37 @@ console.log("\n[C9] hooks.ts:tool_execution_end lastProgressAt stamp is durably 
 	const eightMinAgo = new Date(now - 480_000).toISOString();
 
 	const agent = {
-		id: "worker-y", role: "implementer", roleKind: "worker", capabilities: [],
-		activeTaskIds: ["task-c9"], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "busy", health: "healthy",
+		id: "worker-y",
+		role: "implementer",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: ["task-c9"],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "busy",
+		health: "healthy",
 		lastHeartbeatAt: new Date(now).toISOString(),
 		pid: process.pid, // match current process for pid-guard
-		tmuxSession: "s", tmuxWindow: "worker-y", tmuxTarget: "s:worker-y.0",
-		model: "m", provider: "p", cwd: scratch,
+		tmuxSession: "s",
+		tmuxWindow: "worker-y",
+		tmuxTarget: "s:worker-y.0",
+		model: "m",
+		provider: "p",
+		cwd: scratch,
 		mailbox: ".pi/swarm/mailboxes/worker-y.jsonl",
-		createdAt: eightMinAgo, updatedAt: eightMinAgo,
+		createdAt: eightMinAgo,
+		updatedAt: eightMinAgo,
 	};
 	const st = makeState(scratch, ["task-c9"]);
 	st.agents["worker-y"] = agent;
 	await writeStateFile(scratch, st);
 
-	const node = makeNode({ assignee: "worker-y", status: "in_progress", lastActivityAt: eightMinAgo, staleOpenSurfacedAt: new Date(now - 1000).toISOString() });
+	const node = makeNode({
+		assignee: "worker-y",
+		status: "in_progress",
+		lastActivityAt: eightMinAgo,
+		staleOpenSurfacedAt: new Date(now - 1000).toISOString(),
+	});
 	const task = makeTask("task-c9", { n1: node });
 	await writeTaskFile(scratch, task);
 
@@ -386,7 +478,9 @@ console.log("\n[C9] hooks.ts:tool_execution_end lastProgressAt stamp is durably 
 	const piMock = {
 		registerTool: () => {},
 		registerCommand: () => {},
-		on: (event, fn) => { if (event === "tool_execution_end") toolHandlers.push(fn); },
+		on: (event, fn) => {
+			if (event === "tool_execution_end") toolHandlers.push(fn);
+		},
 		setModel: async () => true,
 		sendMessage: () => {},
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
@@ -405,7 +499,11 @@ console.log("\n[C9] hooks.ts:tool_execution_end lastProgressAt stamp is durably 
 		// Wait for any async file writes
 		await new Promise((r) => setTimeout(r, 100));
 		const reloaded = await readTaskFile(scratch, "task-c9");
-		ok("C9 hook stamped lastProgressAt durably to disk", !!reloaded.nodes["n1"].lastProgressAt, `got: ${reloaded.nodes["n1"].lastProgressAt ?? "MISSING"}`);
+		ok(
+			"C9 hook stamped lastProgressAt durably to disk",
+			!!reloaded.nodes["n1"].lastProgressAt,
+			`got: ${reloaded.nodes["n1"].lastProgressAt ?? "MISSING"}`,
+		);
 		ok("C9 hook cleared staleOpenSurfacedAt on disk", !reloaded.nodes["n1"].staleOpenSurfacedAt);
 
 		// Verify the scan sees the fresh progress (subsequent scan surfaces===0)
@@ -447,12 +545,19 @@ console.log("\n[C10] regression: node assigned 2 min ago with no lastProgressAt 
 		await writeState(path, st);
 		return out;
 	});
-	ok("C10 result.surfaced === 0 (node assigned 2 min ago, under 5 min threshold)", result.surfaced === 0, `got surfaced=${result.surfaced}`);
+	ok(
+		"C10 result.surfaced === 0 (node assigned 2 min ago, under 5 min threshold)",
+		result.surfaced === 0,
+		`got surfaced=${result.surfaced}`,
+	);
 	ok("C10 result.inspected === 1 (node inspected but not surfaced)", result.inspected === 1, `got inspected=${result.inspected}`);
 	const reloaded = await readTaskFile(scratch, "task-c10");
 	ok("C10 node.staleOpenSurfacedAt NOT populated (under threshold)", !reloaded.nodes["n1"].staleOpenSurfacedAt);
 	const events = await readEvents(scratch);
-	ok("C10 NO stale_open_surfaced trace for under-threshold node", !events.some((e) => e.event === "stale_open_surfaced" && e.taskId === "task-c10"));
+	ok(
+		"C10 NO stale_open_surfaced trace for under-threshold node",
+		!events.some((e) => e.event === "stale_open_surfaced" && e.taskId === "task-c10"),
+	);
 }
 
 // =============================================================================
@@ -472,15 +577,26 @@ console.log("\n[C11] R10-1 cost-bound counting: hooks.ts:tool_execution_end file
 	const eightMinAgo = new Date(now - 480_000).toISOString();
 
 	const agent = {
-		id: "worker-z", role: "implementer", roleKind: "worker", capabilities: [],
+		id: "worker-z",
+		role: "implementer",
+		roleKind: "worker",
+		capabilities: [],
 		activeTaskIds: ["task-c11", "task-c11-2", "task-c11-3"],
-		maxConcurrentTasks: 5, status: "running", runtimeStatus: "busy", health: "healthy",
+		maxConcurrentTasks: 5,
+		status: "running",
+		runtimeStatus: "busy",
+		health: "healthy",
 		lastHeartbeatAt: new Date(now).toISOString(),
 		pid: process.pid,
-		tmuxSession: "s", tmuxWindow: "worker-z", tmuxTarget: "s:worker-z.0",
-		model: "m", provider: "p", cwd: scratch,
+		tmuxSession: "s",
+		tmuxWindow: "worker-z",
+		tmuxTarget: "s:worker-z.0",
+		model: "m",
+		provider: "p",
+		cwd: scratch,
 		mailbox: ".pi/swarm/mailboxes/worker-z.jsonl",
-		createdAt: eightMinAgo, updatedAt: eightMinAgo,
+		createdAt: eightMinAgo,
+		updatedAt: eightMinAgo,
 	};
 	const st = makeState(scratch, ["task-c11", "task-c11-2", "task-c11-3"]);
 	st.agents["worker-z"] = agent;
@@ -500,9 +616,13 @@ console.log("\n[C11] R10-1 cost-bound counting: hooks.ts:tool_execution_end file
 	const factory = (await import(join(here, "..", "index.ts"))).default;
 	const toolHandlers = [];
 	const piMock = {
-		registerTool: () => {}, registerCommand: () => {},
-		on: (event, fn) => { if (event === "tool_execution_end") toolHandlers.push(fn); },
-		setModel: async () => true, sendMessage: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: (event, fn) => {
+			if (event === "tool_execution_end") toolHandlers.push(fn);
+		},
+		setModel: async () => true,
+		sendMessage: () => {},
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 	};
 	factory(piMock);
@@ -518,7 +638,12 @@ console.log("\n[C11] R10-1 cost-bound counting: hooks.ts:tool_execution_end file
 		ok("C11 task-c11/n1 stamped (worker-z, in_progress)", !!reloadedC11.nodes["n1"].lastProgressAt);
 		ok("C11 task-c11-2/n1 NOT stamped (assignee mismatch, not dirty)", !reloadedC11_2.nodes["n1"].lastProgressAt);
 		ok("C11 task-c11-3/n1 NOT stamped (status=done, ensureNodeActivityStamp no-op)", !reloadedC11_3.nodes["n1"].lastProgressAt);
-		ok("C11 honest bound: 1 active task dirty out of 3 active tasks (M=1 ≤ N=3)", reloadedC11.nodes["n1"].lastProgressAt && !reloadedC11_2.nodes["n1"].lastProgressAt && !reloadedC11_3.nodes["n1"].lastProgressAt);
+		ok(
+			"C11 honest bound: 1 active task dirty out of 3 active tasks (M=1 ≤ N=3)",
+			reloadedC11.nodes["n1"].lastProgressAt &&
+				!reloadedC11_2.nodes["n1"].lastProgressAt &&
+				!reloadedC11_3.nodes["n1"].lastProgressAt,
+		);
 	} else {
 		ok("C11 hook handler found", false, "Issue 83a stamp hook not found");
 	}

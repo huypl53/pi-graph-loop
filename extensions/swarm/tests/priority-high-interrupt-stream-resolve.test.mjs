@@ -23,8 +23,17 @@ import factory from "../index.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-let pass = 0, fail = 0;
-const ok = (name, cond, info) => { if (cond) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, info) => {
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
+};
 
 const RECIPIENT = "worker-a";
 const FIXTURE_ID = "priority-high-interrupt";
@@ -75,15 +84,33 @@ async function readState(scratch) {
 }
 async function readEvents(scratch) {
 	const txt = await (await import("node:fs/promises")).readFile(join(scratch, ".pi/swarm/traces/events.jsonl"), "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 
 // Build a synthetic swarm message + the corresponding input-handler event text.
 function buildMsg({ id, priority = "high" }) {
 	return {
-		id, swarmId: "test", from: "root", to: RECIPIENT, priority, type: "swarm.message",
-		schemaVersion: 1, createdAt: new Date().toISOString(), body: "STOP: stop the current implement turn.",
-		requiresAck: true, headers: {},
+		id,
+		swarmId: "test",
+		from: "root",
+		to: RECIPIENT,
+		priority,
+		type: "swarm.message",
+		schemaVersion: 1,
+		createdAt: new Date().toISOString(),
+		body: "STOP: stop the current implement turn.",
+		requiresAck: true,
+		headers: {},
 	};
 }
 function buildSystemDelivery(msg) {
@@ -98,11 +125,19 @@ async function loadExtension(identity) {
 	const commands = {};
 	const sentMessages = [];
 	const pi = {
-		registerTool: (def) => { tools[def.name] = def; },
-		registerCommand: (name, def) => { commands[name] = def; },
-		on: (ev, fn) => { (handlers[ev] ||= []).push(fn); },
+		registerTool: (def) => {
+			tools[def.name] = def;
+		},
+		registerCommand: (name, def) => {
+			commands[name] = def;
+		},
+		on: (ev, fn) => {
+			(handlers[ev] ||= []).push(fn);
+		},
 		setModel: async () => true,
-		sendMessage: (m, o) => { sentMessages.push({ m, o }); },
+		sendMessage: (m, o) => {
+			sentMessages.push({ m, o });
+		},
 		exec: async (cmd, args) => {
 			if (cmd === "tmux" && args[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
 			return { code: 1, stdout: "", stderr: "" };
@@ -176,17 +211,35 @@ console.log("\n[S1] full incident shape: hung turn → ctx.abort() resolves in <
 	// TURN 1: resumed scripted turn — fires immediately (no abort), emits "Interrupt settled" + ack.
 	const turn1 = await runTurn({ fixtureId: FIXTURE_ID, ctx, signal: undefined, label: "turn-1-resumed" });
 	ok("turn 1: scripted turn emitted stopReason=stop", turn1.result.stopReason === "stop", `stopReason=${turn1.result.stopReason}`);
-	ok("turn 1: emitted text content", turn1.result.content.some((b) => b.type === "text" && /Interrupt settled/.test(b.text || "")));
-	ok("turn 1: emitted swarm_ack_message toolcall", turn1.result.content.some((b) => b.type === "toolCall" && b.name === "swarm_ack_message"));
-	ok("turn 1: emitted TWO swarm_ack_message toolcalls (seen + done)", turn1.result.content.filter((b) => b.type === "toolCall" && b.name === "swarm_ack_message").length === 2);
+	ok(
+		"turn 1: emitted text content",
+		turn1.result.content.some((b) => b.type === "text" && /Interrupt settled/.test(b.text || "")),
+	);
+	ok(
+		"turn 1: emitted swarm_ack_message toolcall",
+		turn1.result.content.some((b) => b.type === "toolCall" && b.name === "swarm_ack_message"),
+	);
+	ok(
+		"turn 1: emitted TWO swarm_ack_message toolcalls (seen + done)",
+		turn1.result.content.filter((b) => b.type === "toolCall" && b.name === "swarm_ack_message").length === 2,
+	);
 	ok("turn 1: emitted within 500ms", turn1.elapsed < 500, `elapsed=${turn1.elapsed}ms`);
 
 	// Trace event census
 	const events = await readEvents(scratch);
-	ok("trace: message.input_intercept present", events.some((e) => e.event === "message.input_intercept" && e.id === "PHI-S1-1"));
-	ok("trace: message.interrupt_requested present", events.some((e) => e.event === "message.interrupt_requested" && e.id === "PHI-S1-1"));
-	ok("trace: message.interrupt_effective present", events.some((e) => e.event === "message.interrupt_effective" && e.id === "PHI-S1-1"));
-	ok("trace: agent.lastHighInterruptAt populated", !!((await readState(scratch)).agents[RECIPIENT]?.lastHighInterruptAt));
+	ok(
+		"trace: message.input_intercept present",
+		events.some((e) => e.event === "message.input_intercept" && e.id === "PHI-S1-1"),
+	);
+	ok(
+		"trace: message.interrupt_requested present",
+		events.some((e) => e.event === "message.interrupt_requested" && e.id === "PHI-S1-1"),
+	);
+	ok(
+		"trace: message.interrupt_effective present",
+		events.some((e) => e.event === "message.interrupt_effective" && e.id === "PHI-S1-1"),
+	);
+	ok("trace: agent.lastHighInterruptAt populated", !!(await readState(scratch)).agents[RECIPIENT]?.lastHighInterruptAt);
 
 	// Total turn-0 elapsed (the live-incident analog: 23 min → ~200ms)
 	const totalElapsed = turn0.elapsed + turn1.elapsed;
@@ -229,7 +282,11 @@ console.log("\n[S2] deterministic double-run: clean cursor + replay S1 → same 
 	const ackCountB = t1b.result.content.filter((b) => b.type === "toolCall" && b.name === "swarm_ack_message").length;
 
 	ok("S2 determinism: both runs produced same toolcall count", ackCountA === ackCountB, `run1=${ackCountA} run2=${ackCountB}`);
-	ok("S2 determinism: both runs aborted within 500ms", t0a.elapsed < 500 && t0b.elapsed < 500, `run1=${t0a.elapsed}ms run2=${t0b.elapsed}ms`);
+	ok(
+		"S2 determinism: both runs aborted within 500ms",
+		t0a.elapsed < 500 && t0b.elapsed < 500,
+		`run1=${t0a.elapsed}ms run2=${t0b.elapsed}ms`,
+	);
 }
 
 // =============================================================================
@@ -287,9 +344,15 @@ console.log("\n[S4] deterministic re-run: reset cursor + replay S1 → same shap
 	ok("S4 turn-0: resolved in <500ms", turn0.elapsed < 500);
 	const turn1 = await runTurn({ fixtureId: FIXTURE_ID, ctx, signal: undefined, label: "turn-1-resumed" });
 	ok("S4 turn-1: stopReason=stop", turn1.result.stopReason === "stop");
-	ok("S4 turn-1: text content emitted", turn1.result.content.some((b) => b.type === "text"));
+	ok(
+		"S4 turn-1: text content emitted",
+		turn1.result.content.some((b) => b.type === "text"),
+	);
 	// Compare shape to S1 — must match
-	ok("S4 turn-1: same toolcall count (2 ack toolcalls)", turn1.result.content.filter((b) => b.type === "toolCall" && b.name === "swarm_ack_message").length === 2);
+	ok(
+		"S4 turn-1: same toolcall count (2 ack toolcalls)",
+		turn1.result.content.filter((b) => b.type === "toolCall" && b.name === "swarm_ack_message").length === 2,
+	);
 }
 
 console.log(`\nPRIORITY-HIGH-INTERRUPT-STREAM-RESOLVE ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);

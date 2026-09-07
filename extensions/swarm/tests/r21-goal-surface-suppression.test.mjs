@@ -25,13 +25,18 @@ const prevIsOrch = process.env.PI_SWARM_IS_ROOT;
 process.env.PI_SWARM_AGENT_ID = "root";
 process.env.PI_SWARM_IS_ROOT = "1";
 process.on("exit", () => {
-	if (prevAgentId === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = prevAgentId;
-	if (prevIsOrch === undefined) delete process.env.PI_SWARM_IS_ROOT; else process.env.PI_SWARM_IS_ROOT = prevIsOrch;
+	if (prevAgentId === undefined) delete process.env.PI_SWARM_AGENT_ID;
+	else process.env.PI_SWARM_AGENT_ID = prevAgentId;
+	if (prevIsOrch === undefined) delete process.env.PI_SWARM_IS_ROOT;
+	else process.env.PI_SWARM_IS_ROOT = prevIsOrch;
 });
 
 const dir = await mkdtemp(join(tmpdir(), "r21-goal-surface-suppression-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
-await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }));
+await writeFile(
+	join(dir, ".pi", "settings.json"),
+	JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }),
+);
 process.chdir(dir);
 const p = paths(dir);
 await ensureDirs(p);
@@ -138,7 +143,10 @@ async function seedState({ taskId, taskStatus, withMailbox = false, messageId = 
 		};
 		st.messages[messageId] = msg;
 		const mailboxPath = join(p.mailboxes, "root.jsonl");
-		await writeFile(mailboxPath, `${JSON.stringify({ swarmId: st.swarmId, ...msg, type: "swarm.message", schemaVersion: 1, headers: {} })}\n`);
+		await writeFile(
+			mailboxPath,
+			`${JSON.stringify({ swarmId: st.swarmId, ...msg, type: "swarm.message", schemaVersion: 1, headers: {} })}\n`,
+		);
 	}
 
 	await writeState(p, st);
@@ -156,11 +164,19 @@ async function pumpScenario(taskId, taskStatus, withMailbox = true) {
 		ui: { setStatus: () => {}, notify: () => {}, setFooter: () => {}, setWidget: () => {} },
 		model: { id: "glm-5.1", provider: "zai-coding-cn" },
 	};
-	await pumpRootMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, `r21-${taskId}`);
+	await pumpRootMailbox(
+		{ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) },
+		ctx,
+		p,
+		`r21-${taskId}`,
+	);
 	const after = await readState(p, dir);
 	let events = [];
 	try {
-		events = (await readFile(p.events, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+		events = (await readFile(p.events, "utf8"))
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line));
 	} catch {
 		events = [];
 	}
@@ -175,27 +191,63 @@ console.log("=== R21 goal-surface suppression ===");
 
 // S1: terminal orphan goal-key staleSurfaceReason fix.
 const { st: s1State, task: s1Task } = await seedState({ taskId: "task-r21-terminal", taskStatus: "failed", withMailbox: false });
-const s1Msg = { id: "msg-task-r21-terminal", idempotencyKey: `goal:${s1State.goal.id}:nudge:idle-streak:1`, createdAt: new Date().toISOString() };
-const s1 = await staleSurfaceReason(p, s1State, s1Msg, { [s1Task.taskId]: JSON.parse(await readFile(taskPaths(p, s1Task.taskId).taskJson, "utf8")) }, Date.now());
+const s1Msg = {
+	id: "msg-task-r21-terminal",
+	idempotencyKey: `goal:${s1State.goal.id}:nudge:idle-streak:1`,
+	createdAt: new Date().toISOString(),
+};
+const s1 = await staleSurfaceReason(
+	p,
+	s1State,
+	s1Msg,
+	{ [s1Task.taskId]: JSON.parse(await readFile(taskPaths(p, s1Task.taskId).taskJson, "utf8")) },
+	Date.now(),
+);
 ok("S1 terminal orphan does not get actionable_graph suppression", s1.stale === false, JSON.stringify(s1));
-ok("C-R21-2 terminal orphan has zero notification.stale.suppressed traces", countEvents([], "notification.stale.suppressed") === 0, JSON.stringify(s1));
+ok(
+	"C-R21-2 terminal orphan has zero notification.stale.suppressed traces",
+	countEvents([], "notification.stale.suppressed") === 0,
+	JSON.stringify(s1),
+);
 
 // S2/S3: R27 (2026-09-04) — LIVE actionable task no longer suppresses the goal key at
 // surface time either (surface must agree with the task-state-independent emission gate;
 // same principle as R22's agent_busy removal). Only the idle_epoch_advanced leg remains.
 const { st: s2State, task: s2Task } = await seedState({ taskId: "task-r21-live", taskStatus: "in_progress", withMailbox: false });
-const s2Msg = { id: "msg-task-r21-live", idempotencyKey: `goal:${s2State.goal.id}:nudge:idle-streak:1`, createdAt: new Date().toISOString() };
-const s2 = await staleSurfaceReason(p, s2State, s2Msg, { [s2Task.taskId]: JSON.parse(await readFile(taskPaths(p, s2Task.taskId).taskJson, "utf8")) }, Date.now());
+const s2Msg = {
+	id: "msg-task-r21-live",
+	idempotencyKey: `goal:${s2State.goal.id}:nudge:idle-streak:1`,
+	createdAt: new Date().toISOString(),
+};
+const s2 = await staleSurfaceReason(
+	p,
+	s2State,
+	s2Msg,
+	{ [s2Task.taskId]: JSON.parse(await readFile(taskPaths(p, s2Task.taskId).taskJson, "utf8")) },
+	Date.now(),
+);
 ok("S2 live actionable task no longer suppresses goal nudge (R27)", s2.stale === false, JSON.stringify(s2));
-ok("S3 goal-key surface suppression reason is null (no actionable_graph leg)", s2.stale === false && s2.reason === null, JSON.stringify(s2));
+ok(
+	"S3 goal-key surface suppression reason is null (no actionable_graph leg)",
+	s2.stale === false && s2.reason === null,
+	JSON.stringify(s2),
+);
 
 // S4: taskKey branch unchanged — closed task still suppresses the nudge.
 const { st: s4State, task: s4Task } = await seedState({ taskId: "task-r21-taskkey", taskStatus: "done", withMailbox: false });
 const s4TaskJson = JSON.parse(await readFile(taskPaths(p, s4Task.taskId).taskJson, "utf8"));
 s4TaskJson.nodes.fix.status = "done";
-const s4Msg = { id: "msg-task-r21-taskkey", idempotencyKey: `task:${s4Task.taskId}:nudge:graph-stall:1`, createdAt: new Date().toISOString() };
+const s4Msg = {
+	id: "msg-task-r21-taskkey",
+	idempotencyKey: `task:${s4Task.taskId}:nudge:graph-stall:1`,
+	createdAt: new Date().toISOString(),
+};
 const s4 = await staleSurfaceReason(p, s4State, s4Msg, { [s4Task.taskId]: s4TaskJson }, Date.now());
-ok("S4 taskKey branch remains stale on closed task graph-stall nudges", s4.stale === true && s4.reason === "no_active_node", JSON.stringify(s4));
+ok(
+	"S4 taskKey branch remains stale on closed task graph-stall nudges",
+	s4.stale === true && s4.reason === "no_active_node",
+	JSON.stringify(s4),
+);
 
 console.log(`\nR21 summary: ${passed} passed, ${failed} failed`);
 process.exitCode = failed ? 1 : 0;

@@ -27,8 +27,15 @@ import {
 	validateSwarmSettings,
 } from "../src/pool.ts";
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) pass++; else { fail++; console.error("  FAIL:", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) pass++;
+	else {
+		fail++;
+		console.error("  FAIL:", name);
+	}
+};
 
 const dir = await mkdtemp(join(tmpdir(), "pool-config-test-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
@@ -83,16 +90,19 @@ await writeFile(settingsFile, JSON.stringify(validPool));
 }
 
 // 3. Invalid config: empty model + bad weight + duplicate + bad strategy.
-await writeFile(settingsFile, JSON.stringify({
-	swarm: {
-		modelPool: [
-			{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-			{ model: "", provider: "openai", weight: -1 },
-			{ model: "glm-5.1", provider: "zai-coding-cn", weight: 10 },
-		],
-		rotation: { strategy: "wrong-strategy", cooldownMs: -5, maxRetries: 0 },
-	},
-}));
+await writeFile(
+	settingsFile,
+	JSON.stringify({
+		swarm: {
+			modelPool: [
+				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
+				{ model: "", provider: "openai", weight: -1 },
+				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 10 },
+			],
+			rotation: { strategy: "wrong-strategy", cooldownMs: -5, maxRetries: 0 },
+		},
+	}),
+);
 {
 	const validation = validateSwarmSettings();
 	ok("invalid pool fails validation", !validation.ok);
@@ -146,7 +156,10 @@ await writeFile(settingsFile, JSON.stringify(validPool));
 	const p = paths(dir);
 	const preflight = await preflightSpawn(p, { tmuxSession: "pi-swarm-test-fake" });
 	ok("preflight: ok when at least one slot eligible", preflight.ok === true && preflight.resolved.fromPool === true);
-	ok("preflight: resolved model matches a configured model", ["glm-5.1", "gpt-5.4-mini", "claude-sonnet-4"].includes(preflight.resolved.model));
+	ok(
+		"preflight: resolved model matches a configured model",
+		["glm-5.1", "gpt-5.4-mini", "claude-sonnet-4"].includes(preflight.resolved.model),
+	);
 	ok("preflight: resolved provider is a known provider", ["zai-coding-cn", "openai", "anthropic"].includes(preflight.resolved.provider));
 }
 
@@ -172,7 +185,10 @@ await writeFile(settingsFile, JSON.stringify(validPool));
 }
 
 // 9. classifySwarmSettings handles extensions.swarm shape (legacy nesting).
-await writeFile(settingsFile, JSON.stringify({ extensions: { swarm: { defaultModel: "openai/gpt-5.4-mini", defaultProvider: "openai" } } }));
+await writeFile(
+	settingsFile,
+	JSON.stringify({ extensions: { swarm: { defaultModel: "openai/gpt-5.4-mini", defaultProvider: "openai" } } }),
+);
 {
 	const shape = classifySwarmSettings();
 	ok("extensions.swarm singleton classified", shape.kind === "singleton");
@@ -207,18 +223,22 @@ await writeFile(settingsFile, JSON.stringify({ swarm: {} }));
 }
 
 // 13. Preflight: invalid_settings surfaces invalid pool config.
-await writeFile(settingsFile, JSON.stringify({
-	swarm: {
-		modelPool: [
-			{ model: "", provider: "openai" },
-		],
-	},
-}));
+await writeFile(
+	settingsFile,
+	JSON.stringify({
+		swarm: {
+			modelPool: [{ model: "", provider: "openai" }],
+		},
+	}),
+);
 {
 	const p = paths(dir);
 	const preflight = await preflightSpawn(p);
 	ok("preflight: invalid_settings catches empty model", preflight.ok === false && preflight.error.kind === "invalid_settings");
-	ok("preflight: invalid_settings suggestion references /swarm pool validate", preflight.error.suggestion.toLowerCase().includes("validate"));
+	ok(
+		"preflight: invalid_settings suggestion references /swarm pool validate",
+		preflight.error.suggestion.toLowerCase().includes("validate"),
+	);
 }
 
 // 14. pickSlot behavior is unchanged (regression) — confirm preflight uses the same code path.

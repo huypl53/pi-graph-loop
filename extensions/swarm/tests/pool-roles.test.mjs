@@ -19,24 +19,34 @@ import { registerSwarmCommand } from "../src/command.ts";
 import { pickSlot, poolStatus, slotKey, validateSwarmSettings, withPoolLock, readPoolHealth, writePoolHealth } from "../src/pool.ts";
 import { readSwarmSettings } from "../src/session.ts";
 
-let pass = 0, fail = 0;
-const ok = (name, cond, info) => { if (cond) pass++; else { fail++; console.error("  FAIL:", name, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, info) => {
+	if (cond) pass++;
+	else {
+		fail++;
+		console.error("  FAIL:", name, info ?? "");
+	}
+};
 
 // --- fixture project: pool with BOTH role-scoped and global slots ---
 const dir = await mkdtemp(join(tmpdir(), "pool-roles-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
-await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-	swarm: {
-		defaultModel: "glm-5.1",
-		defaultProvider: "zai-coding-cn",
-		modelPool: [
-			{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
-			{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
-			{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-		],
-		rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-	},
-}));
+await writeFile(
+	join(dir, ".pi", "settings.json"),
+	JSON.stringify({
+		swarm: {
+			defaultModel: "glm-5.1",
+			defaultProvider: "zai-coding-cn",
+			modelPool: [
+				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
+				{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
+				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+			],
+			rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
+		},
+	}),
+);
 process.chdir(dir);
 const p = paths(dir);
 
@@ -52,7 +62,11 @@ async function resetHealth() {
 {
 	const s = readSwarmSettings(dir);
 	ok("case M: modelPool parsed", Boolean(s.modelPool && s.modelPool.length === 3));
-	ok("case M: slot0 roles forwarded as [implementer,tester]", JSON.stringify(s.modelPool[0].roles) === JSON.stringify(["implementer", "tester"]), JSON.stringify(s.modelPool?.[0]?.roles));
+	ok(
+		"case M: slot0 roles forwarded as [implementer,tester]",
+		JSON.stringify(s.modelPool[0].roles) === JSON.stringify(["implementer", "tester"]),
+		JSON.stringify(s.modelPool?.[0]?.roles),
+	);
 	ok("case M: empty roles array preserved (empty = all)", Array.isArray(s.modelPool[1].roles) && s.modelPool[1].roles.length === 0);
 	ok("case M: absent roles stays undefined", s.modelPool[2].roles === undefined);
 }
@@ -66,7 +80,11 @@ async function resetHealth() {
 	// matches, but round-robin cursor + glm first -> just assert we never pick a filtered slot.
 	const a = await pickSlot(p, { roleKind: "implementer" });
 	ok("case A: picked a slot", Boolean(a));
-	ok("case A: picked slot matches implementer role", a && (a.slot.roles === undefined || a.slot.roles.includes("implementer")), JSON.stringify(a?.slot));
+	ok(
+		"case A: picked slot matches implementer role",
+		a && (a.slot.roles === undefined || a.slot.roles.includes("implementer")),
+		JSON.stringify(a?.slot),
+	);
 
 	// B: reviewer — glm slot (roles:[implementer,tester]) filtered out; gpt (roles:[]) still matches.
 	const b = await pickSlot(p, { roleKind: "reviewer" });
@@ -108,9 +126,15 @@ async function resetHealth() {
 	// All-filtered-out: roleKind with no matching slot -> undefined.
 	await resetHealth();
 	// Temporarily rewrite settings: ONLY role-scoped slots, weight>0, role=implementer only.
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", weight: 10, roles: ["implementer"] }], rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 } },
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: {
+				modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", weight: 10, roles: ["implementer"] }],
+				rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
+			},
+		}),
+	);
 	const none = await pickSlot(p, { roleKind: "reviewer" });
 	ok("all-filtered: pickSlot returns undefined for excluded roleKind", none === undefined, JSON.stringify(none));
 	const still = await pickSlot(p, { roleKind: "implementer" });
@@ -118,18 +142,21 @@ async function resetHealth() {
 	const legacy = await pickSlot(p, {});
 	ok("all-filtered: legacy no-roleKind pick still works (no filter)", Boolean(legacy));
 	// Restore the mixed fixture.
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1",
-			defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
-				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-			],
-			rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-		},
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: {
+				defaultModel: "glm-5.1",
+				defaultProvider: "zai-coding-cn",
+				modelPool: [
+					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
+					{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
+					{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+				],
+				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
+			},
+		}),
+	);
 	await resetHealth();
 }
 
@@ -137,36 +164,51 @@ async function resetHealth() {
 // CASE L — validateSwarmSettings rejects malformed roles
 // ===========================================================================
 {
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", roles: "implementer" }] },
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", roles: "implementer" }] },
+		}),
+	);
 	const v = validateSwarmSettings(dir);
 	const bad = v.errors.find((e) => e.kind === "slot_bad_roles");
 	ok("case L: slot_bad_roles error reported for non-array roles", Boolean(bad), JSON.stringify(v.errors));
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", roles: ["ok", 42] }] },
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", roles: ["ok", 42] }] },
+		}),
+	);
 	const v2 = validateSwarmSettings(dir);
-	ok("case L: slot_bad_roles error reported for non-string entry", v2.errors.some((e) => e.kind === "slot_bad_roles"));
+	ok(
+		"case L: slot_bad_roles error reported for non-string entry",
+		v2.errors.some((e) => e.kind === "slot_bad_roles"),
+	);
 	// Well-formed roles -> no error.
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", roles: ["implementer"] }] },
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", roles: ["implementer"] }] },
+		}),
+	);
 	const v3 = validateSwarmSettings(dir);
 	ok("case L: well-formed roles produce no slot_bad_roles", !v3.errors.some((e) => e.kind === "slot_bad_roles"));
 	// Restore mixed fixture.
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1",
-			defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
-				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-			],
-			rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-		},
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: {
+				defaultModel: "glm-5.1",
+				defaultProvider: "zai-coding-cn",
+				modelPool: [
+					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
+					{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
+					{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+				],
+				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
+			},
+		}),
+	);
 }
 
 // ===========================================================================
@@ -178,36 +220,68 @@ const hookHandlers = {};
 const commandHandlers = {};
 const notifications = [];
 const fakePi = {
-	on: (ev, fn) => { (hookHandlers[ev] ||= []).push(fn); },
+	on: (ev, fn) => {
+		(hookHandlers[ev] ||= []).push(fn);
+	},
 	registerTool: () => {},
-	registerCommand: (name, def) => { commandHandlers[name] = def.handler; },
-	setModel: async (m) => { setModelCalls.push({ provider: m.provider, id: m.id, target: `${m.provider}/${m.id}` }); return true; },
-	sendMessage: (m, o) => { sentMessages.push({ m, o }); },
+	registerCommand: (name, def) => {
+		commandHandlers[name] = def.handler;
+	},
+	setModel: async (m) => {
+		setModelCalls.push({ provider: m.provider, id: m.id, target: `${m.provider}/${m.id}` });
+		return true;
+	},
+	sendMessage: (m, o) => {
+		sentMessages.push({ m, o });
+	},
 	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 };
 const fakeModelGlm = { id: "glm-5.1", provider: "zai-coding-cn" };
 const fakeModelGpt = { id: "gpt-5.4-mini", provider: "openai" };
 const fakeModelClaude = { id: "claude-sonnet-4", provider: "anthropic" };
 const ctx = {
-	cwd: dir, mode: "tui", isIdle: () => true, model: fakeModelGlm,
-	modelRegistry: { find: (provider, id) => {
-		if (id === "gpt-5.4-mini") return fakeModelGpt;
-		if (id === "claude-sonnet-4") return fakeModelClaude;
-		if (id === "glm-5.1") return fakeModelGlm;
-		return undefined;
-	} },
-	ui: { notify: (text, level) => { notifications.push({ level, text }); }, setStatus: () => {} },
+	cwd: dir,
+	mode: "tui",
+	isIdle: () => true,
+	model: fakeModelGlm,
+	modelRegistry: {
+		find: (provider, id) => {
+			if (id === "gpt-5.4-mini") return fakeModelGpt;
+			if (id === "claude-sonnet-4") return fakeModelClaude;
+			if (id === "glm-5.1") return fakeModelGlm;
+			return undefined;
+		},
+	},
+	ui: {
+		notify: (text, level) => {
+			notifications.push({ level, text });
+		},
+		setStatus: () => {},
+	},
 };
 
 async function seedAgentRecord(agentId, roleKind) {
 	const st = await readState(p, dir);
 	const ts = new Date().toISOString();
 	st.agents[agentId] = {
-		id: agentId, role: roleKind || "worker", roleKind: roleKind || "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		tmuxSession: "sess", tmuxWindow: agentId, tmuxTarget: `sess:${agentId}.0`,
-		model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/x.jsonl",
-		createdAt: ts, updatedAt: ts,
+		id: agentId,
+		role: roleKind || "worker",
+		roleKind: roleKind || "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: "sess",
+		tmuxWindow: agentId,
+		tmuxTarget: `sess:${agentId}.0`,
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: dir,
+		mailbox: ".pi/swarm/mailboxes/x.jsonl",
+		createdAt: ts,
+		updatedAt: ts,
 	};
 	await writeState(p, st);
 }
@@ -229,7 +303,17 @@ async function freshSession(agentId = "root") {
 
 async function traceEvents() {
 	const raw = await readFile(p.events, "utf8").catch(() => "");
-	return raw.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return raw
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 
 registerSwarmCommand(fakePi);
@@ -258,32 +342,40 @@ registerSwarmCommand(fakePi);
 	ok("case F: roles column rendered when roles configured", /roles=\[implementer,tester\]/.test(listText), listText);
 	ok("case F: (all) shown for empty-roles slot", /roles=\[\(all\)\]/.test(listText), listText);
 	// Without any roles configured: NO roles= fragment in any row.
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-			],
-			rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-		},
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: {
+				defaultModel: "glm-5.1",
+				defaultProvider: "zai-coding-cn",
+				modelPool: [
+					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
+					{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+				],
+				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
+			},
+		}),
+	);
 	notifications.length = 0;
 	await commandHandlers["swarm"]("pool list", { ...ctx });
 	const plainText = notifications.map((n) => n.text).join("\n");
 	ok("case F: no roles= fragment when no slot has roles", !plainText.includes("roles="), plainText);
 	// Restore mixed fixture.
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
-				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-			],
-			rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-		},
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: {
+				defaultModel: "glm-5.1",
+				defaultProvider: "zai-coding-cn",
+				modelPool: [
+					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
+					{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
+					{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+				],
+				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
+			},
+		}),
+	);
 }
 
 // --- CASE G: roleKind re-read from state under lock (mid-life role change) ---
@@ -302,7 +394,10 @@ registerSwarmCommand(fakePi);
 	await writeState(p, st);
 	const g2 = await pickSlot(p, { roleKind: (await readState(p, dir)).agents["worker-a"].roleKind });
 	ok("case G: new roleKind observed on next pick (no caching)", Boolean(g2), JSON.stringify(g2?.slot));
-	ok("case G: picked slot is eligible for the new roleKind", g2 && (g2.slot.roles === undefined || g2.slot.roles.length === 0 || g2.slot.roles.includes("implementer")));
+	ok(
+		"case G: picked slot is eligible for the new roleKind",
+		g2 && (g2.slot.roles === undefined || g2.slot.roles.length === 0 || g2.slot.roles.includes("implementer")),
+	);
 }
 
 // --- CASE H: all slots filtered out -> pickSlot undefined -> higher-level fallback ---
@@ -311,26 +406,36 @@ registerSwarmCommand(fakePi);
 	// assert pickSlot returns undefined for an excluded roleKind, and that retrying WITHOUT the
 	// filter yields a slot — the exact fallback sequence spawnAgent performs, traced as
 	// pool.role_filter_all_filtered_fallback at the callsite.
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", weight: 10, roles: ["implementer"] }], rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 } },
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: {
+				modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", weight: 10, roles: ["implementer"] }],
+				rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
+			},
+		}),
+	);
 	await resetHealth();
 	const filtered = await pickSlot(p, { roleKind: "reviewer" });
 	ok("case H: filtered pickSlot returns undefined", filtered === undefined);
 	const fallback = await pickSlot(p, {});
 	ok("case H: unfiltered retry yields a slot (spawn fallback path)", Boolean(fallback) && fallback.slot.model === "glm-5.1");
 	// Restore mixed fixture for case I.
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
-				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-			],
-			rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-		},
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: {
+				defaultModel: "glm-5.1",
+				defaultProvider: "zai-coding-cn",
+				modelPool: [
+					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
+					{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
+					{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+				],
+				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
+			},
+		}),
+	);
 }
 
 // --- CASE I: pool show renders roles=[…] line iff non-empty ---

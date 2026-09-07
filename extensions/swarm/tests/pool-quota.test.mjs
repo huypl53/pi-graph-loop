@@ -21,39 +21,64 @@ import { registerSwarmHooks } from "../src/hooks.ts";
 import { poolStatus } from "../src/pool.ts";
 import { classifyProviderError } from "../src/types.ts";
 
-let pass = 0, fail = 0;
-const ok = (name, cond, info) => { if (cond) pass++; else { fail++; console.error("  FAIL:", name, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, info) => {
+	if (cond) pass++;
+	else {
+		fail++;
+		console.error("  FAIL:", name, info ?? "");
+	}
+};
 
 // --- live trace-shaped 429 bodies (resets_in_seconds mutates every turn) ---
-const quotaBody = (resets) => `429: {"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":178806230,"eligible_promo":null,"resets_in_seconds":${resets}}`;
-const quotaBodyOpenAI = (resets) => `OpenAI API error (429): {"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":178806230,"eligible_promo":null,"resets_in_seconds":${resets}}`;
+const quotaBody = (resets) =>
+	`429: {"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":178806230,"eligible_promo":null,"resets_in_seconds":${resets}}`;
+const quotaBodyOpenAI = (resets) =>
+	`OpenAI API error (429): {"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":178806230,"eligible_promo":null,"resets_in_seconds":${resets}}`;
 
 // --- fixture project with a model pool ---
 const dir = await mkdtemp(join(tmpdir(), "pool-quota-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
-await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-	swarm: {
-		defaultModel: "glm-5.1",
-		defaultProvider: "zai-coding-cn",
-		modelPool: [
-			{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-			{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-			{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-		],
-		rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
-	},
-}));
+await writeFile(
+	join(dir, ".pi", "settings.json"),
+	JSON.stringify({
+		swarm: {
+			defaultModel: "glm-5.1",
+			defaultProvider: "zai-coding-cn",
+			modelPool: [
+				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
+				{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+			],
+			rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
+		},
+	}),
+);
 process.chdir(dir);
 const p = paths(dir);
 process.env.PI_SWARM_AGENT_ID = "worker-a";
 const st = await readState(p, dir);
 const ts = new Date().toISOString();
 st.agents["worker-a"] = {
-	id: "worker-a", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-	status: "running", runtimeStatus: "idle", health: "healthy",
-	tmuxSession: "sess", tmuxWindow: "worker-a", tmuxTarget: "sess:worker-a.0",
-	model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/x.jsonl",
-	createdAt: ts, updatedAt: ts,
+	id: "worker-a",
+	role: "worker",
+	roleKind: "worker",
+	capabilities: [],
+	activeTaskIds: [],
+	maxConcurrentTasks: 1,
+	status: "running",
+	runtimeStatus: "idle",
+	health: "healthy",
+	tmuxSession: "sess",
+	tmuxWindow: "worker-a",
+	tmuxTarget: "sess:worker-a.0",
+	model: "glm-5.1",
+	provider: "zai-coding-cn",
+	cwd: dir,
+	mailbox: ".pi/swarm/mailboxes/x.jsonl",
+	createdAt: ts,
+	updatedAt: ts,
 };
 const { writeState } = await import("../src/state.ts");
 await writeState(p, st);
@@ -63,38 +88,70 @@ const setModelCalls = [];
 const sentMessages = [];
 const handlers = {};
 const fakePi = {
-	on: (ev, fn) => { (handlers[ev] ||= []).push(fn); },
-	registerTool: () => {}, registerCommand: () => {},
-	setModel: async (m) => { setModelCalls.push(`${m.provider}/${m.id}`); return true; },
-	sendMessage: (m, o) => { sentMessages.push({ m, o }); },
+	on: (ev, fn) => {
+		(handlers[ev] ||= []).push(fn);
+	},
+	registerTool: () => {},
+	registerCommand: () => {},
+	setModel: async (m) => {
+		setModelCalls.push(`${m.provider}/${m.id}`);
+		return true;
+	},
+	sendMessage: (m, o) => {
+		sentMessages.push({ m, o });
+	},
 	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 };
 const fakeModelGlm = { id: "glm-5.1", provider: "zai-coding-cn" };
 const fakeModelGpt = { id: "gpt-5.4-mini", provider: "openai" };
 const fakeModelClaude = { id: "claude-sonnet-4", provider: "anthropic" };
 const ctx = {
-	cwd: dir, mode: "tui", isIdle: () => true, model: fakeModelGlm,
-	modelRegistry: { find: (provider, id) => {
-		if (id === "gpt-5.4-mini") return fakeModelGpt;
-		if (id === "claude-sonnet-4") return fakeModelClaude;
-		if (id === "glm-5.1") return fakeModelGlm;
-		return undefined;
-	} },
+	cwd: dir,
+	mode: "tui",
+	isIdle: () => true,
+	model: fakeModelGlm,
+	modelRegistry: {
+		find: (provider, id) => {
+			if (id === "gpt-5.4-mini") return fakeModelGpt;
+			if (id === "claude-sonnet-4") return fakeModelClaude;
+			if (id === "glm-5.1") return fakeModelGlm;
+			return undefined;
+		},
+	},
 };
 
 // --- helpers ---
 async function countTraceEvents(name) {
 	try {
 		const raw = await readFile(p.events, "utf8");
-		return raw.split("\n").filter(Boolean).filter((l) => {
-			try { return JSON.parse(l).event === name; } catch { return false; }
-		}).length;
-	} catch { return 0; }
+		return raw
+			.split("\n")
+			.filter(Boolean)
+			.filter((l) => {
+				try {
+					return JSON.parse(l).event === name;
+				} catch {
+					return false;
+				}
+			}).length;
+	} catch {
+		return 0;
+	}
 }
 async function gatedCounts() {
 	const raw = await readFile(p.events, "utf8");
-	return raw.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } })
-		.filter((o) => o?.event === "pool.swap_gated_by_engine_retry").map((o) => o.count);
+	return raw
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter((o) => o?.event === "pool.swap_gated_by_engine_retry")
+		.map((o) => o.count);
 }
 
 async function freshSession(agentId = `worker-${Math.random().toString(36).slice(2, 8)}`) {
@@ -109,10 +166,21 @@ async function freshSession(agentId = `worker-${Math.random().toString(36).slice
 
 const turnEnd = () => handlers["turn_end"][0];
 async function errTurn(i, errorMessage, model = fakeModelGlm) {
-	await turnEnd()({ type: "turn_end", turnIndex: 300 + i, message: {
-		role: "assistant", model: model.id, provider: model.provider,
-		stopReason: "error", errorMessage,
-	}, toolResults: [] }, { ...ctx, model });
+	await turnEnd()(
+		{
+			type: "turn_end",
+			turnIndex: 300 + i,
+			message: {
+				role: "assistant",
+				model: model.id,
+				provider: model.provider,
+				stopReason: "error",
+				errorMessage,
+			},
+			toolResults: [],
+		},
+		{ ...ctx, model },
+	);
 }
 
 registerSwarmHooks(fakePi);
@@ -123,9 +191,16 @@ registerSwarmHooks(fakePi);
 // Immediate-bench policy (quota/auth) and lastBenchReason="quota" depend on this.
 {
 	ok("F0: ccs-style live body -> quota", classifyProviderError(quotaBody(9136)) === "quota", classifyProviderError(quotaBody(9136)));
-	ok("F0: openai-style live body -> quota", classifyProviderError(quotaBodyOpenAI(9136)) === "quota", classifyProviderError(quotaBodyOpenAI(9136)));
+	ok(
+		"F0: openai-style live body -> quota",
+		classifyProviderError(quotaBodyOpenAI(9136)) === "quota",
+		classifyProviderError(quotaBodyOpenAI(9136)),
+	);
 	ok("F0: plain 429 rate limit stays rate_limit", classifyProviderError("429 Too Many Requests: rate limit exceeded") === "rate_limit");
-	ok("F0: exceeded-quota prose stays quota", classifyProviderError("Error 429: You exceeded your current quota, please check your plan and billing details") === "quota");
+	ok(
+		"F0: exceeded-quota prose stays quota",
+		classifyProviderError("Error 429: You exceeded your current quota, please check your plan and billing details") === "quota",
+	);
 }
 
 // =============================================================
@@ -138,7 +213,11 @@ registerSwarmHooks(fakePi);
 	await freshSession();
 	await errTurn(1, quotaBody(11508));
 	await errTurn(2, quotaBody(11504));
-	ok("F1: counts escalate (1,2) across mutating bodies — NOT pinned at 1", JSON.stringify(await gatedCounts()) === "[1,2]", JSON.stringify(await gatedCounts()));
+	ok(
+		"F1: counts escalate (1,2) across mutating bodies — NOT pinned at 1",
+		JSON.stringify(await gatedCounts()) === "[1,2]",
+		JSON.stringify(await gatedCounts()),
+	);
 	await errTurn(3, quotaBody(11499));
 	ok("F1: third strike exhausts and swaps", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
 	ok("F1: swap left the dead slot", setModelCalls[0] !== "zai-coding-cn/glm-5.1", `to=${setModelCalls[0]}`);
@@ -150,7 +229,11 @@ registerSwarmHooks(fakePi);
 	const glm = ps.slots.find((s) => s.model === "glm-5.1");
 	ok("F1: quota slot benched (in cooldown)", Boolean(glm.inCooldown), JSON.stringify(glm.health));
 	ok("F1: benched with lastBenchReason=quota", glm.health?.lastBenchReason === "quota", `reason=${glm.health?.lastBenchReason}`);
-	ok("F1: [PI-SWARM MODEL POOL] notify sent", sentMessages.some((s) => /MODEL POOL/.test(s.m.content) && /quota/.test(s.m.content)), JSON.stringify(sentMessages.map((s) => s.m.content?.slice(0, 60))));
+	ok(
+		"F1: [PI-SWARM MODEL POOL] notify sent",
+		sentMessages.some((s) => /MODEL POOL/.test(s.m.content) && /quota/.test(s.m.content)),
+		JSON.stringify(sentMessages.map((s) => s.m.content?.slice(0, 60))),
+	);
 }
 
 // =============================================================
@@ -163,7 +246,11 @@ registerSwarmHooks(fakePi);
 	await freshSession();
 	await errTurn(1, "fetch failed: ECONNREFUSED");
 	await errTurn(2, quotaBody(9136));
-	ok("F2: two gated strikes, no swap", setModelCalls.length === 0 && (await gatedCounts()).length === 2, `gated=${JSON.stringify(await gatedCounts())}`);
+	ok(
+		"F2: two gated strikes, no swap",
+		setModelCalls.length === 0 && (await gatedCounts()).length === 2,
+		`gated=${JSON.stringify(await gatedCounts())}`,
+	);
 	ok("F2: no exhausted trace", (await countTraceEvents("pool.engine_retry_exhausted")) === 0);
 }
 
@@ -175,7 +262,11 @@ registerSwarmHooks(fakePi);
 	await freshSession();
 	await errTurn(1, quotaBody(9136), fakeModelGlm);
 	await errTurn(2, quotaBodyOpenAI(9136), fakeModelGpt);
-	ok("F3: two gated strikes across slots, no swap", setModelCalls.length === 0 && (await gatedCounts()).length === 2, `gated=${JSON.stringify(await gatedCounts())}`);
+	ok(
+		"F3: two gated strikes across slots, no swap",
+		setModelCalls.length === 0 && (await gatedCounts()).length === 2,
+		`gated=${JSON.stringify(await gatedCounts())}`,
+	);
 	ok("F3: no exhausted trace", (await countTraceEvents("pool.engine_retry_exhausted")) === 0);
 }
 
@@ -188,10 +279,21 @@ registerSwarmHooks(fakePi);
 	await freshSession();
 	await errTurn(1, quotaBody(9136));
 	await errTurn(2, quotaBody(9133));
-	await turnEnd()({ type: "turn_end", turnIndex: 400, message: {
-		role: "assistant", model: "glm-5.1", provider: "zai-coding-cn",
-		stopReason: "stop", errorMessage: undefined,
-	}, toolResults: [] }, { ...ctx, model: fakeModelGlm });
+	await turnEnd()(
+		{
+			type: "turn_end",
+			turnIndex: 400,
+			message: {
+				role: "assistant",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				stopReason: "stop",
+				errorMessage: undefined,
+			},
+			toolResults: [],
+		},
+		{ ...ctx, model: fakeModelGlm },
+	);
 	ok("F4: recovered trace fired", (await countTraceEvents("pool.engine_retry_recovered")) === 1);
 	await errTurn(3, quotaBody(9128));
 	await errTurn(4, quotaBody(9120));

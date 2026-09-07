@@ -69,10 +69,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, "..", "src");
 
-const {
-	pumpRootMailbox,
-	evaluateIdleGoalNudgeLocked,
-} = await import(join(srcDir, "reconcile.ts"));
+const { pumpRootMailbox, evaluateIdleGoalNudgeLocked } = await import(join(srcDir, "reconcile.ts"));
 
 const { paths, withLock, readState, writeState } = await import(join(srcDir, "state.ts"));
 const { ensureRoot, heartbeatRootLeader } = await import(join(srcDir, "identity.ts"));
@@ -83,10 +80,16 @@ const { trace } = await import(join(srcDir, "state.ts"));
 // Test harness
 // ============================================================================
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, info) => {
-	if (cond) { pass++; console.log("  ok  ", name); }
-	else { fail++; console.error("  FAIL", name, info ?? ""); }
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
 };
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
@@ -104,14 +107,34 @@ function readEvents(scratchDir) {
 	const p = join(scratchDir, ".pi/swarm/traces/events.jsonl");
 	if (!existsSync(p)) return [];
 	const txt = readFileSync(p, "utf8").trim();
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 
 function readRootMailbox(scratchDir) {
 	const p = join(scratchDir, ".pi/swarm/mailboxes/root.jsonl");
 	if (!existsSync(p)) return [];
 	const txt = readFileSync(p, "utf8").trim();
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 
 function makePiMockWithCounters(opts = {}) {
@@ -119,9 +142,15 @@ function makePiMockWithCounters(opts = {}) {
 	const pi = {
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
-		sendMessage: (m, _opts) => { sendMessages.push({ id: m?.details?.id, m }); },
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		sendMessage: (m, _opts) => {
+			sendMessages.push({ id: m?.details?.id, m });
+		},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 	return { pi, sendMessages };
 }
@@ -153,9 +182,7 @@ async function seedR14Shape({
 	// about the vacuous predicate (Fix A territory). The pre-fix bug classifies a
 	// settled-but-alive + stale heartbeat as vacuous; Config F seeds a FRESH heartbeat
 	// so the worker is non-vacuous pre-fix AND post-fix.
-	const workerTs = freshHeartbeat
-		? new Date(nowMs - 1000).toISOString()
-		: new Date(nowMs - 15 * 60_000).toISOString();
+	const workerTs = freshHeartbeat ? new Date(nowMs - 1000).toISOString() : new Date(nowMs - 15 * 60_000).toISOString();
 
 	const agents = {
 		"worker-1": {
@@ -323,9 +350,15 @@ console.log("\n[R14-S1] Config A — settled-but-alive pool (3 alive workers, st
 	const pi = {
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
-		sendMessage: (m) => { calls.push({ id: m?.details?.id }); },
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		sendMessage: (m) => {
+			calls.push({ id: m?.details?.id });
+		},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 
 	const nowMs = Date.now();
@@ -346,13 +379,19 @@ console.log("\n[R14-S1] Config A — settled-but-alive pool (3 alive workers, st
 		await writeState(p, st);
 	});
 
-	ok("R14-S1 [GREEN post-fix-A] idleAgentsCount === 3 (Fix A: settled-but-alive workers counted via tmuxAlive===true fallback)",
-		idleAgentsCount === 3, `got ${idleAgentsCount}`);
+	ok(
+		"R14-S1 [GREEN post-fix-A] idleAgentsCount === 3 (Fix A: settled-but-alive workers counted via tmuxAlive===true fallback)",
+		idleAgentsCount === 3,
+		`got ${idleAgentsCount}`,
+	);
 
 	const events = readEvents(s1Scratch);
 	const heldTraces = events.filter((e) => e.event === "goal.nudge.held_no_live_workers");
-	ok("R14-S1 [GREEN post-fix-A] heldNoLiveWorkersTraceCount === 0 (vacuous=false; the normal goal-nudge path resumes)",
-		heldTraces.length === 0, `got ${heldTraces.length}`);
+	ok(
+		"R14-S1 [GREEN post-fix-A] heldNoLiveWorkersTraceCount === 0 (vacuous=false; the normal goal-nudge path resumes)",
+		heldTraces.length === 0,
+		`got ${heldTraces.length}`,
+	);
 
 	// GREEN post-fix expectation: idleAgentsCount === 3 (Fix A: settled-but-alive
 	// workers counted via tmuxAlive===true fallback). vacuous=false; the normal
@@ -377,8 +416,12 @@ console.log("\n[R14-S2] Config B — 12-tick stable genuinely-vacuous pool (3 de
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
 		sendMessage: () => {},
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 
 	const tickIntervalMs = 5000;
@@ -406,19 +449,26 @@ console.log("\n[R14-S2] Config B — 12-tick stable genuinely-vacuous pool (3 de
 
 	const events = readEvents(s2Scratch);
 	heldTraceCount = events.filter((e) => e.event === "goal.nudge.held_no_live_workers").length;
-	const escalationTraces = events.filter((e) =>
-		e.event === "goal.escalation.pool_empty" || e.event === "message.deliver.mailbox_only"
-	);
+	const escalationTraces = events.filter((e) => e.event === "goal.escalation.pool_empty" || e.event === "message.deliver.mailbox_only");
 	escalationSendCount = escalationTraces.filter((e) => e.event === "goal.escalation.pool_empty").length;
 
-	ok("R14-S2 [GREEN post-fix-B] heldNoLiveWorkersTraceCount === 1 (once-per-transition dedupe)",
-		heldTraceCount === 1, `got ${heldTraceCount}`);
+	ok(
+		"R14-S2 [GREEN post-fix-B] heldNoLiveWorkersTraceCount === 1 (once-per-transition dedupe)",
+		heldTraceCount === 1,
+		`got ${heldTraceCount}`,
+	);
 
-	ok("R14-S2 [GREEN post-fix-C] escalationSendCount === 1 (one bounded nudge per cooldown)",
-		escalationSendCount === 1, `got ${escalationSendCount}`);
+	ok(
+		"R14-S2 [GREEN post-fix-C] escalationSendCount === 1 (one bounded nudge per cooldown)",
+		escalationSendCount === 1,
+		`got ${escalationSendCount}`,
+	);
 
-	ok("R14-S2 [GREEN post-fix-C] mailboxAppendCount === 1 (durable escalation append)",
-		mailboxAppendCount === 1, `got ${mailboxAppendCount}`);
+	ok(
+		"R14-S2 [GREEN post-fix-C] mailboxAppendCount === 1 (durable escalation append)",
+		mailboxAppendCount === 1,
+		`got ${mailboxAppendCount}`,
+	);
 }
 
 // ============================================================================
@@ -438,8 +488,12 @@ console.log("\n[R14-S3] Config C — vacuous → non-vacuous → vacuous → vac
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
 		sendMessage: () => {},
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 
 	const startMs = Date.now();
@@ -486,8 +540,11 @@ console.log("\n[R14-S3] Config C — vacuous → non-vacuous → vacuous → vac
 	const heldTraces = events.filter((e) => e.event === "goal.nudge.held_no_live_workers");
 	// RED pre-fix: 3 (ticks 1, 3, 4 — fires every tick of vacuous).
 	// GREEN post-fix: 2 (ticks 1 and 3 only — once per false→true transition; tick 2 non-vacuous clears lastWasVacuous; tick 4 re-fires nothing).
-	ok("R14-S3 [GREEN post-fix-B] heldNoLiveWorkersTraceCount === 2 (one per false→true transition; tick 4 must NOT re-fire)",
-		heldTraces.length === 2, `got ${heldTraces.length}`);
+	ok(
+		"R14-S3 [GREEN post-fix-B] heldNoLiveWorkersTraceCount === 2 (one per false→true transition; tick 4 must NOT re-fire)",
+		heldTraces.length === 2,
+		`got ${heldTraces.length}`,
+	);
 }
 
 // ============================================================================
@@ -507,8 +564,12 @@ console.log("\n[R14-S4] Config D — escalation cooldown bounded (12 ticks, genu
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
 		sendMessage: () => {},
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 
 	const startMs = Date.now();
@@ -524,14 +585,19 @@ console.log("\n[R14-S4] Config D — escalation cooldown bounded (12 ticks, genu
 
 	const events = readEvents(s4Scratch);
 	escalationSendCount = events.filter((e) => e.event === "goal.escalation.pool_empty").length;
-	ok("R14-S4 [GREEN post-fix] escalationSendCount === 1 (one bounded nudge per cooldown)",
-		escalationSendCount === 1, `got ${escalationSendCount}`);
+	ok(
+		"R14-S4 [GREEN post-fix] escalationSendCount === 1 (one bounded nudge per cooldown)",
+		escalationSendCount === 1,
+		`got ${escalationSendCount}`,
+	);
 
 	const mailbox = readRootMailbox(s4Scratch);
 	const highPriorityEscalations = mailbox.filter((m) => m.priority === "high");
-	ok("R14-S4 mailbox durable append === 1 with priority=high",
+	ok(
+		"R14-S4 mailbox durable append === 1 with priority=high",
 		highPriorityEscalations.length === 1,
-		`got ${highPriorityEscalations.length} (mailbox total=${mailbox.length})`);
+		`got ${highPriorityEscalations.length} (mailbox total=${mailbox.length})`,
+	);
 }
 
 // ============================================================================
@@ -557,8 +623,12 @@ console.log("\n[R14-S5] Config F — active pool retains existing suppression (n
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
 		sendMessage: () => {},
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 
 	const startMs = Date.now();
@@ -573,16 +643,25 @@ console.log("\n[R14-S5] Config F — active pool retains existing suppression (n
 
 	const events = readEvents(s5Scratch);
 	const heldTraces = events.filter((e) => e.event === "goal.nudge.held_no_live_workers");
-	ok("R14-S5 heldNoLiveWorkersTraceCount === 0 (active pool: vacuous=false, no held trace)",
-		heldTraces.length === 0, `got ${heldTraces.length}`);
+	ok(
+		"R14-S5 heldNoLiveWorkersTraceCount === 0 (active pool: vacuous=false, no held trace)",
+		heldTraces.length === 0,
+		`got ${heldTraces.length}`,
+	);
 
 	const suppressedTraces = events.filter((e) => e.event === "goal.nudge.suppressed_by_assignment_in_flight");
-	ok("R14-S5 active-task suppression unchanged (>=1 suppressed trace; idle-pointer shape)",
-		suppressedTraces.length >= 1, `got ${suppressedTraces.length}`);
+	ok(
+		"R14-S5 active-task suppression unchanged (>=1 suppressed trace; idle-pointer shape)",
+		suppressedTraces.length >= 1,
+		`got ${suppressedTraces.length}`,
+	);
 
 	const escalationTraces = events.filter((e) => e.event === "goal.escalation.pool_empty");
-	ok("R14-S5 escalationSendCount === 0 (active task suppresses before vacuous branch)",
-		escalationTraces.length === 0, `got ${escalationTraces.length}`);
+	ok(
+		"R14-S5 escalationSendCount === 0 (active task suppresses before vacuous branch)",
+		escalationTraces.length === 0,
+		`got ${escalationTraces.length}`,
+	);
 }
 
 // ============================================================================
@@ -602,8 +681,12 @@ console.log("\n[R14-S6] Config E — explicit goal clear stops escalation mid-co
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
 		sendMessage: () => {},
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 
 	const startMs = Date.now();
@@ -639,17 +722,22 @@ console.log("\n[R14-S6] Config E — explicit goal clear stops escalation mid-co
 
 	const eventsAfter = readEvents(s6Scratch);
 	const escalationAfter = eventsAfter.filter((e) => e.event === "goal.escalation.pool_empty").length;
-	ok("R14-S6 escalationSendCount unchanged after goal clear (still 1)",
-		escalationAfter === escalationBefore, `before=${escalationBefore} after=${escalationAfter}`);
-	ok("R14-S6 no additional escalations after goal clear",
-		escalationAfter <= 1, `got ${escalationAfter}`);
+	ok(
+		"R14-S6 escalationSendCount unchanged after goal clear (still 1)",
+		escalationAfter === escalationBefore,
+		`before=${escalationBefore} after=${escalationAfter}`,
+	);
+	ok("R14-S6 no additional escalations after goal clear", escalationAfter <= 1, `got ${escalationAfter}`);
 
 	// R14-S6 structural proof: heldAfter.length === 1 (asserted below) is the empirical
 	// evidence that the no_goal guard (reconcile.ts `if (!goal) return`) fired on every
 	// post-clear tick — the vacuous branch was never re-entered, so no new held traces.
 	const heldAfter = eventsAfter.filter((e) => e.event === "goal.nudge.held_no_live_workers");
-	ok("R14-S6 heldNoLiveWorkersTraceCount UNCHANGED after clear (the goal evaluator bails at the no_goal guard, not at the vacuous branch)",
-		heldAfter.length === 1, `got ${heldAfter.length} (expect 1: pre-clear only)`);
+	ok(
+		"R14-S6 heldNoLiveWorkersTraceCount UNCHANGED after clear (the goal evaluator bails at the no_goal guard, not at the vacuous branch)",
+		heldAfter.length === 1,
+		`got ${heldAfter.length} (expect 1: pre-clear only)`,
+	);
 }
 
 // ============================================================================
@@ -660,7 +748,9 @@ process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 
 console.log(`\nR14-GOAL-EMPTY-POOL-ESCALATION ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 if (fail > 0) {
-	console.error("\n  ↳ RED regression reproduced — the goal-pump empty-pool deadlock is confirmed across six scenarios. Fix B + C + A (in that order) per plan §5 will land the fix.");
+	console.error(
+		"\n  ↳ RED regression reproduced — the goal-pump empty-pool deadlock is confirmed across six scenarios. Fix B + C + A (in that order) per plan §5 will land the fix.",
+	);
 	process.exit(1);
 }
 process.exit(0);

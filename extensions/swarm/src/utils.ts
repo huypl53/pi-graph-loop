@@ -1,5 +1,13 @@
 // === swarm/utils.ts — auto-extracted from index.ts (verbatim bodies) ===
-import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	defineTool,
+	CONFIG_DIR_NAME,
+	truncateHead,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { SwarmAgent, TaskNode } from "./types.ts";
@@ -14,7 +22,11 @@ export function sleep(ms: number) {
 }
 
 export function safeId(input: string) {
-	const out = input.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+	const out = input
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, "-")
+		.replace(/^-+|-+$/g, "");
 	return out || `agent-${randomUUID().slice(0, 8)}`;
 }
 

@@ -16,16 +16,63 @@ mkdirSync(p.traces, { recursive: true });
 mkdirSync(p.tmuxTraces, { recursive: true });
 
 let fail = 0;
-const ok = (name, cond) => { if (cond) console.log(`  ok  ${name}`); else { fail++; console.error(`  FAIL ${name}`); } };
+const ok = (name, cond) => {
+	if (cond) console.log(`  ok  ${name}`);
+	else {
+		fail++;
+		console.error(`  FAIL ${name}`);
+	}
+};
 
 const ts = (offsetMs) => new Date(Date.UTC(2026, 8, 1, 0, 0, 0) + offsetMs).toISOString();
 
 const st = await readState(p, scratch);
 st.messages = {
-  m1: { id: "m1", from: "root", to: "worker", status: "queued", createdAt: ts(0), updatedAt: ts(0), attempts: 0, requiresAck: true, queuedAt: ts(0), idempotencyKey: "k1" },
-  m2: { id: "m2", from: "root", to: "worker", status: "dead_letter", createdAt: ts(-1000), updatedAt: ts(-1000), attempts: 2, requiresAck: true, failedAt: ts(-1000) },
-  m3: { id: "m3", from: "root", to: "worker", status: "acked", createdAt: ts(-2000), updatedAt: ts(-2000), attempts: 1, requiresAck: true, ackedAt: ts(-2000), lastAck: { by: "worker", status: "done", at: ts(-2000) } },
-  m4: { id: "m4", from: "root", to: "worker", status: "injected", createdAt: ts(-60 * 60 * 1000), updatedAt: ts(-60 * 60 * 1000), attempts: 1, requiresAck: true },
+	m1: {
+		id: "m1",
+		from: "root",
+		to: "worker",
+		status: "queued",
+		createdAt: ts(0),
+		updatedAt: ts(0),
+		attempts: 0,
+		requiresAck: true,
+		queuedAt: ts(0),
+		idempotencyKey: "k1",
+	},
+	m2: {
+		id: "m2",
+		from: "root",
+		to: "worker",
+		status: "dead_letter",
+		createdAt: ts(-1000),
+		updatedAt: ts(-1000),
+		attempts: 2,
+		requiresAck: true,
+		failedAt: ts(-1000),
+	},
+	m3: {
+		id: "m3",
+		from: "root",
+		to: "worker",
+		status: "acked",
+		createdAt: ts(-2000),
+		updatedAt: ts(-2000),
+		attempts: 1,
+		requiresAck: true,
+		ackedAt: ts(-2000),
+		lastAck: { by: "worker", status: "done", at: ts(-2000) },
+	},
+	m4: {
+		id: "m4",
+		from: "root",
+		to: "worker",
+		status: "injected",
+		createdAt: ts(-60 * 60 * 1000),
+		updatedAt: ts(-60 * 60 * 1000),
+		attempts: 1,
+		requiresAck: true,
+	},
 };
 await writeState(p, st);
 
@@ -33,24 +80,24 @@ const taskId = "task-audit-1";
 const tp = taskPaths(p, taskId);
 mkdirSync(tp.root, { recursive: true });
 const task = {
-  version: 1,
-  taskId,
-  title: "Audit task",
-  goal: "Exercise audit invariants",
-  workflow: "feature-dev",
-  allowedFiles: [],
-  acceptanceCriteria: [],
-  validationCommands: [],
-  start: "commit",
-  nodes: { commit: { status: "done", role: "root", dependsOn: [], messageIds: [] } },
-  evidence: { commit: { status: "unverified", baseline: "b", head: "h" } },
-  edges: [],
-  gates: { gate1: { status: "waived" } },
-  currentNodes: [],
-  sharedContext: { summary: "", decisions: [], risks: [], openQuestions: [] },
-  createdAt: ts(0),
-  updatedAt: ts(0),
-  status: "done",
+	version: 1,
+	taskId,
+	title: "Audit task",
+	goal: "Exercise audit invariants",
+	workflow: "feature-dev",
+	allowedFiles: [],
+	acceptanceCriteria: [],
+	validationCommands: [],
+	start: "commit",
+	nodes: { commit: { status: "done", role: "root", dependsOn: [], messageIds: [] } },
+	evidence: { commit: { status: "unverified", baseline: "b", head: "h" } },
+	edges: [],
+	gates: { gate1: { status: "waived" } },
+	currentNodes: [],
+	sharedContext: { summary: "", decisions: [], risks: [], openQuestions: [] },
+	createdAt: ts(0),
+	updatedAt: ts(0),
+	status: "done",
 };
 await writeTaskState(tp, task);
 
@@ -70,26 +117,85 @@ appendFileSync(p.events, `${JSON.stringify({ ts: ts(120), event: "mailbox.root_p
 ok("event filter matches prefix", (await readAuditEvents(p, { event: "message.", limit: 2 })).events.length === 2);
 ok("event filter returns all matches under limit", (await readAuditEvents(p, { event: "goal.nudge.", limit: 10 })).events.length === 4);
 ok("audit duration is measured", (await readAuditEvents(p, { event: "message.", limit: 1 })).durationMs >= 0);
-ok("event filter matches agent/task", (await readAuditEvents(p, { task: taskId, limit: 5 })).events.some((e) => e.detail.taskId === taskId));
+ok(
+	"event filter matches agent/task",
+	(await readAuditEvents(p, { task: taskId, limit: 5 })).events.some((e) => e.detail.taskId === taskId),
+);
 
 const timeline = await auditTimeline(p, "m1", {});
-ok("timeline contains ordered stages", timeline.timeline.stages.map((s) => s.stage).join(",").includes("enqueue") && timeline.timeline.stages.map((s) => s.stage).includes("response_verified"));
+ok(
+	"timeline contains ordered stages",
+	timeline.timeline.stages
+		.map((s) => s.stage)
+		.join(",")
+		.includes("enqueue") && timeline.timeline.stages.map((s) => s.stage).includes("response_verified"),
+);
 ok("timeline duration is measured", timeline.durationMs >= 0);
 
 const probes = __test;
-ok("probe P1 flags old actionable", probes.probeP1(st, 1).some((r) => r.messageId === "m4"));
-ok("probe P2 lists dead_letter", probes.probeP2(st).some((r) => r.messageId === "m2"));
-ok("probe P3 coalesces epochs", probes.probeP3([{ event: "mailbox.root_pump_stuck_escalated", ts: ts(1), oldestWaitMs: 1 }, { event: "mailbox.root_pump_stuck_escalated", ts: ts(2), oldestWaitMs: 3 }]).length === 1);
-ok("probe P4 flags burst", probes.probeP4([{ event: "goal.nudge.emitted", ts: ts(1), detail: { goalId: "goal-1" } }, { event: "goal.nudge.emitted", ts: ts(2), detail: { goalId: "goal-1" } }, { event: "goal.nudge.emitted", ts: ts(3), detail: { goalId: "goal-1" } }, { event: "goal.nudge.emitted", ts: ts(4), detail: { goalId: "goal-1" } }]).length === 1);
-ok("probe P4 negative 2 in window stays quiet", probes.probeP4([{ event: "goal.nudge.emitted", ts: ts(1), detail: { goalId: "goal-2" } }, { event: "goal.nudge.emitted", ts: ts(2), detail: { goalId: "goal-2" } }]).length === 0);
-ok("probe P4 negative 3 spread beyond window stays quiet", probes.probeP4([{ event: "goal.nudge.emitted", ts: ts(1), detail: { goalId: "goal-3" } }, { event: "goal.nudge.emitted", ts: ts(61_001), detail: { goalId: "goal-3" } }, { event: "goal.nudge.emitted", ts: ts(122_002), detail: { goalId: "goal-3" } }]).length === 0);
+ok(
+	"probe P1 flags old actionable",
+	probes.probeP1(st, 1).some((r) => r.messageId === "m4"),
+);
+ok(
+	"probe P2 lists dead_letter",
+	probes.probeP2(st).some((r) => r.messageId === "m2"),
+);
+ok(
+	"probe P3 coalesces epochs",
+	probes.probeP3([
+		{ event: "mailbox.root_pump_stuck_escalated", ts: ts(1), oldestWaitMs: 1 },
+		{ event: "mailbox.root_pump_stuck_escalated", ts: ts(2), oldestWaitMs: 3 },
+	]).length === 1,
+);
+ok(
+	"probe P4 flags burst",
+	probes.probeP4([
+		{ event: "goal.nudge.emitted", ts: ts(1), detail: { goalId: "goal-1" } },
+		{ event: "goal.nudge.emitted", ts: ts(2), detail: { goalId: "goal-1" } },
+		{ event: "goal.nudge.emitted", ts: ts(3), detail: { goalId: "goal-1" } },
+		{ event: "goal.nudge.emitted", ts: ts(4), detail: { goalId: "goal-1" } },
+	]).length === 1,
+);
+ok(
+	"probe P4 negative 2 in window stays quiet",
+	probes.probeP4([
+		{ event: "goal.nudge.emitted", ts: ts(1), detail: { goalId: "goal-2" } },
+		{ event: "goal.nudge.emitted", ts: ts(2), detail: { goalId: "goal-2" } },
+	]).length === 0,
+);
+ok(
+	"probe P4 negative 3 spread beyond window stays quiet",
+	probes.probeP4([
+		{ event: "goal.nudge.emitted", ts: ts(1), detail: { goalId: "goal-3" } },
+		{ event: "goal.nudge.emitted", ts: ts(61_001), detail: { goalId: "goal-3" } },
+		{ event: "goal.nudge.emitted", ts: ts(122_002), detail: { goalId: "goal-3" } },
+	]).length === 0,
+);
 
 const inv = await checkInvariants(p, st);
-ok("invariants flag seeded violations", inv.invariants.some((i) => i.violated && i.invariant === "INV1") && inv.invariants.some((i) => i.violated && i.invariant === "INV2") && inv.invariants.some((i) => i.violated && i.invariant === "INV3"));
+ok(
+	"invariants flag seeded violations",
+	inv.invariants.some((i) => i.violated && i.invariant === "INV1") &&
+		inv.invariants.some((i) => i.violated && i.invariant === "INV2") &&
+		inv.invariants.some((i) => i.violated && i.invariant === "INV3"),
+);
 ok("invariants duration is measured", inv.durationMs >= 0);
 rmSync(tp.root, { recursive: true, force: true });
 const clean = await readState(p, scratch);
-clean.messages = { m1: { id: "m1", from: "root", to: "worker", status: "dead_letter", createdAt: ts(0), updatedAt: ts(0), attempts: 1, requiresAck: true, failedAt: ts(0) } };
+clean.messages = {
+	m1: {
+		id: "m1",
+		from: "root",
+		to: "worker",
+		status: "dead_letter",
+		createdAt: ts(0),
+		updatedAt: ts(0),
+		attempts: 1,
+		requiresAck: true,
+		failedAt: ts(0),
+	},
+};
 await writeState(p, clean);
 const invClean = await checkInvariants(p, clean);
 ok("invariants clean state has zero violations", invClean.counts.violations === 0);
@@ -112,5 +218,8 @@ const rollup2 = JSON.parse(readFileSync(join(p.traces, "events.rollup.json"), "u
 ok("rollup is cumulative", Array.isArray(rollup2.generations) && rollup2.generations.length === 2);
 
 rmSync(scratch, { recursive: true, force: true });
-if (fail) { console.error(`\nAUDIT FAIL (${fail})`); process.exit(1); }
+if (fail) {
+	console.error(`\nAUDIT FAIL (${fail})`);
+	process.exit(1);
+}
 console.log("\nAUDIT PASS");

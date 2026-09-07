@@ -40,7 +40,9 @@ process.env.PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED ||= "3";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs } = await import(join(here, "..", "src", "state.ts"));
-const { evaluateIdleGoalNudgeLocked, evaluateTaskGraphStallNudgeLocked, updateIdleEpochLocked } = await import(join(here, "..", "src", "reconcile.ts"));
+const { evaluateIdleGoalNudgeLocked, evaluateTaskGraphStallNudgeLocked, updateIdleEpochLocked } = await import(
+	join(here, "..", "src", "reconcile.ts")
+);
 const { ensureRoot } = await import(join(here, "..", "src", "identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "..", "src", "mailbox.ts"));
 const { findIdempotentMessage } = await import(join(here, "..", "src", "mailbox.ts"));
@@ -50,14 +52,35 @@ const SAVED_ORCH = process.env.PI_SWARM_IS_ROOT;
 delete process.env.PI_SWARM_AGENT_ID;
 process.env.PI_SWARM_IS_ROOT = "1";
 
-let passed = 0, failed = 0;
-const ok = (n, c, info) => { if (c) { passed++; console.log("  ok  ", n); } else { failed++; console.error("  FAIL:", n, info ?? ""); } };
+let passed = 0,
+	failed = 0;
+const ok = (n, c, info) => {
+	if (c) {
+		passed++;
+		console.log("  ok  ", n);
+	} else {
+		failed++;
+		console.error("  FAIL:", n, info ?? "");
+	}
+};
 
 async function readEventsFile(p) {
 	try {
 		const raw = await readFile(p.events, "utf8");
-		return raw.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-	} catch { return []; }
+		return raw
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.filter(Boolean);
+	} catch {
+		return [];
+	}
 }
 async function countEvents(p, name) {
 	const events = await readEventsFile(p);
@@ -67,8 +90,20 @@ async function readMailboxMessages(p, agentId) {
 	try {
 		const path = join(p.mailboxes, `${agentId}.jsonl`);
 		const raw = await readFile(path, "utf8");
-		return raw.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-	} catch { return []; }
+		return raw
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.filter(Boolean);
+	} catch {
+		return [];
+	}
 }
 async function countMailboxGoalNudges(p) {
 	const msgs = await readMailboxMessages(p, "root");
@@ -81,14 +116,19 @@ const pi = {
 	registerCommand: () => {},
 	on: () => {},
 	setModel: async () => true,
-	sendMessage: (m, o) => { sentMessages.push({ m, o }); },
+	sendMessage: (m, o) => {
+		sentMessages.push({ m, o });
+	},
 	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 };
 
 async function buildScratchDir() {
 	const dir = await mkdtemp(join(tmpdir(), "r19-goal-graph-deadlock-"));
 	await mkdir(join(dir, ".pi"), { recursive: true });
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }),
+	);
 	process.chdir(dir);
 	const p = paths(dir);
 	await ensureDirs(p);
@@ -101,16 +141,38 @@ async function seedState(p, dir, overrides = {}) {
 	const now = Date.now();
 	const ts = new Date(now).toISOString();
 	st.agents["worker-a"] = {
-		id: "worker-a", role: "implementer", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		tmuxSession: st.tmuxSession, tmuxWindow: "worker-a", tmuxTarget: "sess:worker-a.0",
-		lastHeartbeatAt: ts, createdAt: ts, updatedAt: ts,
+		id: "worker-a",
+		role: "implementer",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: st.tmuxSession,
+		tmuxWindow: "worker-a",
+		tmuxTarget: "sess:worker-a.0",
+		lastHeartbeatAt: ts,
+		createdAt: ts,
+		updatedAt: ts,
 	};
 	st.agents["worker-b"] = {
-		id: "worker-b", role: "tester", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		tmuxSession: st.tmuxSession, tmuxWindow: "worker-b", tmuxTarget: "sess:worker-b.0",
-		lastHeartbeatAt: ts, createdAt: ts, updatedAt: ts,
+		id: "worker-b",
+		role: "tester",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: st.tmuxSession,
+		tmuxWindow: "worker-b",
+		tmuxTarget: "sess:worker-b.0",
+		lastHeartbeatAt: ts,
+		createdAt: ts,
+		updatedAt: ts,
 	};
 	// Ensure idleNudgeState is clean
 	delete st.idleNudgeState;
@@ -245,7 +307,7 @@ console.log("\n=== R19-S1: orphan on FAILED task (C-orphan) ===");
 	console.log("    consecutiveNoResolveNudges (C-R19-7):", st.goal?.consecutiveNoResolveNudges);
 	console.log("    nudgeSeq (C-R19-8):", st.goal?.nudgeSeq);
 	console.log("    nextGoalNudgeAt (C-R19-9):", st.idleNudgeState?.nextGoalNudgeAt ?? null);
-	console.log("    tick results:", results.map(r => `${r.tick}:${r.reason}`).join(", "));
+	console.log("    tick results:", results.map((r) => `${r.tick}:${r.reason}`).join(", "));
 
 	// RED: the plan says before the fix, the goal nudge is fully blocked.
 	// The test asserts RED values first. After the fix, it asserts GREEN.
@@ -266,7 +328,11 @@ console.log("\n=== R19-S1: orphan on FAILED task (C-orphan) ===");
 		ok("R19-S1: deferred_by_actionable_graph === 0 for terminal task (Fix B excludes it)", deferredCount === 0, `got ${deferredCount}`);
 		// C-R19-4: deliverMessageLocked to root with goal.idle_nudge body — counts via mailbox JSONL
 		ok("C-R19-4: deliverMessageLocked goal-nudge count >= 1 (GREEN)", deliveredGoalMessages >= 1, `got ${deliveredGoalMessages}`);
-		ok("R19-S1: consecutiveNoResolveNudges >= 1", (st.goal?.consecutiveNoResolveNudges ?? 0) >= 1, `got ${st.goal?.consecutiveNoResolveNudges}`);
+		ok(
+			"R19-S1: consecutiveNoResolveNudges >= 1",
+			(st.goal?.consecutiveNoResolveNudges ?? 0) >= 1,
+			`got ${st.goal?.consecutiveNoResolveNudges}`,
+		);
 		ok("R19-S1: nudgeSeq >= 1", (st.goal?.nudgeSeq ?? 0) >= 1, `got ${st.goal?.nudgeSeq}`);
 		// C-R19-2: deferred count is 0 for terminal task (Fix B excludes it entirely)
 		ok("C-R19-2: deferred_by_actionable_graph === 0 for terminal task (Fix B)", deferredCount === 0, `got ${deferredCount}`);
@@ -275,14 +341,20 @@ console.log("\n=== R19-S1: orphan on FAILED task (C-orphan) ===");
 		// C-R19-1: idle_nudge trace count >= 1
 		ok("C-R19-1: goal.idle_nudge trace count >= 1", idleNudgeCount >= 1, `got ${idleNudgeCount}`);
 		// C-R19-7: consecutiveNoResolveNudges incremented
-		ok("C-R19-7: consecutiveNoResolveNudges >= 1", (st.goal?.consecutiveNoResolveNudges ?? 0) >= 1, `got ${st.goal?.consecutiveNoResolveNudges}`);
+		ok(
+			"C-R19-7: consecutiveNoResolveNudges >= 1",
+			(st.goal?.consecutiveNoResolveNudges ?? 0) >= 1,
+			`got ${st.goal?.consecutiveNoResolveNudges}`,
+		);
 		// C-R19-8: nudgeSeq >= 1
 		ok("C-R19-8: nudgeSeq >= 1", (st.goal?.nudgeSeq ?? 0) >= 1, `got ${st.goal?.nudgeSeq}`);
 		// C-R19-9: nextGoalNudgeAt value is bounded (set at least once across the 6 ticks)
 		// Either idleNudgeState.nextGoalNudgeAt or lastGoalNudgeAt should be populated
-		ok("C-R19-9: nextGoalNudgeAt or lastGoalNudgeAt populated (bounded, not every tick)",
+		ok(
+			"C-R19-9: nextGoalNudgeAt or lastGoalNudgeAt populated (bounded, not every tick)",
 			Boolean(st.idleNudgeState?.nextGoalNudgeAt || st.idleNudgeState?.lastGoalNudgeAt),
-			`nextGoalNudgeAt=${st.idleNudgeState?.nextGoalNudgeAt} lastGoalNudgeAt=${st.idleNudgeState?.lastGoalNudgeAt}`);
+			`nextGoalNudgeAt=${st.idleNudgeState?.nextGoalNudgeAt} lastGoalNudgeAt=${st.idleNudgeState?.lastGoalNudgeAt}`,
+		);
 	}
 	await rm(dir, { recursive: true, force: true });
 }
@@ -307,7 +379,7 @@ console.log("\n=== R19-S2: orphan on LIVE in_progress task (C-live) ===");
 	console.log("    goal.nudge.suppressed_by_actionable_graph count:", suppressedCount);
 	console.log("    goal.nudge.deferred_by_actionable_graph count:", deferredCount);
 	console.log("    task.stall_nudge count:", stallNudgeCount);
-	console.log("    tick results:", results.map(r => `${r.tick}:${r.reason}`).join(", "));
+	console.log("    tick results:", results.map((r) => `${r.tick}:${r.reason}`).join(", "));
 
 	// For LIVE task: graph-stall should emit on first tick. Goal is deferred (not suppressed).
 	// After the fix: hasActionableGraphWork returns actionable:true for LIVE task, so the defer fires.
@@ -362,8 +434,8 @@ console.log("\n=== R19-S3: LIVE actionable — no double-fire (C-no-double-fire)
 	console.log("    goal.nudge.suppressed_by_actionable_graph:", suppressedCount);
 	console.log("    goal.nudge.deferred_by_actionable_graph:", deferredCount);
 	console.log("    task.stall_nudge count:", stallNudgeCount);
-	console.log("    phase1 results:", results1.map(r => `${r.tick}:${r.reason}`).join(", "));
-	console.log("    phase2 results:", results2.map(r => `${r.tick}:${r.reason}`).join(", "));
+	console.log("    phase1 results:", results1.map((r) => `${r.tick}:${r.reason}`).join(", "));
+	console.log("    phase2 results:", results2.map((r) => `${r.tick}:${r.reason}`).join(", "));
 
 	const isRedPhase = process.env.R19_RED_PHASE === "1";
 	if (isRedPhase) {
@@ -373,7 +445,11 @@ console.log("\n=== R19-S3: LIVE actionable — no double-fire (C-no-double-fire)
 		// R27 (2026-09-04): the graph/goal "never double-fire" contract is superseded — the
 		// goal floor is independent of graph state, so it fires while actionable work exists.
 		// (Co-existence with the graph-stall nudge family is accepted per user direction.)
-		ok("R19-S3: goal.idle_nudge >= 1 (R27: goal floor fires regardless of actionable work)", idleNudgeCount >= 1, `got ${idleNudgeCount}`);
+		ok(
+			"R19-S3: goal.idle_nudge >= 1 (R27: goal floor fires regardless of actionable work)",
+			idleNudgeCount >= 1,
+			`got ${idleNudgeCount}`,
+		);
 		ok("R19-S3: deferred count === 0 (R27: defer machinery removed)", deferredCount === 0, `got ${deferredCount}`);
 	}
 	await rm(dir, { recursive: true, force: true });
@@ -410,10 +486,13 @@ console.log("\n=== R19-S4: vacuous pool (no regression) ===");
 	console.log("    held_no_live_workers:", heldCount);
 	console.log("    escalation.pool_empty:", escalationCount);
 	console.log("    goal.idle_nudge:", idleNudgeCount);
-	console.log("    tick results:", results.map(r => `${r.tick}:${r.reason}`).join(", "));
+	console.log("    tick results:", results.map((r) => `${r.tick}:${r.reason}`).join(", "));
 
-	ok("R19-S4: vacuous branch unchanged — held or escalation fires", heldCount >= 1 || escalationCount >= 1,
-		`held=${heldCount} escalation=${escalationCount}`);
+	ok(
+		"R19-S4: vacuous branch unchanged — held or escalation fires",
+		heldCount >= 1 || escalationCount >= 1,
+		`held=${heldCount} escalation=${escalationCount}`,
+	);
 	ok("R19-S4: goal.idle_nudge === 0 (vacuous blocks)", idleNudgeCount === 0);
 	await rm(dir, { recursive: true, force: true });
 }
@@ -431,13 +510,16 @@ console.log("\n=== R19-S5: all-busy pool (no regression) ===");
 	const idleNudgeCount = await countEvents(p, "goal.idle_nudge");
 
 	console.log("  R19-S5 results:");
-	console.log("    tick results:", results.map(r => `${r.tick}:${r.reason}`).join(", "));
+	console.log("    tick results:", results.map((r) => `${r.tick}:${r.reason}`).join(", "));
 	console.log("    goal.idle_nudge:", idleNudgeCount);
 
 	ok("R19-S5: no goal emit while busy", idleNudgeCount === 0);
-	const nonEmitReasons = results.filter(r => r.reason === "agent_busy" || r.reason === "no_live_workers");
-	ok("R19-S5: pump returns agent_busy or no_live_workers", nonEmitReasons.length >= 1,
-		`reasons: ${results.map(r => r.reason).join(", ")}`);
+	const nonEmitReasons = results.filter((r) => r.reason === "agent_busy" || r.reason === "no_live_workers");
+	ok(
+		"R19-S5: pump returns agent_busy or no_live_workers",
+		nonEmitReasons.length >= 1,
+		`reasons: ${results.map((r) => r.reason).join(", ")}`,
+	);
 	await rm(dir, { recursive: true, force: true });
 }
 
@@ -446,7 +528,10 @@ console.log("\n=== R19-S6: active-task pool (no regression) ===");
 {
 	const { dir, p } = await buildScratchDir();
 	await seedState(p, dir, { workerWithAssignment: "task-r19-active" });
-	const task = makeTask("task-r19-active", { status: "in_progress", overrideNodes: { fix: { status: "assigned", assignee: "worker-a" } } });
+	const task = makeTask("task-r19-active", {
+		status: "in_progress",
+		overrideNodes: { fix: { status: "assigned", assignee: "worker-a" } },
+	});
 	await writeTask(p, task);
 	await writeFile(p.events, "");
 
@@ -459,12 +544,15 @@ console.log("\n=== R19-S6: active-task pool (no regression) ===");
 	console.log("    suppressed_by_active_task:", activeTaskCount);
 	console.log("    suppressed_by_assignment_in_flight:", inFlightCount);
 	console.log("    goal.idle_nudge:", idleNudgeCount);
-	console.log("    tick results:", results.map(r => `${r.tick}:${r.reason}`).join(", "));
+	console.log("    tick results:", results.map((r) => `${r.tick}:${r.reason}`).join(", "));
 
 	ok("R19-S6: active-task branch unchanged — no goal emit", idleNudgeCount === 0);
-	const hasActiveTaskReason = results.some(r => r.reason === "active_task" || r.reason === "assignment_in_flight");
-	ok("R19-S6: suppression via active_task or assignment_in_flight", hasActiveTaskReason,
-		`reasons: ${results.map(r => r.reason).join(", ")}`);
+	const hasActiveTaskReason = results.some((r) => r.reason === "active_task" || r.reason === "assignment_in_flight");
+	ok(
+		"R19-S6: suppression via active_task or assignment_in_flight",
+		hasActiveTaskReason,
+		`reasons: ${results.map((r) => r.reason).join(", ")}`,
+	);
 	await rm(dir, { recursive: true, force: true });
 }
 

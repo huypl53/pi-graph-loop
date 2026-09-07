@@ -66,7 +66,7 @@ function parseJsonLine(line: string, modelId: string, lineNo: number): unknown {
 }
 
 function validateEvent(event: unknown, modelId: string, lineNo: number): MockLLMFixtureEvent {
-		assertPlainObject(event, `event at line ${lineNo}`);
+	assertPlainObject(event, `event at line ${lineNo}`);
 	if (typeof event.type !== "string") {
 		throw new Error(`mock-llm invalid event.type at line ${lineNo}`);
 	}
@@ -78,7 +78,12 @@ function validateEvent(event: unknown, modelId: string, lineNo: number): MockLLM
 			if (event.chunks !== undefined && (!Array.isArray(event.chunks) || !event.chunks.every((chunk) => typeof chunk === "string"))) {
 				throw new Error(`mock-llm ${event.type} chunks must be string[] at line ${lineNo}`);
 			}
-			return { type: event.type, text: event.text, delayMs: validateDelayMs(event.delayMs, lineNo, `${modelId}.${event.type}`), chunks: event.chunks as string[] | undefined };
+			return {
+				type: event.type,
+				text: event.text,
+				delayMs: validateDelayMs(event.delayMs, lineNo, `${modelId}.${event.type}`),
+				chunks: event.chunks as string[] | undefined,
+			};
 		}
 		case "toolcall": {
 			if (typeof event.name !== "string") throw new Error(`mock-llm toolcall missing name at line ${lineNo}`);
@@ -100,7 +105,11 @@ function validateEvent(event: unknown, modelId: string, lineNo: number): MockLLM
 			if (event.until !== undefined && event.until !== "abort") {
 				throw new Error(`mock-llm hang.until must be abort at line ${lineNo}`);
 			}
-			return { type: "hang", delayMs: validateDelayMs(event.delayMs, lineNo, `${modelId}.hang`), until: event.until as "abort" | undefined };
+			return {
+				type: "hang",
+				delayMs: validateDelayMs(event.delayMs, lineNo, `${modelId}.hang`),
+				until: event.until as "abort" | undefined,
+			};
 		case "error":
 			if (event.kind !== "429" && event.kind !== "torn_json" && event.kind !== "abort") {
 				throw new Error(`mock-llm error.kind must be 429 | torn_json | abort at line ${lineNo}`);
@@ -161,7 +170,9 @@ export async function loadFixtureFile(modelId: string): Promise<MockLLMFixtureFi
 }
 
 export async function discoverFixtures(): Promise<MockLLMFixtureFile[]> {
-	const entries = (await readdir(FIXTURE_DIR, { withFileTypes: true })).filter((entry) => entry.isFile() && extname(entry.name) === ".jsonl");
+	const entries = (await readdir(FIXTURE_DIR, { withFileTypes: true })).filter(
+		(entry) => entry.isFile() && extname(entry.name) === ".jsonl",
+	);
 	entries.sort((a, b) => a.name.localeCompare(b.name));
 	const fixtures: MockLLMFixtureFile[] = [];
 	for (const entry of entries) {

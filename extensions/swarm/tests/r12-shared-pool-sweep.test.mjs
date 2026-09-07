@@ -43,17 +43,33 @@ const { paths, withLock, readState, writeState } = await import(join(here, "..",
 const scratch = await mkdtemp(join(tmpdir(), `swarm-r12-shared-pool-${process.pid}-${Date.now()}`));
 await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, info) => {
-	if (cond) { pass++; console.log("  ok  ", name); }
-	else { fail++; console.error("  FAIL", name, info ?? ""); }
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
 };
 
 // ===== scratch helpers =====
 async function readEvents() {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function clearEvents() {
 	await mkdir(join(scratch, ".pi/swarm/traces"), { recursive: true });
@@ -74,25 +90,58 @@ async function setupTaskJson(taskId, task) {
 function makeAgent(id, overrides = {}) {
 	const now = new Date().toISOString();
 	return {
-		id, role: id, roleKind: overrides.roleKind ?? "worker", roleKindExplicit: overrides.roleKind !== undefined,
-		capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		lastHeartbeatAt: now, lastSessionStartAt: now, lastAgentStartAt: now,
+		id,
+		role: id,
+		roleKind: overrides.roleKind ?? "worker",
+		roleKindExplicit: overrides.roleKind !== undefined,
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		lastHeartbeatAt: now,
+		lastSessionStartAt: now,
+		lastAgentStartAt: now,
 		pid: 1000,
-		tmuxSession: "r12", tmuxWindow: id, tmuxTarget: `r12:${id}.0`,
-		model: "glm-5.1", provider: "zai-coding-cn",
-		cwd: scratch, mailbox: `.pi/swarm/mailboxes/${id}.jsonl`,
-		createdAt: now, updatedAt: now,
+		tmuxSession: "r12",
+		tmuxWindow: id,
+		tmuxTarget: `r12:${id}.0`,
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: scratch,
+		mailbox: `.pi/swarm/mailboxes/${id}.jsonl`,
+		createdAt: now,
+		updatedAt: now,
 		...overrides,
 	};
 }
 function makeState(agents) {
 	const now = new Date().toISOString();
-	return { version: 1, swarmId: "r12-test", cwd: scratch, tmuxSession: "r12", agents, delivered: {}, messages: {}, createdAt: now, updatedAt: now };
+	return {
+		version: 1,
+		swarmId: "r12-test",
+		cwd: scratch,
+		tmuxSession: "r12",
+		agents,
+		delivered: {},
+		messages: {},
+		createdAt: now,
+		updatedAt: now,
+	};
 }
 function makeTask(taskId, nodes = {}) {
 	const now = new Date().toISOString();
-	return { version: 1, taskId, title: "r12 mass-sweep", goal: "reproduce shared-pool mass-sweep", status: "in_progress", nodes, createdAt: now, updatedAt: now };
+	return {
+		version: 1,
+		taskId,
+		title: "r12 mass-sweep",
+		goal: "reproduce shared-pool mass-sweep",
+		status: "in_progress",
+		nodes,
+		createdAt: now,
+		updatedAt: now,
+	};
 }
 
 function makePiMock() {
@@ -121,9 +170,9 @@ function makePiMock() {
 
 const ROLES = [
 	{ id: "fs-implementer", roleKind: "implementer", node: "implement" },
-	{ id: "r80-tester",     roleKind: "tester",      node: "test"      },
-	{ id: "r80-reviewer",   roleKind: "reviewer",    node: "review"    },
-	{ id: "r10-analyst",    roleKind: "analyst",     node: "plan"      },
+	{ id: "r80-tester", roleKind: "tester", node: "test" },
+	{ id: "r80-reviewer", roleKind: "reviewer", node: "review" },
+	{ id: "r10-analyst", roleKind: "analyst", node: "plan" },
 ];
 
 function buildTaskWithSharedAssignees(taskId, sharedIds) {
@@ -178,13 +227,21 @@ console.log("\n[R12-S1] shared-pool sole-task workers must NOT be swept");
 	});
 
 	ok("R12-S1 sweep returned object outcome", typeof result === "object" && Array.isArray(result.stopped));
-	ok("R12-S1 stopped array is EMPTY (no shared-pool workers killed)", result.stopped.length === 0, `got stopped=${JSON.stringify(result.stopped)}`);
+	ok(
+		"R12-S1 stopped array is EMPTY (no shared-pool workers killed)",
+		result.stopped.length === 0,
+		`got stopped=${JSON.stringify(result.stopped)}`,
+	);
 	for (const id of sharedIds) {
 		ok(`R12-S1 stopped excludes ${id}`, !result.stopped.includes(id));
 	}
 
 	// R10-1 boundary counting: zero tmux kill-window / kill-pane calls for any shared-pool worker.
-	ok("R12-S1 killCalls.length === 0 (real boundary counter)", killCalls.length === 0, `got ${killCalls.length} kill calls: ${JSON.stringify(killCalls)}`);
+	ok(
+		"R12-S1 killCalls.length === 0 (real boundary counter)",
+		killCalls.length === 0,
+		`got ${killCalls.length} kill calls: ${JSON.stringify(killCalls)}`,
+	);
 	for (const k of killCalls) {
 		const ok2 = !sharedIds.some((id) => (k.target || "").includes(id));
 		ok(`R12-S1 killCall does NOT target a shared worker: ${JSON.stringify(k)}`, ok2);
@@ -194,7 +251,10 @@ console.log("\n[R12-S1] shared-pool sole-task workers must NOT be swept");
 	const finalState = await readStateFile();
 	for (const id of sharedIds) {
 		ok(`R12-S1 ${id}.status === 'running'`, finalState.agents[id]?.status === "running");
-		ok(`R12-S1 ${id}.activeTaskIds === []`, Array.isArray(finalState.agents[id]?.activeTaskIds) && finalState.agents[id].activeTaskIds.length === 0);
+		ok(
+			`R12-S1 ${id}.activeTaskIds === []`,
+			Array.isArray(finalState.agents[id]?.activeTaskIds) && finalState.agents[id].activeTaskIds.length === 0,
+		);
 	}
 
 	// No per-agent sweep traces for any shared-pool worker.
@@ -292,7 +352,11 @@ console.log("\n[R12-S3] R10-1 boundary counting: shared â†’ 0 kills, dedicated â
 		ok(`R12-S3 killByAgent[${id}] === 0`, killByAgent[id] === 0 || killByAgent[id] === undefined, `got ${killByAgent[id]}`);
 	}
 
-	ok("R12-S3 result.stopped === [dedicatedId]", result.stopped.length === 1 && result.stopped[0] === dedicatedId, `stopped=${JSON.stringify(result.stopped)}`);
+	ok(
+		"R12-S3 result.stopped === [dedicatedId]",
+		result.stopped.length === 1 && result.stopped[0] === dedicatedId,
+		`stopped=${JSON.stringify(result.stopped)}`,
+	);
 }
 
 // =============================================================================

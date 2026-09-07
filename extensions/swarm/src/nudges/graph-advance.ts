@@ -22,18 +22,40 @@ import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Paths, SwarmAgent, SwarmState, TaskPaths, TaskState } from "../types.ts";
 import {
-  ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS, ARTIFACT_PROGRESS_GRACE_MS, ARTIFACT_PROGRESS_MAX_FILES,
-  ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS, ARTIFACT_PROGRESS_NUDGE_CAP, DEFAULT_AGENT_HEARTBEAT_STALE_MS,
-  MAX_TASK_STALL_NUDGES, GOAL_NUDGE_BACKOFF_TICKS, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GRAPH_ADVANCE,
-  NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_TASK_GRAPH_STALL, TASK_INITIAL_READY_GRACE_MS,
-  TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES,
-  TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED,
-  TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION,
-  TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED, TRACE_ARTIFACT_PROGRESS_NUDGE, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED,
-  formatNotifyKey,
+	ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS,
+	ARTIFACT_PROGRESS_GRACE_MS,
+	ARTIFACT_PROGRESS_MAX_FILES,
+	ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS,
+	ARTIFACT_PROGRESS_NUDGE_CAP,
+	DEFAULT_AGENT_HEARTBEAT_STALE_MS,
+	MAX_TASK_STALL_NUDGES,
+	GOAL_NUDGE_BACKOFF_TICKS,
+	NOTIFY_DEFAULT_COOLDOWN_MS,
+	NOTIFY_DEFAULT_MAX_NUDGES,
+	NOTIFY_KEY_GRAPH_ADVANCE,
+	NOTIFY_KEY_INITIAL_READY,
+	NOTIFY_KEY_TASK_GRAPH_STALL,
+	TASK_INITIAL_READY_GRACE_MS,
+	TASK_STALL_NUDGE_IDLE_INTERVAL_MS,
+	TERMINAL_NODE_STATUSES,
+	TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED,
+	TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED,
+	TRACE_AGENT_HEARTBEAT_GC_STALE,
+	TRACE_AGENT_HEARTBEAT_GC_STOPPED,
+	TRACE_AGENT_TMUX_LIVENESS_CORRECTION,
+	TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED,
+	TRACE_ARTIFACT_PROGRESS_NUDGE,
+	TRACE_GRAPH_ADVANCE_NUDGE_EMITTED,
+	formatNotifyKey,
 } from "../constants.ts";
 import { ensureAgentDefaults, inferRoleKind, safeId } from "../utils.ts";
-import { checkStallNotificationStale, computeReadyNodes, computeTaskStatus, deriveNodeAttention, proxyMetricEmitLocked } from "../taskgraph.ts";
+import {
+	checkStallNotificationStale,
+	computeReadyNodes,
+	computeTaskStatus,
+	deriveNodeAttention,
+	proxyMetricEmitLocked,
+} from "../taskgraph.ts";
 import { deliverMessageLocked, findIdempotentMessage } from "../mailbox.ts";
 import { isTmuxRunning } from "../tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
@@ -42,7 +64,15 @@ import { isStallNudgeEligibleTaskStatus } from "./status-predicates.ts";
 import { updateIdleEpochLocked } from "./goal-epoch.ts";
 import { traceStaleSuppressedOnce } from "../surface.ts";
 
-export async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, taskId: string, nodeId: string, role: string): Promise<void> {
+export async function sendGraphAdvanceNudgeLocked(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	taskId: string,
+	nodeId: string,
+	role: string,
+): Promise<void> {
 	// Per-(taskId, nodeId) monotonic seq store. Lazily initialized so pre-policy swarms boot cleanly.
 	const graphAdvanceState = (st.graphAdvanceNudgeState ||= {});
 	const perTask = (graphAdvanceState[taskId] ||= {});
@@ -55,7 +85,11 @@ export async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string,
 	const keyPrefix = `task:${taskId}:node:${nodeId}:nudge:assign:seq:`;
 	const prior = Object.values(st.messages || {}).filter((r) => r.to === "root" && (r.idempotencyKey?.startsWith(keyPrefix) ?? false));
 	if (prior.length >= NOTIFY_DEFAULT_MAX_NUDGES) return; // cap: root has ignored the stall
-	const lastSent = prior.map((r) => r.createdAt || "").sort().pop() || "";
+	const lastSent =
+		prior
+			.map((r) => r.createdAt || "")
+			.sort()
+			.pop() || "";
 	if (lastSent && Date.now() - new Date(lastSent).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) return; // cooldown
 	if (findIdempotentMessage(st, "root", "root", key) && !prior.some((r) => r.ackedAt)) return; // in-flight, unacked: idempotent
 	try {
@@ -71,14 +105,25 @@ export async function sendGraphAdvanceNudgeLocked(pi: ExtensionAPI, cwd: string,
 		// seq, not skip ahead.
 		perNode.nudgeSeq = nextSeq;
 		perNode.lastNudgeAt = new Date().toISOString();
-		await trace(p, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, { taskId, nodeId, seq: nextSeq, key, cap: NOTIFY_DEFAULT_MAX_NUDGES, cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS }).catch(() => {});
+		await trace(p, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, {
+			taskId,
+			nodeId,
+			seq: nextSeq,
+			key,
+			cap: NOTIFY_DEFAULT_MAX_NUDGES,
+			cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS,
+		}).catch(() => {});
 	} catch (err: any) {
-		await trace(p, "graph.advance_nudge_failed", { taskId, nodeId, seq: nextSeq, error: String((err as Error)?.message || err) }).catch(() => {});
+		await trace(p, "graph.advance_nudge_failed", { taskId, nodeId, seq: nextSeq, error: String((err as Error)?.message || err) }).catch(
+			() => {},
+		);
 	}
 }
 
 function ackRootNudgeLocked(st: SwarmState, key: string, nowMs: number, note: string): void {
-	const rec = findIdempotentMessage(st, "root", "root", key) || Object.values(st.messages || {}).find((r) => r.to === "root" && r.idempotencyKey === key);
+	const rec =
+		findIdempotentMessage(st, "root", "root", key) ||
+		Object.values(st.messages || {}).find((r) => r.to === "root" && r.idempotencyKey === key);
 	if (rec && rec.requiresAck && !rec.ackedAt) {
 		const at = new Date(nowMs).toISOString();
 		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "root", status: "done", note, at } };
@@ -113,12 +158,20 @@ function ackRootGraphAdvanceNudgesLocked(st: SwarmState, taskId: string, nodeId:
 export async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<void> {
 	if (!existsSync(p.tasksDir)) return;
 	let entries: string[] = [];
-	try { entries = await readdir(p.tasksDir); } catch { return; }
+	try {
+		entries = await readdir(p.tasksDir);
+	} catch {
+		return;
+	}
 	for (const taskId of entries) {
 		const tp = taskPaths(p, taskId);
 		if (!existsSync(tp.taskJson)) continue;
 		let task: TaskState;
-		try { task = await readTaskState(tp.taskJson); } catch { continue; }
+		try {
+			task = await readTaskState(tp.taskJson);
+		} catch {
+			continue;
+		}
 		// Only drive active graphs. Done/blocked tasks have no ready work to assign.
 		if (task.status !== "in_progress") continue;
 		const cr = computeReadyNodes(task);
@@ -138,7 +191,12 @@ export async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string,
 				const staleCheck = checkStallNotificationStale(st, task, nodeId, node.assignee || "root", nowMs);
 				if (staleCheck.stale) {
 					const keyForTrace = formatNotifyKey(NOTIFY_KEY_GRAPH_ADVANCE, { taskId, nodeId, seq: "1" });
-					await traceStaleSuppressedOnce(p, "reconcile.graph_advance_nudge", { messageId: keyForTrace, idempotencyKey: keyForTrace, reason: staleCheck.reason, evidence: staleCheck.evidence });
+					await traceStaleSuppressedOnce(p, "reconcile.graph_advance_nudge", {
+						messageId: keyForTrace,
+						idempotencyKey: keyForTrace,
+						reason: staleCheck.reason,
+						evidence: staleCheck.evidence,
+					});
 					ackRootGraphAdvanceNudgesLocked(st, taskId, nodeId, nowMs, "auto-acked: node stale");
 					continue;
 				}
@@ -168,12 +226,20 @@ export async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string,
 export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<void> {
 	if (!existsSync(p.tasksDir)) return;
 	let entries: string[] = [];
-	try { entries = await readdir(p.tasksDir); } catch { return; }
+	try {
+		entries = await readdir(p.tasksDir);
+	} catch {
+		return;
+	}
 	for (const taskId of entries) {
 		const tp = taskPaths(p, taskId);
 		if (!existsSync(tp.taskJson)) continue;
 		let task: TaskState;
-		try { task = await readTaskState(tp.taskJson); } catch { continue; }
+		try {
+			task = await readTaskState(tp.taskJson);
+		} catch {
+			continue;
+		}
 		// Only act on tasks that have never progressed past the very first node. `in_progress` is handled
 		// by the graph-advance watcher; terminal states have no actionable start node.
 		if (task.status !== "ready") continue;
@@ -193,7 +259,11 @@ export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string,
 		if (existing.length >= NOTIFY_DEFAULT_MAX_NUDGES) continue;
 		if (findIdempotentMessage(st, "root", "root", key)) continue;
 		// Cooldown: never re-send within NOTIFY_DEFAULT_COOLDOWN_MS of the last send for the same key.
-		const last = existing.map((r) => r.createdAt || "").sort().pop() || "";
+		const last =
+			existing
+				.map((r) => r.createdAt || "")
+				.sort()
+				.pop() || "";
 		if (last && nowMs - new Date(last).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) continue;
 		// Lifecycle-fencing (issue 9, site 5): per-node staleness check before the initial-ready nudge.
 		// Task status="ready" already rules out conditions (1)/(2) — but we still run the predicate so a
@@ -202,7 +272,12 @@ export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string,
 		// placeholder is "root" (the only recipient of this nudge anyway).
 		const staleCheck = checkStallNotificationStale(st, task, startId, startNode.assignee || "root", nowMs);
 		if (staleCheck.stale) {
-			await traceStaleSuppressedOnce(p, "reconcile.initial_ready_nudge", { messageId: key, idempotencyKey: key, reason: staleCheck.reason, evidence: staleCheck.evidence });
+			await traceStaleSuppressedOnce(p, "reconcile.initial_ready_nudge", {
+				messageId: key,
+				idempotencyKey: key,
+				reason: staleCheck.reason,
+				evidence: staleCheck.evidence,
+			});
 			ackRootNudgeLocked(st, key, nowMs, "auto-acked: node stale");
 			continue;
 		}
@@ -210,7 +285,15 @@ export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string,
 	}
 }
 
-async function sendInitialReadyNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, task: TaskState, startId: string, key: string): Promise<void> {
+async function sendInitialReadyNudgeLocked(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	task: TaskState,
+	startId: string,
+	key: string,
+): Promise<void> {
 	const taskId = task.taskId;
 	const startNode = task.nodes[startId];
 	const role = startNode.role || "worker";
@@ -223,7 +306,9 @@ async function sendInitialReadyNudgeLocked(pi: ExtensionAPI, cwd: string, p: Pat
 			idempotencyKey: key,
 		});
 	} catch (err: any) {
-		await trace(p, "task.initial_ready_nudge_failed", { taskId, nodeId: startId, error: String((err as Error)?.message || err) }).catch(() => {});
+		await trace(p, "task.initial_ready_nudge_failed", { taskId, nodeId: startId, error: String((err as Error)?.message || err) }).catch(
+			() => {},
+		);
 	}
 }
 
@@ -234,7 +319,6 @@ async function sendInitialReadyNudgeLocked(pi: ExtensionAPI, cwd: string, p: Pat
 // dead panes are excluded rather than counted as busy — previously 100+ stopped ghosts starved
 // both nudges forever (goal.nudge never emitted since goal set).
 const AGENT_HEARTBEAT_STALE_MS = Number(process.env.PI_SWARM_AGENT_HEARTBEAT_STALE_MS ?? 10 * 60_000);
-
 
 export async function evaluateTaskGraphStallNudgeLocked(
 	pi: ExtensionAPI,
@@ -260,9 +344,13 @@ export async function evaluateTaskGraphStallNudgeLocked(
 				// Row 68 fix (AC1): include fresh status="ready" tasks (created, never assigned) —
 				// non-terminal candidates only; the per-node actionable filter below still gates.
 				if (isStallNudgeEligibleTaskStatus(t.status)) tasks.push({ task: t, tp });
-			} catch { /* skip unreadable */ }
+			} catch {
+				/* skip unreadable */
+			}
 		}
-	} catch { /* unreadable tasksDir === no active tasks */ }
+	} catch {
+		/* unreadable tasksDir === no active tasks */
+	}
 	if (!tasks.length) return { emitted: false, reason: "no_active_task" };
 
 	// Predicate 3: every non-root agent must be runtimeStatus === "idle".
@@ -303,8 +391,13 @@ export async function evaluateTaskGraphStallNudgeLocked(
 		let graphAdvanceActive = false;
 		for (const nodeId of actionableNodes) {
 			const advanceKeyPrefix = `task:${taskId}:node:${nodeId}:nudge:assign:seq:`;
-			const hasActive = Object.values(st.messages || {}).some((r) => r.to === "root" && !r.ackedAt && (r.idempotencyKey?.startsWith(advanceKeyPrefix) ?? false));
-			if (hasActive) { graphAdvanceActive = true; break; }
+			const hasActive = Object.values(st.messages || {}).some(
+				(r) => r.to === "root" && !r.ackedAt && (r.idempotencyKey?.startsWith(advanceKeyPrefix) ?? false),
+			);
+			if (hasActive) {
+				graphAdvanceActive = true;
+				break;
+			}
 		}
 		if (graphAdvanceActive) continue;
 
@@ -345,7 +438,12 @@ export async function evaluateTaskGraphStallNudgeLocked(
 				stallState.nextStallNudgeAt = new Date(nowMs + TASK_STALL_NUDGE_IDLE_INTERVAL_MS).toISOString();
 				if (!st.taskStallState) st.taskStallState = {};
 				st.taskStallState[taskId] = stallState;
-				await trace(p, "task_stall.nudge.backoff", { taskId, nudges: stallState.consecutiveNoResolveNudges, max: MAX_TASK_STALL_NUDGES, backoffTicks: GOAL_NUDGE_BACKOFF_TICKS }).catch(() => {});
+				await trace(p, "task_stall.nudge.backoff", {
+					taskId,
+					nudges: stallState.consecutiveNoResolveNudges,
+					max: MAX_TASK_STALL_NUDGES,
+					backoffTicks: GOAL_NUDGE_BACKOFF_TICKS,
+				}).catch(() => {});
 			}
 			return { emitted: false, reason: "max_nudges", taskId };
 		}
@@ -447,18 +545,35 @@ export async function evaluateTaskGraphStallNudgeLocked(
 //
 // Output: returns an inspectable summary `{ inspected, nudged, escalated, scannedFiles }` so the
 // pump loop + tests can verify behavior without poking into private state.
-export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<{ inspected: number; nudged: number; escalated: number; scannedFiles: number }> {
-	let inspected = 0, nudged = 0, escalated = 0, scannedFiles = 0;
+export async function evaluateArtifactProgressNudgeLocked(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	nowMs: number,
+): Promise<{ inspected: number; nudged: number; escalated: number; scannedFiles: number }> {
+	let inspected = 0,
+		nudged = 0,
+		escalated = 0,
+		scannedFiles = 0;
 	if (!existsSync(p.tasksDir)) return { inspected, nudged, escalated, scannedFiles };
 	let taskDirs: string[] = [];
-	try { taskDirs = await readdir(p.tasksDir); } catch { return { inspected, nudged, escalated, scannedFiles }; }
+	try {
+		taskDirs = await readdir(p.tasksDir);
+	} catch {
+		return { inspected, nudged, escalated, scannedFiles };
+	}
 	const dirtyTaskPaths = new Set<TaskPaths>();
 	const tpToTask = new Map<TaskPaths, TaskState>();
 	for (const taskDir of taskDirs) {
 		const tp = taskPaths(p, taskDir);
 		if (!existsSync(tp.taskJson)) continue;
 		let task: TaskState;
-		try { task = await readTaskState(tp.taskJson); } catch { continue; }
+		try {
+			task = await readTaskState(tp.taskJson);
+		} catch {
+			continue;
+		}
 		tpToTask.set(tp, task);
 		for (const [nodeId, node] of Object.entries(task.nodes)) {
 			if (!node) continue;
@@ -467,7 +582,12 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 			// pseudo-agent (no real worker pane to nudge; the root drives its own work).
 			if (!node.assignee || node.assignee === "root") continue;
 			// Skip when the node has no allowedFiles (OQ3 default: too noisy to track whole-project mtime).
-			const effectiveAllowed: string[] = node.allowedFiles && node.allowedFiles.length > 0 ? node.allowedFiles : (task.allowedFiles && task.allowedFiles.length > 0 ? task.allowedFiles : []);
+			const effectiveAllowed: string[] =
+				node.allowedFiles && node.allowedFiles.length > 0
+					? node.allowedFiles
+					: task.allowedFiles && task.allowedFiles.length > 0
+						? task.allowedFiles
+						: [];
 			if (effectiveAllowed.length === 0) continue;
 			inspected++;
 			// fs.stat each allowed file; cap at ARTIFACT_PROGRESS_MAX_FILES. The "max mtime across
@@ -480,8 +600,13 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 				try {
 					const s = await stat(join(cwd, rel));
 					const mt = s.mtimeMs || (s.mtime ? s.mtime.getTime() : 0);
-					if (mt > maxMtimeMs) { maxMtimeMs = mt; contributingFile = rel; }
-				} catch { /* file not on disk yet (worker hasn't created it) — skip */ }
+					if (mt > maxMtimeMs) {
+						maxMtimeMs = mt;
+						contributingFile = rel;
+					}
+				} catch {
+					/* file not on disk yet (worker hasn't created it) — skip */
+				}
 			}
 			if (!contributingFile) continue;
 			// Baseline: max(lastProgressAt, artifactProgressNudgeAt). A worker that just got nudged
@@ -506,7 +631,17 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 				// cycle. Subsequent ticks within the same stalled cycle stay silent — the
 				// root already has the escalation; more repeats would just clutter traces.
 				if (!node.artifactProgressCapSurfaced) {
-					await trace(p, TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED, { taskId: task.taskId, nodeId, assignee: node.assignee, nudgeCount: priorCount, cap: ARTIFACT_PROGRESS_NUDGE_CAP, contributingFile, maxMtimeMs, lastProgressAt: node.lastProgressAt ?? null, lastToolAt: agent.lastToolAt ?? null }).catch(() => {});
+					await trace(p, TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED, {
+						taskId: task.taskId,
+						nodeId,
+						assignee: node.assignee,
+						nudgeCount: priorCount,
+						cap: ARTIFACT_PROGRESS_NUDGE_CAP,
+						contributingFile,
+						maxMtimeMs,
+						lastProgressAt: node.lastProgressAt ?? null,
+						lastToolAt: agent.lastToolAt ?? null,
+					}).catch(() => {});
 					// Lightweight root escalation: durable mailbox delivery so the root
 					// sees the "node stalled with N ignored nudges" line on its next pump tick.
 					try {
@@ -519,7 +654,9 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 							requiresResponse: false,
 							idempotencyKey: `r20:cap:${task.taskId}:${nodeId}`,
 						});
-					} catch { /* escalation is informational; never throw out of the tick */ }
+					} catch {
+						/* escalation is informational; never throw out of the tick */
+					}
 					node.artifactProgressNudgeAt = new Date(nowMs).toISOString();
 					node.artifactProgressCapSurfaced = true;
 					escalated++;
@@ -566,11 +703,29 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 				});
 				node.artifactProgressNudgeAt = new Date(nowMs).toISOString();
 				node.artifactProgressNudgeCount = priorCount + 1;
-				await trace(p, TRACE_ARTIFACT_PROGRESS_NUDGE, { taskId: task.taskId, nodeId, assignee: node.assignee, contributingFile, maxMtimeMs, baselineMs, lastProgressAt: node.lastProgressAt ?? null, lastToolAt: agent.lastToolAt ?? null, nudgeCount: node.artifactProgressNudgeCount, cap: ARTIFACT_PROGRESS_NUDGE_CAP, backoffMs: ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS, gracefulMs: ARTIFACT_PROGRESS_GRACE_MS }).catch(() => {});
+				await trace(p, TRACE_ARTIFACT_PROGRESS_NUDGE, {
+					taskId: task.taskId,
+					nodeId,
+					assignee: node.assignee,
+					contributingFile,
+					maxMtimeMs,
+					baselineMs,
+					lastProgressAt: node.lastProgressAt ?? null,
+					lastToolAt: agent.lastToolAt ?? null,
+					nudgeCount: node.artifactProgressNudgeCount,
+					cap: ARTIFACT_PROGRESS_NUDGE_CAP,
+					backoffMs: ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS,
+					gracefulMs: ARTIFACT_PROGRESS_GRACE_MS,
+				}).catch(() => {});
 				nudged++;
 				dirtyTaskPaths.add(tp);
 			} catch (err: any) {
-				await trace(p, "worker.artifact_progress_nudge_failed", { taskId: task.taskId, nodeId, assignee: node.assignee, error: String((err as Error)?.message || err) }).catch(() => {});
+				await trace(p, "worker.artifact_progress_nudge_failed", {
+					taskId: task.taskId,
+					nodeId,
+					assignee: node.assignee,
+					error: String((err as Error)?.message || err),
+				}).catch(() => {});
 			}
 		}
 	}
@@ -579,7 +734,11 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 	// fresh re-read, which would lose the in-memory mutations because readTaskState deserializes
 	// a new copy). Updated updatedAt is stamped inside writeTaskState.
 	for (const tp of Array.from(dirtyTaskPaths)) {
-		try { await writeTaskState(tp, tpToTask.get(tp)!); } catch { /* best-effort */ }
+		try {
+			await writeTaskState(tp, tpToTask.get(tp)!);
+		} catch {
+			/* best-effort */
+		}
 	}
 	if (nudged || escalated || inspected) {
 		await writeState(p, st).catch(() => {});
@@ -601,11 +760,29 @@ export async function evaluateArtifactProgressNudgeLocked(pi: ExtensionAPI, cwd:
 //   - Mark-stopped is non-destructive: stopAgent is NOT called here (we leave that to the next
 //     sweepTaskWorkersLocked or explicit /swarm stop). The GC just flips the status flag so
 //     downstream sweeps / prunes can pick it up.
-export async function agentHeartbeatGCLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, nowMs: number): Promise<{ stopped: number; stale: number; corrected: number; probesFired: number; probesThrottled: number; expiredParkFlipped: number }> {
+export async function agentHeartbeatGCLocked(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	nowMs: number,
+): Promise<{
+	stopped: number;
+	stale: number;
+	corrected: number;
+	probesFired: number;
+	probesThrottled: number;
+	expiredParkFlipped: number;
+}> {
 	// Source the threshold from constants (single source of truth; env override is operator-only).
 	const staleWindow = Number(process.env.PI_SWARM_AGENT_HEARTBEAT_STALE_MS ?? DEFAULT_AGENT_HEARTBEAT_STALE_MS);
 	const probeAfterMs = staleWindow * 2;
-	let stopped = 0, stale = 0, corrected = 0, probesFired = 0, probesThrottled = 0, expiredParkFlipped = 0;
+	let stopped = 0,
+		stale = 0,
+		corrected = 0,
+		probesFired = 0,
+		probesThrottled = 0,
+		expiredParkFlipped = 0;
 	for (const agent of Object.values(st.agents)) {
 		if (agent.id === "root") continue;
 		const leaseKind = agent.leaseKind;
@@ -640,9 +817,17 @@ export async function agentHeartbeatGCLocked(pi: ExtensionAPI, cwd: string, p: P
 			stopped++;
 			if (paused && expiredLease) {
 				expiredParkFlipped++;
-				await trace(p, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, { agentId: agent.id, reason: "tmux_dead_after_lease_expiry", hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge }).catch(() => {});
+				await trace(p, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, {
+					agentId: agent.id,
+					reason: "tmux_dead_after_lease_expiry",
+					hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge,
+				}).catch(() => {});
 			} else {
-				await trace(p, TRACE_AGENT_HEARTBEAT_GC_STOPPED, { agentId: agent.id, reason: "tmux_dead", hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge }).catch(() => {});
+				await trace(p, TRACE_AGENT_HEARTBEAT_GC_STOPPED, {
+					agentId: agent.id,
+					reason: "tmux_dead",
+					hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge,
+				}).catch(() => {});
 			}
 			continue;
 		}
@@ -660,7 +845,7 @@ export async function agentHeartbeatGCLocked(pi: ExtensionAPI, cwd: string, p: P
 			agent.tmuxTarget !== "unknown" &&
 			agent.status === "running" &&
 			agent.tmuxAlive !== false &&
-			(nowMs - lastProbeAtMs > probeAfterMs)
+			nowMs - lastProbeAtMs > probeAfterMs
 		) {
 			agent.lastProbeAt = new Date(nowMs).toISOString();
 			probesFired++;
@@ -669,7 +854,12 @@ export async function agentHeartbeatGCLocked(pi: ExtensionAPI, cwd: string, p: P
 				const previous = agent.tmuxAlive ?? null;
 				agent.tmuxAlive = alive;
 				corrected++;
-				await trace(p, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, { agentId: agent.id, alive, previous, hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge }).catch(() => {});
+				await trace(p, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, {
+					agentId: agent.id,
+					alive,
+					previous,
+					hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge,
+				}).catch(() => {});
 			}
 			if (!alive && agent.status === "running") {
 				agent.status = "stopped";
@@ -678,20 +868,24 @@ export async function agentHeartbeatGCLocked(pi: ExtensionAPI, cwd: string, p: P
 				agent.lastShutdownAt ||= new Date(nowMs).toISOString();
 				agent.updatedAt = new Date(nowMs).toISOString();
 				stopped++;
-				await trace(p, TRACE_AGENT_HEARTBEAT_GC_STOPPED, { agentId: agent.id, reason: "tmux_dead_after_probe", hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge }).catch(() => {});
+				await trace(p, TRACE_AGENT_HEARTBEAT_GC_STOPPED, {
+					agentId: agent.id,
+					reason: "tmux_dead_after_probe",
+					hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge,
+				}).catch(() => {});
 				continue;
 			}
-		} else if (
-			hbAge > probeAfterMs &&
-			agent.tmuxTarget &&
-			agent.tmuxTarget !== "unknown" &&
-			(nowMs - lastProbeAtMs <= probeAfterMs)
-		) {
+		} else if (hbAge > probeAfterMs && agent.tmuxTarget && agent.tmuxTarget !== "unknown" && nowMs - lastProbeAtMs <= probeAfterMs) {
 			// Review item 1 evidence trace: emit a throttle-skip counter when gate 2 conditions
 			// are met but the probe ledger blocks the probe. Cheap (one trace per skipped agent
 			// per tick); dashboards can chart probe-skip rates without re-reading state.
 			probesThrottled++;
-			await trace(p, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, { agentId: agent.id, hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge, lastProbeAtMs: lastProbeAtMs || null, probeAfterMs }).catch(() => {});
+			await trace(p, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, {
+				agentId: agent.id,
+				hbAgeMs: hbAge === Number.POSITIVE_INFINITY ? null : hbAge,
+				lastProbeAtMs: lastProbeAtMs || null,
+				probeAfterMs,
+			}).catch(() => {});
 		}
 		// Cheap gate 3: heartbeat too old AND idle -> mark stale (downgrade; don't stop).
 		if (hbAge > staleWindow && agent.runtimeStatus === "idle") {
@@ -777,9 +971,15 @@ export async function evaluateSlotRecoveryLocked(
 			const cooldownEnd = new Date(health.cooldownUntil).getTime();
 			if (cooldownEnd > nowMs) continue; // still in bench
 			// Cooldown has expired — but only "quota" benches get a recovery event.
-			if (health.lastBenchReason !== "quota") { reasons.not_quota_bench++; continue; }
+			if (health.lastBenchReason !== "quota") {
+				reasons.not_quota_bench++;
+				continue;
+			}
 			// Idempotent: skip if we already emitted for this bench cycle.
-			if (health.lastRecoveredAt) { reasons.deduped++; continue; }
+			if (health.lastRecoveredAt) {
+				reasons.deduped++;
+				continue;
+			}
 			// Find agents on this slot. The slot key is `${provider}/${model}`; agents carry their
 			// current model+provider. We do NOT filter on tmuxTarget=="unknown" — even a dead-tmux
 			// agent is a candidate for the trace (the root may want to know regardless).
@@ -802,7 +1002,13 @@ export async function evaluateSlotRecoveryLocked(
 			// Emit one trace per busy agent (a slot with multiple workers on it produces multiple
 			// events; the root can dedupe downstream if it cares).
 			for (const agent of busyAgents) {
-				emitted.push({ agentId: agent.id, slot: slotKeyStr, afterMs, remainingTasks: agent.activeTaskIds.length, benchMs: health.lastBenchMs ?? Math.max(0, cooldownEnd - (cooldownEnd - afterMs)) });
+				emitted.push({
+					agentId: agent.id,
+					slot: slotKeyStr,
+					afterMs,
+					remainingTasks: agent.activeTaskIds.length,
+					benchMs: health.lastBenchMs ?? Math.max(0, cooldownEnd - (cooldownEnd - afterMs)),
+				});
 				reasons.expired_quota++;
 			}
 			// Stash idempotency stamp so the next tick (and all subsequent ticks until a new bench)

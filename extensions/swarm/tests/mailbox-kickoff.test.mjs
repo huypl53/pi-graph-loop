@@ -23,39 +23,46 @@ if (typeof mailboxKickoffPrompt !== "function") {
 }
 
 const tmp = mkdtempSync(join(tmpdir(), "swarm-kickoff-"));
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) pass++; else { fail++; console.error("  FAIL:", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) pass++;
+	else {
+		fail++;
+		console.error("  FAIL:", name);
+	}
+};
 try {
 	const p = { root: tmp, mailboxes: join(tmp, "mailboxes") };
 	const st = (msgs) => ({ messages: msgs });
 
 	// 1. Pending unacked message -> prompt mentions it + the tool to call.
-	const withPending = st({ "m1": { id: "m1", to: "w", from: "reviewer", status: "failed", requiresAck: true } });
+	const withPending = st({ m1: { id: "m1", to: "w", from: "reviewer", status: "failed", requiresAck: true } });
 	let out = await mailboxKickoffPrompt(p, withPending, "w");
 	ok("pending message produces prompt", out.includes("PI-SWARM MAILBOX PENDING"));
 	ok("prompt tells agent to check mailbox", out.includes("swarm_check_mailbox"));
 	ok("prompt lists the message id", out.includes("m1"));
 
 	// 2. All acked -> no prompt.
-	const acked = st({ "m1": { id: "m1", to: "w", from: "reviewer", status: "acked", requiresAck: true, ackedAt: "x" } });
+	const acked = st({ m1: { id: "m1", to: "w", from: "reviewer", status: "acked", requiresAck: true, ackedAt: "x" } });
 	out = await mailboxKickoffPrompt(p, acked, "w");
 	ok("acked messages produce no prompt", out === "");
 
 	// 3. Dead-lettered / superseded ignored.
-	const dead = st({ "m1": { id: "m1", to: "w", from: "r", status: "dead_letter", requiresAck: true } });
+	const dead = st({ m1: { id: "m1", to: "w", from: "r", status: "dead_letter", requiresAck: true } });
 	out = await mailboxKickoffPrompt(p, dead, "w");
 	ok("dead-letter ignored", out === "");
-	const sup = st({ "m1": { id: "m1", to: "w", from: "r", status: "injected", requiresAck: true, superseded: { at: "x" } } });
+	const sup = st({ m1: { id: "m1", to: "w", from: "r", status: "injected", requiresAck: true, superseded: { at: "x" } } });
 	out = await mailboxKickoffPrompt(p, sup, "w");
 	ok("superseded ignored", out === "");
 
 	// 4. Messages for other agents ignored.
-	const other = st({ "m1": { id: "m1", to: "someone-else", from: "r", status: "failed", requiresAck: true } });
+	const other = st({ m1: { id: "m1", to: "someone-else", from: "r", status: "failed", requiresAck: true } });
 	out = await mailboxKickoffPrompt(p, other, "w");
 	ok("other-recipient messages ignored", out === "");
 
 	// 5. Null-safety: empty state.
-	out = await mailboxKickoffPrompt(p, {} , "w");
+	out = await mailboxKickoffPrompt(p, {}, "w");
 	ok("empty state safe", out === "");
 } finally {
 	rmSync(tmp, { recursive: true, force: true });

@@ -37,8 +37,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const tg = await import(join(here, "..", "src/taskgraph.ts"));
 const { mintNodeAttempt } = tg;
 
-let pass = 0, fail = 0;
-const ok = (name, cond, info) => { if (cond) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, info) => {
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
+};
 
 async function newScratch() {
 	const dir = await mkdtemp(join(tmpdir(), `swarm-83b-${process.pid}-${Date.now()}-`));
@@ -69,7 +78,17 @@ async function readEvents(scratch) {
 		}
 	} catch {}
 	const all = [traces, swarm, perTask].join("\n");
-	return all.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return all
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function clearEvents(scratch) {
 	await writeFile(join(scratch, ".pi/swarm/traces/events.jsonl"), "");
@@ -126,7 +145,21 @@ console.log("C1/C2: reassign rate-limit (5/min) + window-expiry recovery");
 	const scratch = await newScratch();
 	await clearEvents(scratch);
 
-	const node = makeNode({ status: "assigned", assignee: "worker-a", activeAttemptId: "attempt-seed", attemptHistory: [{ attemptId: "attempt-seed", attemptNumber: 1, assignee: "worker-a", assignedAt: new Date().toISOString(), status: "active", lastActivityAt: new Date().toISOString() }] });
+	const node = makeNode({
+		status: "assigned",
+		assignee: "worker-a",
+		activeAttemptId: "attempt-seed",
+		attemptHistory: [
+			{
+				attemptId: "attempt-seed",
+				attemptNumber: 1,
+				assignee: "worker-a",
+				assignedAt: new Date().toISOString(),
+				status: "active",
+				lastActivityAt: new Date().toISOString(),
+			},
+		],
+	});
 	const task = makeTask("task-83b-rate", node);
 	await writeTaskFile(scratch, task);
 	await writeStateFile(scratch, { version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test", agents: {}, tasks: {}, messages: {} });
@@ -147,10 +180,26 @@ console.log("C1/C2: reassign rate-limit (5/min) + window-expiry recovery");
 	// actual rate-limit must drive the tool layer. For now, assert the FENCE constants exist
 	// (red-first: assert the surface area the implementation must wire up):
 	const constants = await import(join(here, "..", "src/constants.ts"));
-	ok("C1.a: TRACE_REASSIGN_RATE_LIMITED constant exists", typeof constants.TRACE_REASSIGN_RATE_LIMITED === "string", `got: ${typeof constants.TRACE_REASSIGN_RATE_LIMITED}`);
-	ok("C1.b: REASSIGN_RATE_LIMITED error code constant exists", typeof constants.REASSIGN_RATE_LIMITED === "string", `got: ${typeof constants.REASSIGN_RATE_LIMITED}`);
-	ok("C1.c: PI_SWARM_REASSIGN_RATE_LIMIT env default = 5/min", constants.PI_SWARM_REASSIGN_RATE_LIMIT === 5, `got: ${constants.PI_SWARM_REASSIGN_RATE_LIMIT}`);
-	ok("C1.d: PI_SWARM_REASSIGN_RATE_WINDOW_MS env default = 60_000", constants.PI_SWARM_REASSIGN_RATE_WINDOW_MS === 60_000, `got: ${constants.PI_SWARM_REASSIGN_RATE_WINDOW_MS}`);
+	ok(
+		"C1.a: TRACE_REASSIGN_RATE_LIMITED constant exists",
+		typeof constants.TRACE_REASSIGN_RATE_LIMITED === "string",
+		`got: ${typeof constants.TRACE_REASSIGN_RATE_LIMITED}`,
+	);
+	ok(
+		"C1.b: REASSIGN_RATE_LIMITED error code constant exists",
+		typeof constants.REASSIGN_RATE_LIMITED === "string",
+		`got: ${typeof constants.REASSIGN_RATE_LIMITED}`,
+	);
+	ok(
+		"C1.c: PI_SWARM_REASSIGN_RATE_LIMIT env default = 5/min",
+		constants.PI_SWARM_REASSIGN_RATE_LIMIT === 5,
+		`got: ${constants.PI_SWARM_REASSIGN_RATE_LIMIT}`,
+	);
+	ok(
+		"C1.d: PI_SWARM_REASSIGN_RATE_WINDOW_MS env default = 60_000",
+		constants.PI_SWARM_REASSIGN_RATE_WINDOW_MS === 60_000,
+		`got: ${constants.PI_SWARM_REASSIGN_RATE_WINDOW_MS}`,
+	);
 
 	// C2 (window expiry): the rate limit MUST be fixed-window (clearable), not a hard cap.
 	ok("C2.a: rate-limit window is reset-able (windowStart field exists in TaskNode)", true, "covered by type check below");
@@ -158,7 +207,11 @@ console.log("C1/C2: reassign rate-limit (5/min) + window-expiry recovery");
 	// types.ts: TaskNode has supersessionCount + supersessionWindowStart
 	const types = await import(join(here, "..", "src/types.ts"));
 	// We can't introspect types at runtime, so assert via the fence constants are exported.
-	ok("C2.b: TRACE_LATE_RESULT_REJECTED constant exists", typeof constants.TRACE_LATE_RESULT_REJECTED === "string", `got: ${typeof constants.TRACE_LATE_RESULT_REJECTED}`);
+	ok(
+		"C2.b: TRACE_LATE_RESULT_REJECTED constant exists",
+		typeof constants.TRACE_LATE_RESULT_REJECTED === "string",
+		`got: ${typeof constants.TRACE_LATE_RESULT_REJECTED}`,
+	);
 
 	await rm(scratch, { recursive: true, force: true }).catch(() => {});
 }
@@ -177,7 +230,16 @@ console.log("C3/C4: late-result refusal + no node mutation + counter");
 		assignee: "worker-b",
 		activeAttemptId: "attempt-new",
 		attemptHistory: [
-			{ attemptId: "attempt-old", attemptNumber: 1, assignee: "worker-a", assignedAt: ts, status: "superseded", supersededAt: ts, supersededBy: "attempt-new", lastActivityAt: ts },
+			{
+				attemptId: "attempt-old",
+				attemptNumber: 1,
+				assignee: "worker-a",
+				assignedAt: ts,
+				status: "superseded",
+				supersededAt: ts,
+				supersededBy: "attempt-new",
+				lastActivityAt: ts,
+			},
 			{ attemptId: "attempt-new", attemptNumber: 2, assignee: "worker-b", assignedAt: ts, status: "active", lastActivityAt: ts },
 		],
 	});
@@ -187,8 +249,11 @@ console.log("C3/C4: late-result refusal + no node mutation + counter");
 
 	// Test that the message record field exists.
 	const types = await import(join(here, "..", "src/types.ts"));
-	ok("C3.a: types.ts exports intact (MessageRecord is type-only, but module loads)",
-		typeof types === "object" && types !== null, "types.ts module loaded");
+	ok(
+		"C3.a: types.ts exports intact (MessageRecord is type-only, but module loads)",
+		typeof types === "object" && types !== null,
+		"types.ts module loaded",
+	);
 
 	// Verify the surface exists in state.ts (test by importing and calling).
 	const state = await import(join(here, "..", "src/state.ts"));
@@ -196,7 +261,11 @@ console.log("C3/C4: late-result refusal + no node mutation + counter");
 
 	// Trace constants
 	const constants = await import(join(here, "..", "src/constants.ts"));
-	ok("C3.c: TRACE_LATE_RESULT_REJECTED is string constant", typeof constants.TRACE_LATE_RESULT_REJECTED === "string", `got: ${typeof constants.TRACE_LATE_RESULT_REJECTED}`);
+	ok(
+		"C3.c: TRACE_LATE_RESULT_REJECTED is string constant",
+		typeof constants.TRACE_LATE_RESULT_REJECTED === "string",
+		`got: ${typeof constants.TRACE_LATE_RESULT_REJECTED}`,
+	);
 
 	// C4: red assertion — call the refusal surface directly with a superseded attemptId and
 	// assert {refused:true, reason:"supersession"} comes back without node mutation.
@@ -204,9 +273,11 @@ console.log("C3/C4: late-result refusal + no node mutation + counter");
 	const toolsTasks = await import(join(here, "..", "src/tools/tasks.ts"));
 	// Look for a helper named `checkLateResultRejection` or similar. If absent, mark red.
 	const fnNames = Object.keys(toolsTasks);
-	ok("C3.d: late-result rejection helper exported from tools/tasks.ts",
+	ok(
+		"C3.d: late-result rejection helper exported from tools/tasks.ts",
 		fnNames.includes("checkLateResultRejection") || fnNames.includes("refuseLateResult") || fnNames.includes("isLateResultRefused"),
-		`available: ${fnNames.filter((n) => /[Ll]ate[Rr]esult/.test(n)).join(",") || "(none)"}`);
+		`available: ${fnNames.filter((n) => /[Ll]ate[Rr]esult/.test(n)).join(",") || "(none)"}`,
+	);
 
 	await rm(scratch, { recursive: true, force: true }).catch(() => {});
 }
@@ -234,17 +305,21 @@ console.log("C5/C6: positive-path (fresh attemptId) + reconcile rec-level extens
 
 	const toolsTasks = await import(join(here, "..", "src/tools/tasks.ts"));
 	const fnNames = Object.keys(toolsTasks);
-	ok("C5.a: positive-path helper available (or checkLateResultRejection returns null for fresh)",
+	ok(
+		"C5.a: positive-path helper available (or checkLateResultRejection returns null for fresh)",
 		fnNames.includes("checkLateResultRejection") || fnNames.includes("refuseLateResult") || fnNames.includes("isLateResultRefused"),
-		"covered if C3.d passed");
+		"covered if C3.d passed",
+	);
 
 	// C6: reconcile.ts must extend the rec.superseded guard with late-result trace emission.
 	// Read reconcile.ts source and assert the TRACE_LATE_RESULT_REJECTED reference is wired in.
 	const fs = await import("node:fs");
 	const reconcileSrc = fs.readFileSync(join(here, "..", "src/reconcile.ts"), "utf8");
-	ok("C6.a: reconcile.ts references TRACE_LATE_RESULT_REJECTED",
+	ok(
+		"C6.a: reconcile.ts references TRACE_LATE_RESULT_REJECTED",
 		reconcileSrc.includes("TRACE_LATE_RESULT_REJECTED"),
-		"rec-level guard must emit the trace on late-result arrival");
+		"rec-level guard must emit the trace on late-result arrival",
+	);
 
 	await rm(scratch, { recursive: true, force: true }).catch(() => {});
 }
@@ -262,7 +337,10 @@ console.log("C7/C8: KR5 rec-level trace + lateResultRejectionCount stamping");
 	// C7 (KR5): the rec-level guard MUST NOT use the empty-string taskPaths fake, MUST NOT
 	// wrap traceTask in `void ... .catch(() => {})`, and MUST accept a `Paths` argument via
 	// the function signature. These three were the bug surface.
-	const usesEmptyTaskPathsFake = /taskPaths\(\s*\{\s*tasksDir:\s*"",\s*tasksRoot:\s*"",\s*swarmDir:\s*"",\s*stateFile:\s*"",\s*tracesDir:\s*"",\s*mailboxesDir:\s*"",\s*agentsRoot:\s*"",\s*rolesFile:\s*"",\s*identitiesDir:\s*""/.test(block);
+	const usesEmptyTaskPathsFake =
+		/taskPaths\(\s*\{\s*tasksDir:\s*"",\s*tasksRoot:\s*"",\s*swarmDir:\s*"",\s*stateFile:\s*"",\s*tracesDir:\s*"",\s*mailboxesDir:\s*"",\s*agentsRoot:\s*"",\s*rolesFile:\s*"",\s*identitiesDir:\s*""/.test(
+			block,
+		);
 	const hasVoidCatchSwallow = /void\s+traceTask[\s\S]{0,200}\.catch\(\(\)\s*=>\s*\{\}\)/.test(block);
 	const hasOuterTryCatchSwallow = /try\s*\{[\s\S]{0,500}traceTask[\s\S]{0,500}\}\s*catch\s*\{\s*\}/.test(block);
 	ok("C7.a: rec-level guard does NOT use empty-string taskPaths fake (KR5)", !usesEmptyTaskPathsFake, "");
@@ -276,9 +354,11 @@ console.log("C7/C8: KR5 rec-level trace + lateResultRejectionCount stamping");
 
 	// C7.e: when traceTask fails, a `swarm.rec_late_result_trace_failed` trace is emitted (KR5
 	// surface the failure instead of silent swallow).
-	ok("C7.e: durable-write failure surfaces as swarm.rec_late_result_trace_failed trace (not silent swallow)",
+	ok(
+		"C7.e: durable-write failure surfaces as swarm.rec_late_result_trace_failed trace (not silent swallow)",
 		block.includes("swarm.rec_late_result_trace_failed"),
-		"block excerpt: " + block.slice(0, 400));
+		"block excerpt: " + block.slice(0, 400),
+	);
 
 	// C8 (lateResultRejectionCount stamping): tools/tasks.ts fence block stamps the counter on
 	// the inbound assignment message record by walking node.attemptHistory[].assignmentMessageId.

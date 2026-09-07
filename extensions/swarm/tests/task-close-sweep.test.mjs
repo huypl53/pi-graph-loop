@@ -28,33 +28,65 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), `swarm-task-close-sweep-${process.pid}-${Date.now()}`));
 await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, detail) => {
-	if (cond) { pass++; console.log("  ok  ", name); }
-	else { fail++; console.error("  FAIL", name, detail ? `(${detail})` : ""); }
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, detail ? `(${detail})` : "");
+	}
 };
 
 // ===== scratch helpers =====
 async function readGlobalEvents() {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function readStateFile() {
 	const p = join(scratch, ".pi/swarm/swarm-state.json");
-	try { return JSON.parse(await readFile(p, "utf8")); } catch { return null; }
+	try {
+		return JSON.parse(await readFile(p, "utf8"));
+	} catch {
+		return null;
+	}
 }
 async function readTaskJson(taskId) {
 	const p = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
-	try { return JSON.parse(await readFile(p, "utf8")); } catch { return null; }
+	try {
+		return JSON.parse(await readFile(p, "utf8"));
+	} catch {
+		return null;
+	}
 }
 async function mailboxExists(agentId) {
-	try { await readFile(join(scratch, `.pi/swarm/mailboxes/${agentId}.jsonl`), "utf8"); return true; }
-	catch { return false; }
+	try {
+		await readFile(join(scratch, `.pi/swarm/mailboxes/${agentId}.jsonl`), "utf8");
+		return true;
+	} catch {
+		return false;
+	}
 }
 async function identityExists(agentId) {
-	try { await readFile(join(scratch, `.pi/swarm/agents/${agentId}.md`), "utf8"); return true; }
-	catch { return false; }
+	try {
+		await readFile(join(scratch, `.pi/swarm/agents/${agentId}.md`), "utf8");
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 // ===== loadExtension with deterministic identity + isolation =====
@@ -67,9 +99,15 @@ async function loadExtension({ identity = "root", isRoot = true } = {}) {
 	const commands = {};
 	const handlers = {};
 	const pi = {
-		registerTool: (def) => { tools[def.name] = def; },
-		registerCommand: (name, def) => { commands[name] = def; },
-		on: (ev, fn) => { (handlers[ev] ||= []).push(fn); },
+		registerTool: (def) => {
+			tools[def.name] = def;
+		},
+		registerCommand: (name, def) => {
+			commands[name] = def;
+		},
+		on: (ev, fn) => {
+			(handlers[ev] ||= []).push(fn);
+		},
 		exec: async (cmd, args) => {
 			if (cmd === "tmux" && args?.[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
 			return { code: 1, stdout: "", stderr: "" };
@@ -82,7 +120,8 @@ async function loadExtension({ identity = "root", isRoot = true } = {}) {
 	};
 	const mod = await import(join(here, "..", "index.ts"));
 	mod.default(pi);
-	const ctx = (extra = {}) => Object.assign({ cwd: scratch, mode: "tui", hasUI: false, ui: { notify: () => {}, setStatus: () => {} } }, extra);
+	const ctx = (extra = {}) =>
+		Object.assign({ cwd: scratch, mode: "tui", hasUI: false, ui: { notify: () => {}, setStatus: () => {} } }, extra);
 	return { pi, tools, commands, handlers, ctx };
 }
 
@@ -91,8 +130,19 @@ function tinyGraph() {
 	return {
 		nodes: {
 			plan: { role: "planner", dependsOn: [], readArtifacts: [], writeArtifacts: ["artifacts/plan.md"] },
-			implement: { role: "implementer", dependsOn: ["plan"], readArtifacts: ["artifacts/plan.md"], writeArtifacts: ["artifacts/impl.md"] },
-			review: { role: "reviewer", dependsOn: ["implement"], readArtifacts: ["artifacts/impl.md"], writeArtifacts: ["artifacts/review.md"], terminal: true },
+			implement: {
+				role: "implementer",
+				dependsOn: ["plan"],
+				readArtifacts: ["artifacts/plan.md"],
+				writeArtifacts: ["artifacts/impl.md"],
+			},
+			review: {
+				role: "reviewer",
+				dependsOn: ["implement"],
+				readArtifacts: ["artifacts/impl.md"],
+				writeArtifacts: ["artifacts/review.md"],
+				terminal: true,
+			},
 		},
 		edges: [
 			{ from: "plan", to: "implement", when: "planned" },
@@ -103,7 +153,8 @@ function tinyGraph() {
 
 async function createTask(call, taskId, title = "Task-close sweep test") {
 	const out = await call("swarm_create_task", {
-		taskId, title,
+		taskId,
+		title,
 		goal: "Verify task-close worker sweep — auto-stop task-scoped workers on terminal.",
 		nodes: tinyGraph().nodes,
 		edges: tinyGraph().edges,
@@ -114,22 +165,51 @@ async function createTask(call, taskId, title = "Task-close sweep test") {
 	return taskId;
 }
 
-async function seedAgentRecord(agentId, { activeTaskIds = [], spawnedForTaskId, paused = false, status = "running", roleKind = "worker" } = {}) {
+async function seedAgentRecord(
+	agentId,
+	{ activeTaskIds = [], spawnedForTaskId, paused = false, status = "running", roleKind = "worker" } = {},
+) {
 	const stPath = join(scratch, ".pi/swarm/swarm-state.json");
 	let st = null;
-	try { st = JSON.parse(await readFile(stPath, "utf8")); } catch { /* fresh */ }
+	try {
+		st = JSON.parse(await readFile(stPath, "utf8"));
+	} catch {
+		/* fresh */
+	}
 	if (!st) {
 		const ts = new Date().toISOString();
-		st = { version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test", agents: {}, delivered: {}, messages: {}, createdAt: ts, updatedAt: ts };
+		st = {
+			version: 1,
+			swarmId: "test",
+			cwd: scratch,
+			tmuxSession: "test",
+			agents: {},
+			delivered: {},
+			messages: {},
+			createdAt: ts,
+			updatedAt: ts,
+		};
 	}
 	const baseAgent = {
-		id: agentId, role: agentId, roleKind, roleKindExplicit: roleKind !== "worker",
-		capabilities: [], activeTaskIds: [...activeTaskIds], maxConcurrentTasks: roleKind === "root" ? 99 : 1,
-		status, runtimeStatus: "idle", health: "healthy",
-		tmuxSession: "test", tmuxWindow: agentId, tmuxTarget: `test:${agentId}.0`,
-		model: "glm-5.1", provider: "zai-coding-cn",
-		cwd: scratch, mailbox: `.pi/swarm/mailboxes/${agentId}.jsonl`,
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+		id: agentId,
+		role: agentId,
+		roleKind,
+		roleKindExplicit: roleKind !== "worker",
+		capabilities: [],
+		activeTaskIds: [...activeTaskIds],
+		maxConcurrentTasks: roleKind === "root" ? 99 : 1,
+		status,
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: "test",
+		tmuxWindow: agentId,
+		tmuxTarget: `test:${agentId}.0`,
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: scratch,
+		mailbox: `.pi/swarm/mailboxes/${agentId}.jsonl`,
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
 	};
 	if (spawnedForTaskId) baseAgent.spawnedForTaskId = spawnedForTaskId;
 	if (paused) baseAgent.paused = true;
@@ -151,7 +231,8 @@ async function stampNodeAssignee(taskId, nodeId, assignee) {
 	const tp = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
 	const task = JSON.parse(await readFile(tp, "utf8"));
 	task.nodes[nodeId].assignee = assignee;
-	task.nodes[nodeId].status = task.nodes[nodeId].status === "ready" || task.nodes[nodeId].status === "pending" ? "assigned" : task.nodes[nodeId].status;
+	task.nodes[nodeId].status =
+		task.nodes[nodeId].status === "ready" || task.nodes[nodeId].status === "pending" ? "assigned" : task.nodes[nodeId].status;
 	task.nodes[nodeId].lastActivityAt = new Date().toISOString();
 	await writeFile(tp, JSON.stringify(task, null, 2), "utf8");
 }
@@ -183,44 +264,47 @@ function resetIsolation() {
 	const taskId = "task-sweep-s1";
 	await createTask(call, taskId);
 	await seedAgentRecord("implementer-01", { activeTaskIds: [taskId], spawnedForTaskId: taskId });
-	await seedAgentRecord("reviewer-01",   { activeTaskIds: [taskId], spawnedForTaskId: taskId, roleKind: "reviewer" });
+	await seedAgentRecord("reviewer-01", { activeTaskIds: [taskId], spawnedForTaskId: taskId, roleKind: "reviewer" });
 
 	// Drive the task terminal via three updates (plan done -> implement done -> review done).
-	await call("swarm_update_task", { taskId, nodeId: "plan",      status: "done", outcome: "planned",  force: true, cwd: scratch });
+	await call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
 	await call("swarm_update_task", { taskId, nodeId: "implement", status: "done", outcome: "implemented", force: true, cwd: scratch });
-	await call("swarm_update_task", { taskId, nodeId: "review",    status: "done", outcome: "approved", force: true, cwd: scratch });
+	await call("swarm_update_task", { taskId, nodeId: "review", status: "done", outcome: "approved", force: true, cwd: scratch });
 
 	const st = await readStateFile();
 	ok("implementer-01 stopped by sweep", st.agents["implementer-01"]?.status === "stopped");
-	ok("reviewer-01 stopped by sweep",   st.agents["reviewer-01"]?.status === "stopped");
-	ok("root untouched",         st.agents["root"]?.status === "running");
+	ok("reviewer-01 stopped by sweep", st.agents["reviewer-01"]?.status === "stopped");
+	ok("root untouched", st.agents["root"]?.status === "running");
 
 	// Trace shape: 2 per-agent + 1 summary (the terminal transition is site #4 — single sweep).
 	const events = await readGlobalEvents();
 	const perAgent = events.filter((e) => e.event === "agent.task_sweep_stopped");
-	const summary  = events.filter((e) => e.event === "task.workers_swept");
+	const summary = events.filter((e) => e.event === "task.workers_swept");
 	ok("exactly 2 per-agent sweep traces", perAgent.length === 2, `got ${perAgent.length}`);
-	ok("exactly 1 summary sweep trace",    summary.length === 1,  `got ${summary.length}`);
+	ok("exactly 1 summary sweep trace", summary.length === 1, `got ${summary.length}`);
 	if (perAgent.length === 2) {
 		const ids = perAgent.map((e) => e.agentId).sort();
 		ok("per-agent traces cover both workers", JSON.stringify(ids) === JSON.stringify(["implementer-01", "reviewer-01"]));
 		const byId = Object.fromEntries(perAgent.map((e) => [e.agentId, e]));
-		ok("per-agent trace has taskId field",       byId["implementer-01"].taskId === taskId);
-		ok("per-agent trace has priorActiveTaskIds", Array.isArray(byId["implementer-01"].priorActiveTaskIds) && byId["implementer-01"].priorActiveTaskIds.includes(taskId));
-		ok("per-agent trace has releaseReason",      byId["implementer-01"].releaseReason === "spawned_for_task");
-		ok("per-agent trace has spawnedForTaskId",   byId["implementer-01"].spawnedForTaskId === taskId);
+		ok("per-agent trace has taskId field", byId["implementer-01"].taskId === taskId);
+		ok(
+			"per-agent trace has priorActiveTaskIds",
+			Array.isArray(byId["implementer-01"].priorActiveTaskIds) && byId["implementer-01"].priorActiveTaskIds.includes(taskId),
+		);
+		ok("per-agent trace has releaseReason", byId["implementer-01"].releaseReason === "spawned_for_task");
+		ok("per-agent trace has spawnedForTaskId", byId["implementer-01"].spawnedForTaskId === taskId);
 	}
 	if (summary.length === 1) {
-		ok("summary has stoppedCount=2",       summary[0].stoppedCount === 2);
+		ok("summary has stoppedCount=2", summary[0].stoppedCount === 2);
 		ok("summary has stoppedAgentIds (2)", summary[0].stoppedAgentIds.length === 2);
-		ok("summary has taskId",              summary[0].taskId === taskId);
+		ok("summary has taskId", summary[0].taskId === taskId);
 	}
 
 	// Stopped != deleted: mailbox + identity persist.
 	ok("implementer-01 mailbox persists", await mailboxExists("implementer-01"));
-	ok("reviewer-01 mailbox persists",    await mailboxExists("reviewer-01"));
+	ok("reviewer-01 mailbox persists", await mailboxExists("reviewer-01"));
 	ok("implementer-01 identity persists", await identityExists("implementer-01"));
-	ok("reviewer-01 identity persists",    await identityExists("reviewer-01"));
+	ok("reviewer-01 identity persists", await identityExists("reviewer-01"));
 }
 
 // ============================================================
@@ -253,23 +337,36 @@ function resetIsolation() {
 	await stampNodeAssignee(taskA, "review", "reuse-worker-01");
 
 	// Close taskA.
-	await call("swarm_update_task", { taskId: taskA, nodeId: "plan",      status: "done", outcome: "planned",  force: true, cwd: scratch });
-	await call("swarm_update_task", { taskId: taskA, nodeId: "implement", status: "done", outcome: "implemented", force: true, cwd: scratch });
-	await call("swarm_update_task", { taskId: taskA, nodeId: "review",    status: "done", outcome: "approved", force: true, cwd: scratch });
+	await call("swarm_update_task", { taskId: taskA, nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
+	await call("swarm_update_task", {
+		taskId: taskA,
+		nodeId: "implement",
+		status: "done",
+		outcome: "implemented",
+		force: true,
+		cwd: scratch,
+	});
+	await call("swarm_update_task", { taskId: taskA, nodeId: "review", status: "done", outcome: "approved", force: true, cwd: scratch });
 
 	const st = await readStateFile();
 	ok("cross-task worker NOT stopped (still running)", st.agents["multi-worker-01"]?.status === "running");
 	ok("cross-task worker activeTaskIds still includes taskB", st.agents["multi-worker-01"]?.activeTaskIds.includes(taskB));
 	ok("cross-task worker activeTaskIds dropped taskA", !st.agents["multi-worker-01"]?.activeTaskIds.includes(taskA));
 	ok("dedicated worker swept (spawnedForTaskId link)", st.agents["dedicated-worker-01"]?.status === "stopped");
-	ok("shared-pool worker preserved (R12 P0 contract)",  st.agents["reuse-worker-01"]?.status === "running");
-	ok("shared-pool worker activeTaskIds === []",        Array.isArray(st.agents["reuse-worker-01"]?.activeTaskIds) && st.agents["reuse-worker-01"].activeTaskIds.length === 0);
+	ok("shared-pool worker preserved (R12 P0 contract)", st.agents["reuse-worker-01"]?.status === "running");
+	ok(
+		"shared-pool worker activeTaskIds === []",
+		Array.isArray(st.agents["reuse-worker-01"]?.activeTaskIds) && st.agents["reuse-worker-01"].activeTaskIds.length === 0,
+	);
 
 	const events = await readGlobalEvents();
 	const perAgent = events.filter((e) => e.event === "agent.task_sweep_stopped");
 	ok("per-agent sweep trace: NOT for multi-worker-01", !perAgent.some((e) => e.agentId === "multi-worker-01"));
 	ok("per-agent sweep trace: NOT for reuse-worker-01 (shared-pool preserved)", !perAgent.some((e) => e.agentId === "reuse-worker-01"));
-	ok("per-agent sweep trace: present for dedicated-worker-01", perAgent.some((e) => e.agentId === "dedicated-worker-01"));
+	ok(
+		"per-agent sweep trace: present for dedicated-worker-01",
+		perAgent.some((e) => e.agentId === "dedicated-worker-01"),
+	);
 	const dedicatedTrace = perAgent.find((e) => e.agentId === "dedicated-worker-01");
 	ok("dedicated trace releaseReason === 'spawned_for_task'", dedicatedTrace?.releaseReason === "spawned_for_task");
 }
@@ -293,18 +390,21 @@ function resetIsolation() {
 	// Non-paused comparison.
 	await seedAgentRecord("active-worker-01", { activeTaskIds: [taskId], spawnedForTaskId: taskId });
 
-	await call("swarm_update_task", { taskId, nodeId: "plan",      status: "done", outcome: "planned",  force: true, cwd: scratch });
+	await call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
 	await call("swarm_update_task", { taskId, nodeId: "implement", status: "done", outcome: "implemented", force: true, cwd: scratch });
-	await call("swarm_update_task", { taskId, nodeId: "review",    status: "done", outcome: "approved", force: true, cwd: scratch });
+	await call("swarm_update_task", { taskId, nodeId: "review", status: "done", outcome: "approved", force: true, cwd: scratch });
 
 	const st = await readStateFile();
-	ok("paused worker NOT stopped",  st.agents["paused-worker-01"]?.status === "running");
-	ok("active worker stopped",      st.agents["active-worker-01"]?.status === "stopped");
+	ok("paused worker NOT stopped", st.agents["paused-worker-01"]?.status === "running");
+	ok("active worker stopped", st.agents["active-worker-01"]?.status === "stopped");
 
 	const events = await readGlobalEvents();
 	const perAgent = events.filter((e) => e.event === "agent.task_sweep_stopped");
 	ok("no sweep trace for paused worker", !perAgent.some((e) => e.agentId === "paused-worker-01"));
-	ok("sweep trace for active worker",     perAgent.some((e) => e.agentId === "active-worker-01"));
+	ok(
+		"sweep trace for active worker",
+		perAgent.some((e) => e.agentId === "active-worker-01"),
+	);
 }
 
 // ============================================================
@@ -323,18 +423,18 @@ function resetIsolation() {
 	await createTask(call, taskId);
 	await seedAgentRecord("keep-worker-01", { activeTaskIds: [taskId], spawnedForTaskId: taskId });
 
-	await call("swarm_update_task", { taskId, nodeId: "plan",      status: "done", outcome: "planned",  force: true, cwd: scratch });
+	await call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
 	await call("swarm_update_task", { taskId, nodeId: "implement", status: "done", outcome: "implemented", force: true, cwd: scratch });
-	await call("swarm_update_task", { taskId, nodeId: "review",    status: "done", outcome: "approved", force: true, cwd: scratch });
+	await call("swarm_update_task", { taskId, nodeId: "review", status: "done", outcome: "approved", force: true, cwd: scratch });
 
 	const st = await readStateFile();
 	ok("opt-out: worker NOT stopped", st.agents["keep-worker-01"]?.status === "running");
 
 	const events = await readGlobalEvents();
 	const perAgent = events.filter((e) => e.event === "agent.task_sweep_stopped");
-	const summary  = events.filter((e) => e.event === "task.workers_swept");
-	ok("opt-out: no per-agent sweep traces",  perAgent.length === 0, `got ${perAgent.length}`);
-	ok("opt-out: no summary sweep traces",    summary.length === 0,  `got ${summary.length}`);
+	const summary = events.filter((e) => e.event === "task.workers_swept");
+	ok("opt-out: no per-agent sweep traces", perAgent.length === 0, `got ${perAgent.length}`);
+	ok("opt-out: no summary sweep traces", summary.length === 0, `got ${summary.length}`);
 
 	withKeep(undefined); // reset for subsequent scenarios
 }
@@ -366,7 +466,10 @@ function resetIsolation() {
 	// shape is observable via the per-agent sweep trace in scenario 1 (which already proved
 	// spawnedForTaskId was read).
 	const stBefore = await readStateFile();
-	ok("existing worker has spawnedForTaskId=undefined before assignment", stBefore.agents["existing-worker-01"]?.spawnedForTaskId === undefined);
+	ok(
+		"existing worker has spawnedForTaskId=undefined before assignment",
+		stBefore.agents["existing-worker-01"]?.spawnedForTaskId === undefined,
+	);
 
 	// Drive a tiny subset of assign_task: we verify the additive contract by reading the field
 	// back through a fresh seed-and-sweep — R12 contract: shared-pool workers without
@@ -376,9 +479,9 @@ function resetIsolation() {
 	ok("spawnedForTaskId is settable additively", stAfter.agents["existing-worker-01"]?.spawnedForTaskId === taskId);
 
 	// Drive the task terminal; the worker must be swept via spawned_for_task reason.
-	await call("swarm_update_task", { taskId, nodeId: "plan",      status: "done", outcome: "planned",  force: true, cwd: scratch });
+	await call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
 	await call("swarm_update_task", { taskId, nodeId: "implement", status: "done", outcome: "implemented", force: true, cwd: scratch });
-	await call("swarm_update_task", { taskId, nodeId: "review",    status: "done", outcome: "approved", force: true, cwd: scratch });
+	await call("swarm_update_task", { taskId, nodeId: "review", status: "done", outcome: "approved", force: true, cwd: scratch });
 
 	const events = await readGlobalEvents();
 	const perAgent = events.filter((e) => e.event === "agent.task_sweep_stopped" && e.agentId === "existing-worker-01");
@@ -403,15 +506,29 @@ function resetIsolation() {
 	await seedAgentRecord("double-worker-01", { activeTaskIds: [taskId], spawnedForTaskId: taskId });
 
 	// Drive to terminal.
-	await call("swarm_update_task", { taskId, nodeId: "plan",      status: "done", outcome: "planned",  force: true, cwd: scratch });
+	await call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
 	await call("swarm_update_task", { taskId, nodeId: "implement", status: "done", outcome: "implemented", force: true, cwd: scratch });
-	const firstClose = await call("swarm_update_task", { taskId, nodeId: "review", status: "done", outcome: "approved", force: true, cwd: scratch });
+	const firstClose = await call("swarm_update_task", {
+		taskId,
+		nodeId: "review",
+		status: "done",
+		outcome: "approved",
+		force: true,
+		cwd: scratch,
+	});
 	const taskJsonAfterFirst = await readTaskJson(taskId);
 	ok("task closed after first sweep", taskJsonAfterFirst.status === "done");
 
 	// Now drive a redundant terminal update: re-set the review node to done (idempotent at the
 	// node level — same status, no-op). This MUST NOT double-stop or duplicate per-agent traces.
-	const secondClose = await call("swarm_update_task", { taskId, nodeId: "review", status: "done", outcome: "approved", force: true, cwd: scratch });
+	const secondClose = await call("swarm_update_task", {
+		taskId,
+		nodeId: "review",
+		status: "done",
+		outcome: "approved",
+		force: true,
+		cwd: scratch,
+	});
 	ok("redundant update accepted (no error)", typeof secondClose?.content?.[0]?.text === "string");
 
 	const st = await readStateFile();
@@ -420,7 +537,7 @@ function resetIsolation() {
 	const events = await readGlobalEvents();
 	const perAgent = events.filter((e) => e.event === "agent.task_sweep_stopped" && e.agentId === "double-worker-01");
 	ok("exactly ONE per-agent sweep trace (idempotent)", perAgent.length === 1, `got ${perAgent.length}`);
-	const summary  = events.filter((e) => e.event === "task.workers_swept" && e.taskId === taskId);
+	const summary = events.filter((e) => e.event === "task.workers_swept" && e.taskId === taskId);
 	ok("exactly ONE summary sweep trace", summary.length === 1, `got ${summary.length}`);
 
 	void firstClose;
@@ -469,13 +586,66 @@ function resetIsolation() {
 
 	// Import the pure helper directly (no pi needed) — second invocation must be a no-op.
 	const { sweepTaskWorkersLocked } = await import(join(here, "..", "src/taskgraph.ts"));
-	const fakePi = { exec: async () => ({ code: 1, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} };
+	const fakePi = {
+		exec: async () => ({ code: 1, stdout: "", stderr: "" }),
+		setModel: async () => true,
+		sendMessage: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
+	};
 	const ts = new Date().toISOString();
 	const st = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", roleKindExplicit: true, capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "x", provider: "y", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: ts, updatedAt: ts },
-			"helper-worker": { id: "helper-worker", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: ["task-x"], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "helper-worker", tmuxTarget: "test:helper-worker.0", model: "x", provider: "y", cwd: scratch, mailbox: ".pi/swarm/mailboxes/helper-worker.jsonl", createdAt: ts, updatedAt: ts, spawnedForTaskId: "task-x" },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				roleKindExplicit: true,
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "x",
+				provider: "y",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: ts,
+				updatedAt: ts,
+			},
+			"helper-worker": {
+				id: "helper-worker",
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: ["task-x"],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "helper-worker",
+				tmuxTarget: "test:helper-worker.0",
+				model: "x",
+				provider: "y",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/helper-worker.jsonl",
+				createdAt: ts,
+				updatedAt: ts,
+				spawnedForTaskId: "task-x",
+			},
 		},
 		delivered: {},
 		messages: {},
@@ -483,14 +653,28 @@ function resetIsolation() {
 	const r1 = await sweepTaskWorkersLocked(fakePi, scratch, st, "task-x");
 	ok("first sweep returns object outcome", typeof r1 === "object" && Array.isArray(r1.stopped));
 	ok("first sweep stops the eligible worker", r1.stopped.includes("helper-worker"));
-	ok("first sweep ignores root (skipped)", r1.skipped.some((s) => s.agentId === "root" && s.reason === "root"));
+	ok(
+		"first sweep ignores root (skipped)",
+		r1.skipped.some((s) => s.agentId === "root" && s.reason === "root"),
+	);
 	const r2 = await sweepTaskWorkersLocked(fakePi, scratch, st, "task-x");
 	ok("second sweep returns same shape", typeof r2 === "object" && Array.isArray(r2.stopped));
 	ok("second sweep stops ZERO agents (idempotent)", r2.stopped.length === 0, `got ${r2.stopped.length}`);
 
 	// Re-run with opt-out -> "opt_out" string.
 	withKeep("1");
-	const r3 = await sweepTaskWorkersLocked(fakePi, scratch, { ...st, agents: { ...st.agents, "another": { ...st.agents["helper-worker"], id: "another", activeTaskIds: ["task-x"], spawnedForTaskId: "task-x" } } }, "task-x");
+	const r3 = await sweepTaskWorkersLocked(
+		fakePi,
+		scratch,
+		{
+			...st,
+			agents: {
+				...st.agents,
+				another: { ...st.agents["helper-worker"], id: "another", activeTaskIds: ["task-x"], spawnedForTaskId: "task-x" },
+			},
+		},
+		"task-x",
+	);
 	ok("opt-out returns string 'opt_out'", r3 === "opt_out");
 	withKeep(undefined);
 }

@@ -20,18 +20,41 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), `swarm-minimal-protocol-migration-${process.pid}-${Date.now()}`));
 await mkdir(join(scratch, ".pi"), { recursive: true });
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name);
+	}
+};
 
 // ---- helpers ----
 async function readGlobalEvents() {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function readStateFile() {
 	const p = join(scratch, ".pi/swarm/swarm-state.json");
-	try { return JSON.parse(await readFile(p, "utf8")); } catch { return null; }
+	try {
+		return JSON.parse(await readFile(p, "utf8"));
+	} catch {
+		return null;
+	}
 }
 async function loadExtension({ identity = "root" } = {}) {
 	process.env.PI_SWARM_AGENT_ID = identity;
@@ -40,9 +63,15 @@ async function loadExtension({ identity = "root" } = {}) {
 	const handlers = {};
 	const notifies = [];
 	const pi = {
-		registerTool: (def) => { tools[def.name] = def; },
-		registerCommand: (name, def) => { commands[name] = def; },
-		on: (ev, fn) => { (handlers[ev] ||= []).push(fn); },
+		registerTool: (def) => {
+			tools[def.name] = def;
+		},
+		registerCommand: (name, def) => {
+			commands[name] = def;
+		},
+		on: (ev, fn) => {
+			(handlers[ev] ||= []).push(fn);
+		},
 		exec: async (cmd, args) => {
 			if (cmd === "tmux" && args?.[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
 			return { code: 1, stdout: "", stderr: "" };
@@ -52,7 +81,16 @@ async function loadExtension({ identity = "root" } = {}) {
 	};
 	const mod = await import(join(here, "..", "index.ts"));
 	mod.default(pi);
-	const ctxFactory = (extra = {}) => Object.assign({ cwd: scratch, mode: "tui", hasUI: false, ui: { notify: (text, level) => notifies.push({ text, level }), setStatus: () => {} } }, extra);
+	const ctxFactory = (extra = {}) =>
+		Object.assign(
+			{
+				cwd: scratch,
+				mode: "tui",
+				hasUI: false,
+				ui: { notify: (text, level) => notifies.push({ text, level }), setStatus: () => {} },
+			},
+			extra,
+		);
 	return { pi, tools, commands, handlers, notifies, ctxFactory };
 }
 
@@ -81,10 +119,51 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 		}
 	}
 	return {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: ts, updatedAt: ts },
-			"worker-a": { id: "worker-a", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-a", tmuxTarget: "test:worker-a.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl", createdAt: ts, updatedAt: ts },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: ts,
+				updatedAt: ts,
+			},
+			"worker-a": {
+				id: "worker-a",
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "worker-a",
+				tmuxTarget: "test:worker-a.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
+				createdAt: ts,
+				updatedAt: ts,
+			},
 		},
 		delivered,
 		messages,
@@ -121,7 +200,10 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 		// migrated==0 under dry-run); remaining 20 have no delivered[] -> skipped. Total = 30.
 		ok("completion skipped=30 (10 already + 20 without transport)", completions[0].skipped === 30);
 	}
-	ok("notifies contains the migration summary", notifies.some((n) => String(n.text).includes("Migration") && String(n.text).includes("dry-run")));
+	ok(
+		"notifies contains the migration summary",
+		notifies.some((n) => String(n.text).includes("Migration") && String(n.text).includes("dry-run")),
+	);
 }
 
 // ============================================================
@@ -139,7 +221,8 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 	const after = await readStateFile();
 	ok("state file exists", after !== null);
 	// Half (25) had delivered[] entries; of those, 5 were already migrated. So 20 should be stamped.
-	let stamped = 0; let fabricated = 0;
+	let stamped = 0;
+	let fabricated = 0;
 	for (const rec of Object.values(after.messages)) {
 		if (rec.mailboxDeliveredAt) stamped++;
 		if (rec.seenAt || rec.processingAt || rec.respondedAt || rec.terminalAt) fabricated++;
@@ -158,9 +241,16 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 	}
 
 	// Each stamped record must carry a migrationRunId + migratedAt from this run.
-	const stampedRunIds = new Set(Object.values(after.messages).filter((r) => r.mailboxDeliveredAt).map((r) => r.migrationRunId));
+	const stampedRunIds = new Set(
+		Object.values(after.messages)
+			.filter((r) => r.mailboxDeliveredAt)
+			.map((r) => r.migrationRunId),
+	);
 	ok("all stamped records share one migrationRunId", stampedRunIds.size === 1);
-	ok("at least one stamped record has migratedAt", Object.values(after.messages).some((r) => r.migratedAt && r.mailboxDeliveredAt));
+	ok(
+		"at least one stamped record has migratedAt",
+		Object.values(after.messages).some((r) => r.migratedAt && r.mailboxDeliveredAt),
+	);
 }
 
 // ============================================================
@@ -193,10 +283,16 @@ function seedStateFixture(N = 50, alreadyMigrated = 10) {
 	console.log("\n--- Scenario 4: usage error paths ---");
 	const { commands, notifies, ctxFactory } = await loadExtension({ identity: "root" });
 	await commands.swarm.handler("protocol foo", ctxFactory());
-	ok("unknown sub -> usage warning", notifies.some((n) => String(n.text).includes("Usage: /swarm protocol migrate")));
+	ok(
+		"unknown sub -> usage warning",
+		notifies.some((n) => String(n.text).includes("Usage: /swarm protocol migrate")),
+	);
 	notifies.length = 0;
 	await commands.swarm.handler("protocol", ctxFactory());
-	ok("no sub -> usage warning", notifies.some((n) => String(n.text).includes("Usage: /swarm protocol migrate")));
+	ok(
+		"no sub -> usage warning",
+		notifies.some((n) => String(n.text).includes("Usage: /swarm protocol migrate")),
+	);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

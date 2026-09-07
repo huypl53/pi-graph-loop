@@ -33,19 +33,29 @@ const factory = mod.default;
 const { ensureDirs, paths, defaultState } = await import(join(here, "..", "src", "state.ts"));
 await ensureDirs(paths(scratch));
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (n, c, info) => {
-	if (c) { pass++; console.log("  ok  ", n); }
-	else { fail++; console.error("  FAIL", n, info !== undefined ? `(${JSON.stringify(info).slice(0, 200)})` : ""); }
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n, info !== undefined ? `(${JSON.stringify(info).slice(0, 200)})` : "");
+	}
 };
 
 const tools = {};
 const sentMessages = []; // R10-1 boundary counter for real pi.sendMessage
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
-	sendMessage: (msg) => { sentMessages.push(msg); }, // captured for boundary assertions
+	sendMessage: (msg) => {
+		sentMessages.push(msg);
+	}, // captured for boundary assertions
 	exec: async (cmd, args) => {
 		if (cmd === "tmux") {
 			if (args[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
@@ -60,15 +70,22 @@ factory(pi);
 
 const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
 const call = async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd: scratch });
 };
 const readSwarmState = () => JSON.parse(readFileSync(statePath, "utf8"));
 const writeSwarmState = (st) => writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
 const orchMailboxPath = join(scratch, ".pi", "swarm", "mailboxes", "root.jsonl");
 const readOrchMailbox = () => {
-	try { return readFileSync(orchMailboxPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)); }
-	catch { return []; }
+	try {
+		return readFileSync(orchMailboxPath, "utf8")
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l));
+	} catch {
+		return [];
+	}
 };
 
 // Bootstrap state file
@@ -136,12 +153,22 @@ const seedAgentWithUnackedDebt = (agentId, opts = {}) => {
 {
 	const st = readSwarmState();
 	st.agents.root = st.agents.root || {
-		id: "root", role: "root", roleKind: "root", roleKindExplicit: true,
-		tmuxTarget: "r25sess:orch.1", tmuxSession: "r25sess", tmuxWindow: "orch",
-		mailbox: ".pi/swarm/mailboxes/root.jsonl", capabilities: ["orchestrate"],
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		lastHeartbeatAt: new Date().toISOString(), activeTaskIds: [],
+		id: "root",
+		role: "root",
+		roleKind: "root",
+		roleKindExplicit: true,
+		tmuxTarget: "r25sess:orch.1",
+		tmuxSession: "r25sess",
+		tmuxWindow: "orch",
+		mailbox: ".pi/swarm/mailboxes/root.jsonl",
+		capabilities: ["orchestrate"],
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		lastHeartbeatAt: new Date().toISOString(),
+		activeTaskIds: [],
 	};
 	st.swarmId = st.swarmId || "swarm-r25";
 	st.messages = st.messages || {};
@@ -178,9 +205,7 @@ try {
 }
 
 const orchMail1 = readOrchMailbox();
-const ackDebtNotify1 = orchMail1.find((m) =>
-	m.to === "root" && /unacked ack|ack debt|R25/i.test(m.subject || "")
-);
+const ackDebtNotify1 = orchMail1.find((m) => m.to === "root" && /unacked ack|ack debt|R25/i.test(m.subject || ""));
 ok("[Settle path] root received ack-debt notify (RED today: none)", !!ackDebtNotify1, {
 	totalOrchMessages: orchMail1.length,
 	subjects: orchMail1.map((m) => m.subject),
@@ -192,11 +217,22 @@ ok("[Settle path] root received ack-debt notify (RED today: none)", !!ackDebtNot
 // (the original), not 3 — that's the storm-guard proof.
 const orchBeforeResettle = readOrchMailbox().filter((m) => m.to === "root" && /unacked ack|ack debt|R25/i.test(m.subject || "")).length;
 process.env.PI_SWARM_AGENT_ID = "r25-worker";
-try { await agentSettledHandler({}, { cwd: scratch, mode: "tui" }); } finally { process.env.PI_SWARM_AGENT_ID = prevAgent; }
+try {
+	await agentSettledHandler({}, { cwd: scratch, mode: "tui" });
+} finally {
+	process.env.PI_SWARM_AGENT_ID = prevAgent;
+}
 process.env.PI_SWARM_AGENT_ID = "r25-worker";
-try { await agentSettledHandler({}, { cwd: scratch, mode: "tui" }); } finally { process.env.PI_SWARM_AGENT_ID = prevAgent; }
+try {
+	await agentSettledHandler({}, { cwd: scratch, mode: "tui" });
+} finally {
+	process.env.PI_SWARM_AGENT_ID = prevAgent;
+}
 const orchAfterResettle = readOrchMailbox().filter((m) => m.to === "root" && /unacked ack|ack debt|R25/i.test(m.subject || "")).length;
-ok("[Re-settle] cumulative notify count stays 1 across 2 more settles (cooldown storm guard)", orchAfterResettle === orchBeforeResettle, { before: orchBeforeResettle, after: orchAfterResettle });
+ok("[Re-settle] cumulative notify count stays 1 across 2 more settles (cooldown storm guard)", orchAfterResettle === orchBeforeResettle, {
+	before: orchBeforeResettle,
+	after: orchAfterResettle,
+});
 
 // === 4. Sensitivity: requiresResponse-missing still triggers L868 notify (false-RED guard) ===
 seedAgentWithUnackedDebt("r25-worker-rr", { status: "running", includeRequiresResponse: true });
@@ -208,9 +244,7 @@ try {
 	process.env.PI_SWARM_AGENT_ID = prevAgent;
 }
 const orchMail3 = readOrchMailbox();
-const rrNotify = orchMail3.find((m) =>
-	m.to === "root" && /missing response/i.test(m.subject || "")
-);
+const rrNotify = orchMail3.find((m) => m.to === "root" && /missing response/i.test(m.subject || ""));
 ok("[Sensitivity] requiresResponse-missing still produces the existing L868 notify", !!rrNotify, {
 	totalOrchMessages: orchMail3.length,
 	subjects: orchMail3.map((m) => m.subject),
@@ -238,9 +272,7 @@ try {
 	process.env.PI_SWARM_AGENT_ID = prevAgent;
 }
 const orchMail4 = readOrchMailbox();
-const infoNotify = orchMail4.filter((m) =>
-	m.to === "root" && /unacked ack|ack debt|R25/i.test(m.subject || "")
-);
+const infoNotify = orchMail4.filter((m) => m.to === "root" && /unacked ack|ack debt|R25/i.test(m.subject || ""));
 ok("[Invariant] requiresAck=false informational messages NEVER produce a notify", infoNotify.length === 0, {
 	count: infoNotify.length,
 });
@@ -251,9 +283,7 @@ rmSync(orchMailboxPath, { force: true });
 const stopRes = await call("swarm_stop_agent", { agentId: "r25-stopped", cwd: scratch });
 ok("[Stop path] swarm_stop_agent succeeds (no activeTaskIds)", !!stopRes?.content?.[0]?.text);
 const orchMail5 = readOrchMailbox();
-const stopNotify = orchMail5.find((m) =>
-	m.to === "root" && /unacked ack|ack debt|R25|stop/i.test(m.subject || "")
-);
+const stopNotify = orchMail5.find((m) => m.to === "root" && /unacked ack|ack debt|R25|stop/i.test(m.subject || ""));
 ok("[Stop path] root received ack-debt notify (RED today: none)", !!stopNotify, {
 	totalOrchMessages: orchMail5.length,
 	subjects: orchMail5.map((m) => m.subject),
@@ -276,7 +306,14 @@ const pumpStub = {
 	sendMessage: (m, o) => sentMessages.push({ customType: m?.customType, content: m?.content, details: m?.details, options: o }),
 	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 };
-const pumpCtx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
+const pumpCtx = {
+	cwd: scratch,
+	mode: "tui",
+	isIdle: () => true,
+	hasUI: false,
+	ui: { setStatus: () => {} },
+	model: { id: "glm-5.1", provider: "zai-coding-cn" },
+};
 const pPaths = paths(scratch);
 // Helper: ack-debt sendMatcher — pump wraps the swarm message as {customType:"swarm-message",
 // details:<SwarmMessage>}; the subject lives at details.subject (NOT m.subject at the top level).
@@ -295,8 +332,11 @@ const seedRootLeader = async () => {
 const pumpAsRoot = async () => {
 	const prev = process.env.PI_SWARM_AGENT_ID;
 	process.env.PI_SWARM_AGENT_ID = "root";
-	try { return await pumpRootMailbox(pumpStub, pumpCtx, pPaths, "r25"); }
-	finally { process.env.PI_SWARM_AGENT_ID = prev; }
+	try {
+		return await pumpRootMailbox(pumpStub, pumpCtx, pPaths, "r25");
+	} finally {
+		process.env.PI_SWARM_AGENT_ID = prev;
+	}
 };
 
 await seedRootLeader();
@@ -305,21 +345,39 @@ await seedRootLeader();
 seedAgentWithUnackedDebt("r25-worker-b1", { status: "running" });
 rmSync(orchMailboxPath, { force: true });
 process.env.PI_SWARM_AGENT_ID = "r25-worker-b1";
-try { await agentSettledHandler({}, { cwd: scratch, mode: "tui" }); } finally { process.env.PI_SWARM_AGENT_ID = prevAgent; }
+try {
+	await agentSettledHandler({}, { cwd: scratch, mode: "tui" });
+} finally {
+	process.env.PI_SWARM_AGENT_ID = prevAgent;
+}
 sentMessages.length = 0;
 await pumpAsRoot();
 const pumpSends1 = sentMessages.filter(ackDebtSubject);
-ok("[R10-1 boundary] first settle surfaces >=1 ack-debt sendMessage at the pump boundary", pumpSends1.length >= 1, { count: pumpSends1.length, detailsSubjects: sentMessages.map((s) => s?.details?.subject) });
+ok("[R10-1 boundary] first settle surfaces >=1 ack-debt sendMessage at the pump boundary", pumpSends1.length >= 1, {
+	count: pumpSends1.length,
+	detailsSubjects: sentMessages.map((s) => s?.details?.subject),
+});
 
 // [R10-1b] Re-settle the same worker 2x more within cooldown; pump again; surface-ledger dedupes.
 process.env.PI_SWARM_AGENT_ID = "r25-worker-b1";
-try { await agentSettledHandler({}, { cwd: scratch, mode: "tui" }); } finally { process.env.PI_SWARM_AGENT_ID = prevAgent; }
+try {
+	await agentSettledHandler({}, { cwd: scratch, mode: "tui" });
+} finally {
+	process.env.PI_SWARM_AGENT_ID = prevAgent;
+}
 process.env.PI_SWARM_AGENT_ID = "r25-worker-b1";
-try { await agentSettledHandler({}, { cwd: scratch, mode: "tui" }); } finally { process.env.PI_SWARM_AGENT_ID = prevAgent; }
+try {
+	await agentSettledHandler({}, { cwd: scratch, mode: "tui" });
+} finally {
+	process.env.PI_SWARM_AGENT_ID = prevAgent;
+}
 sentMessages.length = 0;
 await pumpAsRoot();
 const pumpSends2 = sentMessages.filter(ackDebtSubject);
-ok("[R10-1 boundary] re-settle within cooldown surfaces 0 NEW ack-debt sendMessage (surface-ledger dedupe)", pumpSends2.length === 0, { count: pumpSends2.length, detailsSubjects: sentMessages.map((s) => s?.details?.subject) });
+ok("[R10-1 boundary] re-settle within cooldown surfaces 0 NEW ack-debt sendMessage (surface-ledger dedupe)", pumpSends2.length === 0, {
+	count: pumpSends2.length,
+	detailsSubjects: sentMessages.map((s) => s?.details?.subject),
+});
 
 // [R10-1c] Stop path surfaces >=1 ack-debt sendMessage at the pump boundary (separate debt set).
 seedAgentWithUnackedDebt("r25-worker-b1-stop", { status: "running" });
@@ -328,7 +386,10 @@ await call("swarm_stop_agent", { agentId: "r25-worker-b1-stop", cwd: scratch });
 sentMessages.length = 0;
 await pumpAsRoot();
 const pumpSends3 = sentMessages.filter(ackDebtSubject);
-ok("[R10-1 boundary] stop path surfaces >=1 ack-debt sendMessage at the pump boundary", pumpSends3.length >= 1, { count: pumpSends3.length, detailsSubjects: sentMessages.map((s) => s?.details?.subject) });
+ok("[R10-1 boundary] stop path surfaces >=1 ack-debt sendMessage at the pump boundary", pumpSends3.length >= 1, {
+	count: pumpSends3.length,
+	detailsSubjects: sentMessages.map((s) => s?.details?.subject),
+});
 
 // Cleanup
 rmSync(scratch, { recursive: true, force: true });

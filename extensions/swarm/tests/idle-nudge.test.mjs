@@ -26,14 +26,18 @@ process.env.PI_SWARM_TASK_STALL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs } = await import(join(here, "..", "src", "state.ts"));
-const { evaluateIdleGoalNudgeLocked, evaluateTaskGraphStallNudgeLocked, staleSurfaceReason, updateIdleEpochLocked, pumpRootMailbox } = await import(join(here, "..", "src", "reconcile.ts"));
+const { evaluateIdleGoalNudgeLocked, evaluateTaskGraphStallNudgeLocked, staleSurfaceReason, updateIdleEpochLocked, pumpRootMailbox } =
+	await import(join(here, "..", "src", "reconcile.ts"));
 
 const { ensureRoot, heartbeatRootLeader } = await import(join(here, "..", "src", "identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "..", "src", "mailbox.ts"));
 
 const dir = await mkdtemp(join(tmpdir(), "idle-nudge-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
-await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }));
+await writeFile(
+	join(dir, ".pi", "settings.json"),
+	JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }),
+);
 process.chdir(dir);
 const p = paths(dir);
 await ensureDirs(p);
@@ -44,12 +48,23 @@ const pi = {
 	registerCommand: () => {},
 	on: () => {},
 	setModel: async () => true,
-	sendMessage: (m, o) => { sentMessages.push({ m, o }); },
+	sendMessage: (m, o) => {
+		sentMessages.push({ m, o });
+	},
 	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 };
 
-let pass = 0, fail = 0;
-const ok = (n, c, info) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL:", n, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c, info) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL:", n, info ?? "");
+	}
+};
 
 const SAVED_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
 const SAVED_ORCH = process.env.PI_SWARM_IS_ROOT;
@@ -65,7 +80,17 @@ process.on("exit", () => {
 async function readEventsFile() {
 	try {
 		const raw = await readFile(p.events, "utf8");
-		return raw.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+		return raw
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.filter(Boolean);
 	} catch {
 		return [];
 	}
@@ -80,18 +105,46 @@ async function setup({ taskId = "task-1", ageMs = 0, withTask = false, taskStatu
 	ensureRoot(st, dir, p);
 	const ts = new Date().toISOString();
 	st.agents["worker-a"] = {
-		id: "worker-a", role: "worker-a role", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		tmuxSession: st.tmuxSession, tmuxWindow: "worker-a", tmuxTarget: "sess:worker-a.0",
-		model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
-		createdAt: ts, updatedAt: ts, lastHeartbeatAt: ts,
+		id: "worker-a",
+		role: "worker-a role",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: st.tmuxSession,
+		tmuxWindow: "worker-a",
+		tmuxTarget: "sess:worker-a.0",
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: dir,
+		mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
+		createdAt: ts,
+		updatedAt: ts,
+		lastHeartbeatAt: ts,
 	};
 	st.agents["worker-b"] = {
-		id: "worker-b", role: "worker-b role", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		tmuxSession: st.tmuxSession, tmuxWindow: "worker-b", tmuxTarget: "sess:worker-b.0",
-		model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/worker-b.jsonl",
-		createdAt: ts, updatedAt: ts, lastHeartbeatAt: ts,
+		id: "worker-b",
+		role: "worker-b role",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: st.tmuxSession,
+		tmuxWindow: "worker-b",
+		tmuxTarget: "sess:worker-b.0",
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: dir,
+		mailbox: ".pi/swarm/mailboxes/worker-b.jsonl",
+		createdAt: ts,
+		updatedAt: ts,
+		lastHeartbeatAt: ts,
 	};
 	st.idleNudgeState = {};
 	st.goal = {
@@ -107,12 +160,16 @@ async function setup({ taskId = "task-1", ageMs = 0, withTask = false, taskStatu
 	try {
 		const entries = await readdir(p.tasksDir);
 		for (const entry of entries) await rm(join(p.tasksDir, entry), { recursive: true, force: true });
-	} catch { /* ignore */ }
+	} catch {
+		/* ignore */
+	}
 	if (withTask) {
 		try {
 			const entries = await readdir(p.tasksDir);
 			for (const entry of entries) await rm(join(p.tasksDir, entry), { recursive: true, force: true });
-		} catch { /* ignore */ }
+		} catch {
+			/* ignore */
+		}
 		await seedGraphTask(taskId, { ageMs, taskStatus });
 	}
 	await rm(p.events, { force: true });
@@ -141,7 +198,15 @@ async function seedGraphTask(taskId, { ageMs = 0, taskStatus = "in_progress" } =
 		currentNodes: ["a"],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: {
-			a: { status: "ready", role: "worker", assignee: undefined, dependsOn: [], messageIds: [], attempts: 0, lastActivityAt: createdAt },
+			a: {
+				status: "ready",
+				role: "worker",
+				assignee: undefined,
+				dependsOn: [],
+				messageIds: [],
+				attempts: 0,
+				lastActivityAt: createdAt,
+			},
 		},
 		edges: [],
 		handoffs: [],
@@ -176,7 +241,14 @@ async function tickGraph(nowMs = Date.now()) {
 
 async function getGoalState() {
 	const st = await readState(p, dir);
-	return { goal: st.goal, idle: st.idleNudgeState, idleNudgeState: st.idleNudgeState, taskStallState: st.taskStallState, agents: st.agents, messages: st.messages };
+	return {
+		goal: st.goal,
+		idle: st.idleNudgeState,
+		idleNudgeState: st.idleNudgeState,
+		taskStallState: st.taskStallState,
+		agents: st.agents,
+		messages: st.messages,
+	};
 }
 
 // =============================================================
@@ -222,7 +294,10 @@ console.log("\n[B] goal nudges need a fresh full streak after each emission");
 	ok("third fresh check emits again (fresh streak)", r.emitted === true && r.reason === "emitted");
 	const st = await getGoalState();
 	ok("counter advanced on actual emissions", st.goal.consecutiveNoResolveNudges >= 1);
-	ok("one goal message persisted", Object.values(st.messages).filter((m) => m.idempotencyKey?.startsWith(`goal:${st.goal.id}:nudge:idle-streak`)).length >= 1);
+	ok(
+		"one goal message persisted",
+		Object.values(st.messages).filter((m) => m.idempotencyKey?.startsWith(`goal:${st.goal.id}:nudge:idle-streak`)).length >= 1,
+	);
 }
 
 // =============================================================
@@ -274,17 +349,37 @@ console.log("\n[D] busy agent resets idle epoch; ghosts ignored");
 		const s = await readState(p, dir);
 		s.agents["worker-a"].runtimeStatus = "idle";
 		s.agents["ghost-stopped"] = {
-			id: "ghost-stopped", role: "ghost", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-			status: "stopped", runtimeStatus: "stopped", health: "unhealthy",
-			tmuxSession: s.tmuxSession, tmuxWindow: "ghost-stopped", tmuxTarget: "unknown",
-			model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/ghost-stopped.jsonl",
-			createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(), tmuxAlive: false,
+			id: "ghost-stopped",
+			role: "ghost",
+			roleKind: "worker",
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 1,
+			status: "stopped",
+			runtimeStatus: "stopped",
+			health: "unhealthy",
+			tmuxSession: s.tmuxSession,
+			tmuxWindow: "ghost-stopped",
+			tmuxTarget: "unknown",
+			model: "glm-5.1",
+			provider: "zai-coding-cn",
+			cwd: dir,
+			mailbox: ".pi/swarm/mailboxes/ghost-stopped.jsonl",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+			lastHeartbeatAt: new Date().toISOString(),
+			tmuxAlive: false,
 		};
 		// Also a running-but-stale-heartbeat ghost.
 		s.agents["ghost-stale-hb"] = {
 			...s.agents["ghost-stopped"],
-			id: "ghost-stale-hb", tmuxWindow: "ghost-stale-hb", tmuxTarget: "sess:ghost-stale-hb.0", tmuxAlive: true,
-			status: "running", runtimeStatus: "busy", health: "healthy",
+			id: "ghost-stale-hb",
+			tmuxWindow: "ghost-stale-hb",
+			tmuxTarget: "sess:ghost-stale-hb.0",
+			tmuxAlive: true,
+			status: "running",
+			runtimeStatus: "busy",
+			health: "healthy",
 			lastHeartbeatAt: new Date(Date.now() - 30 * 60_000).toISOString(), // 30min old > stale window
 		};
 		await writeState(p, s);
@@ -310,9 +405,17 @@ console.log("\n[E] graph nudge still fires; goal floor ignores the graph (R27)")
 	const graphResult = await tickGraph(t0);
 	ok("graph nudge emits", graphResult.emitted === true && graphResult.reason === "emitted");
 	const goalResult = await tickGoal(t0 + 1000);
-	ok("goal check pending on its own streak cadence (no graph defer)", goalResult.emitted === false && goalResult.reason === "idle_interval_pending", `got ${goalResult.reason}/${goalResult.emitted}`);
+	ok(
+		"goal check pending on its own streak cadence (no graph defer)",
+		goalResult.emitted === false && goalResult.reason === "idle_interval_pending",
+		`got ${goalResult.reason}/${goalResult.emitted}`,
+	);
 	ok("graph nudge trace emitted", (await countEvents("task_stall.nudge_emitted")) === 1);
-	ok("zero goal graph-gate traces (R27: removed)", (await countEvents("goal.nudge.suppressed_by_actionable_graph")) === 0 && (await countEvents("goal.nudge.deferred_by_actionable_graph")) === 0);
+	ok(
+		"zero goal graph-gate traces (R27: removed)",
+		(await countEvents("goal.nudge.suppressed_by_actionable_graph")) === 0 &&
+			(await countEvents("goal.nudge.deferred_by_actionable_graph")) === 0,
+	);
 }
 
 // =============================================================
@@ -353,9 +456,17 @@ console.log("\n[F] deferred stale nudges are suppressed at surface time");
 	v = await staleSurfaceReason(p, st, stallMsg, taskIndex, Date.now());
 	ok("assigned node suppresses deferred stall nudge even when idle", v.stale === true, JSON.stringify(v));
 	// Scenario 3: a goal nudge created BEFORE an idle-epoch advance is stale.
-	const goalKeyMsg = { id: "synthetic-goal-msg", idempotencyKey: `goal:${st.goal.id}:nudge:idle-streak:1`, createdAt: new Date(t0 - 5_000).toISOString() };
+	const goalKeyMsg = {
+		id: "synthetic-goal-msg",
+		idempotencyKey: `goal:${st.goal.id}:nudge:idle-streak:1`,
+		createdAt: new Date(t0 - 5_000).toISOString(),
+	};
 	v = await staleSurfaceReason(p, st, goalKeyMsg, taskIndex, Date.now());
-	ok("goal nudge predating epoch advance is stale", v.stale === true && (v.reason === "idle_epoch_advanced" || v.reason === "agent_busy"), JSON.stringify(v));
+	ok(
+		"goal nudge predating epoch advance is stale",
+		v.stale === true && (v.reason === "idle_epoch_advanced" || v.reason === "agent_busy"),
+		JSON.stringify(v),
+	);
 	// Scenario 4: fresh stall condition + fresh message -> NOT stale.
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
@@ -368,8 +479,18 @@ console.log("\n[F] deferred stale nudges are suppressed at surface time");
 		await writeState(p, s);
 	});
 	st = await getGoalState();
-	const freshMsg = { id: "synthetic-stall-msg", idempotencyKey: "task:task-surface:nudge:graph-stall:9", createdAt: new Date().toISOString() };
-	v = await staleSurfaceReason(p, st, freshMsg, { "task-surface": JSON.parse(await readFile(taskPaths(p, "task-surface").taskJson, "utf8")) }, Date.now());
+	const freshMsg = {
+		id: "synthetic-stall-msg",
+		idempotencyKey: "task:task-surface:nudge:graph-stall:9",
+		createdAt: new Date().toISOString(),
+	};
+	v = await staleSurfaceReason(
+		p,
+		st,
+		freshMsg,
+		{ "task-surface": JSON.parse(await readFile(taskPaths(p, "task-surface").taskJson, "utf8")) },
+		Date.now(),
+	);
 	ok("fresh stall + idle agents is not stale", v.stale === false, JSON.stringify(v));
 }
 
@@ -383,10 +504,18 @@ console.log("\n[F] graph and goal coexist (goal floor independent of graph)");
 	const graphResult = await tickGraph(t0);
 	ok("graph nudge emitted", graphResult.emitted === true);
 	const goalResult = await tickGoal(t0 + 1000);
-	ok("goal checks accumulate on their own cadence (no defer)", goalResult.emitted === false && goalResult.reason === "idle_interval_pending", `got ${goalResult.reason}/${goalResult.emitted}`);
+	ok(
+		"goal checks accumulate on their own cadence (no defer)",
+		goalResult.emitted === false && goalResult.reason === "idle_interval_pending",
+		`got ${goalResult.reason}/${goalResult.emitted}`,
+	);
 	const goalResult2 = await tickGoal(t0 + 2000);
 	const goalResult3 = await tickGoal(t0 + 3000);
-	ok("goal floor fires once its streak completes (coexistence accepted)", goalResult3.emitted === true && goalResult3.reason === "emitted", `got ${goalResult3.reason}/${goalResult3.emitted}`);
+	ok(
+		"goal floor fires once its streak completes (coexistence accepted)",
+		goalResult3.emitted === true && goalResult3.reason === "emitted",
+		`got ${goalResult3.reason}/${goalResult3.emitted}`,
+	);
 }
 
 // =============================================================
@@ -442,16 +571,27 @@ console.log("\n[I] fresh status=ready task with actionable plan -> graph nudge, 
 	const t0 = Date.now();
 	// Sanity: the seeded task really is pre-first-assign (task-level ready, plan ready+unassigned).
 	const seeded = JSON.parse(await readFile(taskPaths(p, "task-fresh").taskJson, "utf8"));
-	ok("seeded task is status=ready with unassigned ready plan node", seeded.status === "ready" && seeded.nodes.a.status === "ready" && !seeded.nodes.a.assignee);
+	ok(
+		"seeded task is status=ready with unassigned ready plan node",
+		seeded.status === "ready" && seeded.nodes.a.status === "ready" && !seeded.nodes.a.assignee,
+	);
 	const graphResult = await tickGraph(t0);
 	ok("graph nudge fires for fresh ready task", graphResult.emitted === true && graphResult.reason === "emitted");
 	const goalResult = await tickGoal(t0 + 1000);
 	// R27: the goal floor is task-state-independent — a fresh ready task neither suppresses
 	// nor defers it; the goal fires on its own streak cadence.
-	ok("goal evaluator on its own cadence (no defer for fresh ready task)", goalResult.emitted === false && goalResult.reason === "idle_interval_pending", `got ${goalResult.reason}/${goalResult.emitted}`);
+	ok(
+		"goal evaluator on its own cadence (no defer for fresh ready task)",
+		goalResult.emitted === false && goalResult.reason === "idle_interval_pending",
+		`got ${goalResult.reason}/${goalResult.emitted}`,
+	);
 	await tickGoal(t0 + 2000);
 	let goalResult3 = await tickGoal(t0 + 3000);
-	ok("third check emits despite fresh ready task (R27)", goalResult3.emitted === true && goalResult3.reason === "emitted", `got ${goalResult3.reason}/${goalResult3.emitted}`);
+	ok(
+		"third check emits despite fresh ready task (R27)",
+		goalResult3.emitted === true && goalResult3.reason === "emitted",
+		`got ${goalResult3.reason}/${goalResult3.emitted}`,
+	);
 }
 
 // =============================================================
@@ -477,7 +617,11 @@ console.log("\n[J] assignment pointer suppresses goal fallback (task.json alone 
 	const goalResult = await tickGoal(t0);
 	// Issue 85 bug #2 shape preserved under R27: an idle agent carrying an activeTaskIds
 	// pointer is "about to run" — the goal floor holds with assignment_in_flight.
-	ok("goal evaluator suppresses when an idle agent carries an assignment pointer", goalResult.emitted === false && goalResult.reason === "assignment_in_flight", JSON.stringify(goalResult));
+	ok(
+		"goal evaluator suppresses when an idle agent carries an assignment pointer",
+		goalResult.emitted === false && goalResult.reason === "assignment_in_flight",
+		JSON.stringify(goalResult),
+	);
 	ok("assignment-in-flight suppression trace emitted", (await countEvents("goal.nudge.suppressed_by_assignment_in_flight")) >= 1);
 }
 
@@ -500,10 +644,18 @@ console.log("\n[K] task.json-only assigned node does NOT suppress the goal floor
 	});
 	const t0 = Date.now();
 	let goalResult = await tickGoal(t0);
-	ok("check 1 pending (no active_task suppression — scan removed)", goalResult.emitted === false && goalResult.reason === "idle_interval_pending", JSON.stringify(goalResult));
+	ok(
+		"check 1 pending (no active_task suppression — scan removed)",
+		goalResult.emitted === false && goalResult.reason === "idle_interval_pending",
+		JSON.stringify(goalResult),
+	);
 	goalResult = await tickGoal(t0 + 1000);
 	goalResult = await tickGoal(t0 + 2000);
-	ok("goal floor EMITS despite task.json assigned/in_progress + no pointer (R27 core)", goalResult.emitted === true && goalResult.reason === "emitted", JSON.stringify(goalResult));
+	ok(
+		"goal floor EMITS despite task.json assigned/in_progress + no pointer (R27 core)",
+		goalResult.emitted === true && goalResult.reason === "emitted",
+		JSON.stringify(goalResult),
+	);
 	ok("zero active_task suppression traces (scan removed)", (await countEvents("goal.nudge.suppressed_by_active_task")) === 0);
 }
 
@@ -520,8 +672,19 @@ console.log("\n[K] stale legacy nextGoalNudgeAt is inert under the check-streak 
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
 		ensureRoot(st, dir, p);
-		st.goal = { id: "g-k1", text: "K1 stale schedule", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
-		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 3_600_000).toISOString(), nextGoalNudgeAt: new Date(t0 + 3_300_000).toISOString() };
+		st.goal = {
+			id: "g-k1",
+			text: "K1 stale schedule",
+			setAt: new Date(t0 - 3_600_000).toISOString(),
+			setBy: "root",
+			consecutiveNoResolveNudges: 0,
+			nudgeSeq: 0,
+			nudgeIntervalMs: 30_000,
+		};
+		st.idleNudgeState = {
+			allIdleSinceAt: new Date(t0 - 3_600_000).toISOString(),
+			nextGoalNudgeAt: new Date(t0 + 3_300_000).toISOString(),
+		};
 		await writeState(p, st);
 	});
 	let r = await tickGoal(t0);
@@ -542,15 +705,31 @@ console.log("\n[L] (R27) post-emission spacing is streak-based; legacy lastGoalN
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
 		ensureRoot(st, dir, p);
-		st.goal = { id: "g-l1", text: "L1 post-resolve spacing", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
+		st.goal = {
+			id: "g-l1",
+			text: "L1 post-resolve spacing",
+			setAt: new Date(t0 - 3_600_000).toISOString(),
+			setBy: "root",
+			consecutiveNoResolveNudges: 0,
+			nudgeSeq: 0,
+			nudgeIntervalMs: 30_000,
+		};
 		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 2_700_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 5_000).toISOString() };
 		await writeState(p, st);
 	});
 	let r = await tickGoal(t0);
-	ok("check 1 pending (no immediate fire off the old epoch)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	ok(
+		"check 1 pending (no immediate fire off the old epoch)",
+		r.emitted === false && r.reason === "idle_interval_pending",
+		JSON.stringify(r),
+	);
 	await tickGoal(t0 + 1000);
 	r = await tickGoal(t0 + 2000);
-	ok("check 3 emits — spacing is streak-based, not last-emit-anchored (R27)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	ok(
+		"check 3 emits — spacing is streak-based, not last-emit-anchored (R27)",
+		r.emitted === true && r.reason === "emitted",
+		JSON.stringify(r),
+	);
 }
 
 // =============================================================
@@ -563,7 +742,15 @@ console.log("\n[M] root busy during the interval resets the epoch");
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
 		ensureRoot(st, dir, p);
-		st.goal = { id: "g-m1", text: "M1 root busy", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
+		st.goal = {
+			id: "g-m1",
+			text: "M1 root busy",
+			setAt: new Date(t0 - 3_600_000).toISOString(),
+			setBy: "root",
+			consecutiveNoResolveNudges: 0,
+			nudgeSeq: 0,
+			nudgeIntervalMs: 30_000,
+		};
 		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 25_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 25_000).toISOString() };
 		await writeState(p, st);
 	});
@@ -571,19 +758,36 @@ console.log("\n[M] root busy during the interval resets the epoch");
 	// Row 68 fix: busy root work must not count toward the idle interval.
 	const hooks = await import(join(here, "..", "src", "hooks.ts"));
 	const handlers = {};
-	const hpi = { on: (ev, fn) => { (handlers[ev] ||= []).push(fn); }, registerTool(){}, registerCommand(){}, exec: pi.exec, setModel: pi.setModel, sendMessage: pi.sendMessage };
+	const hpi = {
+		on: (ev, fn) => {
+			(handlers[ev] ||= []).push(fn);
+		},
+		registerTool() {},
+		registerCommand() {},
+		exec: pi.exec,
+		setModel: pi.setModel,
+		sendMessage: pi.sendMessage,
+	};
 	hooks.registerSwarmHooks(hpi);
 	process.env.PI_SWARM_IS_ROOT = "1";
 	await handlers["turn_start"][0]({ turnIndex: 0 }, { cwd: dir });
 	{
 		const st = await getGoalState();
-		ok("turn_start (root) drops the idle epoch", st.idle?.allIdleSinceAt === undefined && st.idle?.nextGoalNudgeAt === undefined, JSON.stringify(st.idle));
+		ok(
+			"turn_start (root) drops the idle epoch",
+			st.idle?.allIdleSinceAt === undefined && st.idle?.nextGoalNudgeAt === undefined,
+			JSON.stringify(st.idle),
+		);
 	}
 	// 25s of busy work elapse; turn ends at t0+25s. Next pump tick stamps a FRESH epoch
 	// (t0+25s) and the nudge must wait until t0+25s+30s — NOT fire at t0+30s (which would
 	// ignore the busy window, the live bug).
 	let r = await tickGoal(t0 + 30_000);
-	ok("interval measured from the END of root work (not old epoch)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	ok(
+		"interval measured from the END of root work (not old epoch)",
+		r.emitted === false && r.reason === "idle_interval_pending",
+		JSON.stringify(r),
+	);
 	{
 		const st = await getGoalState();
 		const fresh = new Date(st.idle.allIdleSinceAt).getTime();
@@ -618,13 +822,24 @@ console.log("\n[L] assignment pointer suppresses goal nudge (post-assign pre-pic
 	});
 	const t0 = Date.now();
 	let r = await tickGoal(t0);
-	ok("goal suppressed by assignment pointer (assignment_in_flight)", r.emitted === false && r.reason === "assignment_in_flight", JSON.stringify(r));
-	ok("goal.nudge.suppressed_by_assignment_in_flight trace recorded", (await countEvents("goal.nudge.suppressed_by_assignment_in_flight")) >= 1);
+	ok(
+		"goal suppressed by assignment pointer (assignment_in_flight)",
+		r.emitted === false && r.reason === "assignment_in_flight",
+		JSON.stringify(r),
+	);
+	ok(
+		"goal.nudge.suppressed_by_assignment_in_flight trace recorded",
+		(await countEvents("goal.nudge.suppressed_by_assignment_in_flight")) >= 1,
+	);
 	// Tick again 2s later — still no active task in tasksDir, still pointer only — must stay suppressed.
 	// Pre-fix this would have been throttled (active-task scan every intervalMs) and could emit; the
 	// pointer fast path closes the window.
 	r = await tickGoal(t0 + 2000);
-	ok("second tick also suppresses via pointer (no scan-throttle race)", r.emitted === false && r.reason === "assignment_in_flight", JSON.stringify(r));
+	ok(
+		"second tick also suppresses via pointer (no scan-throttle race)",
+		r.emitted === false && r.reason === "assignment_in_flight",
+		JSON.stringify(r),
+	);
 	// Now mark the worker busy — still pointer + busy — must stay suppressed but with the generic
 	// agent_busy reason (the pointer is no longer the only signal).
 	await withLock(p, async () => {
@@ -633,7 +848,11 @@ console.log("\n[L] assignment pointer suppresses goal nudge (post-assign pre-pic
 		await writeState(p, st);
 	});
 	r = await tickGoal(t0 + 3000);
-	ok("busy worker suppresses with agent_busy (pointer no longer the leading signal)", r.emitted === false && r.reason === "agent_busy", JSON.stringify(r));
+	ok(
+		"busy worker suppresses with agent_busy (pointer no longer the leading signal)",
+		r.emitted === false && r.reason === "agent_busy",
+		JSON.stringify(r),
+	);
 }
 
 // =============================================================
@@ -656,11 +875,19 @@ console.log("\n[M] vacuous idle: zero effective agents holds goal nudge");
 	});
 	const t0 = Date.now();
 	let r = await tickGoal(t0);
-	ok("zero effective agents suppresses with reason no_live_workers", r.emitted === false && r.reason === "no_live_workers", JSON.stringify(r));
+	ok(
+		"zero effective agents suppresses with reason no_live_workers",
+		r.emitted === false && r.reason === "no_live_workers",
+		JSON.stringify(r),
+	);
 	ok("goal.nudge.held_no_live_workers trace recorded", (await countEvents("goal.nudge.held_no_live_workers")) >= 1);
 	// Tick again 2s later — still vacuous — must stay held. Pre-fix this would fire forever.
 	r = await tickGoal(t0 + 2000);
-	ok("subsequent vacuous tick stays held (no emission forever)", r.emitted === false && r.reason === "no_live_workers", JSON.stringify(r));
+	ok(
+		"subsequent vacuous tick stays held (no emission forever)",
+		r.emitted === false && r.reason === "no_live_workers",
+		JSON.stringify(r),
+	);
 }
 
 // =============================================================
@@ -682,7 +909,11 @@ console.log("\n[N] ghost agents do not count as effective workers (vacuous sanit
 	});
 	const t0 = Date.now();
 	const r = await tickGoal(t0);
-	ok("ghosts-only swarm (effective=0) suppresses with no_live_workers", r.emitted === false && r.reason === "no_live_workers", JSON.stringify(r));
+	ok(
+		"ghosts-only swarm (effective=0) suppresses with no_live_workers",
+		r.emitted === false && r.reason === "no_live_workers",
+		JSON.stringify(r),
+	);
 	ok("vacuous trace recorded for ghost-only swarm", (await countEvents("goal.nudge.held_no_live_workers")) >= 1);
 }
 
@@ -708,8 +939,12 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 	await tickGoal(t0 + 1000); // sample 2
 	const e1 = await tickGoal(t0 + 2000); // sample 3 → EMITS nudge 1
 	ok("R22 emission: nudge 1 emitted under the all-idle gate", e1.emitted === true && e1.reason === "emitted", JSON.stringify(e1));
-	await tickGoal(t0 + 3000); await tickGoal(t0 + 4000); await tickGoal(t0 + 5000); // nudge 2
-	await tickGoal(t0 + 6000); await tickGoal(t0 + 7000); await tickGoal(t0 + 8000); // nudge 3
+	await tickGoal(t0 + 3000);
+	await tickGoal(t0 + 4000);
+	await tickGoal(t0 + 5000); // nudge 2
+	await tickGoal(t0 + 6000);
+	await tickGoal(t0 + 7000);
+	await tickGoal(t0 + 8000); // nudge 3
 	let st = await getGoalState();
 	const goalMsgs = Object.values(st.messages)
 		.filter((m) => m.idempotencyKey?.startsWith(`goal:${st.goal.id}:nudge:idle-streak`))
@@ -745,9 +980,17 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 		await writeState(p, s);
 	});
 	st = await getGoalState();
-	const oldGoalMsg = { id: "r22-synthetic-old-goal", idempotencyKey: `goal:${st.goal.id}:nudge:idle-streak:1`, createdAt: new Date(t0 - 3_600_000).toISOString() };
+	const oldGoalMsg = {
+		id: "r22-synthetic-old-goal",
+		idempotencyKey: `goal:${st.goal.id}:nudge:idle-streak:1`,
+		createdAt: new Date(t0 - 3_600_000).toISOString(),
+	};
 	const vC2 = await staleSurfaceReason(p, st, oldGoalMsg, {}, t0 + 5000);
-	ok("R22-C2 epoch-advanced goal nudge stays stale (immortality guard kept)", vC2.stale === true && vC2.reason === "idle_epoch_advanced", JSON.stringify(vC2));
+	ok(
+		"R22-C2 epoch-advanced goal nudge stays stale (immortality guard kept)",
+		vC2.stale === true && vC2.reason === "idle_epoch_advanced",
+		JSON.stringify(vC2),
+	);
 
 	// ---- Control C3 (R27): LIVE actionable graph NO LONGER suppresses goal keys — the
 	// surface gate must agree with the task-state-independent emission gate. Synthetic
@@ -760,12 +1003,22 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 		await writeState(p, s);
 	});
 	st = await getGoalState();
-	const vC3 = await staleSurfaceReason(p, st, goalMsgs[0], {
-		"task-r22-ctl-live": {
-			taskId: "task-r22-ctl-live", status: "in_progress", start: "a", edges: [], handoffs: [],
-			nodes: { a: { status: "ready", assignee: undefined, dependsOn: [] } },
+	const vC3 = await staleSurfaceReason(
+		p,
+		st,
+		goalMsgs[0],
+		{
+			"task-r22-ctl-live": {
+				taskId: "task-r22-ctl-live",
+				status: "in_progress",
+				start: "a",
+				edges: [],
+				handoffs: [],
+				nodes: { a: { status: "ready", assignee: undefined, dependsOn: [] } },
+			},
 		},
-	}, t0 + 5100);
+		t0 + 5100,
+	);
 	ok("R22-C3 live actionable graph does NOT suppress goal nudge (R27)", vC3.stale === false, JSON.stringify(vC3));
 
 	// ---- Control C1: taskKey graph-stall nudges keep the busy suppression (fix is
@@ -779,14 +1032,32 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 		await writeState(p, s);
 	});
 	st = await getGoalState();
-	const stallCtlMsg = { id: "r22-synthetic-stall", idempotencyKey: "task:task-r22-ctl-stall:node:a:nudge:graph-stall:1", createdAt: new Date(t0 + 5000).toISOString() };
-	const vC1 = await staleSurfaceReason(p, st, stallCtlMsg, {
-		"task-r22-ctl-stall": {
-			taskId: "task-r22-ctl-stall", status: "in_progress", start: "a", edges: [], handoffs: [],
-			nodes: { a: { status: "assigned", assignee: "worker-a", dependsOn: [] } },
+	const stallCtlMsg = {
+		id: "r22-synthetic-stall",
+		idempotencyKey: "task:task-r22-ctl-stall:node:a:nudge:graph-stall:1",
+		createdAt: new Date(t0 + 5000).toISOString(),
+	};
+	const vC1 = await staleSurfaceReason(
+		p,
+		st,
+		stallCtlMsg,
+		{
+			"task-r22-ctl-stall": {
+				taskId: "task-r22-ctl-stall",
+				status: "in_progress",
+				start: "a",
+				edges: [],
+				handoffs: [],
+				nodes: { a: { status: "assigned", assignee: "worker-a", dependsOn: [] } },
+			},
 		},
-	}, t0 + 5300);
-	ok("R22-C1 taskKey graph-stall nudge still suppressed by busy worker", vC1.stale === true && vC1.reason === "agent_busy", JSON.stringify(vC1));
+		t0 + 5300,
+	);
+	ok(
+		"R22-C1 taskKey graph-stall nudge still suppressed by busy worker",
+		vC1.stale === true && vC1.reason === "agent_busy",
+		JSON.stringify(vC1),
+	);
 
 	// ---- R22-S2 (R10-1 boundary): idle-root pump tick must surface the queued
 	// nudges through the REAL pi.sendMessage boundary — not an internal helper. The pi
@@ -811,34 +1082,61 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 	// only the current goal's nudges in mailbox + message records — the live-incident slice.
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		const keep = new Set(Object.values(s.messages)
-			.filter((m) => m.idempotencyKey?.startsWith(`goal:${s.goal.id}:nudge:idle-streak`))
-			.map((m) => m.id));
+		const keep = new Set(
+			Object.values(s.messages)
+				.filter((m) => m.idempotencyKey?.startsWith(`goal:${s.goal.id}:nudge:idle-streak`))
+				.map((m) => m.id),
+		);
 		for (const id of Object.keys(s.messages)) if (!keep.has(id)) delete s.messages[id];
 		const mb = join(dir, ".pi", "swarm", "mailboxes", "root.jsonl");
 		try {
-			const lines = (await readFile(mb, "utf8")).trim().split("\n").filter(Boolean)
-				.map((l) => JSON.parse(l)).filter((e) => keep.has(e.id));
+			const lines = (await readFile(mb, "utf8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((l) => JSON.parse(l))
+				.filter((e) => keep.has(e.id));
 			await writeFile(mb, lines.map((e) => JSON.stringify(e)).join("\n") + "\n");
-		} catch { /* no mailbox yet */ }
+		} catch {
+			/* no mailbox yet */
+		}
 		await writeState(p, s);
 	});
 
-
 	const sendsAtPumpStart = sentMessages.length;
-	const pump1 = await pumpRootMailbox(pi, ctx, p, 'r22_starve_tick');
+	const pump1 = await pumpRootMailbox(pi, ctx, p, "r22_starve_tick");
 	ok("R22-S2 pump delivers the queued goal nudge (delivered >= 1)", (pump1?.delivered ?? 0) >= 1, `delivered=${pump1?.delivered}`);
-	ok("R22-S2 pi.sendMessage called >= 1 at the real boundary", sentMessages.length - sendsAtPumpStart >= 1, `sends=${sentMessages.length - sendsAtPumpStart}`);
+	ok(
+		"R22-S2 pi.sendMessage called >= 1 at the real boundary",
+		sentMessages.length - sendsAtPumpStart >= 1,
+		`sends=${sentMessages.length - sendsAtPumpStart}`,
+	);
 	if (sentMessages.length - sendsAtPumpStart >= 1) {
-		ok("R22-S2 surfaced as swarm-message", sentMessages[sendsAtPumpStart]?.m?.customType === "swarm-message", `got ${sentMessages[sendsAtPumpStart]?.m?.customType}`);
-		ok("R22-S2 first surface carries triggerTurn", sentMessages[sendsAtPumpStart]?.o?.triggerTurn === true, JSON.stringify(sentMessages[sendsAtPumpStart]?.o));
+		ok(
+			"R22-S2 surfaced as swarm-message",
+			sentMessages[sendsAtPumpStart]?.m?.customType === "swarm-message",
+			`got ${sentMessages[sendsAtPumpStart]?.m?.customType}`,
+		);
+		ok(
+			"R22-S2 first surface carries triggerTurn",
+			sentMessages[sendsAtPumpStart]?.o?.triggerTurn === true,
+			JSON.stringify(sentMessages[sendsAtPumpStart]?.o),
+		);
 	}
-	ok("R22-S2 coalescing surfaces ONE message per goal group (not 3)", sentMessages.length - sendsAtPumpStart === 1, `sends=${sentMessages.length - sendsAtPumpStart}`);
+	ok(
+		"R22-S2 coalescing surfaces ONE message per goal group (not 3)",
+		sentMessages.length - sendsAtPumpStart === 1,
+		`sends=${sentMessages.length - sendsAtPumpStart}`,
+	);
 
 	// Replay guard (R13-S2 pattern): a second idle tick must NOT re-surface the same nudge.
 	const sendsAfterFirst = sentMessages.length;
 	const pump2 = await pumpRootMailbox(pi, ctx, p, "r22_starve_replay");
-	ok("R22-S2 replay tick does not duplicate surface", sentMessages.length === sendsAfterFirst && (pump2?.delivered ?? 0) === 0, `sends=${sentMessages.length - sendsAfterFirst} delivered=${pump2?.delivered} ids=${JSON.stringify(pump2?.ids)}`);
+	ok(
+		"R22-S2 replay tick does not duplicate surface",
+		sentMessages.length === sendsAfterFirst && (pump2?.delivered ?? 0) === 0,
+		`sends=${sentMessages.length - sendsAfterFirst} delivered=${pump2?.delivered} ids=${JSON.stringify(pump2?.ids)}`,
+	);
 
 	if (prevAgentId === undefined) delete process.env.PI_SWARM_AGENT_ID;
 	else process.env.PI_SWARM_AGENT_ID = prevAgentId;
@@ -874,43 +1172,110 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	};
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		s.goal = { id: gid, text: "R23 user goal", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(t0 - 120_000).toISOString() };
-		s.idleNudgeState = { allIdleSinceAt: new Date(t0 - 60_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
-		s.messages["msg-r23-legacy-3"] = { id: "msg-r23-legacy-3", from: "root", to: "root", status: "mailbox_delivered", createdAt: new Date(t0 - 120_000).toISOString(), updatedAt: new Date(t0 - 120_000).toISOString(), requiresAck: true, requiresResponse: false, subject: "legacy", body: "legacy", idempotencyKey: `goal:${gid}:nudge:idle-streak:3` };
+		s.goal = {
+			id: gid,
+			text: "R23 user goal",
+			setAt: new Date(t0 - 3_600_000).toISOString(),
+			setBy: "user",
+			consecutiveNoResolveNudges: 3,
+			nudgeSeq: 3,
+			backoffTicksRemaining: 2,
+			lastNudgeAt: new Date(t0 - 120_000).toISOString(),
+		};
+		s.idleNudgeState = {
+			allIdleSinceAt: new Date(t0 - 60_000).toISOString(),
+			lastGoalNudgeAt: new Date(t0 - 120_000).toISOString(),
+			goalConsecutiveNoResolveNudges: 3,
+			goalBackoffTicksRemaining: 2,
+		};
+		s.messages["msg-r23-legacy-3"] = {
+			id: "msg-r23-legacy-3",
+			from: "root",
+			to: "root",
+			status: "mailbox_delivered",
+			createdAt: new Date(t0 - 120_000).toISOString(),
+			updatedAt: new Date(t0 - 120_000).toISOString(),
+			requiresAck: true,
+			requiresResponse: false,
+			subject: "legacy",
+			body: "legacy",
+			idempotencyKey: `goal:${gid}:nudge:idle-streak:3`,
+		};
 		await writeState(p, s);
 	});
 	// R27: each completed round = 3 samples at the 1s check interval.
 	const roundR23 = async (base) => {
-		await tickR23(base); await tickR23(base + 1_000);
+		await tickR23(base);
+		await tickR23(base + 1_000);
 		return await tickR23(base + 2_000);
 	};
 	let r = await roundR23(t0);
-	ok("R23-G1a within-saturation round1 still backoff.skip (cap preserved)", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	ok(
+		"R23-G1a within-saturation round1 still backoff.skip (cap preserved)",
+		r.emitted === false && r.reason === "backoff",
+		JSON.stringify(r),
+	);
 	r = await roundR23(t0 + 10_000);
-	ok("R23-G1b within-saturation round2 still backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	ok(
+		"R23-G1b within-saturation round2 still backoff_just_exhausted",
+		r.emitted === false && r.reason === "backoff_just_exhausted",
+		JSON.stringify(r),
+	);
 	let st = await getGoalState();
-	ok("R23-G1c counter still MAX after the drain ticks", st.goal.consecutiveNoResolveNudges === 3, `count=${st.goal.consecutiveNoResolveNudges}`);
+	ok(
+		"R23-G1c counter still MAX after the drain ticks",
+		st.goal.consecutiveNoResolveNudges === 3,
+		`count=${st.goal.consecutiveNoResolveNudges}`,
+	);
 	r = await roundR23(t0 + 20_000);
 	ok("R23-G2 round3 emits the fresh nudge (reset engaged at cap)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
 	st = await getGoalState();
-	ok("R23-G2 counter reset then advanced to 1 (not MAX)", st.goal.consecutiveNoResolveNudges === 1, `count=${st.goal.consecutiveNoResolveNudges}`);
+	ok(
+		"R23-G2 counter reset then advanced to 1 (not MAX)",
+		st.goal.consecutiveNoResolveNudges === 1,
+		`count=${st.goal.consecutiveNoResolveNudges}`,
+	);
 	ok("R23-G2 nudgeSeq advanced to 4", st.goal.nudgeSeq === 4, `seq=${st.goal.nudgeSeq}`);
 	ok("R23-G2 backoff cleared by the reset", st.goal.backoffTicksRemaining === undefined, `remaining=${st.goal.backoffTicksRemaining}`);
-	ok("R23-G2 resolve-stamp carries the epoch marker", Array.isArray(st.goal.lastResolveActionTools) && st.goal.lastResolveActionTools.includes("epoch_advance_saturation_reset"), JSON.stringify(st.goal.lastResolveActionTools));
+	ok(
+		"R23-G2 resolve-stamp carries the epoch marker",
+		Array.isArray(st.goal.lastResolveActionTools) && st.goal.lastResolveActionTools.includes("epoch_advance_saturation_reset"),
+		JSON.stringify(st.goal.lastResolveActionTools),
+	);
 	ok("R23-G2 saturation_reset trace recorded", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 1);
-	ok("R23-G2 fresh goal.idle_nudge trace seq:4 consecutiveCount:1", (await readEventsFile()).some((e) => e.event === "goal.idle_nudge" && e.key === `goal:${gid}:nudge:idle-streak:4` && e.consecutiveCount === 1));
+	ok(
+		"R23-G2 fresh goal.idle_nudge trace seq:4 consecutiveCount:1",
+		(await readEventsFile()).some(
+			(e) => e.event === "goal.idle_nudge" && e.key === `goal:${gid}:nudge:idle-streak:4` && e.consecutiveCount === 1,
+		),
+	);
 	const seq4 = Object.values(st.messages).find((m) => m.idempotencyKey === `goal:${gid}:nudge:idle-streak:4`);
 	ok("R23-G2 new durable message seq=4 exists", Boolean(seq4));
-	ok("R23-G2 new message createdAt >= current anchor", Boolean(seq4 && new Date(seq4.createdAt).getTime() >= new Date(st.idle.allIdleSinceAt).getTime()));
+	ok(
+		"R23-G2 new message createdAt >= current anchor",
+		Boolean(seq4 && new Date(seq4.createdAt).getTime() >= new Date(st.idle.allIdleSinceAt).getTime()),
+	);
 	const legacy3 = st.messages["msg-r23-legacy-3"];
 	const vLegacy = await staleSurfaceReason(p, st, legacy3, {}, t0 + 125_000);
-	ok("R23-C5 legacy message still idle_epoch_advanced-stale post-fix", vLegacy.stale === true && vLegacy.reason === "idle_epoch_advanced", JSON.stringify(vLegacy));
+	ok(
+		"R23-C5 legacy message still idle_epoch_advanced-stale post-fix",
+		vLegacy.stale === true && vLegacy.reason === "idle_epoch_advanced",
+		JSON.stringify(vLegacy),
+	);
 	// R23-G3: a mid-streak probe (inside the 1s check interval) is pending — the reset
 	// fired once and a fresh 3-sample streak is required before any further emission.
 	r = await tickR23(t0 + 22_000 + 500);
-	ok("R23-G3 mid-streak probe is pending (reset fired once; no storm)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	ok(
+		"R23-G3 mid-streak probe is pending (reset fired once; no storm)",
+		r.emitted === false && r.reason === "idle_interval_pending",
+		JSON.stringify(r),
+	);
 	st = await getGoalState();
-	ok("R23-G3 counter still 1 and nudgeSeq still 4 after the pending tick", st.goal.consecutiveNoResolveNudges === 1 && st.goal.nudgeSeq === 4, JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, s: st.goal.nudgeSeq }));
+	ok(
+		"R23-G3 counter still 1 and nudgeSeq still 4 after the pending tick",
+		st.goal.consecutiveNoResolveNudges === 1 && st.goal.nudgeSeq === 4,
+		JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, s: st.goal.nudgeSeq }),
+	);
 
 	// ---- G4: C3 real-boundary pump surface of the fresh nudge + replay dedupe.
 	// Purge the file-shared mailbox slice to THIS goal's messages (R22 pattern): earlier
@@ -919,13 +1284,24 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	process.env.PI_SWARM_AGENT_ID = "root";
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		const keep = new Set(Object.values(s.messages).filter((m) => m.idempotencyKey?.startsWith(`goal:${gid}:nudge:idle-streak`)).map((m) => m.id));
+		const keep = new Set(
+			Object.values(s.messages)
+				.filter((m) => m.idempotencyKey?.startsWith(`goal:${gid}:nudge:idle-streak`))
+				.map((m) => m.id),
+		);
 		for (const id of Object.keys(s.messages)) if (!keep.has(id)) delete s.messages[id];
 		const mb = join(dir, ".pi", "swarm", "mailboxes", "root.jsonl");
 		try {
-			const lines = (await readFile(mb, "utf8")).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((e) => keep.has(e.id));
+			const lines = (await readFile(mb, "utf8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((l) => JSON.parse(l))
+				.filter((e) => keep.has(e.id));
 			await writeFile(mb, lines.map((e) => JSON.stringify(e)).join("\n") + "\n");
-		} catch { /* no mailbox yet */ }
+		} catch {
+			/* no mailbox yet */
+		}
 		await writeState(p, s);
 	});
 	await withLock(p, async () => {
@@ -935,16 +1311,42 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		await writeState(p, s);
 	});
 	const sendsAtPumpR23 = sentMessages.length;
-	const pumpR23 = await pumpRootMailbox(pi, { cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } }, p, "r23_rearm_tick");
+	const pumpR23 = await pumpRootMailbox(
+		pi,
+		{ cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } },
+		p,
+		"r23_rearm_tick",
+	);
 	ok("R23-G4 pump surfaces the fresh nudge (delivered >= 1)", (pumpR23?.delivered ?? 0) >= 1, `delivered=${pumpR23?.delivered}`);
-	ok("R23-G4 pi.sendMessage called >= 1 at the real boundary", sentMessages.length - sendsAtPumpR23 >= 1, `sends=${sentMessages.length - sendsAtPumpR23}`);
+	ok(
+		"R23-G4 pi.sendMessage called >= 1 at the real boundary",
+		sentMessages.length - sendsAtPumpR23 >= 1,
+		`sends=${sentMessages.length - sendsAtPumpR23}`,
+	);
 	if (sentMessages.length - sendsAtPumpR23 >= 1) {
-		ok("R23-G4 surfaced message is the seq=4 nudge", sentMessages[sendsAtPumpR23]?.m?.details?.idempotencyKey === `goal:${gid}:nudge:idle-streak:4`, `got ${sentMessages[sendsAtPumpR23]?.m?.details?.idempotencyKey}`);
-		ok("R23-G4 first surface carries triggerTurn", sentMessages[sendsAtPumpR23]?.o?.triggerTurn === true, JSON.stringify(sentMessages[sendsAtPumpR23]?.o));
+		ok(
+			"R23-G4 surfaced message is the seq=4 nudge",
+			sentMessages[sendsAtPumpR23]?.m?.details?.idempotencyKey === `goal:${gid}:nudge:idle-streak:4`,
+			`got ${sentMessages[sendsAtPumpR23]?.m?.details?.idempotencyKey}`,
+		);
+		ok(
+			"R23-G4 first surface carries triggerTurn",
+			sentMessages[sendsAtPumpR23]?.o?.triggerTurn === true,
+			JSON.stringify(sentMessages[sendsAtPumpR23]?.o),
+		);
 	}
 	const sendsAfterPumpR23 = sentMessages.length;
-	const pumpR23b = await pumpRootMailbox(pi, { cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } }, p, "r23_rearm_replay");
-	ok("R23-G4 replay tick does not duplicate surface", sentMessages.length === sendsAfterPumpR23 && (pumpR23b?.delivered ?? 0) === 0, `sends=${sentMessages.length - sendsAfterPumpR23} delivered=${pumpR23b?.delivered}`);
+	const pumpR23b = await pumpRootMailbox(
+		pi,
+		{ cwd: dir, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} } },
+		p,
+		"r23_rearm_replay",
+	);
+	ok(
+		"R23-G4 replay tick does not duplicate surface",
+		sentMessages.length === sendsAfterPumpR23 && (pumpR23b?.delivered ?? 0) === 0,
+		`sends=${sentMessages.length - sendsAfterPumpR23} delivered=${pumpR23b?.delivered}`,
+	);
 	if (prevAgentIdR23 === undefined) delete process.env.PI_SWARM_AGENT_ID;
 	else process.env.PI_SWARM_AGENT_ID = prevAgentIdR23;
 
@@ -953,19 +1355,45 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	const t7 = Date.now();
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		s.goal = { id: "goal-r23-g7", text: "R23 same-epoch", setAt: new Date(t7 - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(t7 - 30_000).toISOString() };
-		s.idleNudgeState = { allIdleSinceAt: new Date(t7 - 120_000).toISOString(), lastGoalNudgeAt: new Date(t7 - 30_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		s.goal = {
+			id: "goal-r23-g7",
+			text: "R23 same-epoch",
+			setAt: new Date(t7 - 3_600_000).toISOString(),
+			setBy: "user",
+			consecutiveNoResolveNudges: 3,
+			nudgeSeq: 3,
+			backoffTicksRemaining: 2,
+			lastNudgeAt: new Date(t7 - 30_000).toISOString(),
+		};
+		s.idleNudgeState = {
+			allIdleSinceAt: new Date(t7 - 120_000).toISOString(),
+			lastGoalNudgeAt: new Date(t7 - 30_000).toISOString(),
+			goalConsecutiveNoResolveNudges: 3,
+			goalBackoffTicksRemaining: 2,
+		};
 		await writeState(p, s);
 	});
-	const roundG7 = async (base) => { await tickGoal(base); await tickGoal(base + 1_000); return await tickGoal(base + 2_000); };
+	const roundG7 = async (base) => {
+		await tickGoal(base);
+		await tickGoal(base + 1_000);
+		return await tickGoal(base + 2_000);
+	};
 	r = await roundG7(t7);
 	ok("R23-G7 same-epoch round1 backoff.skip", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
 	r = await roundG7(t7 + 10_000);
 	ok("R23-G7 same-epoch round2 backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
 	r = await roundG7(t7 + 20_000);
-	ok("R23-G7 same-epoch round3 max_nudges re-arm (no reset within one epoch)", r.emitted === false && r.reason === "max_nudges", JSON.stringify(r));
+	ok(
+		"R23-G7 same-epoch round3 max_nudges re-arm (no reset within one epoch)",
+		r.emitted === false && r.reason === "max_nudges",
+		JSON.stringify(r),
+	);
 	st = await getGoalState();
-	ok("R23-G7 counter still MAX + backoff re-armed (no storm)", st.goal.consecutiveNoResolveNudges === 3 && st.goal.backoffTicksRemaining === 2, JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, b: st.goal.backoffTicksRemaining }));
+	ok(
+		"R23-G7 counter still MAX + backoff re-armed (no storm)",
+		st.goal.consecutiveNoResolveNudges === 3 && st.goal.backoffTicksRemaining === 2,
+		JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, b: st.goal.backoffTicksRemaining }),
+	);
 	ok("R23-G7 no saturation_reset trace in the same-epoch window", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 0);
 
 	// ---- G2b: live-repair path — the reset is now the CAP BRANCH's responsibility.
@@ -981,8 +1409,22 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	const t8 = Date.now();
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		s.goal = { id: "goal-r23-edge", text: "R23 edge", setAt: new Date(t8 - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(t8 - 120_000).toISOString() };
-		s.idleNudgeState = { allIdleSinceAt: new Date(t8 - 60_000).toISOString(), lastGoalNudgeAt: new Date(t8 - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		s.goal = {
+			id: "goal-r23-edge",
+			text: "R23 edge",
+			setAt: new Date(t8 - 3_600_000).toISOString(),
+			setBy: "user",
+			consecutiveNoResolveNudges: 3,
+			nudgeSeq: 3,
+			backoffTicksRemaining: 2,
+			lastNudgeAt: new Date(t8 - 120_000).toISOString(),
+		};
+		s.idleNudgeState = {
+			allIdleSinceAt: new Date(t8 - 60_000).toISOString(),
+			lastGoalNudgeAt: new Date(t8 - 120_000).toISOString(),
+			goalConsecutiveNoResolveNudges: 3,
+			goalBackoffTicksRemaining: 2,
+		};
 		// === R23C (2026-09-03) — production-mint shape seed ===
 		// Real sessions reach a state where `r23LastEpochAnchor === allIdleSinceAt` after any
 		// busy→idle edge (the legacy R23 code stamped the memo at mint; this seed emulates
@@ -991,14 +1433,30 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		s.idleNudgeState.r23LastEpochAnchor = s.idleNudgeState.allIdleSinceAt;
 		await writeState(p, s);
 	});
-	const roundG2b = async (base) => { await tickGoal(base); await tickGoal(base + 1_000); return await tickGoal(base + 2_000); };
+	const roundG2b = async (base) => {
+		await tickGoal(base);
+		await tickGoal(base + 1_000);
+		return await tickGoal(base + 2_000);
+	};
 	r = await roundG2b(t8); // first eligible round: backoff 2→1
-	ok("R23-G2b first eligible round after the anchor stamps: backoff drain 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	ok(
+		"R23-G2b first eligible round after the anchor stamps: backoff drain 2→1",
+		r.emitted === false && r.reason === "backoff",
+		JSON.stringify(r),
+	);
 	st = await getGoalState();
-	ok("R23-G2b counter preserved at MAX on this tick (no reset — edge site is gone)", st.goal.consecutiveNoResolveNudges === 3 && st.goal.backoffTicksRemaining === 1, JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, b: st.goal.backoffTicksRemaining }));
+	ok(
+		"R23-G2b counter preserved at MAX on this tick (no reset — edge site is gone)",
+		st.goal.consecutiveNoResolveNudges === 3 && st.goal.backoffTicksRemaining === 1,
+		JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, b: st.goal.backoffTicksRemaining }),
+	);
 	ok("R23-G2b NO saturation_reset trace yet", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 0);
 	r = await roundG2b(t8 + 10_000); // backoff 1→0
-	ok("R23-G2b second eligible round backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	ok(
+		"R23-G2b second eligible round backoff_just_exhausted",
+		r.emitted === false && r.reason === "backoff_just_exhausted",
+		JSON.stringify(r),
+	);
 	r = await roundG2b(t8 + 20_000); // cap-branch reset + emits seq=4
 	ok("R23-G2b third eligible round: cap-branch reset + emits seq=4", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
 	st = await getGoalState();
@@ -1014,19 +1472,41 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	const tR23B = Date.now();
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		s.goal = { id: "goal-r23b-storm", text: "R23B storm guard", setAt: new Date(tR23B - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(tR23B - 120_000).toISOString() };
-		s.idleNudgeState = { allIdleSinceAt: new Date(tR23B - 60_000).toISOString(), lastGoalNudgeAt: new Date(tR23B - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		s.goal = {
+			id: "goal-r23b-storm",
+			text: "R23B storm guard",
+			setAt: new Date(tR23B - 3_600_000).toISOString(),
+			setBy: "user",
+			consecutiveNoResolveNudges: 3,
+			nudgeSeq: 3,
+			backoffTicksRemaining: 2,
+			lastNudgeAt: new Date(tR23B - 120_000).toISOString(),
+		};
+		s.idleNudgeState = {
+			allIdleSinceAt: new Date(tR23B - 60_000).toISOString(),
+			lastGoalNudgeAt: new Date(tR23B - 120_000).toISOString(),
+			goalConsecutiveNoResolveNudges: 3,
+			goalBackoffTicksRemaining: 2,
+		};
 		// === R23C (2026-09-03) — production-mint shape seed ===
 		s.idleNudgeState.r23LastEpochAnchor = s.idleNudgeState.allIdleSinceAt;
 		await writeState(p, s);
 	});
-	const roundB = async (base) => { await tickGoal(base); await tickGoal(base + 1_000); return await tickGoal(base + 2_000); };
+	const roundB = async (base) => {
+		await tickGoal(base);
+		await tickGoal(base + 1_000);
+		return await tickGoal(base + 2_000);
+	};
 	// drain backoff: 2→1
 	r = await roundB(tR23B);
 	ok("R23B-1 first eligible round: backoff drain 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
 	// drain backoff: 1→0
 	r = await roundB(tR23B + 10_000);
-	ok("R23B-2 second eligible round: backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	ok(
+		"R23B-2 second eligible round: backoff_just_exhausted",
+		r.emitted === false && r.reason === "backoff_just_exhausted",
+		JSON.stringify(r),
+	);
 	// cap-branch reset + emit seq=4 (the legitimate R23 re-arm)
 	r = await roundB(tR23B + 20_000);
 	ok("R23B-3 cap-branch reset + emits seq=4", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
@@ -1056,7 +1536,15 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		await writeState(p, s);
 	});
 	r = await tickGoal(tR23B + 360_000); // root idle edge: new anchor stamped, mint clears memo, cap branch breaker rejects
-	ok("R23B-6 churn1 idle: NO reset (storm guard — worker-breaker rejects root-only)", r.emitted === false && (r.reason === "idle_interval_pending" || r.reason === "backoff" || r.reason === "max_nudges" || r.reason === "backoff_just_exhausted"), JSON.stringify(r));
+	ok(
+		"R23B-6 churn1 idle: NO reset (storm guard — worker-breaker rejects root-only)",
+		r.emitted === false &&
+			(r.reason === "idle_interval_pending" ||
+				r.reason === "backoff" ||
+				r.reason === "max_nudges" ||
+				r.reason === "backoff_just_exhausted"),
+		JSON.stringify(r),
+	);
 	// churn cycle 2
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
@@ -1070,18 +1558,37 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		await writeState(p, s);
 	});
 	r = await tickGoal(tR23B + 480_000);
-	ok("R23B-7 churn2 idle: NO reset (storm guard holds)", r.emitted === false && (r.reason === "idle_interval_pending" || r.reason === "max_nudges" || r.reason === "backoff"), JSON.stringify(r));
+	ok(
+		"R23B-7 churn2 idle: NO reset (storm guard holds)",
+		r.emitted === false && (r.reason === "idle_interval_pending" || r.reason === "max_nudges" || r.reason === "backoff"),
+		JSON.stringify(r),
+	);
 	// one eligible round past the churn — backoff arms, counter preserved.
 	// (The churn2 idle tick at +480_000 already consumed a sample; two more spaced
 	// samples complete the round: +481_000, +482_000.)
 	await tickGoal(tR23B + 481_000);
 	r = await tickGoal(tR23B + 482_000);
-	ok("R23B-8 post-churn eligible round: cap engages (max_nudges / backoff armed)", r.emitted === false && (r.reason === "max_nudges" || r.reason === "backoff"), JSON.stringify(r));
-	ok("R23B-9 exactly ONE saturation_reset trace across the entire run (storm eliminated)", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 1);
+	ok(
+		"R23B-8 post-churn eligible round: cap engages (max_nudges / backoff armed)",
+		r.emitted === false && (r.reason === "max_nudges" || r.reason === "backoff"),
+		JSON.stringify(r),
+	);
+	ok(
+		"R23B-9 exactly ONE saturation_reset trace across the entire run (storm eliminated)",
+		(await countEvents("goal.nudge.saturation_reset_on_epoch")) === 1,
+	);
 	st = await getGoalState();
 	ok("R23B-10 nudgeSeq bounded to 6 (no runaway seq 7+)", st.goal.nudgeSeq === 6, `seq=${st.goal.nudgeSeq}`);
-	ok("R23B-11 counter preserved at MAX (cap preserved across churn)", st.goal.consecutiveNoResolveNudges === 3, `count=${st.goal.consecutiveNoResolveNudges}`);
-	ok("R23B-12 backoff engaged after the burst (backoffTicksRemaining > 0)", (st.goal.backoffTicksRemaining ?? 0) > 0, `remaining=${st.goal.backoffTicksRemaining}`);
+	ok(
+		"R23B-11 counter preserved at MAX (cap preserved across churn)",
+		st.goal.consecutiveNoResolveNudges === 3,
+		`count=${st.goal.consecutiveNoResolveNudges}`,
+	);
+	ok(
+		"R23B-12 backoff engaged after the burst (backoffTicksRemaining > 0)",
+		(st.goal.backoffTicksRemaining ?? 0) > 0,
+		`remaining=${st.goal.backoffTicksRemaining}`,
+	);
 
 	// ---- R23C: turn-start orbit storm guard (the live R23 storm source).
 	// hooks.ts `turn_start` clears the anchor bypassing updateIdleEpochLocked (root's
@@ -1098,13 +1605,31 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	const tR23C = Date.now();
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		s.goal = { id: "goal-r23c-turnstart", text: "R23C turn-start orbit", setAt: new Date(tR23C - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(tR23C - 120_000).toISOString() };
-		s.idleNudgeState = { allIdleSinceAt: new Date(tR23C - 60_000).toISOString(), lastGoalNudgeAt: new Date(tR23C - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		s.goal = {
+			id: "goal-r23c-turnstart",
+			text: "R23C turn-start orbit",
+			setAt: new Date(tR23C - 3_600_000).toISOString(),
+			setBy: "user",
+			consecutiveNoResolveNudges: 3,
+			nudgeSeq: 3,
+			backoffTicksRemaining: 2,
+			lastNudgeAt: new Date(tR23C - 120_000).toISOString(),
+		};
+		s.idleNudgeState = {
+			allIdleSinceAt: new Date(tR23C - 60_000).toISOString(),
+			lastGoalNudgeAt: new Date(tR23C - 120_000).toISOString(),
+			goalConsecutiveNoResolveNudges: 3,
+			goalBackoffTicksRemaining: 2,
+		};
 		s.idleNudgeState.r23LastEpochAnchor = s.idleNudgeState.allIdleSinceAt;
 		await writeState(p, s);
 	});
 	// drain backoff (mirrors tester-turnstart-probe.mjs Phase 1)
-	const roundC = async (base) => { await tickGoal(base); await tickGoal(base + 1_000); return await tickGoal(base + 2_000); };
+	const roundC = async (base) => {
+		await tickGoal(base);
+		await tickGoal(base + 1_000);
+		return await tickGoal(base + 2_000);
+	};
 	r = await roundC(tR23C);
 	ok("R23C-1 drain1: backoff 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
 	r = await roundC(tR23C + 10_000);
@@ -1114,7 +1639,9 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	// mock pi that captures the handler, then invoke it on each orbit.
 	const turnStartHandlers = [];
 	const mockPi = {
-		on(eventName, handler) { if (eventName === "turn_start") turnStartHandlers.push(handler); },
+		on(eventName, handler) {
+			if (eventName === "turn_start") turnStartHandlers.push(handler);
+		},
 	};
 	const { registerSwarmHooks } = await import(join(here, "..", "src", "hooks.ts"));
 	process.env.PI_SWARM_AGENT_ID = "root";
@@ -1136,11 +1663,22 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		const orbitResult = await turnStartOrbit(orbitBase);
 		if (!orbitResult) continue;
 		if (orbitResult.emitted) r23cEmissions++;
-		ok(`R23C-3.${i} orbit${i}: NO reset (storm guard — root provenance rejects)`, orbitResult.emitted === false || (orbitResult.emitted === true && i === 1), JSON.stringify(orbitResult));
+		ok(
+			`R23C-3.${i} orbit${i}: NO reset (storm guard — root provenance rejects)`,
+			orbitResult.emitted === false || (orbitResult.emitted === true && i === 1),
+			JSON.stringify(orbitResult),
+		);
 	}
-	ok("R23C-4 exactly 0 saturation_reset traces across 5 turn-start orbits (storm dead)", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 0);
+	ok(
+		"R23C-4 exactly 0 saturation_reset traces across 5 turn-start orbits (storm dead)",
+		(await countEvents("goal.nudge.saturation_reset_on_epoch")) === 0,
+	);
 	st = await getGoalState();
-	ok("R23C-5 nudgeSeq bounded (no storm — seq ≤ 3 OR seq=4 from the first legitimate re-arm in drain)", st.goal.nudgeSeq <= 4, `seq=${st.goal.nudgeSeq}`);
+	ok(
+		"R23C-5 nudgeSeq bounded (no storm — seq ≤ 3 OR seq=4 from the first legitimate re-arm in drain)",
+		st.goal.nudgeSeq <= 4,
+		`seq=${st.goal.nudgeSeq}`,
+	);
 	ok(`R23C-6 ≤1 total emissions across 5 orbits (storm dead)`, r23cEmissions <= 1, `emissions=${r23cEmissions}`);
 
 	// === R24 section: result-class exemption in the surface-time liveness gate (reconcile.ts).
@@ -1153,20 +1691,89 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	const r24TaskId = "task-r24-result-class";
 	const r24TaskNodeRef = { taskId: r24TaskId, nodeId: "implement" };
 	const r24TaskDone = { id: r24TaskId, status: "done", nodes: { implement: { nodeId: "implement", status: "done" } }, handoffs: [] };
-	const r24TaskInProgress = { id: r24TaskId, status: "in_progress", nodes: { implement: { nodeId: "implement", status: "done" } }, handoffs: [] };
-	const r24ResultRec = { id: "m-result", to: "root", requiresAck: true, requiresResponse: false, replyTo: "msg-1788360728586-75f828bd", conversationId: `task:${r24TaskId}:implement`, idempotencyKey: "r24-result-1" };
-	const r24NudgeRec = { id: "m-nudge", to: "root", requiresAck: true, requiresResponse: false, conversationId: `task:${r24TaskId}:node:implement:nudge:stale-open:seq:1`, idempotencyKey: `task:${r24TaskId}:node:implement:nudge:stale-open:seq:1` };
+	const r24TaskInProgress = {
+		id: r24TaskId,
+		status: "in_progress",
+		nodes: { implement: { nodeId: "implement", status: "done" } },
+		handoffs: [],
+	};
+	const r24ResultRec = {
+		id: "m-result",
+		to: "root",
+		requiresAck: true,
+		requiresResponse: false,
+		replyTo: "msg-1788360728586-75f828bd",
+		conversationId: `task:${r24TaskId}:implement`,
+		idempotencyKey: "r24-result-1",
+	};
+	const r24NudgeRec = {
+		id: "m-nudge",
+		to: "root",
+		requiresAck: true,
+		requiresResponse: false,
+		conversationId: `task:${r24TaskId}:node:implement:nudge:stale-open:seq:1`,
+		idempotencyKey: `task:${r24TaskId}:node:implement:nudge:stale-open:seq:1`,
+	};
 	const r24TaskIndex = { [r24TaskId]: r24TaskDone };
 	const r24TaskIndexInProgress = { [r24TaskId]: r24TaskInProgress };
-	ok("R24-1 result-class message on DONE implement node → actionable (exempted from node_terminal)", isActionableRootMessage(r24ResultRec, r24TaskIndex, Date.now(), {}, false).ok === true, "result-class must surface");
-	ok("R24-2 nudge-shaped message on DONE implement node → node_terminal (gate intact)", isActionableRootMessage(r24NudgeRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal", "nudges keep full gating");
-	ok("R24-3 result-class message on DONE task → result_class_exempt_task_done", isActionableRootMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "done", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_done");
-	ok("R24-4 result-class message on FAILED task → result_class_exempt_task_failed", isActionableRootMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "failed", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_failed");
-	ok("R24-5 result-class message on CANCELLED task → result_class_exempt_task_cancelled", isActionableRootMessage(r24ResultRec, { [r24TaskId]: { id: r24TaskId, status: "cancelled", nodes: {}, handoffs: [] } }, Date.now(), {}, false).reason === "result_class_exempt_task_cancelled");
-	ok("R24-6 result-class message WITHOUT replyTo → falls through to node_terminal (gate intact)", isActionableRootMessage({ ...r24ResultRec, replyTo: undefined }, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
-	ok("R24-7 result-class message with requiresResponse:true → falls through to node_terminal (gate intact)", isActionableRootMessage({ ...r24ResultRec, requiresResponse: true }, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
-	ok("R24-8 result-class message on in-progress task + done node → result_class_exempt_node_terminal", isActionableRootMessage(r24ResultRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "result_class_exempt_node_terminal");
-	ok("R24-9 nudge-shaped on in-progress task + done node → node_terminal (gate intact)", isActionableRootMessage(r24NudgeRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal");
+	ok(
+		"R24-1 result-class message on DONE implement node → actionable (exempted from node_terminal)",
+		isActionableRootMessage(r24ResultRec, r24TaskIndex, Date.now(), {}, false).ok === true,
+		"result-class must surface",
+	);
+	ok(
+		"R24-2 nudge-shaped message on DONE implement node → node_terminal (gate intact)",
+		isActionableRootMessage(r24NudgeRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal",
+		"nudges keep full gating",
+	);
+	ok(
+		"R24-3 result-class message on DONE task → result_class_exempt_task_done",
+		isActionableRootMessage(
+			r24ResultRec,
+			{ [r24TaskId]: { id: r24TaskId, status: "done", nodes: {}, handoffs: [] } },
+			Date.now(),
+			{},
+			false,
+		).reason === "result_class_exempt_task_done",
+	);
+	ok(
+		"R24-4 result-class message on FAILED task → result_class_exempt_task_failed",
+		isActionableRootMessage(
+			r24ResultRec,
+			{ [r24TaskId]: { id: r24TaskId, status: "failed", nodes: {}, handoffs: [] } },
+			Date.now(),
+			{},
+			false,
+		).reason === "result_class_exempt_task_failed",
+	);
+	ok(
+		"R24-5 result-class message on CANCELLED task → result_class_exempt_task_cancelled",
+		isActionableRootMessage(
+			r24ResultRec,
+			{ [r24TaskId]: { id: r24TaskId, status: "cancelled", nodes: {}, handoffs: [] } },
+			Date.now(),
+			{},
+			false,
+		).reason === "result_class_exempt_task_cancelled",
+	);
+	ok(
+		"R24-6 result-class message WITHOUT replyTo → falls through to node_terminal (gate intact)",
+		isActionableRootMessage({ ...r24ResultRec, replyTo: undefined }, r24TaskIndexInProgress, Date.now(), {}, false).reason ===
+			"node_terminal",
+	);
+	ok(
+		"R24-7 result-class message with requiresResponse:true → falls through to node_terminal (gate intact)",
+		isActionableRootMessage({ ...r24ResultRec, requiresResponse: true }, r24TaskIndexInProgress, Date.now(), {}, false).reason ===
+			"node_terminal",
+	);
+	ok(
+		"R24-8 result-class message on in-progress task + done node → result_class_exempt_node_terminal",
+		isActionableRootMessage(r24ResultRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "result_class_exempt_node_terminal",
+	);
+	ok(
+		"R24-9 nudge-shaped on in-progress task + done node → node_terminal (gate intact)",
+		isActionableRootMessage(r24NudgeRec, r24TaskIndexInProgress, Date.now(), {}, false).reason === "node_terminal",
+	);
 
 	// ---- G6: active-task emission gate still enforced (reset must not bypass it).
 	await setup();
@@ -1174,8 +1781,22 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	await seedGraphTask("task-r23-active", { ageMs: 120_000 });
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
-		s.goal = { id: "goal-r23-g6", text: "R23 active-task", setAt: new Date(t9 - 3_600_000).toISOString(), setBy: "user", consecutiveNoResolveNudges: 3, nudgeSeq: 3, backoffTicksRemaining: 2, lastNudgeAt: new Date(t9 - 120_000).toISOString() };
-		s.idleNudgeState = { allIdleSinceAt: new Date(t9 - 60_000).toISOString(), lastGoalNudgeAt: new Date(t9 - 120_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
+		s.goal = {
+			id: "goal-r23-g6",
+			text: "R23 active-task",
+			setAt: new Date(t9 - 3_600_000).toISOString(),
+			setBy: "user",
+			consecutiveNoResolveNudges: 3,
+			nudgeSeq: 3,
+			backoffTicksRemaining: 2,
+			lastNudgeAt: new Date(t9 - 120_000).toISOString(),
+		};
+		s.idleNudgeState = {
+			allIdleSinceAt: new Date(t9 - 60_000).toISOString(),
+			lastGoalNudgeAt: new Date(t9 - 120_000).toISOString(),
+			goalConsecutiveNoResolveNudges: 3,
+			goalBackoffTicksRemaining: 2,
+		};
 		const tp = taskPaths(p, "task-r23-active");
 		const task = JSON.parse(await readFile(tp.taskJson, "utf8"));
 		task.nodes.a.status = "assigned";
@@ -1185,7 +1806,11 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		await writeState(p, s);
 	});
 	r = await tickGoal(t9);
-	ok("R23-G6 active-task gate suppresses despite saturated goal + fresh anchor", r.emitted === false && (r.reason === "assignment_in_flight" || r.reason === "active_task"), JSON.stringify(r));
+	ok(
+		"R23-G6 active-task gate suppresses despite saturated goal + fresh anchor",
+		r.emitted === false && (r.reason === "assignment_in_flight" || r.reason === "active_task"),
+		JSON.stringify(r),
+	);
 }
 
 console.log(`\n${fail === 0 ? "IDLE-NUDGE PASS" : "IDLE-NUDGE FAIL"} (${pass} passed, ${fail} failed)`);

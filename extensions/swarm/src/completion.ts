@@ -41,7 +41,11 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "release", description: "Release a task from an agent: <id> [<task-id>] [--force]" },
 	{ name: "mailbox", description: "Mailbox maintenance: reset <id> --yes" },
 	{ name: "send", description: "Send a message: <to> <body>" },
-	{ name: "goal", description: "show | set [-i <time>] <text> | update [-i <time>] [<text>] | done [<goalId>] (show read-only; set/update/done root-only; -i accepts ms/s/m/h)" },
+	{
+		name: "goal",
+		description:
+			"show | set [-i <time>] <text> | update [-i <time>] [<text>] | done [<goalId>] (show read-only; set/update/done root-only; -i accepts ms/s/m/h)",
+	},
 	{ name: "trace", description: "Show trace file path" },
 	{ name: "capture", description: "Capture an agent's tmux pane: <id>" },
 	{ name: "identity", description: "reload|show an agent's identity" },
@@ -74,9 +78,7 @@ const SCOPED_COMMANDS: Record<string, { name: string; description: string; canon
 		{ name: "next", description: "Ready nodes + suggested reusable agent", canonical: "next" },
 		{ name: "validate", description: "Validate a task graph", canonical: "validate" },
 	],
-	"swarm-msg": [
-		{ name: "send", description: "Send a message: <to> <body>", canonical: "send" },
-	],
+	"swarm-msg": [{ name: "send", description: "Send a message: <to> <body>", canonical: "send" }],
 };
 
 const GRAPH_FORMATS = ["text", "mermaid", "json"];
@@ -243,7 +245,9 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 				// <here|id> [--force] [--purge]: 'here' = the current pane (self-service); otherwise any
 				// agent id (self-service for your own id, root-only for others — enforced at run time).
 				if (tokens.length === 1) {
-					const here = startsWith("here", currentWord) ? [{ value: `${b}here`, label: "here", description: "the current tmux pane (self-service)" }] : [];
+					const here = startsWith("here", currentWord)
+						? [{ value: `${b}here`, label: "here", description: "the current tmux pane (self-service)" }]
+						: [];
 					return [...here, ...(await agentSuggestions(p, cwd, b, currentWord))];
 				}
 				return flagSuggestions(DEREGISTER_FLAGS, b, currentWord);
@@ -280,13 +284,14 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 				return flagSuggestions(RELEASE_FLAGS, b, currentWord);
 			case "identity":
 				if (tokens.length === 1) return simple(IDENTITY_SUBS, b, currentWord);
-				if (tokens.length === 2 && IDENTITY_SUBS.includes(tokens[1]))
-					return await agentSuggestions(p, cwd, b, currentWord);
+				if (tokens.length === 2 && IDENTITY_SUBS.includes(tokens[1])) return await agentSuggestions(p, cwd, b, currentWord);
 				return [];
 			case "mailbox":
 				if (tokens.length === 1) return simple(MAILBOX_SUBS, b, currentWord);
 				if (tokens.length === 2 && tokens[1] === "reset") {
-					const here = startsWith("here", currentWord) ? [{ value: `${b}here`, label: "here", description: "the current swarm pane identity" }] : [];
+					const here = startsWith("here", currentWord)
+						? [{ value: `${b}here`, label: "here", description: "the current swarm pane identity" }]
+						: [];
 					return [...here, ...(await agentSuggestions(p, cwd, b, currentWord))];
 				}
 				if (tokens.length >= 3) return flagSuggestions(MAILBOX_RESET_FLAGS, b, currentWord);

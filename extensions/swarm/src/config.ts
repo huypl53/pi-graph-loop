@@ -42,7 +42,11 @@ export function readSwarmYml(cwd: string): Record<string, any> | null {
 
 // Resolve the winning raw config. Precedence: extensions.swarm > swarm > swarm.yml.
 // Never throws; corrupt sources are reported via `corrupt` for the validate path.
-export function readSwarmRawConfig(cwd: string): { cfg: Record<string, any> | null; source: SwarmConfigSource | null; corrupt: Array<"settings.json" | "swarm.yml"> } {
+export function readSwarmRawConfig(cwd: string): {
+	cfg: Record<string, any> | null;
+	source: SwarmConfigSource | null;
+	corrupt: Array<"settings.json" | "swarm.yml">;
+} {
 	const corrupt: Array<"settings.json" | "swarm.yml"> = [];
 
 	// --- settings.json blocks ---

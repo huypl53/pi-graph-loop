@@ -116,8 +116,8 @@ export const POOL_SCAFFOLD_DOC_HINT = "docs/swarm/tools.md#configuration";
 // exponential backoff (2s, 4s, 8s — see @earendil-works/pi-coding-agent/docs/settings.md). These
 // constants size the engine-retry gate in hooks.ts. Values mirror pi's defaults and are stable;
 // engine policy belongs to the engine, so we do not read retry.maxRetries at runtime.
-export const ENGINE_MAX_RETRIES = 3;            // mirrors pi's default retry.maxRetries
-export const ENGINE_RETRY_WINDOW_MS = 14_000;   // pi's retry budget = baseDelay * (2^N - 1) for N=maxRetries=3
+export const ENGINE_MAX_RETRIES = 3; // mirrors pi's default retry.maxRetries
+export const ENGINE_RETRY_WINDOW_MS = 14_000; // pi's retry budget = baseDelay * (2^N - 1) for N=maxRetries=3
 
 // Identity used for an anonymous swarm session that neither sets PI_SWARM_AGENT_ID nor opts in as the
 // root. Such a session is inert for swarm coordination (no agent record, no root pump,
@@ -126,7 +126,15 @@ export const ENGINE_RETRY_WINDOW_MS = 14_000;   // pi's retry budget = baseDelay
 export const SWARM_GUEST_ID = "swarm-guest";
 
 export const NODE_ICON: Record<TaskNodeStatus, string> = {
-	done: "✓", ready: "●", assigned: "●", in_progress: "●", blocked: "⚠", failed: "✗", skipped: "⊘", pending: "○", cancelled: "⊗",
+	done: "✓",
+	ready: "●",
+	assigned: "●",
+	in_progress: "●",
+	blocked: "⚠",
+	failed: "✗",
+	skipped: "⊘",
+	pending: "○",
+	cancelled: "⊗",
 };
 
 export const SAFE_ID_RE = /^[a-z0-9_-]+$/;
@@ -292,7 +300,7 @@ export const NOTIFY_KEY_PUMP_BATCH_SUPPRESSED = "swarm.pump.batch_suppressed";
 // existing explicit ACK/requiresAck/reconcile semantics remain authoritative and no durable
 // lifecycle mutations happen until the rollout review flips gate=1.
 export const PI_SWARM_MINIMAL_PROTOCOL =
-	(process.env.PI_SWARM_MINIMAL_PROTOCOL === "1" || process.env.PI_SWARM_MINIMAL_PROTOCOL === "true") ? 1 : 0;
+	process.env.PI_SWARM_MINIMAL_PROTOCOL === "1" || process.env.PI_SWARM_MINIMAL_PROTOCOL === "true" ? 1 : 0;
 
 // === Issue F2 (task-202608310422): stable telemetry trace event name for graph-advance emits ===
 // Exported so tests + dashboards import the same string the engine emits. Payload:
@@ -526,17 +534,13 @@ export const PI_SWARM_PROXY_METRIC_INTERVAL_MS =
 // Audit reads stay bounded even on very large trace ledgers. Rotation trims the hot trace file
 // outside the swarm lock and keeps only a few days / a few generations of compressed history.
 export const DEFAULT_TRACE_ROTATE_BYTES =
-	Number(process.env.PI_SWARM_TRACE_ROTATE_BYTES) > 0
-		? Math.floor(Number(process.env.PI_SWARM_TRACE_ROTATE_BYTES))
-		: 50 * 1024 * 1024;
+	Number(process.env.PI_SWARM_TRACE_ROTATE_BYTES) > 0 ? Math.floor(Number(process.env.PI_SWARM_TRACE_ROTATE_BYTES)) : 50 * 1024 * 1024;
 export const DEFAULT_TRACE_RETENTION_MS =
 	Number(process.env.PI_SWARM_TRACE_RETENTION_MS) > 0
 		? Math.floor(Number(process.env.PI_SWARM_TRACE_RETENTION_MS))
 		: 3 * 24 * 60 * 60 * 1000;
 export const DEFAULT_TRACE_KEEP_GENERATIONS =
-	Number(process.env.PI_SWARM_TRACE_KEEP_GENERATIONS) > 0
-		? Math.floor(Number(process.env.PI_SWARM_TRACE_KEEP_GENERATIONS))
-		: 5;
+	Number(process.env.PI_SWARM_TRACE_KEEP_GENERATIONS) > 0 ? Math.floor(Number(process.env.PI_SWARM_TRACE_KEEP_GENERATIONS)) : 5;
 
 // === Issue 28 — rework reopen trace ===
 // Emitted when activateReworkNodes reopens a previously-done/failed/skipped node because a rework
@@ -559,9 +563,7 @@ export const PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV = "PI_SWARM_KEEP_TASK_WORKER
 // PI_SWARM_MAX_NUDGES env var (read at module-load time, mirrors the ORPHAN_SPAWN_WARNING_TIMEOUT_MS
 // pattern). Defaults to 3, matching the reliability-roadmap plan.
 export const MAX_CONSECUTIVE_NUDGES_DEFAULT =
-	Number(process.env.PI_SWARM_MAX_NUDGES) > 0
-		? Math.floor(Number(process.env.PI_SWARM_MAX_NUDGES))
-		: 3;
+	Number(process.env.PI_SWARM_MAX_NUDGES) > 0 ? Math.floor(Number(process.env.PI_SWARM_MAX_NUDGES)) : 3;
 
 // Goal idle interval: the fallback nudge is anchored to the BUSY→ALL-IDLE edge and only re-fires
 // after a full continuous idle interval has elapsed. The pump may run more often, but it must not
@@ -582,9 +584,7 @@ export const GOAL_NUDGE_BACKOFF_TICKS = 2;
 // Configurable via the PI_SWARM_MAX_TASK_STALL_NUDGES env var (read at module-load time, mirroring
 // the ORPHAN_SPAWN_WARNING_TIMEOUT_MS pattern). Defaults to 3, matching the goal-nudge default.
 export const MAX_TASK_STALL_NUDGES =
-	Number(process.env.PI_SWARM_MAX_TASK_STALL_NUDGES) > 0
-		? Math.floor(Number(process.env.PI_SWARM_MAX_TASK_STALL_NUDGES))
-		: 3;
+	Number(process.env.PI_SWARM_MAX_TASK_STALL_NUDGES) > 0 ? Math.floor(Number(process.env.PI_SWARM_MAX_TASK_STALL_NUDGES)) : 3;
 
 // Graph-stall interval (row 68): the actionable-graph nudge fires immediately on the all-idle edge
 // but re-fires only after a full continuous all-idle interval — pump tick rate must not turn it
@@ -633,9 +633,7 @@ export const ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS =
 		: 5 * 60_000;
 
 export const ARTIFACT_PROGRESS_NUDGE_CAP =
-	Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_NUDGE_CAP) > 0
-		? Math.floor(Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_NUDGE_CAP))
-		: 3;
+	Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_NUDGE_CAP) > 0 ? Math.floor(Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_NUDGE_CAP)) : 3;
 
 export const ARTIFACT_PROGRESS_GRACE_MS =
 	Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_GRACE_MS) > 0
@@ -655,4 +653,3 @@ export const ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS =
 // R20 trace event names. Stable so dashboards + tests import the same strings the engine emits.
 export const TRACE_ARTIFACT_PROGRESS_NUDGE = "worker.artifact_progress_no_status_update";
 export const TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED = "worker.artifact_progress_cap_exceeded";
-

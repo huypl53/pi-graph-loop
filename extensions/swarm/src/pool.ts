@@ -4,7 +4,18 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
-import type { ModelSlot, Paths, PoolHealthState, PoolSlotHealth, PreflightError, PreflightResult, ProviderErrorKind, RotationConfig, RotationStrategy, SwarmSettings } from "./types.ts";
+import type {
+	ModelSlot,
+	Paths,
+	PoolHealthState,
+	PoolSlotHealth,
+	PreflightError,
+	PreflightResult,
+	ProviderErrorKind,
+	RotationConfig,
+	RotationStrategy,
+	SwarmSettings,
+} from "./types.ts";
 import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
 import { currentModel, currentProvider, readSwarmSettings } from "./session.ts";
 import { readSwarmRawConfig, readSwarmYml, swarmYmlPath, type SwarmConfigSource } from "./config.ts";
@@ -20,9 +31,12 @@ function missingProviderCredential(provider: string): string | undefined {
 		if (home) {
 			const auth = JSON.parse(readFileSync(join(home, ".pi", "agent", "auth.json"), "utf8")) as Record<string, any>;
 			const entry = auth?.[provider];
-			if (entry && typeof entry === "object" && entry.type === "api_key" && String(entry.key || entry.apiKey || "").trim()) return undefined;
+			if (entry && typeof entry === "object" && entry.type === "api_key" && String(entry.key || entry.apiKey || "").trim())
+				return undefined;
 		}
-	} catch { /* missing/unreadable auth.json falls through to env check */ }
+	} catch {
+		/* missing/unreadable auth.json falls through to env check */
+	}
 	const envKey = provider.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 	if (process.env[`${envKey}_API_KEY`] || process.env[`${envKey}_APIKEY`]) return undefined;
 	return `no api key for provider '${provider}'`;
@@ -37,9 +51,7 @@ import { sleep } from "./utils.ts";
 // var first, set the new value, then dynamic-import this module — the constants module's env read
 // happens once at module-load and is captured thereafter.
 const QUOTA_RESET_DEFAULT_MS =
-	Number(process.env.PI_SWARM_QUOTA_RESET_MS) > 0
-		? Math.floor(Number(process.env.PI_SWARM_QUOTA_RESET_MS))
-		: 0;
+	Number(process.env.PI_SWARM_QUOTA_RESET_MS) > 0 ? Math.floor(Number(process.env.PI_SWARM_QUOTA_RESET_MS)) : 0;
 
 // Quota-reset duration format (user request 2026-09-05): quotaResetMs is normally minutes or
 // hours, and raw milliseconds are error-prone (a user writing 18000 meaning 18 minutes actually
@@ -61,7 +73,10 @@ export function parseQuotaResetMs(input: unknown): number | undefined {
 	let rest = trimmed;
 	while (rest) {
 		const ws = rest.match(/^\s+/);
-		if (ws) { rest = rest.slice(ws[0].length); continue; }
+		if (ws) {
+			rest = rest.slice(ws[0].length);
+			continue;
+		}
 		const m = rest.match(/^(\d+)\s*(ms|s|m|h|d)/i);
 		if (!m) return undefined; // unparseable remainder -> reject the whole input
 		const unitMs = QUOTA_DURATION_UNIT_MS[m[2].toLowerCase()];
@@ -97,7 +112,9 @@ function readQuotaResetMsFor(cwd: string, key: string): number {
 					}
 				}
 			}
-		} catch { /* ignore — empty cache */ }
+		} catch {
+			/* ignore — empty cache */
+		}
 	}
 	return m.get(key) ?? 0;
 }
@@ -108,13 +125,15 @@ function readQuotaResetMsFor(cwd: string, key: string): number {
 // we want the same behavior as before (no env floor either). The 24h exponential backoff cap is
 // applied at the caller, NOT here. The auth branch uses a separate, longer floor (6h) that is
 // independent of quotaResetMs (auth benches do not self-heal on a known reset window).
-export function effectiveBenchMs(slot: Pick<ModelSlot, "model" | "provider">, rotation: Required<RotationConfig>, cwd: string = process.cwd()): number {
+export function effectiveBenchMs(
+	slot: Pick<ModelSlot, "model" | "provider">,
+	rotation: Required<RotationConfig>,
+	cwd: string = process.cwd(),
+): number {
 	const key = slotKey(slot);
 	const slotVal = (slot as ModelSlot).quotaResetMs;
 	// Per-slot value wins when > 0; otherwise fall back to env default.
-	const floor = (typeof slotVal === "number" && slotVal > 0)
-		? slotVal
-		: (readQuotaResetMsFor(cwd, key) || QUOTA_RESET_DEFAULT_MS);
+	const floor = typeof slotVal === "number" && slotVal > 0 ? slotVal : readQuotaResetMsFor(cwd, key) || QUOTA_RESET_DEFAULT_MS;
 	return Math.max(rotation.cooldownMs, floor);
 }
 
@@ -218,15 +237,20 @@ export const POOL_FORMAT_EXAMPLE = {
 // need rotation. This function answers "what does the implicit singleton look like right now?"
 // without rewriting the user's settings file. Used by `/swarm pool show`, `/swarm pool help`, and
 // preflight (so the singleton path is described in the same vocabulary as an explicit pool).
-export function implicitSingletonPool(): { slots: ModelSlot[]; rotation: Required<RotationConfig>; source: "settings" | "env" | "constants" } {
+export function implicitSingletonPool(): {
+	slots: ModelSlot[];
+	rotation: Required<RotationConfig>;
+	source: "settings" | "env" | "constants";
+} {
 	const settings = readSwarmSettings();
 	const model = currentModel();
 	const provider = currentProvider(model);
-	const source = settings.defaultModel || settings.defaultProvider
-		? "settings"
-		: (process.env.PI_SWARM_DEFAULT_MODEL || process.env.PI_SWARM_DEFAULT_PROVIDER)
-			? "env"
-			: "constants";
+	const source =
+		settings.defaultModel || settings.defaultProvider
+			? "settings"
+			: process.env.PI_SWARM_DEFAULT_MODEL || process.env.PI_SWARM_DEFAULT_PROVIDER
+				? "env"
+				: "constants";
 	return {
 		slots: [{ model, provider, weight: 1 }],
 		rotation: effectiveConfig().rotation,
@@ -240,15 +264,28 @@ export type SettingsShape =
 	| { kind: "empty" }
 	| { kind: "singleton"; defaultModel?: string; defaultProvider?: string; source: SwarmConfigSource }
 	| { kind: "explicit-pool"; slots: number; rotation?: RotationConfig; source: SwarmConfigSource }
-	| { kind: "both"; slots: number; rotation?: RotationConfig; singleton: { defaultModel?: string; defaultProvider?: string }; source: SwarmConfigSource };
+	| {
+			kind: "both";
+			slots: number;
+			rotation?: RotationConfig;
+			singleton: { defaultModel?: string; defaultProvider?: string };
+			source: SwarmConfigSource;
+	  };
 
 export function classifySwarmSettings(cwd = process.cwd()): SettingsShape {
 	const { cfg, source } = readSwarmRawConfig(cwd);
 	if (!cfg) return { kind: "empty" };
 	const slots = Array.isArray(cfg.modelPool) ? cfg.modelPool.length : 0;
-	const rotation = (cfg.rotation && typeof cfg.rotation === "object") ? cfg.rotation as RotationConfig : undefined;
+	const rotation = cfg.rotation && typeof cfg.rotation === "object" ? (cfg.rotation as RotationConfig) : undefined;
 	const hasSingleton = typeof cfg.defaultModel === "string" || typeof cfg.defaultProvider === "string";
-	if (slots && hasSingleton) return { kind: "both", slots, rotation, singleton: { defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider }, source: source! };
+	if (slots && hasSingleton)
+		return {
+			kind: "both",
+			slots,
+			rotation,
+			singleton: { defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider },
+			source: source!,
+		};
 	if (slots) return { kind: "explicit-pool", slots, rotation, source: source! };
 	if (hasSingleton) return { kind: "singleton", defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider, source: source! };
 	return { kind: "empty" };
@@ -268,7 +305,10 @@ export type PoolValidationError = { kind: string; field?: string; message: strin
 // enables LIVE resolvability checks per slot: `slot_unresolvable` when the provider/model pair
 // is not in the registry, `slot_no_credential` when the provider has no API key (auth.json/env
 // probe). Without a probe, validation degrades to structural-only (back-compat).
-export function validateSwarmSettings(cwd = process.cwd(), opts: { registryProbe?: { find: (provider: string, modelId: string) => any } } = {}): { ok: boolean; errors: PoolValidationError[]; warnings: PoolValidationError[]; shape: SettingsShape } {
+export function validateSwarmSettings(
+	cwd = process.cwd(),
+	opts: { registryProbe?: { find: (provider: string, modelId: string) => any } } = {},
+): { ok: boolean; errors: PoolValidationError[]; warnings: PoolValidationError[]; shape: SettingsShape } {
 	const errors: PoolValidationError[] = [];
 	const warnings: PoolValidationError[] = [];
 	let shape: SettingsShape;
@@ -280,7 +320,10 @@ export function validateSwarmSettings(cwd = process.cwd(), opts: { registryProbe
 	}
 	if (resolved.corrupt.includes("swarm.yml")) {
 		shape = { kind: "empty" };
-		errors.push({ kind: "swarm_yml_unreadable", message: `Could not parse .pi/swarm.yml: corrupt YAML (comments are fine; check indentation/colons)` });
+		errors.push({
+			kind: "swarm_yml_unreadable",
+			message: `Could not parse .pi/swarm.yml: corrupt YAML (comments are fine; check indentation/colons)`,
+		});
 		return { ok: false, errors, warnings, shape };
 	}
 	const cfg = resolved.cfg;
@@ -296,15 +339,27 @@ export function validateSwarmSettings(cwd = process.cwd(), opts: { registryProbe
 	// winning silently. swarm_yml_empty steers them to either fill it or delete it.
 	if (source !== "swarm.yml" && existsSync(swarmYmlPath(cwd))) {
 		let ymlCfg: any = null;
-		try { ymlCfg = readSwarmYml(cwd); } catch { /* corrupt already reported above */ }
+		try {
+			ymlCfg = readSwarmYml(cwd);
+		} catch {
+			/* corrupt already reported above */
+		}
 		if (ymlCfg && (Array.isArray(ymlCfg.modelPool) || ymlCfg.defaultModel || ymlCfg.defaultProvider || ymlCfg.rotation)) {
-			warnings.push({ kind: "both_sources_present", field: ".pi/swarm.yml", message: `Both .pi/settings.json (swarm block) and .pi/swarm.yml declare swarm config — settings.json (${source}) wins and the .pi/swarm.yml contents are ignored. Move your config into one file.` });
+			warnings.push({
+				kind: "both_sources_present",
+				field: ".pi/swarm.yml",
+				message: `Both .pi/settings.json (swarm block) and .pi/swarm.yml declare swarm config — settings.json (${source}) wins and the .pi/swarm.yml contents are ignored. Move your config into one file.`,
+			});
 		} else if (!ymlCfg) {
-			warnings.push({ kind: "swarm_yml_empty", field: ".pi/swarm.yml", message: `.pi/swarm.yml exists but declares no config (empty or comments-only) — settings.json (${source}) remains in effect. Fill it in (see /swarm pool help) or remove it to silence this warning.` });
+			warnings.push({
+				kind: "swarm_yml_empty",
+				field: ".pi/swarm.yml",
+				message: `.pi/swarm.yml exists but declares no config (empty or comments-only) — settings.json (${source}) remains in effect. Fill it in (see /swarm pool help) or remove it to silence this warning.`,
+			});
 		}
 	}
 	const slots = Array.isArray(cfg.modelPool) ? cfg.modelPool : null;
-	const rotation = (cfg.rotation && typeof cfg.rotation === "object") ? cfg.rotation : null;
+	const rotation = cfg.rotation && typeof cfg.rotation === "object" ? cfg.rotation : null;
 	if (slots) {
 		const seen = new Set<string>();
 		slots.forEach((s: any, idx: number) => {
@@ -314,14 +369,24 @@ export function validateSwarmSettings(cwd = process.cwd(), opts: { registryProbe
 			}
 			const model = typeof s.model === "string" ? s.model.trim() : "";
 			const provider = typeof s.provider === "string" ? s.provider.trim() : "";
-			if (!model) errors.push({ kind: "slot_empty_model", field: `modelPool[${idx}].model`, message: `Slot #${idx + 1} has an empty model name` });
+			if (!model)
+				errors.push({
+					kind: "slot_empty_model",
+					field: `modelPool[${idx}].model`,
+					message: `Slot #${idx + 1} has an empty model name`,
+				});
 			if (s.weight !== undefined) {
 				if (typeof s.weight !== "number" || !Number.isFinite(s.weight) || s.weight < 0) {
-					errors.push({ kind: "slot_bad_weight", field: `modelPool[${idx}].weight`, message: `Slot #${idx + 1} weight must be a non-negative number (0 = fallback-only)` });
+					errors.push({
+						kind: "slot_bad_weight",
+						field: `modelPool[${idx}].weight`,
+						message: `Slot #${idx + 1} weight must be a non-negative number (0 = fallback-only)`,
+					});
 				}
 			}
 			const key = `${provider || "(default)"}/${model}`;
-			if (seen.has(key) && model) errors.push({ kind: "slot_duplicate", field: `modelPool[${idx}]`, message: `Duplicate slot: ${key}` });
+			if (seen.has(key) && model)
+				errors.push({ kind: "slot_duplicate", field: `modelPool[${idx}]`, message: `Duplicate slot: ${key}` });
 			if (model) seen.add(key);
 			// Issue 21: validate the optional quotaResetMs field. Reject non-numeric / negative / NaN
 			// values so a typo is caught at validate time rather than silently treated as 0.
@@ -330,15 +395,27 @@ export function validateSwarmSettings(cwd = process.cwd(), opts: { registryProbe
 			const qrRaw = s.quotaReset !== undefined ? s.quotaReset : s.quotaResetMs;
 			if (qrRaw !== undefined && parseQuotaResetMs(qrRaw) === undefined) {
 				const fname = s.quotaReset !== undefined ? "quotaReset" : "quotaResetMs";
-				errors.push({ kind: "slot_bad_quota_reset", field: `modelPool[${idx}].${fname}`, message: `Slot #${idx + 1} ${fname} must be a duration ("30m", "2h", "1h30m", "1d") or a non-negative number of milliseconds (floor for quota benches; 24h cap still applies)` });
+				errors.push({
+					kind: "slot_bad_quota_reset",
+					field: `modelPool[${idx}].${fname}`,
+					message: `Slot #${idx + 1} ${fname} must be a duration ("30m", "2h", "1h30m", "1d") or a non-negative number of milliseconds (floor for quota benches; 24h cap still applies)`,
+				});
 			}
 			if (s.quotaReset === undefined && s.quotaResetMs !== undefined && parseQuotaResetMs(s.quotaResetMs) !== undefined) {
-				warnings.push({ kind: "quota_reset_alias", field: `modelPool[${idx}].quotaResetMs`, message: `Slot #${idx + 1} uses the legacy field name quotaResetMs — rename it to quotaReset (same semantics, duration-friendly). The alias keeps working.` });
+				warnings.push({
+					kind: "quota_reset_alias",
+					field: `modelPool[${idx}].quotaResetMs`,
+					message: `Slot #${idx + 1} uses the legacy field name quotaResetMs — rename it to quotaReset (same semantics, duration-friendly). The alias keeps working.`,
+				});
 			}
 			// Issue 22: validate the optional roles allow-list (warning-grade, informational — the
 			// malformed value is treated as "no filter" by parseModelPool, but the operator should see it).
 			if (s.roles !== undefined && (!Array.isArray(s.roles) || !s.roles.every((r: any) => typeof r === "string" && r.length > 0))) {
-				errors.push({ kind: "slot_bad_roles", field: `modelPool[${idx}].roles`, message: `Slot #${idx + 1} roles must be a string array of role-kind names (see completion.ts ROLE_KINDS for the closed set: root, planner, reviewer, tester, implementer, worker, observer)` });
+				errors.push({
+					kind: "slot_bad_roles",
+					field: `modelPool[${idx}].roles`,
+					message: `Slot #${idx + 1} roles must be a string array of role-kind names (see completion.ts ROLE_KINDS for the closed set: root, planner, reviewer, tester, implementer, worker, observer)`,
+				});
 			}
 			// Follow-up F2 (2026-09-05): live resolvability probe — only when a registry probe is
 			// supplied (the /swarm tool path passes ctx.modelRegistry; structural callers don't).
@@ -346,28 +423,60 @@ export function validateSwarmSettings(cwd = process.cwd(), opts: { registryProbe
 			if (opts.registryProbe && model && provider) {
 				const found = opts.registryProbe.find(provider, model);
 				if (!found) {
-					errors.push({ kind: "slot_unresolvable", field: `modelPool[${idx}]`, message: `Slot #${idx + 1} ${provider}/${model} is not resolvable: no such model registered under that provider (pi auth / --list-models to inspect). Spawns targeting it would fail.` });
+					errors.push({
+						kind: "slot_unresolvable",
+						field: `modelPool[${idx}]`,
+						message: `Slot #${idx + 1} ${provider}/${model} is not resolvable: no such model registered under that provider (pi auth / --list-models to inspect). Spawns targeting it would fail.`,
+					});
 				} else if (missingProviderCredential(provider)) {
-					errors.push({ kind: "slot_no_credential", field: `modelPool[${idx}]`, message: `Slot #${idx + 1} provider '${provider}' has no stored API key — a spawned pi would exit with 'No API key found for ${provider}'. Authenticate it (pi auth) or set ${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY.` });
+					errors.push({
+						kind: "slot_no_credential",
+						field: `modelPool[${idx}]`,
+						message: `Slot #${idx + 1} provider '${provider}' has no stored API key — a spawned pi would exit with 'No API key found for ${provider}'. Authenticate it (pi auth) or set ${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY.`,
+					});
 				}
 			}
 		});
 	}
 	if (rotation) {
 		if (rotation.strategy !== undefined && !["weighted", "round-robin", "sticky"].includes(rotation.strategy)) {
-			errors.push({ kind: "rotation_bad_strategy", field: "rotation.strategy", message: `rotation.strategy must be one of weighted | round-robin | sticky (got ${JSON.stringify(rotation.strategy)})` });
+			errors.push({
+				kind: "rotation_bad_strategy",
+				field: "rotation.strategy",
+				message: `rotation.strategy must be one of weighted | round-robin | sticky (got ${JSON.stringify(rotation.strategy)})`,
+			});
 		}
-		if (rotation.cooldownMs !== undefined && (typeof rotation.cooldownMs !== "number" || !Number.isFinite(rotation.cooldownMs) || rotation.cooldownMs < 0)) {
-			errors.push({ kind: "rotation_bad_cooldown", field: "rotation.cooldownMs", message: `rotation.cooldownMs must be a non-negative number of milliseconds` });
+		if (
+			rotation.cooldownMs !== undefined &&
+			(typeof rotation.cooldownMs !== "number" || !Number.isFinite(rotation.cooldownMs) || rotation.cooldownMs < 0)
+		) {
+			errors.push({
+				kind: "rotation_bad_cooldown",
+				field: "rotation.cooldownMs",
+				message: `rotation.cooldownMs must be a non-negative number of milliseconds`,
+			});
 		}
-		if (rotation.maxRetries !== undefined && (typeof rotation.maxRetries !== "number" || !Number.isFinite(rotation.maxRetries) || rotation.maxRetries < 1)) {
-			errors.push({ kind: "rotation_bad_maxretries", field: "rotation.maxRetries", message: `rotation.maxRetries must be a positive integer (>= 1)` });
+		if (
+			rotation.maxRetries !== undefined &&
+			(typeof rotation.maxRetries !== "number" || !Number.isFinite(rotation.maxRetries) || rotation.maxRetries < 1)
+		) {
+			errors.push({
+				kind: "rotation_bad_maxretries",
+				field: "rotation.maxRetries",
+				message: `rotation.maxRetries must be a positive integer (>= 1)`,
+			});
 		}
 	}
 	const hasSingleton = typeof cfg.defaultModel === "string" || typeof cfg.defaultProvider === "string";
 	const slotsCount = slots ? slots.length : 0;
 	if (slotsCount && hasSingleton) {
-		shape = { kind: "both", slots: slotsCount, rotation: rotation || undefined, singleton: { defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider }, source };
+		shape = {
+			kind: "both",
+			slots: slotsCount,
+			rotation: rotation || undefined,
+			singleton: { defaultModel: cfg.defaultModel, defaultProvider: cfg.defaultProvider },
+			source,
+		};
 	} else if (slotsCount) {
 		shape = { kind: "explicit-pool", slots: slotsCount, rotation: rotation || undefined, source };
 	} else if (hasSingleton) {
@@ -418,7 +527,10 @@ export function slotMatchesRole(slot: ModelSlot, roleKind: string | undefined): 
 	return roles.includes(roleKind);
 }
 
-export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: string; roleKind?: string; bypassRolesFilter?: boolean } = {}): Promise<PickResult | undefined> {
+export async function pickSlot(
+	p: Paths,
+	opts: { stickyKey?: string; avoidKey?: string; roleKind?: string; bypassRolesFilter?: boolean } = {},
+): Promise<PickResult | undefined> {
 	const { slots, rotation } = effectiveConfig();
 	if (!slots.length) return undefined;
 	// Issue 22: filter slots through the role allow-list unless bypassed (manual operator rotate)
@@ -437,44 +549,44 @@ export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: 
 	if (!visible.length) return undefined;
 	// Round-robin mutates the shared cursor, so the whole pick runs under the pool lock.
 	return withPoolLock(p, async () => {
-	const h = await readPoolHealth(p);
-	const nowMs = Date.now();
+		const h = await readPoolHealth(p);
+		const nowMs = Date.now();
 
-	const eligible = visible
-		.map((slot, index) => ({ slot, index }))
-		.filter(({ slot }) => (slot.weight ?? 1) > 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
-	const fallbacks = visible
-		.map((slot, index) => ({ slot, index }))
-		.filter(({ slot }) => (slot.weight ?? 1) === 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
+		const eligible = visible
+			.map((slot, index) => ({ slot, index }))
+			.filter(({ slot }) => (slot.weight ?? 1) > 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
+		const fallbacks = visible
+			.map((slot, index) => ({ slot, index }))
+			.filter(({ slot }) => (slot.weight ?? 1) === 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
 
-	if (eligible.length) {
-		if (rotation.strategy === "sticky" && opts.stickyKey) {
-			const { slot, index } = eligible[stickyIndex(opts.stickyKey, eligible.length)];
-			return { slot, index, fromPool: true, reason: `sticky(${opts.stickyKey})` };
-		}
-		if (rotation.strategy === "round-robin") {
-			let cursor = ((h.rrCursor ?? 0) % eligible.length + eligible.length) % eligible.length;
-			if (opts.avoidKey && eligible.length > 1 && slotKey(eligible[cursor].slot) === opts.avoidKey) {
-				cursor = (cursor + 1) % eligible.length;
+		if (eligible.length) {
+			if (rotation.strategy === "sticky" && opts.stickyKey) {
+				const { slot, index } = eligible[stickyIndex(opts.stickyKey, eligible.length)];
+				return { slot, index, fromPool: true, reason: `sticky(${opts.stickyKey})` };
 			}
-			h.rrCursor = cursor + 1;
-			await writePoolHealth(p, h).catch(() => {});
-			const { slot, index } = eligible[cursor];
-			return { slot, index, fromPool: true, reason: `round-robin(${cursor})` };
+			if (rotation.strategy === "round-robin") {
+				let cursor = (((h.rrCursor ?? 0) % eligible.length) + eligible.length) % eligible.length;
+				if (opts.avoidKey && eligible.length > 1 && slotKey(eligible[cursor].slot) === opts.avoidKey) {
+					cursor = (cursor + 1) % eligible.length;
+				}
+				h.rrCursor = cursor + 1;
+				await writePoolHealth(p, h).catch(() => {});
+				const { slot, index } = eligible[cursor];
+				return { slot, index, fromPool: true, reason: `round-robin(${cursor})` };
+			}
+			const { slot, index } = weightedPick(eligible.map((e) => ({ ...e, weight: e.slot.weight ?? 1 })));
+			return { slot, index, fromPool: true, reason: `weighted(w=${slot.weight ?? 1})` };
 		}
-		const { slot, index } = weightedPick(eligible.map((e) => ({ ...e, weight: e.slot.weight ?? 1 })));
-		return { slot, index, fromPool: true, reason: `weighted(w=${slot.weight ?? 1})` };
-	}
 
-	if (fallbacks.length) {
-		const { slot, index } = fallbacks[0];
-		return { slot, index, fromPool: true, reason: "fallback-only (all weighted slots benched)" };
-	}
+		if (fallbacks.length) {
+			const { slot, index } = fallbacks[0];
+			return { slot, index, fromPool: true, reason: "fallback-only (all weighted slots benched)" };
+		}
 
-	// Everything is in cooldown: return undefined — the caller keeps its current model and simply
-	// retries on it (quota errors on every slot means the swap loop cannot help; thrashing between
-	// benched slots would burn the remaining turn budget). PoolStatus/traces make the outage visible.
-	return undefined;
+		// Everything is in cooldown: return undefined — the caller keeps its current model and simply
+		// retries on it (quota errors on every slot means the swap loop cannot help; thrashing between
+		// benched slots would burn the remaining turn budget). PoolStatus/traces make the outage visible.
+		return undefined;
 	});
 }
 
@@ -489,43 +601,57 @@ export async function pickSlot(p: Paths, opts: { stickyKey?: string; avoidKey?: 
 export async function recordProviderError(p: Paths, slot: ModelSlot, kind: ProviderErrorKind, error: string): Promise<PoolSlotHealth> {
 	const { rotation } = effectiveConfig();
 	return withPoolLock(p, async () => {
-	const h = await readPoolHealth(p);
-	const key = slotKey(slot);
-	const prev = h.slots[key] || { failures: 0 };
-	// Deduplicate pi-internal retries of the SAME incident: pi can emit several error turns for one
-	// underlying failure (stream retry, overflow-recovery re-run). An identical error on the same
-	// slot within 30s counts once toward the streak, so maxRetries means real distinct failures.
-	const sameIncident = prev.lastError === `${kind}: ${error}`.slice(0, 200)
-		&& prev.lastErrorAt && (Date.now() - new Date(prev.lastErrorAt).getTime()) < 30_000;
-	const failures = sameIncident ? (prev.failures || 0) : (prev.failures || 0) + 1;
-	const next: PoolSlotHealth = { failures, lastError: `${kind}: ${error}`.slice(0, 200), lastErrorAt: new Date().toISOString(), deduped: sameIncident || undefined };
-	const immediate = kind === "quota" || kind === "auth";
-	if (failures >= rotation.maxRetries || immediate) {
-		// Exponential backoff for repeated benching: a slot that keeps failing right after each
-		// cooldown doubles its bench time (capped at 24h), so a long outage (monthly quota reset)
-		// costs at most one probe attempt per doubling instead of one per cooldownMs.
-		const benchStreak = (prev.benchStreak || 0) + 1;
-		// B-1: effectiveBenchMs already floors on rotation.cooldownMs — drop the redundant Math.max.
-		// auth is unaffected by quotaResetMs (auth benches do not self-heal on a known reset window).
-		const base = kind === "auth" ? Math.max(rotation.cooldownMs, 6 * 60 * 60_000) : effectiveBenchMs(slot, rotation);
-		const ms = Math.min(base * Math.pow(2, benchStreak - 1), 24 * 60 * 60_000);
-		next.cooldownUntil = new Date(Date.now() + ms).toISOString();
-		next.failures = 0; // fresh chance after cooldown
-		next.benchStreak = benchStreak;
-		// Issue 21: stamp the reason on every bench so the recovery scan can filter on "quota".
-		// Always overwrite (a fresh bench invalidates any prior reason stamp).
-		next.lastBenchReason = kind;
-		// Stamp the original bench duration for the recovery trace's benchMs payload.
-		next.lastBenchMs = ms;
-		// A new bench also invalidates the prior recovery dedupe stamp — if the slot was recovered
-		// and is being benched again, the NEXT recovery after THIS bench must fire (not be deduped
-		// by the stale lastRecoveredAt from the previous cycle).
-		delete next.lastRecoveredAt;
-	}
-	h.slots[key] = next;
-	await writePoolHealth(p, h);
-	await trace(p, "pool.slot_failure", { slot: key, failures, kind, error: error.slice(0, 200), cooldownUntil: next.cooldownUntil, benchReason: next.lastBenchReason }).catch(() => {});
-	return next;
+		const h = await readPoolHealth(p);
+		const key = slotKey(slot);
+		const prev = h.slots[key] || { failures: 0 };
+		// Deduplicate pi-internal retries of the SAME incident: pi can emit several error turns for one
+		// underlying failure (stream retry, overflow-recovery re-run). An identical error on the same
+		// slot within 30s counts once toward the streak, so maxRetries means real distinct failures.
+		const sameIncident =
+			prev.lastError === `${kind}: ${error}`.slice(0, 200) &&
+			prev.lastErrorAt &&
+			Date.now() - new Date(prev.lastErrorAt).getTime() < 30_000;
+		const failures = sameIncident ? prev.failures || 0 : (prev.failures || 0) + 1;
+		const next: PoolSlotHealth = {
+			failures,
+			lastError: `${kind}: ${error}`.slice(0, 200),
+			lastErrorAt: new Date().toISOString(),
+			deduped: sameIncident || undefined,
+		};
+		const immediate = kind === "quota" || kind === "auth";
+		if (failures >= rotation.maxRetries || immediate) {
+			// Exponential backoff for repeated benching: a slot that keeps failing right after each
+			// cooldown doubles its bench time (capped at 24h), so a long outage (monthly quota reset)
+			// costs at most one probe attempt per doubling instead of one per cooldownMs.
+			const benchStreak = (prev.benchStreak || 0) + 1;
+			// B-1: effectiveBenchMs already floors on rotation.cooldownMs — drop the redundant Math.max.
+			// auth is unaffected by quotaResetMs (auth benches do not self-heal on a known reset window).
+			const base = kind === "auth" ? Math.max(rotation.cooldownMs, 6 * 60 * 60_000) : effectiveBenchMs(slot, rotation);
+			const ms = Math.min(base * Math.pow(2, benchStreak - 1), 24 * 60 * 60_000);
+			next.cooldownUntil = new Date(Date.now() + ms).toISOString();
+			next.failures = 0; // fresh chance after cooldown
+			next.benchStreak = benchStreak;
+			// Issue 21: stamp the reason on every bench so the recovery scan can filter on "quota".
+			// Always overwrite (a fresh bench invalidates any prior reason stamp).
+			next.lastBenchReason = kind;
+			// Stamp the original bench duration for the recovery trace's benchMs payload.
+			next.lastBenchMs = ms;
+			// A new bench also invalidates the prior recovery dedupe stamp — if the slot was recovered
+			// and is being benched again, the NEXT recovery after THIS bench must fire (not be deduped
+			// by the stale lastRecoveredAt from the previous cycle).
+			delete next.lastRecoveredAt;
+		}
+		h.slots[key] = next;
+		await writePoolHealth(p, h);
+		await trace(p, "pool.slot_failure", {
+			slot: key,
+			failures,
+			kind,
+			error: error.slice(0, 200),
+			cooldownUntil: next.cooldownUntil,
+			benchReason: next.lastBenchReason,
+		}).catch(() => {});
+		return next;
 	});
 }
 
@@ -538,19 +664,19 @@ export async function recordProviderError(p: Paths, slot: ModelSlot, kind: Provi
 // event is not deduped by a stale stamp.
 export async function recordSlotSuccess(p: Paths, slot: ModelSlot): Promise<void> {
 	await withPoolLock(p, async () => {
-	const h = await readPoolHealth(p);
-	const key = slotKey(slot);
-	const prev = h.slots[key];
-	if (!prev || (!prev.failures && !prev.cooldownUntil && !prev.lastError)) return;
-	h.slots[key] = {
-		failures: 0,
-		lastBenchReason: prev.lastBenchReason,
-		lastBenchMs: prev.lastBenchMs,
-		benchStreak: prev.benchStreak,
-		lastRecoveredAt: prev.lastRecoveredAt,
-	};
-	await writePoolHealth(p, h);
-	await trace(p, "pool.slot_success", { slot: key }).catch(() => {});
+		const h = await readPoolHealth(p);
+		const key = slotKey(slot);
+		const prev = h.slots[key];
+		if (!prev || (!prev.failures && !prev.cooldownUntil && !prev.lastError)) return;
+		h.slots[key] = {
+			failures: 0,
+			lastBenchReason: prev.lastBenchReason,
+			lastBenchMs: prev.lastBenchMs,
+			benchStreak: prev.benchStreak,
+			lastRecoveredAt: prev.lastRecoveredAt,
+		};
+		await writePoolHealth(p, h);
+		await trace(p, "pool.slot_success", { slot: key }).catch(() => {});
 	});
 }
 
@@ -561,28 +687,40 @@ export async function recordSlotSuccess(p: Paths, slot: ModelSlot): Promise<void
 // dedupe state.
 export async function setSlotCooldown(p: Paths, key: string, ms: number | null): Promise<boolean> {
 	return withPoolLock(p, async () => {
-	const h = await readPoolHealth(p);
-	const slot = h.slots[key];
-	if (!slot && ms === null) return false;
-	h.slots[key] = slot || { failures: 0 };
-	if (ms === null) {
-		delete h.slots[key].cooldownUntil;
-		// Manual clear wipes both the bench reason stamp and the recovery dedupe stamp — a fresh
-		// quota bench after the clear should NOT be deduped by an old lastRecoveredAt.
-		delete h.slots[key].lastBenchReason;
-		delete h.slots[key].lastBenchMs;
-		delete h.slots[key].lastRecoveredAt;
-	} else {
-		h.slots[key].cooldownUntil = new Date(Date.now() + ms).toISOString();
-		// Manual bench leaves lastBenchReason undefined so the recovery scan ignores it (only
-		// error-driven quota benches trigger slot_recovered).
-	}
-	await writePoolHealth(p, h);
-	return true;
+		const h = await readPoolHealth(p);
+		const slot = h.slots[key];
+		if (!slot && ms === null) return false;
+		h.slots[key] = slot || { failures: 0 };
+		if (ms === null) {
+			delete h.slots[key].cooldownUntil;
+			// Manual clear wipes both the bench reason stamp and the recovery dedupe stamp — a fresh
+			// quota bench after the clear should NOT be deduped by an old lastRecoveredAt.
+			delete h.slots[key].lastBenchReason;
+			delete h.slots[key].lastBenchMs;
+			delete h.slots[key].lastRecoveredAt;
+		} else {
+			h.slots[key].cooldownUntil = new Date(Date.now() + ms).toISOString();
+			// Manual bench leaves lastBenchReason undefined so the recovery scan ignores it (only
+			// error-driven quota benches trigger slot_recovered).
+		}
+		await writePoolHealth(p, h);
+		return true;
 	});
 }
 
-export async function poolStatus(p: Paths): Promise<{ slots: Array<ModelSlot & { key: string; health: PoolSlotHealth | undefined; inCooldown: boolean; cooldownRemainingMs: number; quotaResetMs: number; quotaAware: boolean }>; rotation: Required<RotationConfig> }> {
+export async function poolStatus(p: Paths): Promise<{
+	slots: Array<
+		ModelSlot & {
+			key: string;
+			health: PoolSlotHealth | undefined;
+			inCooldown: boolean;
+			cooldownRemainingMs: number;
+			quotaResetMs: number;
+			quotaAware: boolean;
+		}
+	>;
+	rotation: Required<RotationConfig>;
+}> {
 	const { slots, rotation } = effectiveConfig();
 	const h = await readPoolHealth(p);
 	const nowMs = Date.now();
@@ -596,10 +734,19 @@ export async function poolStatus(p: Paths): Promise<{ slots: Array<ModelSlot & {
 			// Issue 21: surface the effective quotaResetMs (slot value or env default) so /swarm
 			// pool list can render a "quota-aware" annotation. quotaAware=true means the effective
 			// bench floor exceeds rotation.cooldownMs.
-			const qrMs = (typeof (slot as ModelSlot).quotaResetMs === "number" && (slot as ModelSlot).quotaResetMs! > 0)
-				? (slot as ModelSlot).quotaResetMs!
-				: (readQuotaResetMsFor(cwd, key) || QUOTA_RESET_DEFAULT_MS);
-			return { ...slot, key, health, inCooldown: until > nowMs, cooldownRemainingMs: Math.max(0, until - nowMs), quotaResetMs: qrMs, quotaAware: qrMs > 0 && qrMs > rotation.cooldownMs };
+			const qrMs =
+				typeof (slot as ModelSlot).quotaResetMs === "number" && (slot as ModelSlot).quotaResetMs! > 0
+					? (slot as ModelSlot).quotaResetMs!
+					: readQuotaResetMsFor(cwd, key) || QUOTA_RESET_DEFAULT_MS;
+			return {
+				...slot,
+				key,
+				health,
+				inCooldown: until > nowMs,
+				cooldownRemainingMs: Math.max(0, until - nowMs),
+				quotaResetMs: qrMs,
+				quotaAware: qrMs > 0 && qrMs > rotation.cooldownMs,
+			};
 		}),
 	};
 }
@@ -620,7 +767,10 @@ export async function previewPickable(p: Paths): Promise<{ configured: boolean; 
 		const until = h.slots[slotKey(s)]?.cooldownUntil;
 		return typeof until === "string" && new Date(until).getTime() > nowMs;
 	}).length;
-	return { configured: true, reason: `all ${total} slot(s) benched (${benched} in cooldown); wait for cooldown to expire or /swarm pool clear <slot>` };
+	return {
+		configured: true,
+		reason: `all ${total} slot(s) benched (${benched} in cooldown); wait for cooldown to expire or /swarm pool clear <slot>`,
+	};
 }
 
 // Preflight a spawn/restart. Validates (1) settings shape — if a pool is configured but every slot
@@ -769,7 +919,8 @@ export function formatPreflightError(err: PreflightError): string {
 // and side-effect free. The real tmux probe is intentionally left to spawnAgent (which performs
 // the actual new-session fallback).
 export async function checkTmuxSession(session: string): Promise<{ ok: boolean; message?: string }> {
-	if (!session || session === "unknown") return { ok: false, message: "tmux session name is unknown (no swarm started yet; run /swarm init)." };
+	if (!session || session === "unknown")
+		return { ok: false, message: "tmux session name is unknown (no swarm started yet; run /swarm init)." };
 	if (!process.env.TMUX && !process.env.PI_SWARM_TMUX_OK) {
 		return { ok: false, message: `No $TMUX env var set — the swarm normally runs inside tmux. Session requested: ${session}.` };
 	}

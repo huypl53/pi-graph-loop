@@ -33,7 +33,9 @@ const factory = mod.default;
 
 const tools = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
 	exec: async (cmd, args) => {
@@ -45,22 +47,40 @@ const pi = {
 };
 factory(pi);
 
-let pass = 0, fail = 0;
-const ok = (n, c, info) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c, info) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n, info ?? "");
+	}
+};
 
 const call = async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd: scratch });
 };
 const as = (agentId, fn) => {
 	const prev = process.env.PI_SWARM_AGENT_ID;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	try { return fn(); } finally { process.env.PI_SWARM_AGENT_ID = prev; }
+	try {
+		return fn();
+	} finally {
+		process.env.PI_SWARM_AGENT_ID = prev;
+	}
 };
 const awaitAs = async (agentId, name, params) => {
 	const prev = process.env.PI_SWARM_AGENT_ID;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	try { return await call(name, params); } finally { process.env.PI_SWARM_AGENT_ID = prev; }
+	try {
+		return await call(name, params);
+	} finally {
+		process.env.PI_SWARM_AGENT_ID = prev;
+	}
 };
 const expectErrorCode = async (agentId, name, params, code) => {
 	try {
@@ -73,8 +93,7 @@ const expectErrorCode = async (agentId, name, params, code) => {
 	}
 };
 
-const readTask = (taskId) =>
-	JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskId}/task.json`), "utf8"));
+const readTask = (taskId) => JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskId}/task.json`), "utf8"));
 const readNode = (taskId, nodeId) => readTask(taskId).nodes[nodeId];
 const readStateFile = () => {
 	const p = join(scratch, ".pi/swarm/swarm-state.json");
@@ -85,28 +104,61 @@ const readEvents = (taskId) => {
 	const p = join(scratch, `.pi/swarm/tasks/${taskId}/events.jsonl`);
 	const swarm = join(scratch, ".pi/swarm/traces/events.jsonl");
 	const out = [];
-	if (existsSync(p)) out.push(...readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean));
-	if (existsSync(swarm)) out.push(...readFileSync(swarm, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean));
+	if (existsSync(p))
+		out.push(
+			...readFileSync(p, "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map((l) => {
+					try {
+						return JSON.parse(l);
+					} catch {
+						return null;
+					}
+				})
+				.filter(Boolean),
+		);
+	if (existsSync(swarm))
+		out.push(
+			...readFileSync(swarm, "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map((l) => {
+					try {
+						return JSON.parse(l);
+					} catch {
+						return null;
+					}
+				})
+				.filter(Boolean),
+		);
 	return out;
 };
 
 async function ensureWorker(agentId, roleKind) {
-	await awaitAs(agentId, "swarm_register_agent", { tmuxTarget: "unknown", role: `test ${roleKind}`, roleKind, id: agentId, inject: false });
+	await awaitAs(agentId, "swarm_register_agent", {
+		tmuxTarget: "unknown",
+		role: `test ${roleKind}`,
+		roleKind,
+		id: agentId,
+		inject: false,
+	});
 }
 
 async function createTask(extra = {}) {
 	const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-test`;
 	return await call("swarm_create_task", {
-		title: "Assignment ownership", goal: "g", priority: "normal", cwd: scratch,
+		title: "Assignment ownership",
+		goal: "g",
+		priority: "normal",
+		cwd: scratch,
 		taskId,
 		start: "plan",
 		nodes: {
 			plan: { role: "planner", writeArtifacts: ["artifacts/plan.md"] },
 			implement: { role: "implementer", dependsOn: ["plan"] },
 		},
-		edges: [
-			{ from: "plan", to: "implement", when: "planned" },
-		],
+		edges: [{ from: "plan", to: "implement", when: "planned" }],
 		...extra,
 	});
 }
@@ -131,7 +183,10 @@ console.log("\n[1] ready+unassigned by non-assignee -> CLAIM succeeds");
 	ok("attempt history entry created", Array.isArray(after.attemptHistory) && after.attemptHistory.length >= 1);
 	// task.node.claimed trace event
 	const events = readEvents(taskId);
-	ok("task.node.claimed trace emitted", events.some((e) => e.event === "task.node.claimed"));
+	ok(
+		"task.node.claimed trace emitted",
+		events.some((e) => e.event === "task.node.claimed"),
+	);
 	// activeTaskIds on the claimer
 	const st = readStateFile();
 	ok("activeTaskIds on claimer includes taskId", st.agents["worker-a"]?.activeTaskIds?.includes(taskId) === true);
@@ -154,10 +209,18 @@ console.log("\n[2] in_progress+unassigned -> OWNERSHIP_REQUIRED (inline-string)"
 	delete task.nodes.plan.activeAttemptId;
 	delete task.nodes.plan.attemptHistory;
 	writeFileSync(tp, JSON.stringify(task, null, 2), "utf8");
-	const err = await expectErrorCode("worker-a", "swarm_update_task", { taskId, nodeId: "plan", status: "done", cwd: scratch }, "OWNERSHIP_REQUIRED");
+	const err = await expectErrorCode(
+		"worker-a",
+		"swarm_update_task",
+		{ taskId, nodeId: "plan", status: "done", cwd: scratch },
+		"OWNERSHIP_REQUIRED",
+	);
 	ok("hint suggests escalate to root", err && err.suggestedNextCall && err.suggestedNextCall.tool === "swarm_send_message");
 	const events = readEvents(taskId);
-	ok("task.update.ownership_reject trace emitted", events.some((e) => e.event === "task.update.ownership_reject" && e.errorCode === "OWNERSHIP_REQUIRED"));
+	ok(
+		"task.update.ownership_reject trace emitted",
+		events.some((e) => e.event === "task.update.ownership_reject" && e.errorCode === "OWNERSHIP_REQUIRED"),
+	);
 }
 
 // =============================================================
@@ -195,10 +258,18 @@ console.log("\n[4] assigned+non-me -> NODE_ASSIGNEE_MISMATCH + ownership_reject 
 	const attempt1 = n1.activeAttemptId;
 	await awaitAs("worker-a", "swarm_update_task", { taskId, nodeId: "plan", status: "in_progress", attemptId: attempt1, cwd: scratch });
 	// Worker B tries to update — must fail with NODE_ASSIGNEE_MISMATCH (already assigned)
-	const err = await expectErrorCode("worker-b", "swarm_update_task", { taskId, nodeId: "plan", status: "done", cwd: scratch }, "NODE_ASSIGNEE_MISMATCH");
+	const err = await expectErrorCode(
+		"worker-b",
+		"swarm_update_task",
+		{ taskId, nodeId: "plan", status: "done", cwd: scratch },
+		"NODE_ASSIGNEE_MISMATCH",
+	);
 	ok("hint present", err && typeof err.actionableHint === "string");
 	const events = readEvents(taskId);
-	ok("task.update.ownership_reject trace emitted with NODE_ASSIGNEE_MISMATCH", events.some((e) => e.event === "task.update.ownership_reject" && e.errorCode === "NODE_ASSIGNEE_MISMATCH"));
+	ok(
+		"task.update.ownership_reject trace emitted with NODE_ASSIGNEE_MISMATCH",
+		events.some((e) => e.event === "task.update.ownership_reject" && e.errorCode === "NODE_ASSIGNEE_MISMATCH"),
+	);
 }
 
 // =============================================================
@@ -227,7 +298,10 @@ console.log("\n[5] deliverMessageLocked assignment-style -> auto-stamp");
 	const after = readNode(taskId, "implement");
 	ok("auto-stamp set assignee=worker-a", after.assignee === "worker-a");
 	const events = readEvents(taskId);
-	ok("message.deliver.assignment_auto_stamp trace emitted", events.some((e) => e.event === "message.deliver.assignment_auto_stamp"));
+	ok(
+		"message.deliver.assignment_auto_stamp trace emitted",
+		events.some((e) => e.event === "message.deliver.assignment_auto_stamp"),
+	);
 }
 
 // =============================================================
@@ -291,8 +365,14 @@ console.log("\n[7] assignment-style message to different assignee -> stamp + mis
 	const after = readNode(taskId, "implement");
 	ok("auto-stamp updated assignee=worker-b", after.assignee === "worker-b");
 	const events = readEvents(taskId);
-	ok("message.deliver.assignment_auto_stamp trace emitted", events.some((e) => e.event === "message.deliver.assignment_auto_stamp"));
-	ok("message.deliver.assignment_mismatch warn trace emitted", events.some((e) => e.event === "message.deliver.assignment_mismatch"));
+	ok(
+		"message.deliver.assignment_auto_stamp trace emitted",
+		events.some((e) => e.event === "message.deliver.assignment_auto_stamp"),
+	);
+	ok(
+		"message.deliver.assignment_mismatch warn trace emitted",
+		events.some((e) => e.event === "message.deliver.assignment_mismatch"),
+	);
 }
 
 // =============================================================
@@ -321,7 +401,10 @@ console.log("\n[8] failTaskTool coverage table: each listed site has actionableH
 		for (const m of matches) {
 			const idx = m.index;
 			const tail = src.slice(idx, idx + 600);
-			if (tail.includes(contains)) { anySatisfy = true; break; }
+			if (tail.includes(contains)) {
+				anySatisfy = true;
+				break;
+			}
 		}
 		ok(`${code} has hint containing "${contains}"`, anySatisfy);
 	}
@@ -393,13 +476,15 @@ console.log("\n[12] Self-heal: writeTaskState failure simulation");
 	// mid-cycle). Then worker-a's swarm_update_task lands in the claim branch (24.a) and
 	// self-heals.
 	// Send an assignment-style message — auto-stamp runs, assignee=worker-a
-	await as("root", () => call("swarm_send_message", {
-		to: "worker-a",
-		subject: `Task ${taskId} / node implement assigned`,
-		body: "Assignment body",
-		conversationId: `task:${taskId}:implement`,
-		requiresAck: true,
-	}));
+	await as("root", () =>
+		call("swarm_send_message", {
+			to: "worker-a",
+			subject: `Task ${taskId} / node implement assigned`,
+			body: "Assignment body",
+			conversationId: `task:${taskId}:implement`,
+			requiresAck: true,
+		}),
+	);
 	// Simulate writeTaskState failure by manually clearing assignee back to null
 	const tp = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
 	const task = JSON.parse(readFileSync(tp, "utf8"));
@@ -412,7 +497,10 @@ console.log("\n[12] Self-heal: writeTaskState failure simulation");
 	ok("status=assigned (then transitioned to in_progress)", after.status === "in_progress");
 	ok("active attempt minted", Boolean(after.activeAttemptId));
 	const events = readEvents(taskId);
-	ok("task.node.claimed trace emitted (self-heal)", events.some((e) => e.event === "task.node.claimed"));
+	ok(
+		"task.node.claimed trace emitted (self-heal)",
+		events.some((e) => e.event === "task.node.claimed"),
+	);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

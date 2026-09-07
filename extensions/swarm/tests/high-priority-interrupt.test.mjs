@@ -28,8 +28,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 
-let pass = 0, fail = 0;
-const ok = (name, cond, info) => { if (cond) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, info) => {
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
+};
 
 // Build a scratch dir + minimal swarm state with the recipient agent registered.
 async function setupScratch(identity) {
@@ -77,7 +86,17 @@ async function readState(scratch) {
 }
 async function readEvents(scratch) {
 	const txt = await readFile(join(scratch, ".pi/swarm/traces/events.jsonl"), "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function writeEvents(scratch, events) {
 	await mkdir(join(scratch, ".pi/swarm/traces"), { recursive: true });
@@ -114,11 +133,19 @@ async function loadExtension(identity) {
 	const commands = {};
 	const sentMessages = [];
 	const pi = {
-		registerTool: (def) => { tools[def.name] = def; },
-		registerCommand: (name, def) => { commands[name] = def; },
-		on: (ev, fn) => { (handlers[ev] ||= []).push(fn); },
+		registerTool: (def) => {
+			tools[def.name] = def;
+		},
+		registerCommand: (name, def) => {
+			commands[name] = def;
+		},
+		on: (ev, fn) => {
+			(handlers[ev] ||= []).push(fn);
+		},
 		setModel: async () => true,
-		sendMessage: (m, o) => { sentMessages.push({ m, o }); },
+		sendMessage: (m, o) => {
+			sentMessages.push({ m, o });
+		},
 		exec: async (cmd, args) => {
 			if (cmd === "tmux" && args[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
 			return { code: 1, stdout: "", stderr: "" };
@@ -158,7 +185,9 @@ const RECIPIENT = "worker-a";
 // =============================================================================
 // CASE 1: High priority + mid-turn + first in window → interrupt path
 // =============================================================================
-console.log("\n[C1] high priority mid-turn first-in-window: ctx.abort() called once, traces emitted, durable lastHighInterruptAt populated");
+console.log(
+	"\n[C1] high priority mid-turn first-in-window: ctx.abort() called once, traces emitted, durable lastHighInterruptAt populated",
+);
 {
 	const scratch = await setupScratch(RECIPIENT);
 	const { handlers } = await loadExtension(RECIPIENT);
@@ -194,7 +223,10 @@ console.log("\n[C2] high priority mid-turn second-in-window: NO abort, interrupt
 	msg1.testScratch = scratch;
 	await driveInput(handlers, msg1, { isIdle: false });
 	const events1 = await readEvents(scratch);
-	ok("first inject: interrupt_effective trace present", events1.some((e) => e.event === "message.interrupt_effective" && e.id === "msg-c2-1"));
+	ok(
+		"first inject: interrupt_effective trace present",
+		events1.some((e) => e.event === "message.interrupt_effective" && e.id === "msg-c2-1"),
+	);
 	// Second inject within window — must be suppressed
 	const msg2 = buildSwarmMsg({ id: "msg-c2-2", to: RECIPIENT, priority: "high" });
 	msg2.testScratch = scratch;
@@ -226,7 +258,10 @@ console.log("\n[C3] high priority mid-turn second-after-window: ctx.abort() call
 	const { abortCallCount } = await driveInput(handlers, msg, { isIdle: false });
 	ok("after window: ctx.abort() called once", abortCallCount === 1, `got ${abortCallCount}`);
 	const events = await readEvents(scratch);
-	ok("after window: interrupt_effective trace emitted", events.some((e) => e.event === "message.interrupt_effective" && e.id === "msg-c3"));
+	ok(
+		"after window: interrupt_effective trace emitted",
+		events.some((e) => e.event === "message.interrupt_effective" && e.id === "msg-c3"),
+	);
 	ok("after window: NO interrupt_suppressed trace", !events.some((e) => e.event === "message.interrupt_suppressed"));
 	const st = await readState(scratch);
 	const recent = Date.now() - new Date(st.agents[RECIPIENT].lastHighInterruptAt).getTime();
@@ -260,7 +295,10 @@ console.log("\n[C5] normal priority mid-turn: NO abort, followUp behavior preser
 	msg.testScratch = scratch;
 	const { abortCallCount } = await driveInput(handlers, msg, { isIdle: false });
 	ok("normal mid-turn: ctx.abort() NOT called", abortCallCount === 0, `got ${abortCallCount}`);
-	ok("normal mid-turn: pi.sendMessage called with deliverAs=followUp", sentMessages.some((s) => s.o?.deliverAs === "followUp"));
+	ok(
+		"normal mid-turn: pi.sendMessage called with deliverAs=followUp",
+		sentMessages.some((s) => s.o?.deliverAs === "followUp"),
+	);
 	const events = await readEvents(scratch);
 	ok("normal mid-turn: NO interrupt_requested trace", !events.some((e) => e.event === "message.interrupt_requested"));
 }
@@ -276,7 +314,10 @@ console.log("\n[C6] normal priority IDLE: NO abort, steer behavior preserved");
 	msg.testScratch = scratch;
 	const { abortCallCount } = await driveInput(handlers, msg, { isIdle: true });
 	ok("normal idle: ctx.abort() NOT called", abortCallCount === 0);
-	ok("normal idle: pi.sendMessage called with deliverAs=steer", sentMessages.some((s) => s.o?.deliverAs === "steer"));
+	ok(
+		"normal idle: pi.sendMessage called with deliverAs=steer",
+		sentMessages.some((s) => s.o?.deliverAs === "steer"),
+	);
 }
 
 // =============================================================================
@@ -296,7 +337,10 @@ console.log("\n[C7] ctx.abort() throws: interrupt_failed trace, message still qu
 	ok("interrupt_failed trace has error string", !!failed?.error && /simulated abort failure/.test(failed.error));
 	ok("interrupt_failed: NO interrupt_effective trace", !events.some((e) => e.event === "message.interrupt_effective"));
 	// Message still queued — graceful degrade
-	ok("graceful degrade: pi.sendMessage called with deliverAs=followUp", sentMessages.some((s) => s.o?.deliverAs === "followUp" && s.m?.details?.id === "msg-c7"));
+	ok(
+		"graceful degrade: pi.sendMessage called with deliverAs=followUp",
+		sentMessages.some((s) => s.o?.deliverAs === "followUp" && s.m?.details?.id === "msg-c7"),
+	);
 }
 
 // =============================================================================
@@ -320,7 +364,11 @@ console.log("\n[C8] PI_SWARM_HIGH_INTERRUPT_WINDOW_MS=2000: second inject within
 		ok("within 2s window: ctx.abort() NOT called", r2.abortCallCount === 0);
 		const events = await readEvents(scratch);
 		const suppressed = events.find((e) => e.event === "message.interrupt_suppressed" && e.id === "msg-c8-2");
-		ok("within 2s window: interrupt_suppressed trace with windowMs=2000", suppressed?.windowMs === 2_000, `got ${suppressed?.windowMs}`);
+		ok(
+			"within 2s window: interrupt_suppressed trace with windowMs=2000",
+			suppressed?.windowMs === 2_000,
+			`got ${suppressed?.windowMs}`,
+		);
 		// Advance the ledger by overwriting lastHighInterruptAt to 3s ago (simulating elapsed window)
 		const st = await readState(scratch);
 		st.agents[RECIPIENT].lastHighInterruptAt = new Date(Date.now() - 3_000).toISOString();
@@ -331,7 +379,10 @@ console.log("\n[C8] PI_SWARM_HIGH_INTERRUPT_WINDOW_MS=2000: second inject within
 		const r3 = await driveInput(handlers, msg3, { isIdle: false });
 		ok("after 2s+ window: ctx.abort() called", r3.abortCallCount === 1);
 		const events2 = await readEvents(scratch);
-		ok("after 2s+ window: interrupt_effective trace emitted (msg-c8-3)", events2.some((e) => e.event === "message.interrupt_effective" && e.id === "msg-c8-3"));
+		ok(
+			"after 2s+ window: interrupt_effective trace emitted (msg-c8-3)",
+			events2.some((e) => e.event === "message.interrupt_effective" && e.id === "msg-c8-3"),
+		);
 	} finally {
 		if (prevEnv === undefined) delete process.env.PI_SWARM_HIGH_INTERRUPT_WINDOW_MS;
 		else process.env.PI_SWARM_HIGH_INTERRUPT_WINDOW_MS = prevEnv;

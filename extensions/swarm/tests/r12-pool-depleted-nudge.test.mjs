@@ -28,16 +28,32 @@ const { paths, withLock, readState, writeState } = await import(join(here, "..",
 const scratch = await mkdtemp(join(tmpdir(), `swarm-r12-pool-depleted-${process.pid}-${Date.now()}`));
 await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, info) => {
-	if (cond) { pass++; console.log("  ok  ", name); }
-	else { fail++; console.error("  FAIL", name, info ?? ""); }
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
 };
 
 async function readEvents() {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function clearEvents() {
 	await mkdir(join(scratch, ".pi/swarm/traces"), { recursive: true });
@@ -52,7 +68,17 @@ async function writeStateFile(state) {
 async function readRootMailbox() {
 	const p = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function setupTaskJson(taskId, task) {
 	const taskDir = join(scratch, ".pi/swarm/tasks", taskId);
@@ -63,25 +89,58 @@ async function setupTaskJson(taskId, task) {
 function makeAgent(id, overrides = {}) {
 	const now = new Date().toISOString();
 	return {
-		id, role: id, roleKind: overrides.roleKind ?? "worker", roleKindExplicit: overrides.roleKind !== undefined,
-		capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		lastHeartbeatAt: now, lastSessionStartAt: now, lastAgentStartAt: now,
+		id,
+		role: id,
+		roleKind: overrides.roleKind ?? "worker",
+		roleKindExplicit: overrides.roleKind !== undefined,
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		lastHeartbeatAt: now,
+		lastSessionStartAt: now,
+		lastAgentStartAt: now,
 		pid: 1000,
-		tmuxSession: "r12", tmuxWindow: id, tmuxTarget: `r12:${id}.0`,
-		model: "glm-5.1", provider: "zai-coding-cn",
-		cwd: scratch, mailbox: `.pi/swarm/mailboxes/${id}.jsonl`,
-		createdAt: now, updatedAt: now,
+		tmuxSession: "r12",
+		tmuxWindow: id,
+		tmuxTarget: `r12:${id}.0`,
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: scratch,
+		mailbox: `.pi/swarm/mailboxes/${id}.jsonl`,
+		createdAt: now,
+		updatedAt: now,
 		...overrides,
 	};
 }
 function makeState(agents) {
 	const now = new Date().toISOString();
-	return { version: 1, swarmId: "r12-nudge-test", cwd: scratch, tmuxSession: "r12", agents, delivered: {}, messages: {}, createdAt: now, updatedAt: now };
+	return {
+		version: 1,
+		swarmId: "r12-nudge-test",
+		cwd: scratch,
+		tmuxSession: "r12",
+		agents,
+		delivered: {},
+		messages: {},
+		createdAt: now,
+		updatedAt: now,
+	};
 }
 function makeTask(taskId, nodes = {}) {
 	const now = new Date().toISOString();
-	return { version: 1, taskId, title: "r12 pool-depleted", goal: "test pool depletion nudge", status: "in_progress", nodes, createdAt: now, updatedAt: now };
+	return {
+		version: 1,
+		taskId,
+		title: "r12 pool-depleted",
+		goal: "test pool depletion nudge",
+		status: "in_progress",
+		nodes,
+		createdAt: now,
+		updatedAt: now,
+	};
 }
 function makePiMock() {
 	const pi = {
@@ -130,7 +189,12 @@ console.log("\n[N1] real depletion ≥1 → 0 → exactly 1 nudge");
 	const taskId = "task-r12-n1";
 	const state = makeState({
 		root: makeAgent("root", { roleKind: "root", tmuxTarget: "r12:root.0" }),
-		"dedicated-n1": makeAgent("dedicated-n1", { roleKind: "worker", spawnedForTaskId: taskId, activeTaskIds: [], tmuxTarget: "r12:dedicated-n1.0" }),
+		"dedicated-n1": makeAgent("dedicated-n1", {
+			roleKind: "worker",
+			spawnedForTaskId: taskId,
+			activeTaskIds: [],
+			tmuxTarget: "r12:dedicated-n1.0",
+		}),
 	});
 	const task = makeTask(taskId, { "node-n1": { id: "node-n1", assignee: "dedicated-n1", status: "done" } });
 	await writeStateFile(state);
@@ -175,7 +239,12 @@ console.log("\n[N2] non-depleting ≥1 → ≥1 → 0 nudges");
 	const taskId = "task-r12-n2";
 	const state = makeState({
 		root: makeAgent("root", { roleKind: "root", tmuxTarget: "r12:root.0" }),
-		"dedicated-n2": makeAgent("dedicated-n2", { roleKind: "worker", spawnedForTaskId: taskId, activeTaskIds: [], tmuxTarget: "r12:dedicated-n2.0" }),
+		"dedicated-n2": makeAgent("dedicated-n2", {
+			roleKind: "worker",
+			spawnedForTaskId: taskId,
+			activeTaskIds: [],
+			tmuxTarget: "r12:dedicated-n2.0",
+		}),
 		"survivor-n2-a": makeAgent("survivor-n2-a", { roleKind: "worker", activeTaskIds: [], tmuxTarget: "r12:survivor-n2-a.0" }),
 		"survivor-n2-b": makeAgent("survivor-n2-b", { roleKind: "worker", activeTaskIds: [], tmuxTarget: "r12:survivor-n2-b.0" }),
 	});
@@ -246,7 +315,12 @@ console.log("\n[N4] two depleting closes → 2 nudges total");
 	// First close: dedicated-n4a is swept, pool ends at 0 → 1 nudge.
 	let state = makeState({
 		root: makeAgent("root", { roleKind: "root", tmuxTarget: "r12:root.0" }),
-		"dedicated-n4a": makeAgent("dedicated-n4a", { roleKind: "worker", spawnedForTaskId: taskA, activeTaskIds: [], tmuxTarget: "r12:dedicated-n4a.0" }),
+		"dedicated-n4a": makeAgent("dedicated-n4a", {
+			roleKind: "worker",
+			spawnedForTaskId: taskA,
+			activeTaskIds: [],
+			tmuxTarget: "r12:dedicated-n4a.0",
+		}),
 	});
 	const taskAObj = makeTask(taskA, { "node-a": { id: "node-a", assignee: "dedicated-n4a", status: "done" } });
 	await writeStateFile(state);
@@ -256,7 +330,12 @@ console.log("\n[N4] two depleting closes → 2 nudges total");
 
 	// Re-spawn a fresh worker, then close taskB (also depleting) → 1 more nudge.
 	state = await readStateFile();
-	state.agents["dedicated-n4b"] = makeAgent("dedicated-n4b", { roleKind: "worker", spawnedForTaskId: taskB, activeTaskIds: [], tmuxTarget: "r12:dedicated-n4b.0" });
+	state.agents["dedicated-n4b"] = makeAgent("dedicated-n4b", {
+		roleKind: "worker",
+		spawnedForTaskId: taskB,
+		activeTaskIds: [],
+		tmuxTarget: "r12:dedicated-n4b.0",
+	});
 	await writeStateFile(state);
 	const taskBObj = makeTask(taskB, { "node-b": { id: "node-b", assignee: "dedicated-n4b", status: "done" } });
 	await setupTaskJson(taskB, taskBObj);
@@ -272,7 +351,11 @@ console.log("\n[N4] two depleting closes → 2 nudges total");
 	const nudgeMsgs = findPoolDepletedMessages(mailbox);
 	ok("N4 exactly 2 high-priority root nudges", nudgeMsgs.length === 2, `got ${nudgeMsgs.length}`);
 	const msgTaskIds = nudgeMsgs.map((m) => m.idempotencyKey).sort();
-	ok("N4 nudge idempotencyKeys cover both taskIds", JSON.stringify(msgTaskIds) === JSON.stringify([`pool_depleted:${taskA}`, `pool_depleted:${taskB}`].sort()), `got ${JSON.stringify(msgTaskIds)}`);
+	ok(
+		"N4 nudge idempotencyKeys cover both taskIds",
+		JSON.stringify(msgTaskIds) === JSON.stringify([`pool_depleted:${taskA}`, `pool_depleted:${taskB}`].sort()),
+		`got ${JSON.stringify(msgTaskIds)}`,
+	);
 }
 
 console.log(`\nR12-POOL-DEPLETED-NUDGE ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);

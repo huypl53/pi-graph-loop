@@ -15,7 +15,13 @@ const scratch = join(tmpdir(), `swarm-gc-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
 let fail = 0;
-const ok = (n, c) => { if (c) console.log("  ok  ", n); else { fail++; console.error("  FAIL", n); } };
+const ok = (n, c) => {
+	if (c) console.log("  ok  ", n);
+	else {
+		fail++;
+		console.error("  FAIL", n);
+	}
+};
 
 // --- helpers ---------------------------------------------------------------
 const EPOCH = Date.UTC(2026, 0, 1);
@@ -23,25 +29,42 @@ const ts = (i) => new Date(EPOCH + i * 1000).toISOString();
 
 function mkMsg(id, overrides = {}) {
 	return {
-		id, from: "root", to: "worker",
+		id,
+		from: "root",
+		to: "worker",
 		status: "queued",
-		createdAt: ts(0), updatedAt: ts(0),
-		attempts: 0, requiresAck: true,
+		createdAt: ts(0),
+		updatedAt: ts(0),
+		attempts: 0,
+		requiresAck: true,
 		...overrides,
 	};
 }
 const queued = (id, i) => mkMsg(id, { status: "queued", updatedAt: ts(i) });
 const failedMsg = (id, i) => mkMsg(id, { status: "failed", updatedAt: ts(i) });
-const ackedDone = (id, i) => mkMsg(id, { status: "acked", updatedAt: ts(i), ackedAt: ts(i), lastAck: { by: "worker", status: "done", at: ts(i) } });
+const ackedDone = (id, i) =>
+	mkMsg(id, { status: "acked", updatedAt: ts(i), ackedAt: ts(i), lastAck: { by: "worker", status: "done", at: ts(i) } });
 const deadLetter = (id, i) => mkMsg(id, { status: "dead_letter", updatedAt: ts(i) });
-const verified = (id, i) => mkMsg(id, { status: "acked", updatedAt: ts(i), ackedAt: ts(i), lastAck: { by: "worker", status: "done", at: ts(i) }, response: { status: "verified", verifiedAt: ts(i) } });
+const verified = (id, i) =>
+	mkMsg(id, {
+		status: "acked",
+		updatedAt: ts(i),
+		ackedAt: ts(i),
+		lastAck: { by: "worker", status: "done", at: ts(i) },
+		response: { status: "verified", verifiedAt: ts(i) },
+	});
 
 function makeState(messages, delivered = {}, cwd = scratch) {
 	return {
-		version: 1, swarmId: "swarm-test", cwd,
+		version: 1,
+		swarmId: "swarm-test",
+		cwd,
 		tmuxSession: "pi-swarm-test",
-		agents: {}, delivered, messages,
-		createdAt: ts(0), updatedAt: ts(0),
+		agents: {},
+		delivered,
+		messages,
+		createdAt: ts(0),
+		updatedAt: ts(0),
 	};
 }
 
@@ -49,9 +72,9 @@ function makeState(messages, delivered = {}, cwd = scratch) {
 function buildMainState() {
 	const messages = {};
 	for (let i = 0; i < 40; i++) messages[`queued-${i}`] = queued(`queued-${i}`, 600 + i); // i=600..639 (newest)
-	for (let i = 0; i < 200; i++) messages[`done-${i}`] = ackedDone(`done-${i}`, i);          // i=0..199
-	for (let i = 0; i < 200; i++) messages[`dead-${i}`] = deadLetter(`dead-${i}`, 200 + i);    // i=200..399
-	for (let i = 0; i < 200; i++) messages[`ver-${i}`] = verified(`ver-${i}`, 400 + i);        // i=400..599
+	for (let i = 0; i < 200; i++) messages[`done-${i}`] = ackedDone(`done-${i}`, i); // i=0..199
+	for (let i = 0; i < 200; i++) messages[`dead-${i}`] = deadLetter(`dead-${i}`, 200 + i); // i=200..399
+	for (let i = 0; i < 200; i++) messages[`ver-${i}`] = verified(`ver-${i}`, 400 + i); // i=400..599
 	return makeState(messages);
 }
 
@@ -68,7 +91,10 @@ function buildMainState() {
 	ok("all 40 recent queued preserved", Object.keys(st.messages).filter((id) => id.startsWith("queued-")).length === 40);
 	ok("all old dead_letter dropped", Object.keys(st.messages).filter((id) => id.startsWith("dead-")).length === 0);
 	ok("all old acked-done dropped", Object.keys(st.messages).filter((id) => id.startsWith("done-")).length === 0);
-	ok("verified kept=60 (in window), dropped=140 (beyond tail)", Object.keys(st.messages).filter((id) => id.startsWith("ver-")).length === 60);
+	ok(
+		"verified kept=60 (in window), dropped=140 (beyond tail)",
+		Object.keys(st.messages).filter((id) => id.startsWith("ver-")).length === 60,
+	);
 }
 
 // --- 2. Never drop an OLD actionable message (even beyond the window) -----
@@ -85,8 +111,11 @@ function buildMainState() {
 // --- 3. keepMessages:0 drops all terminal, keeps all actionable -----------
 {
 	const st = makeState({
-		a: queued("a", 0), b: failedMsg("b", 1),
-		c: deadLetter("c", 2), d: ackedDone("d", 3), e: verified("e", 4),
+		a: queued("a", 0),
+		b: failedMsg("b", 1),
+		c: deadLetter("c", 2),
+		d: ackedDone("d", 3),
+		e: verified("e", 4),
 	});
 	const res = pruneState(st, { keepMessages: 0 });
 	ok("km0 removed=3 (c,d,e terminal)", res.removed === 3);
@@ -144,8 +173,8 @@ function buildMainState() {
 // --- 8. delivered cap (intersection-safe) ---------------------------------
 {
 	const messages = {};
-	for (let i = 0; i < 500; i++) messages[`m${i}`] = deadLetter(`m${i}`, i);     // old terminal
-	for (let i = 500; i < 600; i++) messages[`m${i}`] = queued(`m${i}`, i);       // newer actionable
+	for (let i = 0; i < 500; i++) messages[`m${i}`] = deadLetter(`m${i}`, i); // old terminal
+	for (let i = 500; i < 600; i++) messages[`m${i}`] = queued(`m${i}`, i); // newer actionable
 	const delivered = { worker: Array.from({ length: 600 }, (_, i) => `m${i}`) };
 	const st = makeState(messages, delivered);
 	pruneState(st, { keepMessages: 50 });
@@ -154,7 +183,10 @@ function buildMainState() {
 	const arr = st.delivered.worker;
 	ok("delivered capped to 50", arr.length === 50);
 	ok("delivered keeps most-recent 50 (m550..m599)", arr[0] === "m550" && arr[49] === "m599");
-	ok("delivered intersection-safe (all ids still exist)", arr.every((id) => st.messages[id]));
+	ok(
+		"delivered intersection-safe (all ids still exist)",
+		arr.every((id) => st.messages[id]),
+	);
 }
 
 rmSync(scratch, { recursive: true, force: true });

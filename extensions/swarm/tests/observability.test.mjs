@@ -17,9 +17,15 @@ const tools = {};
 const cmds = {};
 const handlers = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
-	registerCommand: (name, opts) => { cmds[name] = opts; },
-	on: (ev, h) => { (handlers[ev] ??= []).push(h); },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
+	registerCommand: (name, opts) => {
+		cmds[name] = opts;
+	},
+	on: (ev, h) => {
+		(handlers[ev] ??= []).push(h);
+	},
 	exec: async (cmd, args) => {
 		if (cmd === "tmux" && args?.[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
 		if (cmd === "git") return { code: 0, stdout: "deadbeef\n", stderr: "" };
@@ -43,7 +49,14 @@ for (const h of handlers.session_start ?? []) await h({}, { cwd: scratch, mode: 
 const created = await call("swarm_create_task", {
 	title: "Implement Swarm Observatory flow UI",
 	goal: "Render a read-only flow snapshot from task.json, swarm-state.json, and recent traces.",
-	allowedFiles: ["extensions/swarm/src/observability.ts", "extensions/swarm/src/command.ts", "extensions/swarm/src/completion.ts", "extensions/swarm/observability.test.mjs", "docs/swarm/tools.md", "extensions/swarm/README.md"],
+	allowedFiles: [
+		"extensions/swarm/src/observability.ts",
+		"extensions/swarm/src/command.ts",
+		"extensions/swarm/src/completion.ts",
+		"extensions/swarm/observability.test.mjs",
+		"docs/swarm/tools.md",
+		"extensions/swarm/README.md",
+	],
 	loop: { enabled: true, proposalAgents: [] },
 	cwd: scratch,
 });
@@ -151,17 +164,41 @@ const beforeState = createHash("sha256").update(readFileSync(tp.taskJson)).diges
 const beforeSwarm = createHash("sha256").update(readFileSync(p.state)).digest("hex");
 
 let fail = 0;
-const ok = (name, cond) => { if (cond) console.log("  ok  ", name); else { fail++; console.error("  FAIL", name); } };
+const ok = (name, cond) => {
+	if (cond) console.log("  ok  ", name);
+	else {
+		fail++;
+		console.error("  FAIL", name);
+	}
+};
 const notes = [];
 const ctx = { cwd: scratch, hasUI: true, ui: { notify: (msg, level) => notes.push({ msg, level }), setStatus: () => {} } };
 
 const recent = await readRecentEvents(p, tp, 3);
-ok("readRecentEvents tails + merges + ignores malformed line", recent.length === 3 && recent[0].text.includes("task.create") && recent[1].text.includes("swarm.status") && recent[2].text.includes("task.assign"));
+ok(
+	"readRecentEvents tails + merges + ignores malformed line",
+	recent.length === 3 &&
+		recent[0].text.includes("task.create") &&
+		recent[1].text.includes("swarm.status") &&
+		recent[2].text.includes("task.assign"),
+);
 
-const snapshot = renderFlowSnapshot(task, ["implement"], ["plan", "implement"], st.agents, recent, { index: 1, open: 2, stale: 1, loopLine: "not_started", eventLimit: 3 });
+const snapshot = renderFlowSnapshot(task, ["implement"], ["plan", "implement"], st.agents, recent, {
+	index: 1,
+	open: 2,
+	stale: 1,
+	loopLine: "not_started",
+	eventLimit: 3,
+});
 ok("renderFlowSnapshot header", snapshot.includes(`Flow #1 ${taskId} — Implement Swarm Observatory flow UI [in_progress] open=2 stale=1`));
-ok("renderFlowSnapshot nodes", snapshot.includes("Nodes:") && snapshot.includes("plan") && snapshot.includes("implement") && snapshot.includes("review"));
-ok("renderFlowSnapshot lanes", snapshot.includes("Agents (lanes):") && snapshot.includes("obs-implementer") && snapshot.includes(`active: ${taskId}#implement`));
+ok(
+	"renderFlowSnapshot nodes",
+	snapshot.includes("Nodes:") && snapshot.includes("plan") && snapshot.includes("implement") && snapshot.includes("review"),
+);
+ok(
+	"renderFlowSnapshot lanes",
+	snapshot.includes("Agents (lanes):") && snapshot.includes("obs-implementer") && snapshot.includes(`active: ${taskId}#implement`),
+);
 ok("renderFlowSnapshot events block", snapshot.includes("Events (last 3):") && snapshot.includes("task.assign"));
 
 await cmds.swarm.handler("flow", ctx);
@@ -169,15 +206,24 @@ ok("no-arg flow shows usage", /Usage: \/swarm flow <#\|task-id> \[--events N\]/.
 
 await cmds.swarm.handler(`flow 1 --events 1`, ctx);
 const flowOut = notes.at(-1)?.msg || "";
-ok("flow command renders snapshot", flowOut.includes(`Flow #1 ${taskId}`) && flowOut.includes("Agents (lanes):") && flowOut.includes("Events (last 1):"));
+ok(
+	"flow command renders snapshot",
+	flowOut.includes(`Flow #1 ${taskId}`) && flowOut.includes("Agents (lanes):") && flowOut.includes("Events (last 1):"),
+);
 {
 	const eventBlock = (flowOut.split("Events (last 1):")[1] || "").split("\n\n#")[0];
 	ok("flow command limits events", eventBlock.split(/\n/).filter((l) => /^\s{2}/.test(l)).length === 1);
 }
-ok("flow command writes trace artifact", readFileSync(join(p.traces, "graphs", `${taskId}.flow.txt`), "utf8").includes(`Flow #1 ${taskId}`));
+ok(
+	"flow command writes trace artifact",
+	readFileSync(join(p.traces, "graphs", `${taskId}.flow.txt`), "utf8").includes(`Flow #1 ${taskId}`),
+);
 
 await cmds.swarm.handler(`flow nope`, ctx);
-ok("unknown flow id warns with task list", /no task matches|Ambiguous/.test(notes.at(-1)?.msg || "") && /pick by #|No tasks found/.test(notes.at(-1)?.msg || ""));
+ok(
+	"unknown flow id warns with task list",
+	/no task matches|Ambiguous/.test(notes.at(-1)?.msg || "") && /pick by #|No tasks found/.test(notes.at(-1)?.msg || ""),
+);
 
 const afterState = createHash("sha256").update(readFileSync(tp.taskJson)).digest("hex");
 const afterSwarm = createHash("sha256").update(readFileSync(p.state)).digest("hex");
@@ -185,10 +231,22 @@ ok("flow command leaves task.json unchanged", beforeState === afterState);
 ok("flow command leaves swarm-state.json unchanged", beforeSwarm === afterSwarm);
 
 const completions = cmds.swarm.getArgumentCompletions;
-ok("flow appears in top-level completions", (await completions("")).some((item) => item.value === "flow"));
-ok("flow <space> offers task indices", (await completions("flow ")).some((item) => item.value === "flow 1"));
-ok("flow 1 <space> offers --events", JSON.stringify((await completions("flow 1 ")).map((i) => i.value)) === JSON.stringify(["flow 1 --events"]));
+ok(
+	"flow appears in top-level completions",
+	(await completions("")).some((item) => item.value === "flow"),
+);
+ok(
+	"flow <space> offers task indices",
+	(await completions("flow ")).some((item) => item.value === "flow 1"),
+);
+ok(
+	"flow 1 <space> offers --events",
+	JSON.stringify((await completions("flow 1 ")).map((i) => i.value)) === JSON.stringify(["flow 1 --events"]),
+);
 
 rmSync(scratch, { recursive: true, force: true });
-if (fail) { console.error(`\nFLOW OBSERVABILITY FAIL (${fail})`); process.exit(1); }
+if (fail) {
+	console.error(`\nFLOW OBSERVABILITY FAIL (${fail})`);
+	process.exit(1);
+}
 console.log("\nFLOW OBSERVABILITY PASS");

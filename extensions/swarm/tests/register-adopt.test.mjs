@@ -26,7 +26,9 @@ const bind = (targetPaneId) => {
 	swarmCmd = null;
 	const pi = {
 		registerTool: () => {},
-		registerCommand: (name, opts) => { if (name === "swarm") swarmCmd = opts; },
+		registerCommand: (name, opts) => {
+			if (name === "swarm") swarmCmd = opts;
+		},
 		on: () => {},
 		sendMessage: () => {},
 		exec: async (cmd, args) => {
@@ -51,21 +53,57 @@ const mkCtx = () => {
 		hasUI: true,
 		mode: "tui",
 		isIdle: () => true,
-		ui: { notify: (m, k) => { state.notify = [m, k]; }, setStatus: (k, v) => { state.status = [k, v]; } },
+		ui: {
+			notify: (m, k) => {
+				state.notify = [m, k];
+			},
+			setStatus: (k, v) => {
+				state.status = [k, v];
+			},
+		},
 	};
 	return { ctx, state };
 };
 
-const resetEnv = () => { delete process.env.PI_SWARM_AGENT_ID; delete process.env.PI_SWARM_IS_ROOT; delete process.env.TMUX; };
-const stateAgent = (id) => { try { return JSON.parse(readFileSync(join(scratch, ".pi", "swarm", "swarm-state.json"), "utf8")).agents[id]; } catch { return undefined; } };
+const resetEnv = () => {
+	delete process.env.PI_SWARM_AGENT_ID;
+	delete process.env.PI_SWARM_IS_ROOT;
+	delete process.env.TMUX;
+};
+const stateAgent = (id) => {
+	try {
+		return JSON.parse(readFileSync(join(scratch, ".pi", "swarm", "swarm-state.json"), "utf8")).agents[id];
+	} catch {
+		return undefined;
+	}
+};
 
-let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n); } };
-const throws = async (n, p) => { try { await p; fail++; console.error("  FAIL", n, "(did not throw)"); } catch { pass++; console.log("  ok  ", n); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n);
+	}
+};
+const throws = async (n, p) => {
+	try {
+		await p;
+		fail++;
+		console.error("  FAIL", n, "(did not throw)");
+	} catch {
+		pass++;
+		console.log("  ok  ", n);
+	}
+};
 
 console.log("\n[1] 'register here <id> [role]' adopts the identity and updates the footer");
 {
-	bind("%7"); resetEnv();
+	bind("%7");
+	resetEnv();
 	process.env.TMUX = "/tmp/tmux-501/default,1234,0";
 	const { ctx, state } = mkCtx();
 	await swarmCmd.handler("register here reviewer Review the diff and report risks", ctx);
@@ -76,7 +114,8 @@ console.log("\n[1] 'register here <id> [role]' adopts the identity and updates t
 
 console.log("\n[2] alias '.' also adopts the identity");
 {
-	bind("%7"); resetEnv();
+	bind("%7");
+	resetEnv();
 	process.env.TMUX = "/tmp/tmux-501/default,1234,0";
 	const { ctx, state } = mkCtx();
 	await swarmCmd.handler("register . planner Plan the work", ctx);
@@ -86,7 +125,8 @@ console.log("\n[2] alias '.' also adopts the identity");
 
 console.log("\n[3] 'register here root' performs a FULL PM opt-in (not just a record)");
 {
-	bind("%7"); resetEnv();
+	bind("%7");
+	resetEnv();
 	process.env.TMUX = "/tmp/tmux-501/default,1234,0";
 	const { ctx, state } = mkCtx();
 	await swarmCmd.handler("register here root Drive the swarm", ctx);
@@ -102,7 +142,8 @@ console.log("\n[3] 'register here root' performs a FULL PM opt-in (not just a re
 
 console.log("\n[4] explicit target that resolves to the current pane also adopts (pane-id match)");
 {
-	bind("%7"); resetEnv();
+	bind("%7");
+	resetEnv();
 	process.env.TMUX = "/tmp/tmux-501/default,1234,0";
 	const { ctx, state } = mkCtx();
 	await swarmCmd.handler("register work:0.1 tester Run the suite", ctx);
@@ -112,7 +153,8 @@ console.log("\n[4] explicit target that resolves to the current pane also adopts
 
 console.log("\n[5] explicit target to a DIFFERENT pane does NOT re-identify this session");
 {
-	bind("%42"); resetEnv();
+	bind("%42");
+	resetEnv();
 	process.env.TMUX = "/tmp/tmux-501/default,1234,0";
 	const { ctx, state } = mkCtx();
 	await swarmCmd.handler("register other:0.0 builder Build it", ctx);
@@ -123,7 +165,8 @@ console.log("\n[5] explicit target to a DIFFERENT pane does NOT re-identify this
 
 console.log("\n[6] registering a DIFFERENT pane as 'root' is refused (no half-state)");
 {
-	bind("%42"); resetEnv(); // no TMUX -> currentPaneTarget null -> isCurrent false -> refuse
+	bind("%42");
+	resetEnv(); // no TMUX -> currentPaneTarget null -> isCurrent false -> refuse
 	const { ctx, state } = mkCtx();
 	await swarmCmd.handler("register other:0.0 root Drive the swarm", ctx);
 	ok("NOT opted in (no env)", process.env.PI_SWARM_IS_ROOT !== "1" && process.env.PI_SWARM_AGENT_ID !== "root");
@@ -142,16 +185,50 @@ console.log("\n[7] registerAgent itself refuses the reserved 'root' id (tool-pat
 
 console.log("\n[8] ensureRoot self-heals a 'misled' root record (real pane target -> mailbox-only)");
 {
-	bind("%7"); resetEnv();
+	bind("%7");
+	resetEnv();
 	process.env.TMUX = "/tmp/tmux-501/default,1234,0";
 	const stateFile = join(scratch, ".pi", "swarm", "swarm-state.json");
 	mkdirSync(join(scratch, ".pi", "swarm", "mailboxes"), { recursive: true });
 	// pre-seed a MISLED root record attached to a real tmux pane (the ship-crawl bug shape)
-	writeFileSync(stateFile, JSON.stringify({
-		version: 1, swarmId: "swarm-test", cwd: scratch, tmuxSession: "pi-swarm-x",
-		agents: { root: { id: "root", role: "misled pm", roleKind: "root", status: "running", runtimeStatus: "idle", health: "healthy", tmuxTarget: "pi-swarm-x:3.0", tmuxSession: "pi-swarm-x", tmuxWindow: "3", mailbox: ".pi/swarm/mailboxes/root.jsonl", maxConcurrentTasks: 1, cwd: scratch, createdAt: "t", updatedAt: "t", lastHeartbeatAt: "t", capabilities: [], activeTaskIds: [] } },
-		delivered: {}, messages: {}, createdAt: "t", updatedAt: "t",
-	}, null, 2));
+	writeFileSync(
+		stateFile,
+		JSON.stringify(
+			{
+				version: 1,
+				swarmId: "swarm-test",
+				cwd: scratch,
+				tmuxSession: "pi-swarm-x",
+				agents: {
+					root: {
+						id: "root",
+						role: "misled pm",
+						roleKind: "root",
+						status: "running",
+						runtimeStatus: "idle",
+						health: "healthy",
+						tmuxTarget: "pi-swarm-x:3.0",
+						tmuxSession: "pi-swarm-x",
+						tmuxWindow: "3",
+						mailbox: ".pi/swarm/mailboxes/root.jsonl",
+						maxConcurrentTasks: 1,
+						cwd: scratch,
+						createdAt: "t",
+						updatedAt: "t",
+						lastHeartbeatAt: "t",
+						capabilities: [],
+						activeTaskIds: [],
+					},
+				},
+				delivered: {},
+				messages: {},
+				createdAt: "t",
+				updatedAt: "t",
+			},
+			null,
+			2,
+		),
+	);
 	ok("pre-seed: root misled to a real pane target", stateAgent("root")?.tmuxTarget === "pi-swarm-x:3.0");
 	const { ctx } = mkCtx();
 	await swarmCmd.handler("register here root Drive the swarm", ctx);

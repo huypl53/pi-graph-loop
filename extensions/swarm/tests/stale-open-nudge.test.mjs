@@ -25,7 +25,9 @@ const factory = mod.default;
 
 const tools = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
 	exec: async (cmd, args) => {
@@ -37,11 +39,21 @@ const pi = {
 };
 factory(pi);
 
-let pass = 0, fail = 0;
-const ok = (n, c, extra) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n, extra ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c, extra) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n, extra ?? "");
+	}
+};
 
 const call = async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd: scratch });
 };
 
@@ -50,14 +62,23 @@ mkdirSync(join(scratch, ".pi/swarm"), { recursive: true });
 const statePath = join(scratch, ".pi/swarm/swarm-state.json");
 const nowIso = new Date().toISOString();
 const oldIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-writeFileSync(statePath, JSON.stringify({
-	version: 1, swarmId: "repro",
-	agents: {
-		root: { id: "root", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
-		"worker-x": { id: "worker-x", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
-	},
-	messages: {}, updatedAt: nowIso,
-}, null, 2));
+writeFileSync(
+	statePath,
+	JSON.stringify(
+		{
+			version: 1,
+			swarmId: "repro",
+			agents: {
+				root: { id: "root", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
+				"worker-x": { id: "worker-x", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
+			},
+			messages: {},
+			updatedAt: nowIso,
+		},
+		null,
+		2,
+	),
+);
 
 await call("swarm_create_task", {
 	taskId: "task-repro-r111",
@@ -74,7 +95,14 @@ await call("swarm_create_task", {
 	],
 	cwd: scratch,
 });
-await call("swarm_update_task", { taskId: "task-repro-r111", nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
+await call("swarm_update_task", {
+	taskId: "task-repro-r111",
+	nodeId: "plan",
+	status: "done",
+	outcome: "planned",
+	force: true,
+	cwd: scratch,
+});
 await call("swarm_assign_task", { taskId: "task-repro-r111", nodeId: "implement", agentId: "worker-x", cwd: scratch });
 
 // Age the node: lastActivityAt 10min ago (simulate worker settled silently after pickup).
@@ -95,7 +123,11 @@ let scan;
 	scan = await withLock(p, async () => {
 		const st = await readState(p, scratch);
 		const r = await staleOpenAssignmentScanLocked(p, st, Date.now());
-		if (staleOpenNudgeLocked) { try { await staleOpenNudgeLocked(pi, scratch, p, st, "task-repro-r111", "implement"); } catch {} }
+		if (staleOpenNudgeLocked) {
+			try {
+				await staleOpenNudgeLocked(pi, scratch, p, st, "task-repro-r111", "implement");
+			} catch {}
+		}
 		const { writeState } = await import(join(here, "..", "src", "state.ts"));
 		await writeState(p, st);
 		return r;
@@ -107,7 +139,9 @@ console.log("   [dbg] staleOpenSurfacedAt after scan:", tS.nodes.implement.stale
 
 // --- THE ASSERTIONS: root must have been nudged ---
 const st1 = JSON.parse(readFileSync(statePath, "utf8"));
-const nudges = Object.values(st1.messages || {}).filter((m) => m.to === "root" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"));
+const nudges = Object.values(st1.messages || {}).filter(
+	(m) => m.to === "root" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"),
+);
 ok("root received a stale-open nudge", nudges.length >= 1, `nudges=${nudges.length}`);
 if (nudges.length >= 1) ok("nudge key names the node", (nudges[0].idempotencyKey || "").includes("implement"), nudges[0].idempotencyKey);
 
@@ -117,37 +151,67 @@ if (nudges.length >= 1) ok("nudge key names the node", (nudges[0].idempotencyKey
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
 		const r = await staleOpenAssignmentScanLocked(p, st, Date.now());
-		if (staleOpenNudgeLocked) { try { await staleOpenNudgeLocked(pi, scratch, p, st, "task-repro-r111", "implement"); } catch {} }
+		if (staleOpenNudgeLocked) {
+			try {
+				await staleOpenNudgeLocked(pi, scratch, p, st, "task-repro-r111", "implement");
+			} catch {}
+		}
 		const { writeState } = await import(join(here, "..", "src", "state.ts"));
 		await writeState(p, st);
 		return r;
 	});
 }
 const st2 = JSON.parse(readFileSync(statePath, "utf8"));
-const nudges2 = Object.values(st2.messages || {}).filter((m) => m.to === "root" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"));
+const nudges2 = Object.values(st2.messages || {}).filter(
+	(m) => m.to === "root" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"),
+);
 ok("no duplicate nudge within window", nudges2.length === nudges.length, `before=${nudges.length} after=${nudges2.length}`);
-
 
 // --- KR6 boundary: node WITH fresh progress (below threshold) must NOT nudge ---
 {
 	rmSync(scratch, { recursive: true, force: true });
 	mkdirSync(join(scratch, ".pi/swarm"), { recursive: true });
 	const freshIso = new Date(Date.now() - 200).toISOString(); // well below the 1000ms threshold
-	writeFileSync(statePath, JSON.stringify({
-		version: 1, swarmId: "repro",
-		agents: {
-			root: { id: "root", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
-			"worker-x": { id: "worker-x", status: "running", runtimeStatus: "tool_running", activeTaskIds: [], updatedAt: nowIso },
-		},
-		messages: {}, updatedAt: nowIso,
-	}, null, 2));
+	writeFileSync(
+		statePath,
+		JSON.stringify(
+			{
+				version: 1,
+				swarmId: "repro",
+				agents: {
+					root: { id: "root", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
+					"worker-x": { id: "worker-x", status: "running", runtimeStatus: "tool_running", activeTaskIds: [], updatedAt: nowIso },
+				},
+				messages: {},
+				updatedAt: nowIso,
+			},
+			null,
+			2,
+		),
+	);
 	await call("swarm_create_task", {
-		taskId: "task-repro-fresh", title: "fresh", goal: "fresh",
-		nodes: { plan: { role: "planner", dependsOn: [], writeArtifacts: ["artifacts/plan.md"] }, implement: { role: "implementer", dependsOn: ["plan"], writeArtifacts: ["artifacts/impl.md"] }, review: { role: "reviewer", dependsOn: ["implement"], terminal: true, writeArtifacts: ["artifacts/review.md"] } },
-		edges: [ { from: "plan", to: "implement", when: "planned" }, { from: "implement", to: "review", when: "implemented" } ],
+		taskId: "task-repro-fresh",
+		title: "fresh",
+		goal: "fresh",
+		nodes: {
+			plan: { role: "planner", dependsOn: [], writeArtifacts: ["artifacts/plan.md"] },
+			implement: { role: "implementer", dependsOn: ["plan"], writeArtifacts: ["artifacts/impl.md"] },
+			review: { role: "reviewer", dependsOn: ["implement"], terminal: true, writeArtifacts: ["artifacts/review.md"] },
+		},
+		edges: [
+			{ from: "plan", to: "implement", when: "planned" },
+			{ from: "implement", to: "review", when: "implemented" },
+		],
 		cwd: scratch,
 	});
-	await call("swarm_update_task", { taskId: "task-repro-fresh", nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
+	await call("swarm_update_task", {
+		taskId: "task-repro-fresh",
+		nodeId: "plan",
+		status: "done",
+		outcome: "planned",
+		force: true,
+		cwd: scratch,
+	});
 	await call("swarm_assign_task", { taskId: "task-repro-fresh", nodeId: "implement", agentId: "worker-x", cwd: scratch });
 	const tp2 = join(scratch, ".pi/swarm/tasks/task-repro-fresh/task.json");
 	const tf = JSON.parse(readFileSync(tp2, "utf8"));
@@ -159,11 +223,15 @@ ok("no duplicate nudge within window", nudges2.length === nudges.length, `before
 		const st = await readState(p, scratch);
 		const r = await staleOpenAssignmentScanLocked(p, st, Date.now());
 		ok("KR6: fresh-progress node NOT surfaced", r.surfaced === 0 && (r.surfacedNodes?.length ?? 0) === 0, JSON.stringify(r));
-		if (staleOpenNudgeLocked) { await staleOpenNudgeLocked(pi, scratch, p, st, "task-repro-fresh", "implement"); }
+		if (staleOpenNudgeLocked) {
+			await staleOpenNudgeLocked(pi, scratch, p, st, "task-repro-fresh", "implement");
+		}
 		await writeState(p, st);
 	});
 	const stf = JSON.parse(readFileSync(statePath, "utf8"));
-	const nf = Object.values(stf.messages || {}).filter((m) => m.to === "root" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"));
+	const nf = Object.values(stf.messages || {}).filter(
+		(m) => m.to === "root" && (m.idempotencyKey || "").includes(":nudge:stale-open:seq:"),
+	);
 	ok("KR6: fresh-progress node NOT nudged", nf.length === 0, `nudges=${nf.length}`);
 }
 

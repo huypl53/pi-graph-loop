@@ -29,22 +29,21 @@ export const GOAL_ORIGIN_VALUES: ReadonlySet<GoalOrigin> = new Set([
 // Reason codes for a refused clear / replace. Stable strings (used in `goal.clear_refused` trace
 // payloads and tool refusal results). NEVER interpolated; safe to grep on.
 export type RefuseClearReason =
-	| "user_origin_active"             // swarm_mark_goal_done on a user-origin goal without approvedByUser
-	| "user_origin_replace_blocked";   // swarm_set_goal (replace) on a user-origin active goal
+	| "user_origin_active" // swarm_mark_goal_done on a user-origin goal without approvedByUser
+	| "user_origin_replace_blocked"; // swarm_set_goal (replace) on a user-origin active goal
 
 export type ClassifyGoalClearInput = {
 	currentGoal: Pick<{ id: string; origin?: GoalOrigin }, "id" | "origin"> | null | undefined;
 	action: "clear" | "replace";
-	actor: string;                 // agentId of the caller (root in practice)
+	actor: string; // agentId of the caller (root in practice)
 	params: {
-		approvedByUser?: boolean;  // explicit user-approval signal on clear
-		origin?: GoalOrigin;       // NEW origin being set on replace (informational only — the replace is what triggers the guard, not the new origin value)
+		approvedByUser?: boolean; // explicit user-approval signal on clear
+		origin?: GoalOrigin; // NEW origin being set on replace (informational only — the replace is what triggers the guard, not the new origin value)
 	};
 };
 
 export type ClassifyGoalClearResult =
-	| { allowed: true; origin?: GoalOrigin }
-	| { allowed: false; reason: RefuseClearReason; origin?: GoalOrigin };
+	{ allowed: true; origin?: GoalOrigin } | { allowed: false; reason: RefuseClearReason; origin?: GoalOrigin };
 
 export function classifyGoalClearAuthority(input: ClassifyGoalClearInput): ClassifyGoalClearResult {
 	const origin: GoalOrigin = input.currentGoal?.origin ?? GOAL_ORIGIN_ROOT;

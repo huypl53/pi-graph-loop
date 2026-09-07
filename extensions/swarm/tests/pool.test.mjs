@@ -7,8 +7,15 @@ import { join } from "node:path";
 import { paths } from "../src/state.ts";
 import { pickSlot, recordProviderError, recordSlotSuccess, setSlotCooldown, poolStatus, slotKey } from "../src/pool.ts";
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) pass++; else { fail++; console.error("  FAIL:", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) pass++;
+	else {
+		fail++;
+		console.error("  FAIL:", name);
+	}
+};
 
 const dir = await mkdtemp(join(tmpdir(), "pool-test-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
@@ -32,7 +39,10 @@ for (let i = 0; i < 30; i++) {
 	ok(`pick ${i} returns weighted slot`, r.slot.weight > 0);
 }
 const first = await pickSlot(p);
-ok("pick carries model+provider", first.slot.model === "glm-5.1" && first.slot.provider === "zai-coding-cn" || first.slot.model === "gpt-5.4-mini");
+ok(
+	"pick carries model+provider",
+	(first.slot.model === "glm-5.1" && first.slot.provider === "zai-coding-cn") || first.slot.model === "gpt-5.4-mini",
+);
 
 // Failure streak: 1 failure -> no cooldown; 2 (maxRetries) -> benched.
 const slot = { model: "glm-5.1", provider: "zai-coding-cn" };
@@ -70,7 +80,10 @@ const st2 = await poolStatus(p);
 ok("success clears failures", st2.slots.find((s) => slotKey(s) === slotKey(slot)).health.failures === 0);
 
 // Sticky strategy: same key -> same slot.
-await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: { ...settings.swarm, rotation: { strategy: "sticky", cooldownMs: 1000, maxRetries: 2 } } }));
+await writeFile(
+	join(dir, ".pi", "settings.json"),
+	JSON.stringify({ swarm: { ...settings.swarm, rotation: { strategy: "sticky", cooldownMs: 1000, maxRetries: 2 } } }),
+);
 const picks = new Set();
 for (let i = 0; i < 5; i++) picks.add(slotKey((await pickSlot(p, { stickyKey: "agent-x" })).slot));
 ok("sticky is deterministic", picks.size === 1);

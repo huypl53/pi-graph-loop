@@ -13,15 +13,25 @@ const factory = mod.default;
 const cmds = {};
 const tools = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
-	registerCommand: (name, opts) => { cmds[name] = opts; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
+	registerCommand: (name, opts) => {
+		cmds[name] = opts;
+	},
 	on: () => {},
 	exec: async () => ({ code: 0, stdout: "%1\n", stderr: "" }),
 };
 factory(pi);
 
 let fail = 0;
-const ok = (name, cond) => { if (cond) console.log("  ok  ", name); else { fail++; console.error("  FAIL", name); } };
+const ok = (name, cond) => {
+	if (cond) console.log("  ok  ", name);
+	else {
+		fail++;
+		console.error("  FAIL", name);
+	}
+};
 
 for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg"]) {
 	ok(`${name} registered`, typeof cmds[name]?.handler === "function");
@@ -63,7 +73,9 @@ ok("/swarm-tasks list delegates to tasks list", /No tasks found/.test(notes.at(-
 await cmds["swarm-msg"].handler("", ctx);
 ok("/swarm-msg empty shows usage", /Usage: \/swarm-msg send/.test(notes.at(-1)?.msg || ""));
 
-
 rmSync(cwd, { recursive: true, force: true });
-if (fail) { console.error(`\nCOMMAND ALIAS FAIL (${fail})`); process.exit(1); }
+if (fail) {
+	console.error(`\nCOMMAND ALIAS FAIL (${fail})`);
+	process.exit(1);
+}
 console.log("\nCOMMAND ALIAS PASS");

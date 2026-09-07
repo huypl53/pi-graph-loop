@@ -20,8 +20,14 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Paths, SwarmAgent, SwarmIdleNudgeState, SwarmMessage, SwarmState } from "../types.ts";
 import {
-  GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_CONSECUTIVE_NUDGES_DEFAULT, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_KEY_GOAL_IDLE_NUDGE,
-  TASK_NUDGE_MS, TASK_STALE_MS, formatNotifyKey,
+	GOAL_NUDGE_BACKOFF_TICKS,
+	GOAL_NUDGE_IDLE_INTERVAL_MS,
+	MAX_CONSECUTIVE_NUDGES_DEFAULT,
+	NOTIFY_DEFAULT_COOLDOWN_MS,
+	NOTIFY_KEY_GOAL_IDLE_NUDGE,
+	TASK_NUDGE_MS,
+	TASK_STALE_MS,
+	formatNotifyKey,
 } from "../constants.ts";
 
 import { ensureAgentDefaults, now } from "../utils.ts";
@@ -70,8 +76,10 @@ export function resolveGoalIdleChecksRequired(): number {
 	return 3;
 }
 
-
-export function agentIsEffectivelyAlive(a: { status?: string; runtimeStatus?: string; tmuxAlive?: boolean; lastHeartbeatAt?: string }, nowMs: number): boolean {
+export function agentIsEffectivelyAlive(
+	a: { status?: string; runtimeStatus?: string; tmuxAlive?: boolean; lastHeartbeatAt?: string },
+	nowMs: number,
+): boolean {
 	if (a.status !== "running") return false;
 	if (a.tmuxAlive === false) return false;
 	if (a.runtimeStatus === "stopped") return false;
@@ -130,8 +138,12 @@ export function allEffectiveIdleAgents(st: SwarmState, nowMs: number) {
 // Terminal/cancelled/blocked are excluded: blocked graphs cannot make progress (a blocked task
 // re-enters "in_progress" the moment a node unblocks, re-admitting it here).
 
-export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ allIdle: boolean; idleAgents: SwarmAgent[]; vacuous?: boolean }> {
-	const idleState: SwarmIdleNudgeState = st.idleNudgeState ||= {};
+export async function updateIdleEpochLocked(
+	p: Paths,
+	st: SwarmState,
+	nowMs: number,
+): Promise<{ allIdle: boolean; idleAgents: SwarmAgent[]; vacuous?: boolean }> {
+	const idleState: SwarmIdleNudgeState = (st.idleNudgeState ||= {});
 	const { idleAgents, allIdle, vacuous } = allEffectiveIdleAgents(st, nowMs);
 	if (!allIdle) {
 		// R14 Fix B (2026-09-02): clearing lastWasVacuous on the all-idle→busy edge
@@ -145,7 +157,10 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 			// Busy edge: restart stall spacing so the next all-idle edge re-arms emission immediacy.
 			const stallSlotsReset: string[] = [];
 			for (const slot of Object.values(st.taskStallState || {})) {
-				if (slot?.nextStallNudgeAt) { delete slot.nextStallNudgeAt; stallSlotsReset.push(slot.taskId); }
+				if (slot?.nextStallNudgeAt) {
+					delete slot.nextStallNudgeAt;
+					stallSlotsReset.push(slot.taskId);
+				}
 			}
 			// === R23B (2026-09-02) — stamp the cause of every anchor-clearing ===
 			// The cap-branch reset is gated on `lastEpochBusyAgents?.some(id => id !== "root")`
@@ -229,7 +244,7 @@ export async function updateIdleEpochLocked(p: Paths, st: SwarmState, nowMs: num
 		// reset; root-turn churn anchors are also rejected by the worker-breaker
 		// guard above. Probe evidence: tester-memo-probe.{mjs,out.txt}.
 		delete (idleState as { r23LastEpochAnchor?: string }).r23LastEpochAnchor;
-		await trace(p, "idle.epoch.started", { allIdleSinceAt: idleState.allIdleSinceAt, idleAgents: idleAgents.length }).catch(() =>{});
+		await trace(p, "idle.epoch.started", { allIdleSinceAt: idleState.allIdleSinceAt, idleAgents: idleAgents.length }).catch(() => {});
 	}
 	return { allIdle, idleAgents, vacuous };
 }
@@ -284,7 +299,7 @@ export async function evaluateIdleGoalNudgeLocked(
 	// now also flips `allIdle=false` when (a) zero effective agents remain (vacuous — bug #3) or (b) any
 	// effective agent carries an assignment pointer (bug #2). The pump evaluator distinguishes the two
 	// with distinct reasons + traces so the root sees WHY the nudge was held.
-	const idleState: SwarmIdleNudgeState = st.idleNudgeState ||= {};
+	const idleState: SwarmIdleNudgeState = (st.idleNudgeState ||= {});
 	const epoch = await updateIdleEpochLocked(p, st, nowMs);
 	const { idleAgents, allIdle, vacuous } = epoch;
 	if (vacuous) {
@@ -304,7 +319,7 @@ export async function evaluateIdleGoalNudgeLocked(
 		// branch (added below) so the dedupe survives independently of whether the pump
 		// tail writeState runs. The pump tail is still the source of truth for OTHER
 		// mutations; this is the minimum additional write that closes the persistence gap.
-		const idleStateVac: SwarmIdleNudgeState = st.idleNudgeState ||= {};
+		const idleStateVac: SwarmIdleNudgeState = (st.idleNudgeState ||= {});
 		const wasVacuous = idleStateVac.lastWasVacuous === true;
 		if (!wasVacuous) {
 			await trace(p, "goal.nudge.held_no_live_workers", { goalId: goal.id, effectiveAgentCount: 0 }).catch(() => {});
@@ -346,29 +361,42 @@ export async function evaluateIdleGoalNudgeLocked(
 				// into the four hint buckets and join the relevant ones into the body.
 				const deadAgents = poolDiag.filter((d) => d.tmuxAlive === false);
 				const stoppedAgents = poolDiag.filter((d) => d.runtimeStatus === "stopped");
-				const staleAgents = poolDiag.filter((d) => d.heartbeatAgeSec !== null && d.heartbeatAgeSec > 600 && d.tmuxAlive !== false && d.runtimeStatus !== "stopped");
+				const staleAgents = poolDiag.filter(
+					(d) => d.heartbeatAgeSec !== null && d.heartbeatAgeSec > 600 && d.tmuxAlive !== false && d.runtimeStatus !== "stopped",
+				);
 				const hints: string[] = [];
 				if (deadAgents.length > 0) {
 					const ids = deadAgents.map((a) => a.id).join(", ");
-					hints.push(`Dead panes (${deadAgents.length}): ${ids}. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace, or \`swarm_restart_agent(agentId=...)\` if panes are recoverable.`);
+					hints.push(
+						`Dead panes (${deadAgents.length}): ${ids}. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace, or \`swarm_restart_agent(agentId=...)\` if panes are recoverable.`,
+					);
 				}
 				if (stoppedAgents.length > 0 && deadAgents.length === 0) {
 					const ids = stoppedAgents.map((a) => a.id).join(", ");
-					hints.push(`Stopped agents (${stoppedAgents.length}): ${ids}. Run \`swarm_restart_agent(agentId=...)\` for each, or spawn fresh.`);
+					hints.push(
+						`Stopped agents (${stoppedAgents.length}): ${ids}. Run \`swarm_restart_agent(agentId=...)\` for each, or spawn fresh.`,
+					);
 				}
 				if (staleAgents.length > 0 && deadAgents.length === 0 && stoppedAgents.length === 0) {
-					hints.push(`All agents stale (>10min no heartbeat). Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to mint a fresh worker.`);
+					hints.push(
+						`All agents stale (>10min no heartbeat). Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to mint a fresh worker.`,
+					);
 				}
 				if (hints.length === 0) {
-					hints.push(`No live workers but no clear ghost classification. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` or ask the user for direction.`);
+					hints.push(
+						`No live workers but no clear ghost classification. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` or ask the user for direction.`,
+					);
 				}
-				hints.push(`Or scope a step: \`swarm_create_task(title=..., goal=..., workflow=feature-dev)\` and assign to a fresh worker.`);
+				hints.push(
+					`Or scope a step: \`swarm_create_task(title=..., goal=..., workflow=feature-dev)\` and assign to a fresh worker.`,
+				);
 				hints.push(`Or clear the goal if it is no longer relevant: \`swarm_mark_goal_done(goalId="${goal.id}")\`.`);
 				await deliverMessageLocked(pi, cwd, p, st, {
 					to: "root",
 					priority: "high",
 					subject: `Goal escalation: worker pool empty (goal ${goal.id})`,
-					body: `User-origin goal is held with zero effective live workers (cooldown: ${Math.round(NOTIFY_DEFAULT_COOLDOWN_MS / 1000)}s).\n` +
+					body:
+						`User-origin goal is held with zero effective live workers (cooldown: ${Math.round(NOTIFY_DEFAULT_COOLDOWN_MS / 1000)}s).\n` +
 						`Goal text: ${String(goal.text || "").slice(0, 200)}.\n\n` +
 						`Pool diag: ${JSON.stringify(poolDiag)}.\n\n` +
 						`Next action (one of):\n` +
@@ -399,7 +427,11 @@ export async function evaluateIdleGoalNudgeLocked(
 		// are present (with or without pointers), the diagnostic is the generic `agent_busy`.
 		const pointerAssignee = idleAgents.find((a) => a.runtimeStatus === "idle" && (a.activeTaskIds?.length ?? 0) > 0);
 		if (pointerAssignee) {
-			await trace(p, "goal.nudge.suppressed_by_assignment_in_flight", { goalId: goal.id, assignee: pointerAssignee.id, taskIds: pointerAssignee.activeTaskIds }).catch(() => {});
+			await trace(p, "goal.nudge.suppressed_by_assignment_in_flight", {
+				goalId: goal.id,
+				assignee: pointerAssignee.id,
+				taskIds: pointerAssignee.activeTaskIds,
+			}).catch(() => {});
 			return { emitted: false, reason: "assignment_in_flight" };
 		}
 		return { emitted: false, reason: "agent_busy" };
@@ -443,7 +475,6 @@ export async function evaluateIdleGoalNudgeLocked(
 	// consecutive nudges are spaced >= checksRequired x checkIntervalMs.
 	idleState.goalIdleCheckCount = 0;
 
-
 	// Back-off accounting is round-based: each COMPLETED check-round consumes one back-off
 	// slot. This keeps pump tick rate from affecting the cadence (R27: rounds, not intervals).
 	if (goal.backoffTicksRemaining && goal.backoffTicksRemaining > 0) {
@@ -481,7 +512,11 @@ export async function evaluateIdleGoalNudgeLocked(
 		// root-churn edges are rejected and the cap+backoff loop re-engages.
 		const anchorR23 = idleState.allIdleSinceAt ?? null;
 		const memoR23 = idleState;
-		const lastEmitR23 = idleState.lastGoalNudgeAt ? Date.parse(idleState.lastGoalNudgeAt) : (goal.lastNudgeAt ? Date.parse(goal.lastNudgeAt) : NaN);
+		const lastEmitR23 = idleState.lastGoalNudgeAt
+			? Date.parse(idleState.lastGoalNudgeAt)
+			: goal.lastNudgeAt
+				? Date.parse(goal.lastNudgeAt)
+				: NaN;
 		const anchorIsFreshR23 = Boolean(anchorR23 && Number.isFinite(lastEmitR23) && Date.parse(anchorR23) > lastEmitR23);
 		// === R23B-rework (2026-09-03) — STALE-MEMO CLEAR (production-mint shape) ===
 		// The original R23 code stamped `r23LastEpochAnchor = allIdleSinceAt` at mint,
@@ -533,7 +568,12 @@ export async function evaluateIdleGoalNudgeLocked(
 			if (!goal.backoffTicksRemaining) {
 				goal.backoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
 				idleState.goalBackoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
-				await trace(p, "goal.nudge.backoff", { goalId: goal.id, nudges: goal.consecutiveNoResolveNudges, max: MAX_CONSECUTIVE_NUDGES_DEFAULT, backoffTicks: GOAL_NUDGE_BACKOFF_TICKS }).catch(() => {});
+				await trace(p, "goal.nudge.backoff", {
+					goalId: goal.id,
+					nudges: goal.consecutiveNoResolveNudges,
+					max: MAX_CONSECUTIVE_NUDGES_DEFAULT,
+					backoffTicks: GOAL_NUDGE_BACKOFF_TICKS,
+				}).catch(() => {});
 			}
 			return { emitted: false, reason: "max_nudges" };
 		}

@@ -95,11 +95,7 @@ process.env.PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED ||= "3";
 const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, "..", "src");
 
-const {
-	pumpRootMailbox,
-	evaluateIdleGoalNudgeLocked,
-	updateIdleEpochLocked,
-} = await import(join(srcDir, "reconcile.ts"));
+const { pumpRootMailbox, evaluateIdleGoalNudgeLocked, updateIdleEpochLocked } = await import(join(srcDir, "reconcile.ts"));
 
 const { paths, withLock, readState, writeState, trace } = await import(join(srcDir, "state.ts"));
 const { ensureRoot, heartbeatRootLeader } = await import(join(srcDir, "identity.ts"));
@@ -109,10 +105,16 @@ const { deliverMessageLocked } = await import(join(srcDir, "mailbox.ts"));
 // Test harness
 // ============================================================================
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, info) => {
-	if (cond) { pass++; console.log("  ok  ", name); }
-	else { fail++; console.error("  FAIL", name, info ?? ""); }
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
 };
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
@@ -135,7 +137,17 @@ function readEvents(scratchDir) {
 	if (!existsSync(p)) return [];
 	const txt = readFileSync(p, "utf8").trim();
 	if (!txt) return [];
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 
 function readRootMailbox(scratchDir) {
@@ -143,7 +155,17 @@ function readRootMailbox(scratchDir) {
 	if (!existsSync(p)) return [];
 	const txt = readFileSync(p, "utf8").trim();
 	if (!txt) return [];
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 
 function makePiMock() {
@@ -151,9 +173,15 @@ function makePiMock() {
 	const pi = {
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
-		sendMessage: (m, _opts) => { sendMessages.push({ id: m?.details?.id, m }); },
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		sendMessage: (m, _opts) => {
+			sendMessages.push({ id: m?.details?.id, m });
+		},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 	return { pi, sendMessages };
 }
@@ -179,34 +207,70 @@ async function seedR16Shape({
 
 	const agents = {
 		"worker-1": {
-			id: "worker-1", role: "implementer", roleKind: "implementer", capabilities: [],
-			activeTaskIds: [], maxConcurrentTasks: 1,
-			status, runtimeStatus: "idle", health: "healthy",
+			id: "worker-1",
+			role: "implementer",
+			roleKind: "implementer",
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 1,
+			status,
+			runtimeStatus: "idle",
+			health: "healthy",
 			tmuxAlive,
-			tmuxSession: "r16", tmuxWindow: "worker-1", tmuxTarget: `r16:worker-1.0`,
-			model: "gpt-5.4-mini", provider: "openai", cwd: scratchDir,
+			tmuxSession: "r16",
+			tmuxWindow: "worker-1",
+			tmuxTarget: `r16:worker-1.0`,
+			model: "gpt-5.4-mini",
+			provider: "openai",
+			cwd: scratchDir,
 			mailbox: ".pi/swarm/mailboxes/worker-1.jsonl",
-			createdAt: workerTs, updatedAt: workerTs, lastHeartbeatAt: workerTs,
+			createdAt: workerTs,
+			updatedAt: workerTs,
+			lastHeartbeatAt: workerTs,
 		},
 		"worker-2": {
-			id: "worker-2", role: "implementer", roleKind: "implementer", capabilities: [],
-			activeTaskIds: [], maxConcurrentTasks: 1,
-			status, runtimeStatus: "idle", health: "healthy",
+			id: "worker-2",
+			role: "implementer",
+			roleKind: "implementer",
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 1,
+			status,
+			runtimeStatus: "idle",
+			health: "healthy",
 			tmuxAlive,
-			tmuxSession: "r16", tmuxWindow: "worker-2", tmuxTarget: `r16:worker-2.0`,
-			model: "gpt-5.4-mini", provider: "openai", cwd: scratchDir,
+			tmuxSession: "r16",
+			tmuxWindow: "worker-2",
+			tmuxTarget: `r16:worker-2.0`,
+			model: "gpt-5.4-mini",
+			provider: "openai",
+			cwd: scratchDir,
 			mailbox: ".pi/swarm/mailboxes/worker-2.jsonl",
-			createdAt: workerTs, updatedAt: workerTs, lastHeartbeatAt: workerTs,
+			createdAt: workerTs,
+			updatedAt: workerTs,
+			lastHeartbeatAt: workerTs,
 		},
 		"worker-3": {
-			id: "worker-3", role: "implementer", roleKind: "implementer", capabilities: [],
-			activeTaskIds: [], maxConcurrentTasks: 1,
-			status, runtimeStatus: "idle", health: "healthy",
+			id: "worker-3",
+			role: "implementer",
+			roleKind: "implementer",
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 1,
+			status,
+			runtimeStatus: "idle",
+			health: "healthy",
 			tmuxAlive,
-			tmuxSession: "r16", tmuxWindow: "worker-3", tmuxTarget: `r16:worker-3.0`,
-			model: "gpt-5.4-mini", provider: "openai", cwd: scratchDir,
+			tmuxSession: "r16",
+			tmuxWindow: "worker-3",
+			tmuxTarget: `r16:worker-3.0`,
+			model: "gpt-5.4-mini",
+			provider: "openai",
+			cwd: scratchDir,
 			mailbox: ".pi/swarm/mailboxes/worker-3.jsonl",
-			createdAt: workerTs, updatedAt: workerTs, lastHeartbeatAt: workerTs,
+			createdAt: workerTs,
+			updatedAt: workerTs,
+			lastHeartbeatAt: workerTs,
 		},
 	};
 
@@ -362,22 +426,30 @@ console.log("\n[R16-S1] Config C1 — ack-with-text turn_end on settled-but-aliv
 	const noResolveTurnCount = events.filter((e) => e.event === "goal.nudge.turn_no_resolve_action").length;
 
 	// POST-FIX (GREEN): ack text does NOT reset; counter reaches cap (=3), back-off engages.
-	ok("R16-S1 [GREEN post-fix] goalIdleNudgeTraceCount === 3 (cap reached, back-off engages)",
-		idleNudgeCount === 3, `got ${idleNudgeCount}`);
+	ok(
+		"R16-S1 [GREEN post-fix] goalIdleNudgeTraceCount === 3 (cap reached, back-off engages)",
+		idleNudgeCount === 3,
+		`got ${idleNudgeCount}`,
+	);
 
-	ok("R16-S1 [GREEN post-fix] goalNudgeResolvedTraceCount === 0 (ack text did not reset)",
-		resolvedCount === 0, `got ${resolvedCount}`);
+	ok("R16-S1 [GREEN post-fix] goalNudgeResolvedTraceCount === 0 (ack text did not reset)", resolvedCount === 0, `got ${resolvedCount}`);
 
 	// Post-fix trace: every ack-only turn emits a `goal.nudge.turn_no_resolve_action` so
 	// dashboards can distinguish ack vs resolve. The hook adds this trace when the
 	// action detector returns false (no swarm tool call in the turn).
-	ok("R16-S1 [GREEN post-fix] goal.nudge.turn_no_resolve_action trace fires per ack turn",
-		noResolveTurnCount >= 9, `got ${noResolveTurnCount}`);
+	ok(
+		"R16-S1 [GREEN post-fix] goal.nudge.turn_no_resolve_action trace fires per ack turn",
+		noResolveTurnCount >= 9,
+		`got ${noResolveTurnCount}`,
+	);
 
 	// Pre-fix has no escalation because pool is non-vacuous (R14-A predicate), so this
 	// assertion holds in BOTH RED and GREEN for C1 topology.
-	ok("R16-S1 [no escalation either shape] escalationPoolEmptyTraceCount === 0 (non-vacuous pool)",
-		escalationCount === 0, `got ${escalationCount}`);
+	ok(
+		"R16-S1 [no escalation either shape] escalationPoolEmptyTraceCount === 0 (non-vacuous pool)",
+		escalationCount === 0,
+		`got ${escalationCount}`,
+	);
 
 	// GREEN POST-FIX validation: drive a SECOND run with resolveAction=true (modeling
 	// the root making a swarm tool call in the turn) and confirm the counter
@@ -413,10 +485,12 @@ console.log("\n[R16-S1] Config C1 — ack-with-text turn_end on settled-but-aliv
 		const events2 = readEvents(s2Scratch);
 		const idleNudgeCount2 = events2.filter((e) => e.event === "goal.idle_nudge").length;
 		const resolvedCount2 = events2.filter((e) => e.event === "goal.nudge.resolved").length;
-		ok("R16-S1 [GREEN post-fix] with resolveAction=true, idle_nudge can re-fire on each turn",
-			idleNudgeCount2 >= 3, `got ${idleNudgeCount2}`);
-		ok("R16-S1 [GREEN post-fix] with resolveAction=true, resolved trace fires per turn",
-			resolvedCount2 >= 3, `got ${resolvedCount2}`);
+		ok(
+			"R16-S1 [GREEN post-fix] with resolveAction=true, idle_nudge can re-fire on each turn",
+			idleNudgeCount2 >= 3,
+			`got ${idleNudgeCount2}`,
+		);
+		ok("R16-S1 [GREEN post-fix] with resolveAction=true, resolved trace fires per turn", resolvedCount2 >= 3, `got ${resolvedCount2}`);
 	}
 }
 
@@ -462,11 +536,13 @@ console.log("\n[R16-S2] Config C2 — ack-without-text on settled-but-alive pool
 
 	// Both RED and GREEN: counter reaches 3, back-off engages, no further nudges.
 	// Total idle_nudge fires: 3 (cap) + 0 (back-off consumes 2 ticks) = 3.
-	ok("R16-S2 [GREEN post-fix] goalIdleNudgeTraceCount === 3 (cap reached, back-off engages)",
-		idleNudgeCount === 3, `got ${idleNudgeCount}`);
+	ok(
+		"R16-S2 [GREEN post-fix] goalIdleNudgeTraceCount === 3 (cap reached, back-off engages)",
+		idleNudgeCount === 3,
+		`got ${idleNudgeCount}`,
+	);
 
-	ok("R16-S2 [no regression] escalationPoolEmptyTraceCount === 0 (non-vacuous pool)",
-		escalationCount === 0, `got ${escalationCount}`);
+	ok("R16-S2 [no regression] escalationPoolEmptyTraceCount === 0 (non-vacuous pool)", escalationCount === 0, `got ${escalationCount}`);
 }
 
 // ============================================================================
@@ -508,14 +584,19 @@ console.log("\n[R16-S3] Config C3 — 12-tick persistent vacuous pool + reload b
 
 	// GREEN expectation (R14 dedupe persists): heldCount === 1 (single transition),
 	// lastWasVacuous survives reload.
-	ok("R16-S3 [GREEN post-fix] lastWasVacuous PERSISTED across reload (R14-B dedupe)",
-		firstReload === true, `got firstReload.lastWasVacuous=${firstReload}`);
+	ok(
+		"R16-S3 [GREEN post-fix] lastWasVacuous PERSISTED across reload (R14-B dedupe)",
+		firstReload === true,
+		`got firstReload.lastWasVacuous=${firstReload}`,
+	);
 
-	ok("R16-S3 [GREEN post-fix] heldNoLiveWorkersTraceCount === 1 (once per false→true transition)",
-		heldCount === 1, `got ${heldCount}`);
+	ok("R16-S3 [GREEN post-fix] heldNoLiveWorkersTraceCount === 1 (once per false→true transition)", heldCount === 1, `got ${heldCount}`);
 
-	ok("R16-S3 [GREEN post-fix] escalationPoolEmptyTraceCount === 1 (cooldown fires once)",
-		escalationCount === 1, `got ${escalationCount}`);
+	ok(
+		"R16-S3 [GREEN post-fix] escalationPoolEmptyTraceCount === 1 (cooldown fires once)",
+		escalationCount === 1,
+		`got ${escalationCount}`,
+	);
 }
 
 // ============================================================================
@@ -551,14 +632,15 @@ console.log("\n[R16-S4] Config C4 — vacuous pool + heartbeat-GC status=stopped
 	const heldCount = events.filter((e) => e.event === "goal.nudge.held_no_live_workers").length;
 	const escalationCount = events.filter((e) => e.event === "goal.escalation.pool_empty").length;
 
-	ok("R16-S4 [GREEN post-fix] lastWasVacuous PERSISTED across reload (GC-stopped pool)",
-		firstReload === true, `got firstReload.lastWasVacuous=${firstReload}`);
+	ok(
+		"R16-S4 [GREEN post-fix] lastWasVacuous PERSISTED across reload (GC-stopped pool)",
+		firstReload === true,
+		`got firstReload.lastWasVacuous=${firstReload}`,
+	);
 
-	ok("R16-S4 [GREEN post-fix] heldNoLiveWorkersTraceCount === 1 (GC doesn't re-fire)",
-		heldCount === 1, `got ${heldCount}`);
+	ok("R16-S4 [GREEN post-fix] heldNoLiveWorkersTraceCount === 1 (GC doesn't re-fire)", heldCount === 1, `got ${heldCount}`);
 
-	ok("R16-S4 [GREEN post-fix] escalationPoolEmptyTraceCount === 1",
-		escalationCount === 1, `got ${escalationCount}`);
+	ok("R16-S4 [GREEN post-fix] escalationPoolEmptyTraceCount === 1", escalationCount === 1, `got ${escalationCount}`);
 }
 
 // ============================================================================
@@ -606,14 +688,19 @@ console.log("\n[R16-S5] Config C5 — cooldown survives a state reload");
 	const events = readEvents(sScratch);
 	const escalationTotal = events.filter((e) => e.event === "goal.escalation.pool_empty").length;
 
-	ok("R16-S5 [GREEN post-fix] lastPoolEmptyEscalationAt persisted across reload",
-		persistedCooldown, `got ${fresh.idleNudgeState?.lastPoolEmptyEscalationAt}`);
+	ok(
+		"R16-S5 [GREEN post-fix] lastPoolEmptyEscalationAt persisted across reload",
+		persistedCooldown,
+		`got ${fresh.idleNudgeState?.lastPoolEmptyEscalationAt}`,
+	);
 
-	ok("R16-S5 [GREEN post-fix] first-half escalation === 1 (initial cooldown fires once)",
-		escalationFirstHalf === 1, `got ${escalationFirstHalf}`);
+	ok(
+		"R16-S5 [GREEN post-fix] first-half escalation === 1 (initial cooldown fires once)",
+		escalationFirstHalf === 1,
+		`got ${escalationFirstHalf}`,
+	);
 
-	ok("R16-S5 [GREEN post-fix] escalationTotal === 1 across reload (cooldown persists)",
-		escalationTotal === 1, `got ${escalationTotal}`);
+	ok("R16-S5 [GREEN post-fix] escalationTotal === 1 across reload (cooldown persists)", escalationTotal === 1, `got ${escalationTotal}`);
 }
 
 // ============================================================================
@@ -664,14 +751,15 @@ console.log("\n[R16-S6] Config C6 — explicit goal clear mid-cooldown stops esc
 	const escalationPost = eventsPost.filter((e) => e.event === "goal.escalation.pool_empty").length;
 	const heldPost = eventsPost.filter((e) => e.event === "goal.nudge.held_no_live_workers").length;
 
-	ok("R16-S6 [GREEN post-fix] pre-clear escalation fires === 1 (initial escalation)",
-		escalationPre === 1, `got ${escalationPre}`);
+	ok("R16-S6 [GREEN post-fix] pre-clear escalation fires === 1 (initial escalation)", escalationPre === 1, `got ${escalationPre}`);
 
-	ok("R16-S6 [GREEN post-fix] escalation stops at no_goal guard post-clear",
-		escalationPost === escalationPre, `pre=${escalationPre} post=${escalationPost}`);
+	ok(
+		"R16-S6 [GREEN post-fix] escalation stops at no_goal guard post-clear",
+		escalationPost === escalationPre,
+		`pre=${escalationPre} post=${escalationPost}`,
+	);
 
-	ok("R16-S6 [GREEN post-fix] heldNoLiveWorkersTraceCount UNCHANGED post-clear",
-		heldPost === heldPre, `pre=${heldPre} post=${heldPost}`);
+	ok("R16-S6 [GREEN post-fix] heldNoLiveWorkersTraceCount UNCHANGED post-clear", heldPost === heldPre, `pre=${heldPre} post=${heldPost}`);
 }
 
 // ============================================================================
@@ -701,13 +789,20 @@ console.log("\n[R16-S7] Action-oriented escalation nudge body");
 	const body = highPriority[0]?.body || "";
 
 	// Post-fix body must include at least one of the action-oriented hint keywords.
-	const actionHints = ["swarm_spawn_agent", "swarm_create_task", "swarm_restart_agent", "ask the user", "next action", "recovery", "empty pool", "next step"];
+	const actionHints = [
+		"swarm_spawn_agent",
+		"swarm_create_task",
+		"swarm_restart_agent",
+		"ask the user",
+		"next action",
+		"recovery",
+		"empty pool",
+		"next step",
+	];
 	const hasHint = actionHints.some((k) => body.includes(k));
-	ok("R16-S7 [GREEN post-fix] escalation body contains an action-oriented hint",
-		hasHint, `body=${JSON.stringify(body).slice(0, 400)}`);
+	ok("R16-S7 [GREEN post-fix] escalation body contains an action-oriented hint", hasHint, `body=${JSON.stringify(body).slice(0, 400)}`);
 
-	ok("R16-S7 mailbox durable append === 1 with priority=high",
-		highPriority.length === 1, `got ${highPriority.length}`);
+	ok("R16-S7 mailbox durable append === 1 with priority=high", highPriority.length === 1, `got ${highPriority.length}`);
 }
 
 // ============================================================================
@@ -725,14 +820,26 @@ console.log("\n[R16-S8] state.ts readState back-fill for legacy swarm-state.json
 
 	const agents = {
 		"worker-1": {
-			id: "worker-1", role: "implementer", roleKind: "implementer", capabilities: [],
-			activeTaskIds: [], maxConcurrentTasks: 1,
-			status: "running", runtimeStatus: "idle", health: "healthy",
+			id: "worker-1",
+			role: "implementer",
+			roleKind: "implementer",
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 1,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
 			tmuxAlive: false,
-			tmuxSession: "r16", tmuxWindow: "worker-1", tmuxTarget: `r16:worker-1.0`,
-			model: "gpt-5.4-mini", provider: "openai", cwd: sScratch,
+			tmuxSession: "r16",
+			tmuxWindow: "worker-1",
+			tmuxTarget: `r16:worker-1.0`,
+			model: "gpt-5.4-mini",
+			provider: "openai",
+			cwd: sScratch,
 			mailbox: ".pi/swarm/mailboxes/worker-1.jsonl",
-			createdAt: workerTs, updatedAt: workerTs, lastHeartbeatAt: workerTs,
+			createdAt: workerTs,
+			updatedAt: workerTs,
+			lastHeartbeatAt: workerTs,
 		},
 	};
 
@@ -771,23 +878,27 @@ console.log("\n[R16-S8] state.ts readState back-fill for legacy swarm-state.json
 	let fresh;
 	try {
 		fresh = await readState(p, sScratch);
-	} catch { readThrew = true; }
+	} catch {
+		readThrew = true;
+	}
 
-	ok("R16-S8 readState does NOT throw on pre-R14 swarm-state.json",
-		!readThrew, "readState threw");
+	ok("R16-S8 readState does NOT throw on pre-R14 swarm-state.json", !readThrew, "readState threw");
 
-	ok("R16-S8 readState back-fills idleNudgeState as object",
+	ok(
+		"R16-S8 readState back-fills idleNudgeState as object",
 		!!fresh && typeof fresh.idleNudgeState === "object",
-		`got ${typeof fresh?.idleNudgeState}`);
+		`got ${typeof fresh?.idleNudgeState}`,
+	);
 
 	// Drive a tick — the evaluator must not crash on absent lastWasVacuous.
 	const { pi } = makePiMock();
 	let tickThrew = false;
 	try {
 		await pumpTick({ p, scratch: sScratch, nowMs: nowMs + 5000, pi });
-	} catch { tickThrew = true; }
-	ok("R16-S8 evaluator tick does NOT throw on absent R14 fields",
-		!tickThrew, "tick threw");
+	} catch {
+		tickThrew = true;
+	}
+	ok("R16-S8 evaluator tick does NOT throw on absent R14 fields", !tickThrew, "tick threw");
 }
 
 // ============================================================================
@@ -798,7 +909,9 @@ process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 
 console.log(`\nR16-IDLE-GOAL-REGRESSION ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 if (fail > 0) {
-	console.error("\n  ↳ RED regression reproduced — the idle-goal ACK-loop (R16-S1) is confirmed across the ack-with-text topology; the post-R14 vacuous state persistence (R16-S3..S6) confirms R14 invariants hold across state reload. Fix A (ack-vs-resolve gating) + Fix B (vacuous-branch writeState + state.ts back-fill) + Fix C (action-oriented nudge body) per plan §6 will land the fix.");
+	console.error(
+		"\n  ↳ RED regression reproduced — the idle-goal ACK-loop (R16-S1) is confirmed across the ack-with-text topology; the post-R14 vacuous state persistence (R16-S3..S6) confirms R14 invariants hold across state reload. Fix A (ack-vs-resolve gating) + Fix B (vacuous-branch writeState + state.ts back-fill) + Fix C (action-oriented nudge body) per plan §6 will land the fix.",
+	);
 	process.exit(1);
 }
 process.exit(0);

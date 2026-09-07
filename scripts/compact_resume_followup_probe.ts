@@ -12,10 +12,7 @@ export default function (pi: ExtensionAPI) {
 		if (completed) return;
 		if (!queued) {
 			queued = true;
-			pi.sendMessage(
-				{ customType: "followup-probe", content: FOLLOWUP_PROMPT, display: true },
-				{ deliverAs: "followUp" },
-			);
+			pi.sendMessage({ customType: "followup-probe", content: FOLLOWUP_PROMPT, display: true }, { deliverAs: "followUp" });
 			if (ctx.hasUI) ctx.ui.notify("followup-probe: queued one followUp from turn_end", "info");
 			return;
 		}

@@ -77,8 +77,7 @@ export type PreflightError =
 	| { kind: "invalid_settings"; message: string; suggestion: string; errors: string[] };
 
 export type PreflightResult =
-	| { ok: true; resolved: { model: string; provider: string; fromPool: boolean } }
-	| { ok: false; error: PreflightError };
+	{ ok: true; resolved: { model: string; provider: string; fromPool: boolean } } | { ok: false; error: PreflightError };
 
 // Persisted per-slot health, keyed by `${provider}/${model}`. Stored in .pi/swarm/pool-state.json.
 export type PoolSlotHealth = {
@@ -121,13 +120,13 @@ export type PoolHealthState = {
 // we conclude the engine has exhausted retries on this slot and gate the swap path on that signal.
 // In-process only — never persisted. See pool-retry.test.mjs for fixture coverage.
 export type EngineRetryIncident = {
-	providerKey: string;    // `${provider}/${model}` of the slot being retried by the engine
+	providerKey: string; // `${provider}/${model}` of the slot being retried by the engine
 	kind: ProviderErrorKind; // Issue 70: classified error kind — part of the incident identity
-	errorMessage: string;   // Issue 70: scrubErrorIdentity() output (digits erased, lowercase) for
-	                        // comparison — raw text equality broke on mutating 429 bodies
-	firstSeenAt: number;    // ms epoch — first turn_end {error} for this incident
-	lastSeenAt: number;     // ms epoch — most recent turn_end {error} for this incident
-	count: number;          // number of consecutive turn_end {error} events in this incident
+	errorMessage: string; // Issue 70: scrubErrorIdentity() output (digits erased, lowercase) for
+	// comparison — raw text equality broke on mutating 429 bodies
+	firstSeenAt: number; // ms epoch — first turn_end {error} for this incident
+	lastSeenAt: number; // ms epoch — most recent turn_end {error} for this incident
+	count: number; // number of consecutive turn_end {error} events in this incident
 };
 
 // Issue 70: stable incident-identity string for an error message. Erases every digit run
@@ -136,12 +135,7 @@ export type EngineRetryIncident = {
 // different messages stay distinct. Paired with classifyProviderError kind + providerKey this
 // forms the engine-retry incident identity (replaces raw error-text equality).
 export function scrubErrorIdentity(message: string): string {
-	return (message || "")
-		.toLowerCase()
-		.replace(/\d+/g, "n")
-		.replace(/\s+/g, " ")
-		.trim()
-		.slice(0, 200);
+	return (message || "").toLowerCase().replace(/\d+/g, "n").replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
 export type MessageRecord = {
@@ -201,14 +195,14 @@ export type MessageRecord = {
 	// existing delivered/ack fields. Under gate=0 these are SHADOW ONLY: the engine does
 	// not mutate state or change completion decisions. Under gate=1 (Phase 2) the same
 	// derivation paths become authoritative.
-	mailboxDeliveredAt?: string;     // durable mailbox append succeeded (transport receipt)
-	seenAt?: string;                // API-level surface/read receipt (NOT pane injection)
-	processingAt?: string;          // recipient action scoped to task/node/assignment
-	respondedAt?: string;           // accepted, non-superseded replyTo response received
-	terminalAt?: string;            // inferred terminal disposition reached
-	terminalReason?: string;        // evidence source label (e.g. "response_verified", "task_node_terminal", "supersession", "deadline_exceeded", "ttl_expired")
+	mailboxDeliveredAt?: string; // durable mailbox append succeeded (transport receipt)
+	seenAt?: string; // API-level surface/read receipt (NOT pane injection)
+	processingAt?: string; // recipient action scoped to task/node/assignment
+	respondedAt?: string; // accepted, non-superseded replyTo response received
+	terminalAt?: string; // inferred terminal disposition reached
+	terminalReason?: string; // evidence source label (e.g. "response_verified", "task_node_terminal", "supersession", "deadline_exceeded", "ttl_expired")
 	lifecycleStage?: "delivered" | "surfaced" | "seen" | "processing" | "responded" | "terminal"; // derived stage at last derivation; shadow-only under gate=0
-	lifecycleSource?: string;       // the evidence source that drove the last derivation (e.g. "mailbox.read", "task.tool", "reply.accepted")
+	lifecycleSource?: string; // the evidence source that drove the last derivation (e.g. "mailbox.read", "task.tool", "reply.accepted")
 	// Optional forward-compat fields on the send side. NOT exposed in normal tool
 	// schemas during Phase 1; the migration tool may stamp `expectResponse` on legacy
 	// envelopes when it can derive a response expectation without inventing one.
@@ -217,8 +211,8 @@ export type MessageRecord = {
 	escalateIfSilent?: boolean;
 	// Migration provenance (Issue 25 Phase 1 §D). Additive audit field; set by the migration
 	// command only. Absent on pre-migration records.
-	migrationRunId?: string;        // runId of the migration that last touched this record
-	migratedAt?: string;            // ISO timestamp of the last successful migration write
+	migrationRunId?: string; // runId of the migration that last touched this record
+	migratedAt?: string; // ISO timestamp of the last successful migration write
 };
 
 export type SwarmAgent = {
@@ -292,9 +286,9 @@ export type SwarmAgent = {
 	spawnedForTaskId?: string;
 	// Identity provenance (additive, optional). Stamped whenever the EFFECTIVE identity file is
 	// (re)generated by writeEffectiveIdentity (spawn / swarm_agent_identity refresh / swarm_reload_identity).
-	identityVersion?: number;       // monotonically bumps when the effective content (base+override) changes
-	identityHash?: string;          // sha256 hex of the effective content (base + override body)
-	identityLoadedAt?: string;      // ISO timestamp of the last effective-identity write
+	identityVersion?: number; // monotonically bumps when the effective content (base+override) changes
+	identityHash?: string; // sha256 hex of the effective content (base + override body)
+	identityLoadedAt?: string; // ISO timestamp of the last effective-identity write
 	createdAt: string;
 	updatedAt: string;
 };
@@ -332,13 +326,13 @@ export type RootReceiptEntry = {
 // Row 68: emissions and back-off decrements are interval-spaced via nextStallNudgeAt — pump tick
 // rate no longer drives the cadence (mirrors the goal nudge's nextGoalNudgeAt gate).
 export type SwarmTaskStallState = {
-	taskId: string;                      // safe-id (validated by formatNotifyKey)
-	consecutiveNoResolveNudges: number;  // monotonic; reset when node leaves ready+unassigned or task leaves in_progress
-	nudgeSeq?: number;                   // monotonic emit counter (NEVER reset) — idempotency key component so each nudge gets a fresh dedupe slot
-	lastNudgeAt?: string;                // ISO; set on every successful nudge emission
-	lastResolvedAt?: string;             // ISO; set on every successful counter reset
-	backoffTicksRemaining?: number;      // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next interval opportunit(ies)
-	nextStallNudgeAt?: string;           // ISO; earliest ts the next stall nudge/backoff decrement may fire (interval spacing)
+	taskId: string; // safe-id (validated by formatNotifyKey)
+	consecutiveNoResolveNudges: number; // monotonic; reset when node leaves ready+unassigned or task leaves in_progress
+	nudgeSeq?: number; // monotonic emit counter (NEVER reset) — idempotency key component so each nudge gets a fresh dedupe slot
+	lastNudgeAt?: string; // ISO; set on every successful nudge emission
+	lastResolvedAt?: string; // ISO; set on every successful counter reset
+	backoffTicksRemaining?: number; // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next interval opportunit(ies)
+	nextStallNudgeAt?: string; // ISO; earliest ts the next stall nudge/backoff decrement may fire (interval spacing)
 };
 
 // Per-(taskId, nodeId) monotonic seq store for the graph-advance safety net (Issue F2,
@@ -352,9 +346,9 @@ export type SwarmTaskStallState = {
 export type SwarmGraphAdvanceNudgeState = {
 	[taskId: string]: {
 		[nodeId: string]: {
-			nudgeSeq?: number;        // monotonic emit counter (NEVER reset)
-			lastNudgeAt?: string;     // ISO; set on every successful emit
-			lastResolvedAt?: string;  // ISO; set when node leaves ready+unassigned (seq survives)
+			nudgeSeq?: number; // monotonic emit counter (NEVER reset)
+			lastNudgeAt?: string; // ISO; set on every successful emit
+			lastResolvedAt?: string; // ISO; set when node leaves ready+unassigned (seq survives)
 		};
 	};
 };
@@ -367,10 +361,10 @@ export type SwarmGraphAdvanceNudgeState = {
 // root turn that ends stopReason="stop" resets the consecutiveNoResolveNudges counter and
 // clears back-off (turn_end branch in hooks.ts).
 export type SwarmGoal = {
-	id: string;                         // stable goalId (e.g. "goal-<ms>-<rand6>")
-	text: string;                       // the goal text the root set
-	setAt: string;                      // ISO; durable on set
-	setBy: string;                      // agentId that set it (root in practice; recorded for audit)
+	id: string; // stable goalId (e.g. "goal-<ms>-<rand6>")
+	text: string; // the goal text the root set
+	setAt: string; // ISO; durable on set
+	setBy: string; // agentId that set it (root in practice; recorded for audit)
 	// Issue 81: durable origin metadata so a standing user goal cannot be silently cleared by
 	// batch workflow. Absent on pre-policy goals (== historical default; legacy goals treat as
 	// origin="root" for the guard, which is the LENIENT pre-policy path). New goals stamp
@@ -381,11 +375,11 @@ export type SwarmGoal = {
 	// guard but useful for audit traces. Optional; absent on pre-policy goals.
 	setByScope?: string;
 	consecutiveNoResolveNudges: number; // monotonic; reset on root turn_end {stop} resolve
-	nudgeSeq?: number;                   // monotonic emit counter (NEVER reset, survives resolve) — idempotency key component so each nudge gets a fresh dedupe slot
-	nudgeIntervalMs?: number;           // optional durable per-goal idle interval override; positive integer milliseconds only
-	lastNudgeAt?: string;               // ISO; set on every successful nudge emission
-	lastResolvedAt?: string;            // ISO; set on every successful counter reset
-	backoffTicksRemaining?: number;     // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
+	nudgeSeq?: number; // monotonic emit counter (NEVER reset, survives resolve) — idempotency key component so each nudge gets a fresh dedupe slot
+	nudgeIntervalMs?: number; // optional durable per-goal idle interval override; positive integer milliseconds only
+	lastNudgeAt?: string; // ISO; set on every successful nudge emission
+	lastResolvedAt?: string; // ISO; set on every successful counter reset
+	backoffTicksRemaining?: number; // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
 	// R16 (2026-09-02): track root turns that did NOT resolve the goal (pure ack text or
 	// silent) so dashboards can distinguish ack from resolve. Not used by the evaluator — purely
 	// observational metadata that mirrors the `goal.nudge.turn_no_resolve_action` trace.
@@ -442,8 +436,8 @@ export type SwarmIdleNudgeState = {
 // (NOT on this record) because NodeJS.Timeout is not JSON-serializable.
 export type RecentSpawn = {
 	agentId: string;
-	spawnedAt: string;     // ISO; mirrors agent.createdAt for the just-created record
-	deadlineAt: string;    // ISO; spawnedAt + ORPHAN_SPAWN_WARNING_TIMEOUT_MS
+	spawnedAt: string; // ISO; mirrors agent.createdAt for the just-created record
+	deadlineAt: string; // ISO; spawnedAt + ORPHAN_SPAWN_WARNING_TIMEOUT_MS
 	// Issue 16: identity of the spawning root session, stamped unconditionally at
 	// armOrphanWatch time. The pre-clear predicate in swarm_assign_task compares these against
 	// process.pid + process.env.PI_SWARM_SESSION_STARTED_AT at compare time. Both fields are
@@ -468,7 +462,10 @@ export type SwarmState = {
 	// root-context session (the long-lived PM, a validation `pi -p` run, another PM lane) tracks
 	// the ids IT has surfaced, so one session cannot mark a notification consumed and starve a different
 	// PM session. Separate from `delivered` (the check_mailbox/ack ledger).
-	rootPumpSessions?: Record<string, { ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string }>;
+	rootPumpSessions?: Record<
+		string,
+		{ ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string }
+	>;
 	// Per-worker surfaced ledger for the session-start mailbox auto-surface (idempotent per message).
 	agentSurfaced?: Record<string, string[]>;
 	// Durable recipient receipt ledger for the root mailbox consumer (issue 11). Primary
@@ -591,25 +588,25 @@ export type TaskGateStatus = "open" | "passed" | "failed" | "waived";
 export type ReminderRecord = {
 	reminderId: string;
 	sentAt: string;
-	messageId: string;          // the reminder message sent to the assignee
-	attemptId: string;          // ties the reminder to one attempt lease
-	noProgressSince: string;    // anchor timestamp evidence at send time
+	messageId: string; // the reminder message sent to the assignee
+	attemptId: string; // ties the reminder to one attempt lease
+	noProgressSince: string; // anchor timestamp evidence at send time
 };
 
 export type TaskNodeAttempt = {
-	attemptId: string;           // Unique lease identity (UUID), server-generated
-	attemptNumber: number;       // Monotonic counter (1, 2, 3...)
+	attemptId: string; // Unique lease identity (UUID), server-generated
+	attemptNumber: number; // Monotonic counter (1, 2, 3...)
 	assignmentMessageId: string; // Message that carried this assignment
-	assignee: string;            // Agent who was assigned
-	assignedAt: string;           // ISO timestamp
-	supersededAt?: string;       // When this attempt was superseded (if applicable)
-	supersededBy?: string;        // Attempt ID or "<rework>" that superseded this one
+	assignee: string; // Agent who was assigned
+	assignedAt: string; // ISO timestamp
+	supersededAt?: string; // When this attempt was superseded (if applicable)
+	supersededBy?: string; // Attempt ID or "<rework>" that superseded this one
 	status: "active" | "superseded" | "completed" | "failed" | "cancelled" | "skipped";
-	outcome?: string;             // Final outcome if terminal
-	lastActivityAt?: string;      // Last update timestamp
+	outcome?: string; // Final outcome if terminal
+	lastActivityAt?: string; // Last update timestamp
 	// Additive lease-audit fields (file-ownership policy, roadmap issue 4). `status` remains the
 	// authoritative lifecycle field; these are optional audit annotations only.
-	releasedAt?: string;          // When the attempt's write-scope lease ended (any reason)
+	releasedAt?: string; // When the attempt's write-scope lease ended (any reason)
 	releaseReason?: "reassign" | "rework" | "terminal" | "cancel" | "root_override";
 	// Bounded worker reminder (roadmap issue 5): at most one per attempt, permanently. Presence of
 	// this record means the one-reminder budget for this attempt is consumed; it never mutates node
@@ -873,9 +870,18 @@ export type NodeClosureSummary = {
 };
 
 export type NodeInput = {
-	status?: string; role?: string; dependsOn?: string[]; allowedFiles?: string[]; allowedFilesFrom?: string;
-	readArtifacts?: string[]; writeArtifacts?: string[]; maxAttempts?: number; terminal?: boolean;
-	assignee?: string; assigneePolicy?: string; outcome?: string;
+	status?: string;
+	role?: string;
+	dependsOn?: string[];
+	allowedFiles?: string[];
+	allowedFilesFrom?: string;
+	readArtifacts?: string[];
+	writeArtifacts?: string[];
+	maxAttempts?: number;
+	terminal?: boolean;
+	assignee?: string;
+	assigneePolicy?: string;
+	outcome?: string;
 };
 
 export type MetricContract = {

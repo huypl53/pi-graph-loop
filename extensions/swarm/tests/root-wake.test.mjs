@@ -28,17 +28,39 @@ const { deliver } = await import(join(here, "..", "src/mailbox.ts"));
 
 const scratch = mkdtempSync(join(tmpdir(), `swarm-root-wake-${process.pid}-${Date.now()}`));
 
-let pass = 0, fail = 0;
-const ok = (name, cond, extra) => { if (cond) { pass++; } else { fail++; console.error("  FAIL:", name, extra !== undefined ? JSON.stringify(extra) : ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, extra) => {
+	if (cond) {
+		pass++;
+	} else {
+		fail++;
+		console.error("  FAIL:", name, extra !== undefined ? JSON.stringify(extra) : "");
+	}
+};
 
 const setupScratch = (initial = {}) => {
 	const p = paths(scratch);
 	mkdirSync(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	writeFileSync(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify({
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
-		agents: {}, delivered: {}, messages: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		...initial,
-	}, null, 2));
+	writeFileSync(
+		join(scratch, ".pi/swarm/swarm-state.json"),
+		JSON.stringify(
+			{
+				version: 1,
+				swarmId: "test",
+				cwd: scratch,
+				tmuxSession: "test",
+				agents: {},
+				delivered: {},
+				messages: {},
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+				...initial,
+			},
+			null,
+			2,
+		),
+	);
 	return p;
 };
 
@@ -47,7 +69,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readEvents = (p) => {
 	const evPath = join(scratch, ".pi/swarm/traces/events.jsonl");
 	if (!existsSync(evPath)) return [];
-	return readFileSync(evPath, "utf8").trim().split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return readFileSync(evPath, "utf8")
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 };
 
 // === C3: pi.exec argv spy (tmux invocations) ===
@@ -72,16 +105,33 @@ const readEvents = (p) => {
 	process.env.PI_SWARM_IS_ROOT = "1";
 	const { registerSwarmHooks } = await import(join(here, "..", "src/hooks.ts"));
 	const handlers = [];
-	const spy = { exec: pi.exec, registerTool: () => {}, registerCommand: () => {}, on: (e, fn) => handlers.push({ ev: e, fn }), sendMessage: pi.sendMessage };
+	const spy = {
+		exec: pi.exec,
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: (e, fn) => handlers.push({ ev: e, fn }),
+		sendMessage: pi.sendMessage,
+	};
 	registerSwarmHooks(spy);
 
 	const p = setupScratch();
 	const sessionStart = handlers.find((h) => h.ev === "session_start")?.fn;
 	ok("session_start handler registered", typeof sessionStart === "function");
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "glm-5.1", provider: "zai-coding-cn" },
+	};
 
 	tmuxInvocations.length = 0;
-	try { await sessionStart({}, ctx); } catch(e) { /* may throw if leader check fails in test mode */ }
+	try {
+		await sessionStart({}, ctx);
+	} catch (e) {
+		/* may throw if leader check fails in test mode */
+	}
 	ok("C3: tmux.ts helpers NEVER called from root pump session_start", tmuxInvocations.length === 0, { count: tmuxInvocations.length });
 }
 
@@ -90,21 +140,49 @@ const readEvents = (p) => {
 	console.log("\n[C5] Reassign race — later assignment supersedes prior");
 	const nowMs = Date.now();
 	const task = {
-		version: 1, taskId: "task-reassign", title: "test", goal: "test", status: "in_progress", priority: "normal",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), owner: "root", workflow: "feature-dev",
-		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "node1", currentNodes: [],
+		version: 1,
+		taskId: "task-reassign",
+		title: "test",
+		goal: "test",
+		status: "in_progress",
+		priority: "normal",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "node1",
+		currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: {
-			node1: { status: "assigned", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1, assignee: "worker-a" },
+			node1: {
+				status: "assigned",
+				role: "worker",
+				dependsOn: [],
+				readArtifacts: [],
+				writeArtifacts: [],
+				messageIds: [],
+				attempts: 1,
+				assignee: "worker-a",
+			},
 		},
 		edges: [],
-		handoffs: [
-			{ toNode: "node1", kind: "assign", idempotencyKey: "key-B", by: "root", at: new Date(nowMs - 1000).toISOString() },
-		],
-		gates: {}, editLocks: {}, evidence: {},
+		handoffs: [{ toNode: "node1", kind: "assign", idempotencyKey: "key-B", by: "root", at: new Date(nowMs - 1000).toISOString() }],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 	const taskIndex = { "task-reassign": task };
-	const msg = { id: "mA", to: "root", requiresAck: true, conversationId: "task:task-reassign:node1", idempotencyKey: "key-A", status: "injected" };
+	const msg = {
+		id: "mA",
+		to: "root",
+		requiresAck: true,
+		conversationId: "task:task-reassign:node1",
+		idempotencyKey: "key-A",
+		status: "injected",
+	};
 	const result = isActionableRootMessage(msg, taskIndex, nowMs, {}, false);
 	ok("C5: reassign race suppressed (node_reassigned)", result.ok === false && result.reason === "node_reassigned", result);
 }
@@ -113,12 +191,30 @@ const readEvents = (p) => {
 {
 	console.log("\n[C6] Batch suppression trace — emitted on every tick including total=0");
 	const task = {
-		version: 1, taskId: "task-node-terminal", title: "test", goal: "test", status: "in_progress", priority: "normal",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), owner: "root", workflow: "feature-dev",
-		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
+		version: 1,
+		taskId: "task-node-terminal",
+		title: "test",
+		goal: "test",
+		status: "in_progress",
+		priority: "normal",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "n1",
+		currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
-		nodes: { n1: { status: "done", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 } },
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		nodes: {
+			n1: { status: "done", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 },
+		},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 	const taskIndex = { "task-node-terminal": task };
 	const msg = { id: "m-done", to: "root", requiresAck: true, conversationId: "task:task-node-terminal:n1", status: "injected" };
@@ -127,12 +223,30 @@ const readEvents = (p) => {
 	ok("C6: terminal-node message suppressed (node_terminal)", result.ok === false && result.reason === "node_terminal", result);
 
 	const task2 = {
-		version: 1, taskId: "task-done", title: "test", goal: "test", status: "done", priority: "normal",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), owner: "root", workflow: "feature-dev",
-		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
+		version: 1,
+		taskId: "task-done",
+		title: "test",
+		goal: "test",
+		status: "done",
+		priority: "normal",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "n1",
+		currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
-		nodes: { n1: { status: "done", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 } },
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		nodes: {
+			n1: { status: "done", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 },
+		},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 	const taskIndex2 = { "task-done": task2 };
 	const msg2 = { id: "m-done2", to: "root", requiresAck: true, conversationId: "task:task-done:n1", status: "injected" };
@@ -144,7 +258,14 @@ const readEvents = (p) => {
 	{
 		const p = setupScratch();
 		const sentMessages = [];
-		const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
+		const ctx = {
+			cwd: scratch,
+			mode: "tui",
+			isIdle: () => true,
+			hasUI: false,
+			ui: { setStatus: () => {} },
+			model: { id: "glm-5.1", provider: "zai-coding-cn" },
+		};
 		// Seed root as leader so the second-line defense doesn't deny
 		await withLock(p, async () => {
 			const st = await readState(p, scratch);
@@ -152,12 +273,24 @@ const readEvents = (p) => {
 			heartbeatRootLeader(st, Date.now(), process.pid, "test_seed");
 			await writeState(p, st);
 		});
-		await pumpRootMailbox({ sendMessage: (m, o) => sentMessages.push({ customType: m.customType, options: o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test");
+		await pumpRootMailbox(
+			{
+				sendMessage: (m, o) => sentMessages.push({ customType: m.customType, options: o }),
+				exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+			},
+			ctx,
+			p,
+			"test",
+		);
 		const evs = readEvents(p);
 		const batchTraces = evs.filter((e) => e.event === "notification.batch.suppressed");
 		ok("C6: notification.batch.suppressed emitted on every tick", batchTraces.length >= 1, { count: batchTraces.length });
 		const last = batchTraces[batchTraces.length - 1];
-		ok("C6: batch trace shape has ts/cid/total/counts", !!(last && last.ts && last.cid && typeof last.total === "number" && last.counts), last);
+		ok(
+			"C6: batch trace shape has ts/cid/total/counts",
+			!!(last && last.ts && last.cid && typeof last.total === "number" && last.counts),
+			last,
+		);
 	}
 }
 
@@ -169,7 +302,14 @@ const readEvents = (p) => {
 	// and exercises the inner run() catch classification by stubbing pumpRootMailbox to throw.
 
 	const p = setupScratch();
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "glm-5.1", provider: "zai-coding-cn" },
+	};
 	process.env.PI_SWARM_AGENT_ID = "root";
 	process.env.PI_SWARM_IS_ROOT = "1";
 
@@ -187,9 +327,10 @@ const readEvents = (p) => {
 		// For C2/C7 we'll use a direct test of the classification regex via the source:
 		const { execSync } = await import("node:child_process");
 		const hooksSrc = readFileSync(join(here, "..", "src/hooks.ts"), "utf8");
-		const hasClassify = /const isStaleCtx = \/stale after session\/i\.test\(msg\)/.test(hooksSrc)
-			&& /const isIoTransient = \/EACCES\|ENOSPC\|EROFS\|EAGAIN\|EBUSY\|ENFILE\|EMFILE\//.test(hooksSrc)
-			&& /const isLeaderDenied = msg\.startsWith\("ROOT_LEADER_DENIED"\)/.test(hooksSrc);
+		const hasClassify =
+			/const isStaleCtx = \/stale after session\/i\.test\(msg\)/.test(hooksSrc) &&
+			/const isIoTransient = \/EACCES\|ENOSPC\|EROFS\|EAGAIN\|EBUSY\|ENFILE\|EMFILE\//.test(hooksSrc) &&
+			/const isLeaderDenied = msg\.startsWith\("ROOT_LEADER_DENIED"\)/.test(hooksSrc);
 		ok("C2/C7: hooks.ts run() catch classification has stale-ctx/leader-denied/IO branches", hasClassify);
 
 		// Runtime assertion: throw synthetic errors at startRootPump's inner run() and verify
@@ -205,12 +346,13 @@ const readEvents = (p) => {
 			const m = String((msg && msg.message) || msg);
 			const isStaleCtx = /stale after session/i.test(m);
 			const isLeaderDenied = m.startsWith("ROOT_LEADER_DENIED");
-			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) ||
-								  /EACCES|ENOSPC|EROFS/.test(m);
+			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) || /EACCES|ENOSPC|EROFS/.test(m);
 			return { isStaleCtx, isLeaderDenied, isIoTransient, shouldStop: isStaleCtx || (!isLeaderDenied && !isIoTransient) };
 		};
-		const eacces = new Error("EACCES: permission denied, open 'x'"); eacces.code = "EACCES";
-		const enospc = new Error("ENOSPC: no space left on device"); enospc.code = "ENOSPC";
+		const eacces = new Error("EACCES: permission denied, open 'x'");
+		eacces.code = "EACCES";
+		const enospc = new Error("ENOSPC: no space left on device");
+		enospc.code = "ENOSPC";
 		const generic = new Error("something else");
 		const stale = new Error("This extension ctx is stale after session replacement or reload");
 
@@ -228,16 +370,37 @@ const readEvents = (p) => {
 	// Reset consumerReceipts + messages + events in scratch so prior blocks don't pollute the count.
 	const p = paths(scratch);
 	mkdirSync(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	writeFileSync(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify({
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
-		agents: {}, delivered: {}, messages: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		consumerReceipts: { root: { entries: {}, revision: 0 } },
-	}, null, 2));
+	writeFileSync(
+		join(scratch, ".pi/swarm/swarm-state.json"),
+		JSON.stringify(
+			{
+				version: 1,
+				swarmId: "test",
+				cwd: scratch,
+				tmuxSession: "test",
+				agents: {},
+				delivered: {},
+				messages: {},
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+				consumerReceipts: { root: { entries: {}, revision: 0 } },
+			},
+			null,
+			2,
+		),
+	);
 	// Clear any leftover traces/events from earlier blocks
 	const tracesDir = join(scratch, ".pi/swarm/traces");
 	rmSync(tracesDir, { recursive: true, force: true });
 	mkdirSync(tracesDir, { recursive: true });
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "glm-5.1", provider: "zai-coding-cn" },
+	};
 
 	// Seed exactly 4 legacy requiresAck:true messages in legacy state (revision absent so back-fill runs).
 	// 1: acked → back-fill writes a receipt
@@ -248,24 +411,67 @@ const readEvents = (p) => {
 	const taskIdLive = "task-live-legacy";
 	const nowMs = Date.now();
 	const cancelledTask = {
-		version: 1, taskId: taskIdCancelled, title: "t", goal: "t", status: "cancelled", priority: "normal",
-		createdAt: new Date(nowMs - 10000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString(),
-		owner: "root", workflow: "feature-dev",
-		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
+		version: 1,
+		taskId: taskIdCancelled,
+		title: "t",
+		goal: "t",
+		status: "cancelled",
+		priority: "normal",
+		createdAt: new Date(nowMs - 10000).toISOString(),
+		updatedAt: new Date(nowMs - 5000).toISOString(),
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "n1",
+		currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
-		nodes: { n1: { status: "cancelled", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 } },
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		nodes: {
+			n1: { status: "cancelled", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 },
+		},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 	const liveTask = {
-		version: 1, taskId: taskIdLive, title: "t", goal: "t", status: "in_progress", priority: "normal",
-		createdAt: new Date(nowMs - 10000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString(),
-		owner: "root", workflow: "feature-dev",
-		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
+		version: 1,
+		taskId: taskIdLive,
+		title: "t",
+		goal: "t",
+		status: "in_progress",
+		priority: "normal",
+		createdAt: new Date(nowMs - 10000).toISOString(),
+		updatedAt: new Date(nowMs - 5000).toISOString(),
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "n1",
+		currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		// node status "assigned" so reconcileGraphAdvanceLocked (which fires on ready+unassigned) doesn't
 		// generate a 5th nudge message during the migration back-fill.
-		nodes: { n1: { status: "assigned", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1, assignee: "worker-1" } },
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		nodes: {
+			n1: {
+				status: "assigned",
+				role: "worker",
+				dependsOn: [],
+				readArtifacts: [],
+				writeArtifacts: [],
+				messageIds: [],
+				attempts: 1,
+				assignee: "worker-1",
+			},
+		},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 
 	await withLock(p, async () => {
@@ -283,10 +489,45 @@ const readEvents = (p) => {
 
 		// Seed 4 legacy messages
 		const ackedAt = new Date(nowMs - 1000).toISOString();
-		st.messages["m-acked"] = { id: "m-acked", from: "worker-1", to: "root", status: "acked", requiresAck: true, ackedAt, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: ackedAt };
-		st.messages["m-dead"] = { id: "m-dead", from: "worker-1", to: "root", status: "dead_letter", requiresAck: true, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString() };
-		st.messages["m-cancelled"] = { id: "m-cancelled", from: "worker-1", to: "root", status: "injected", requiresAck: true, conversationId: `task:${taskIdCancelled}:n1`, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString() };
-		st.messages["m-live"] = { id: "m-live", from: "worker-1", to: "root", status: "injected", requiresAck: true, conversationId: `task:${taskIdLive}:n1`, createdAt: new Date(nowMs - 5000).toISOString(), updatedAt: new Date(nowMs - 5000).toISOString() };
+		st.messages["m-acked"] = {
+			id: "m-acked",
+			from: "worker-1",
+			to: "root",
+			status: "acked",
+			requiresAck: true,
+			ackedAt,
+			createdAt: new Date(nowMs - 5000).toISOString(),
+			updatedAt: ackedAt,
+		};
+		st.messages["m-dead"] = {
+			id: "m-dead",
+			from: "worker-1",
+			to: "root",
+			status: "dead_letter",
+			requiresAck: true,
+			createdAt: new Date(nowMs - 5000).toISOString(),
+			updatedAt: new Date(nowMs - 5000).toISOString(),
+		};
+		st.messages["m-cancelled"] = {
+			id: "m-cancelled",
+			from: "worker-1",
+			to: "root",
+			status: "injected",
+			requiresAck: true,
+			conversationId: `task:${taskIdCancelled}:n1`,
+			createdAt: new Date(nowMs - 5000).toISOString(),
+			updatedAt: new Date(nowMs - 5000).toISOString(),
+		};
+		st.messages["m-live"] = {
+			id: "m-live",
+			from: "worker-1",
+			to: "root",
+			status: "injected",
+			requiresAck: true,
+			conversationId: `task:${taskIdLive}:n1`,
+			createdAt: new Date(nowMs - 5000).toISOString(),
+			updatedAt: new Date(nowMs - 5000).toISOString(),
+		};
 
 		// Append corresponding entries to the root mailbox JSONL so the pump's readMailboxCached
 		// returns them. Format: one JSON per line.
@@ -296,7 +537,18 @@ const readEvents = (p) => {
 			{ id: "m-dead", to: "root", requiresAck: true, body: "dead" },
 			{ id: "m-cancelled", to: "root", requiresAck: true, body: "cancelled", conversationId: `task:${taskIdCancelled}:n1` },
 			{ id: "m-live", to: "root", requiresAck: true, body: "live", conversationId: `task:${taskIdLive}:n1` },
-		].map((m) => JSON.stringify({ swarmId: "test", from: "worker-1", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date(nowMs - 5000).toISOString(), headers: {}, ...m }));
+		].map((m) =>
+			JSON.stringify({
+				swarmId: "test",
+				from: "worker-1",
+				priority: "normal",
+				type: "swarm.message",
+				schemaVersion: 1,
+				createdAt: new Date(nowMs - 5000).toISOString(),
+				headers: {},
+				...m,
+			}),
+		);
 		writeFileSync(mailboxFile, lines.join("\n") + "\n");
 
 		// Reset consumerReceipts so the migration back-fill triggers (revision === 0)
@@ -321,7 +573,9 @@ const readEvents = (p) => {
 	// Verify revision was bumped. Back-fill sets revision to 1; the standard surface path bumps it
 	// again after a successful m-live delivery, so we expect 2 here.
 	const stAfter = await readState(p, scratch);
-	ok("C4: consumerReceipts.root.revision >= 1 (back-fill ran)", (stAfter.consumerReceipts?.root?.revision ?? 0) >= 1, { rev: stAfter.consumerReceipts?.root?.revision });
+	ok("C4: consumerReceipts.root.revision >= 1 (back-fill ran)", (stAfter.consumerReceipts?.root?.revision ?? 0) >= 1, {
+		rev: stAfter.consumerReceipts?.root?.revision,
+	});
 	const entries = stAfter.consumerReceipts?.root?.entries || {};
 	ok("C4: m-acked got a receipt entry (back-fill)", !!entries["m-acked"]);
 	ok("C4: m-dead got a receipt entry (back-fill)", !!entries["m-dead"]);
@@ -345,35 +599,143 @@ const readEvents = (p) => {
 		heartbeatRootLeader(st, nowMs, process.pid, "test_seed_c8");
 		st.idleNudgeState = { allIdleSinceAt: new Date(nowMs - 60_000).toISOString() };
 		const goalId = "goal-coalesce";
-		st.goal = { id: goalId, text: "coalesce backlog", setAt: new Date(nowMs - 120_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0 };
-		st.messages["msg-old"] = { id: "msg-old", from: "root", to: "root", status: "injected", createdAt: new Date(nowMs - 120_000).toISOString(), updatedAt: new Date(nowMs - 120_000).toISOString(), requiresAck: false, subject: "stale goal", body: "stale", idempotencyKey: `goal:${goalId}:nudge:idle-streak:1` };
-		st.messages["msg-fresh-1"] = { id: "msg-fresh-1", from: "root", to: "root", status: "injected", createdAt: new Date(nowMs - 5_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), requiresAck: false, subject: "fresh goal 1", body: "fresh", idempotencyKey: `goal:${goalId}:nudge:idle-streak:2` };
-		st.messages["msg-fresh-2"] = { id: "msg-fresh-2", from: "root", to: "root", status: "injected", createdAt: new Date(nowMs - 4_000).toISOString(), updatedAt: new Date(nowMs - 4_000).toISOString(), requiresAck: false, subject: "fresh goal 2", body: "fresh", idempotencyKey: `goal:${goalId}:nudge:idle-streak:3` };
+		st.goal = {
+			id: goalId,
+			text: "coalesce backlog",
+			setAt: new Date(nowMs - 120_000).toISOString(),
+			setBy: "root",
+			consecutiveNoResolveNudges: 0,
+		};
+		st.messages["msg-old"] = {
+			id: "msg-old",
+			from: "root",
+			to: "root",
+			status: "injected",
+			createdAt: new Date(nowMs - 120_000).toISOString(),
+			updatedAt: new Date(nowMs - 120_000).toISOString(),
+			requiresAck: false,
+			subject: "stale goal",
+			body: "stale",
+			idempotencyKey: `goal:${goalId}:nudge:idle-streak:1`,
+		};
+		st.messages["msg-fresh-1"] = {
+			id: "msg-fresh-1",
+			from: "root",
+			to: "root",
+			status: "injected",
+			createdAt: new Date(nowMs - 5_000).toISOString(),
+			updatedAt: new Date(nowMs - 5_000).toISOString(),
+			requiresAck: false,
+			subject: "fresh goal 1",
+			body: "fresh",
+			idempotencyKey: `goal:${goalId}:nudge:idle-streak:2`,
+		};
+		st.messages["msg-fresh-2"] = {
+			id: "msg-fresh-2",
+			from: "root",
+			to: "root",
+			status: "injected",
+			createdAt: new Date(nowMs - 4_000).toISOString(),
+			updatedAt: new Date(nowMs - 4_000).toISOString(),
+			requiresAck: false,
+			subject: "fresh goal 2",
+			body: "fresh",
+			idempotencyKey: `goal:${goalId}:nudge:idle-streak:3`,
+		};
 		st.delivered.root = [];
 		st.consumerReceipts = { root: { entries: {}, revision: 1 } };
 		await writeState(p, st);
 		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
-		const lines = ["msg-old", "msg-fresh-1", "msg-fresh-2"].map((id) => JSON.stringify({ swarmId: "test", from: "root", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id, to: "root", subject: st.messages[id].subject, body: st.messages[id].body, requiresAck: false, createdAt: st.messages[id].createdAt, updatedAt: st.messages[id].updatedAt, idempotencyKey: st.messages[id].idempotencyKey }));
+		const lines = ["msg-old", "msg-fresh-1", "msg-fresh-2"].map((id) =>
+			JSON.stringify({
+				swarmId: "test",
+				from: "root",
+				priority: "normal",
+				type: "swarm.message",
+				schemaVersion: 1,
+				headers: {},
+				id,
+				to: "root",
+				subject: st.messages[id].subject,
+				body: st.messages[id].body,
+				requiresAck: false,
+				createdAt: st.messages[id].createdAt,
+				updatedAt: st.messages[id].updatedAt,
+				idempotencyKey: st.messages[id].idempotencyKey,
+			}),
+		);
 		writeFileSync(mailboxFile, lines.join("\n") + "\n");
 	});
 	const sentMessages = [];
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
-	await pumpRootMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8");
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "glm-5.1", provider: "zai-coding-cn" },
+	};
+	await pumpRootMailbox(
+		{ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) },
+		ctx,
+		p,
+		"test_c8",
+	);
 	let evs = readEvents(p);
-	ok("C8: stale backlog item suppressed", evs.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface" && e.messageId === "msg-old").length === 1, evs.filter((e) => e.event === "notification.stale.suppressed"));
-	ok("C8: duplicate backlog coalesced", evs.some((e) => e.event === "notification.coalesced.suppressed" && e.count === 1), evs.filter((e) => e.event === "notification.coalesced.suppressed"));
-	ok("C8: only one fresh surfaced message sent", sentMessages.length === 1, sentMessages.map((x) => x.o));
+	ok(
+		"C8: stale backlog item suppressed",
+		evs.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface" && e.messageId === "msg-old")
+			.length === 1,
+		evs.filter((e) => e.event === "notification.stale.suppressed"),
+	);
+	ok(
+		"C8: duplicate backlog coalesced",
+		evs.some((e) => e.event === "notification.coalesced.suppressed" && e.count === 1),
+		evs.filter((e) => e.event === "notification.coalesced.suppressed"),
+	);
+	ok(
+		"C8: only one fresh surfaced message sent",
+		sentMessages.length === 1,
+		sentMessages.map((x) => x.o),
+	);
 
 	// Receipt gate regression: a durable receipt suppresses ack_missing on task sweep.
 	const { reconcileTasks } = await import(join(here, "..", "src/reconcile.ts"));
 	const receiptTaskId = "task-receipt-gate";
 	const receiptTask = {
-		version: 1, taskId: receiptTaskId, title: "receipt gate", goal: "receipt gate", status: "in_progress", priority: "normal",
-		createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), owner: "root", workflow: "feature-dev",
-		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
+		version: 1,
+		taskId: receiptTaskId,
+		title: "receipt gate",
+		goal: "receipt gate",
+		status: "in_progress",
+		priority: "normal",
+		createdAt: new Date(nowMs - 20_000).toISOString(),
+		updatedAt: new Date(nowMs - 5_000).toISOString(),
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "n1",
+		currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
-		nodes: { n1: { status: "assigned", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: ["msg-receipt"], attempts: 1, assignee: "worker-1" } },
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		nodes: {
+			n1: {
+				status: "assigned",
+				role: "worker",
+				dependsOn: [],
+				readArtifacts: [],
+				writeArtifacts: [],
+				messageIds: ["msg-receipt"],
+				attempts: 1,
+				assignee: "worker-1",
+			},
+		},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
@@ -381,22 +743,71 @@ const readEvents = (p) => {
 		const tp = taskPaths(p, receiptTaskId);
 		mkdirSync(tp.root, { recursive: true });
 		writeTaskState(tp, receiptTask);
-		st.messages["msg-receipt"] = { id: "msg-receipt", from: "worker-1", to: "root", status: "injected", requiresAck: true, conversationId: `task:${receiptTaskId}:n1`, createdAt: new Date(nowMs - 400_000).toISOString(), updatedAt: new Date(nowMs - 400_000).toISOString(), attempts: 1 };
-		st.consumerReceipts = { root: { entries: { "msg-receipt": { surfacedAt: new Date(nowMs - 300_000).toISOString(), requiresAck: true, conversationId: `task:${receiptTaskId}:n1`, fingerprint: "fp" } }, revision: 1 } };
+		st.messages["msg-receipt"] = {
+			id: "msg-receipt",
+			from: "worker-1",
+			to: "root",
+			status: "injected",
+			requiresAck: true,
+			conversationId: `task:${receiptTaskId}:n1`,
+			createdAt: new Date(nowMs - 400_000).toISOString(),
+			updatedAt: new Date(nowMs - 400_000).toISOString(),
+			attempts: 1,
+		};
+		st.consumerReceipts = {
+			root: {
+				entries: {
+					"msg-receipt": {
+						surfacedAt: new Date(nowMs - 300_000).toISOString(),
+						requiresAck: true,
+						conversationId: `task:${receiptTaskId}:n1`,
+						fingerprint: "fp",
+					},
+				},
+				revision: 1,
+			},
+		};
 		await writeState(p, st);
 	});
-	const receiptActions = await reconcileTasks({ exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, p, await readState(p, scratch), { dryRun: true, nowMs });
-	ok("C8: receipted message skipped by ack_missing sweep", !receiptActions.some((a) => a.reason.includes("ack_missing") || a.action === "task_node_nudge"), receiptActions);
+	const receiptActions = await reconcileTasks(
+		{ exec: async () => ({ code: 0, stdout: "", stderr: "" }) },
+		p,
+		await readState(p, scratch),
+		{ dryRun: true, nowMs },
+	);
+	ok(
+		"C8: receipted message skipped by ack_missing sweep",
+		!receiptActions.some((a) => a.reason.includes("ack_missing") || a.action === "task_node_nudge"),
+		receiptActions,
+	);
 
 	// Stale trace should be one-shot across repeated pump ticks for the same stale message.
 	const staleTaskId = "task-stale-trace";
 	const staleTask = {
-		version: 1, taskId: staleTaskId, title: "stale trace", goal: "stale trace", status: "done", priority: "normal",
-		createdAt: new Date(nowMs - 30_000).toISOString(), updatedAt: new Date(nowMs - 5_000).toISOString(), owner: "root", workflow: "feature-dev",
-		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "n1", currentNodes: [],
+		version: 1,
+		taskId: staleTaskId,
+		title: "stale trace",
+		goal: "stale trace",
+		status: "done",
+		priority: "normal",
+		createdAt: new Date(nowMs - 30_000).toISOString(),
+		updatedAt: new Date(nowMs - 5_000).toISOString(),
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "n1",
+		currentNodes: [],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
-		nodes: { n1: { status: "done", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 } },
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		nodes: {
+			n1: { status: "done", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1 },
+		},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
@@ -404,17 +815,43 @@ const readEvents = (p) => {
 		const tp = taskPaths(p, staleTaskId);
 		mkdirSync(tp.root, { recursive: true });
 		writeTaskState(tp, staleTask);
-		st.messages["msg-stale"] = { id: "msg-stale", from: "worker-1", to: "root", status: "injected", requiresAck: true, conversationId: `task:${staleTaskId}:n1`, createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 20_000).toISOString(), attempts: 1 };
+		st.messages["msg-stale"] = {
+			id: "msg-stale",
+			from: "worker-1",
+			to: "root",
+			status: "injected",
+			requiresAck: true,
+			conversationId: `task:${staleTaskId}:n1`,
+			createdAt: new Date(nowMs - 20_000).toISOString(),
+			updatedAt: new Date(nowMs - 20_000).toISOString(),
+			attempts: 1,
+		};
 		const mailboxFile = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
-		writeFileSync(mailboxFile, `${JSON.stringify({ swarmId: "test", from: "worker-1", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id: "msg-stale", to: "root", requiresAck: true, conversationId: `task:${staleTaskId}:n1`, createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 20_000).toISOString(), body: "stale", attempts: 1 })}
-`, { flag: "a" });
+		writeFileSync(
+			mailboxFile,
+			`${JSON.stringify({ swarmId: "test", from: "worker-1", priority: "normal", type: "swarm.message", schemaVersion: 1, headers: {}, id: "msg-stale", to: "root", requiresAck: true, conversationId: `task:${staleTaskId}:n1`, createdAt: new Date(nowMs - 20_000).toISOString(), updatedAt: new Date(nowMs - 20_000).toISOString(), body: "stale", attempts: 1 })}
+`,
+			{ flag: "a" },
+		);
 		await writeState(p, st);
 	});
-	await pumpRootMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8_repeat1");
+	await pumpRootMailbox(
+		{ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) },
+		ctx,
+		p,
+		"test_c8_repeat1",
+	);
 	evs = readEvents(p);
-	await pumpRootMailbox({ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) }, ctx, p, "test_c8_repeat2");
+	await pumpRootMailbox(
+		{ sendMessage: (m, o) => sentMessages.push({ m, o }), exec: async () => ({ code: 0, stdout: "", stderr: "" }) },
+		ctx,
+		p,
+		"test_c8_repeat2",
+	);
 	evs = readEvents(p);
-	const staleEvents = evs.filter((e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface" && e.messageId === "msg-stale");
+	const staleEvents = evs.filter(
+		(e) => e.event === "notification.stale.suppressed" && e.site === "root_pump.surface" && e.messageId === "msg-stale",
+	);
 	ok("C8: stale suppression traced once across repeated pump ticks", staleEvents.length === 1, staleEvents);
 }
 
@@ -423,12 +860,18 @@ const readEvents = (p) => {
 	console.log("\n[C1] pi.sendMessage for PM deliveries — NO pi.sendUserMessage for swarm-message");
 	// Runtime guard: grep the actual source files for `pi.sendUserMessage` use in any swarm-message
 	// delivery path. We exempt /swarm replay-audit slash command text output (the only allowed site).
-	const grepUserMessage = spawnSync("grep", ["-rn", "--include=*.ts", "-E", "pi\\.sendUserMessage", join(here, "..", "src")], { encoding: "utf8" });
+	const grepUserMessage = spawnSync("grep", ["-rn", "--include=*.ts", "-E", "pi\\.sendUserMessage", join(here, "..", "src")], {
+		encoding: "utf8",
+	});
 	const matches = (grepUserMessage.stdout || "").trim().split("\n").filter(Boolean);
 	const swarmMessageSites = matches.filter((line) => /reconcile\.ts|hooks\.ts/.test(line));
 	ok("C1: grep guard — no pi.sendUserMessage in reconcile.ts/hooks.ts", swarmMessageSites.length === 0, { matches });
 	// Also verify the pump uses pi.sendMessage with customType swarm-message (both on adjacent lines)
-	const grepPiSendMessage = spawnSync("grep", ["-nE", "-r", "--include=*.ts", "pi\\.sendMessage|swarm-message", join(here, "..", "src")], { encoding: "utf8" });
+	const grepPiSendMessage = spawnSync(
+		"grep",
+		["-nE", "-r", "--include=*.ts", "pi\\.sendMessage|swarm-message", join(here, "..", "src")],
+		{ encoding: "utf8" },
+	);
 	const lines = (grepPiSendMessage.stdout || "").trim().split("\n").filter(Boolean);
 	const found = lines.some((l) => /pi\.sendMessage/.test(l)) && lines.some((l) => /swarm-message/.test(l));
 	ok("C1: reconcile.ts uses pi.sendMessage with customType swarm-message", found, { hits: lines.length });
@@ -438,7 +881,14 @@ const readEvents = (p) => {
 {
 	console.log("\n[Watchdog] self-rescheduling setTimeout chain survives + re-arms via agent_settled");
 	const p = setupScratch();
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "glm-5.1", provider: "zai-coding-cn" },
+	};
 	process.env.PI_SWARM_AGENT_ID = "root";
 	process.env.PI_SWARM_IS_ROOT = "1";
 
@@ -474,7 +924,13 @@ const readEvents = (p) => {
 	// handler registered in hooks.ts.
 	// Re-import hooks to get a fresh agent_settled handler list:
 	const handlers = [];
-	const stub = { sendMessage: () => {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }), registerTool: () => {}, registerCommand: () => {}, on: (ev, fn) => handlers.push({ ev, fn }) };
+	const stub = {
+		sendMessage: () => {},
+		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: (ev, fn) => handlers.push({ ev, fn }),
+	};
 	const { registerSwarmHooks } = await import(join(here, "..", "src/hooks.ts"));
 	registerSwarmHooks(stub);
 	const agentSettled = handlers.find((h) => h.ev === "agent_settled")?.fn;
@@ -482,7 +938,10 @@ const readEvents = (p) => {
 	await agentSettled({}, ctx);
 	await sleep(7_000);
 	const evsAfterReinstall = readEvents(p).filter((e) => e.event === "mailbox.root_pump").length;
-	ok("Watchdog: agent_settled re-installs the watchdog after stop()", evsAfterReinstall > evsStopped, { stopped: evsStopped, reinstalled: evsAfterReinstall });
+	ok("Watchdog: agent_settled re-installs the watchdog after stop()", evsAfterReinstall > evsStopped, {
+		stopped: evsStopped,
+		reinstalled: evsAfterReinstall,
+	});
 
 	stopRootPump();
 }

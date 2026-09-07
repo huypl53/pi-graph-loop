@@ -1,5 +1,13 @@
 // === swarm/session.ts — auto-extracted from index.ts (verbatim bodies) ===
-import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	defineTool,
+	CONFIG_DIR_NAME,
+	truncateHead,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import type { ModelSlot, RotationConfig, RotationStrategy, SwarmSettings } from "./types.ts";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, SWARM_GUEST_ID } from "./constants.ts";
 import { ensureRoot } from "./identity.ts";
@@ -59,10 +67,11 @@ function parseModelPool(raw: unknown): ModelSlot[] | undefined {
 			label: typeof (s as any).label === "string" ? (s as any).label.trim() || undefined : undefined,
 			// Issue 22 roles-filter: forward the optional per-slot roleKind allow-list. Absent / empty
 			// preserved verbatim so slotMatchesRole can detect "no filter set". Malformed shapes become
-		// undefined (no filter applied); validateSwarmSettings reports slot_bad_roles for visibility.
-			roles: Array.isArray((s as any).roles) && (s as any).roles.every((r: any) => typeof r === "string" && r.length > 0)
-				? (s as any).roles.map((r: string) => r.trim()).filter(Boolean)
-				: undefined,
+			// undefined (no filter applied); validateSwarmSettings reports slot_bad_roles for visibility.
+			roles:
+				Array.isArray((s as any).roles) && (s as any).roles.every((r: any) => typeof r === "string" && r.length > 0)
+					? (s as any).roles.map((r: string) => r.trim()).filter(Boolean)
+					: undefined,
 			quotaResetMs: qrm,
 		});
 	}
@@ -72,9 +81,11 @@ function parseModelPool(raw: unknown): ModelSlot[] | undefined {
 function parseRotationConfig(raw: unknown): RotationConfig | undefined {
 	if (!raw || typeof raw !== "object") return undefined;
 	const r = raw as Record<string, any>;
-	const strategy = ["weighted", "round-robin", "sticky"].includes(r.strategy) ? r.strategy as RotationStrategy : undefined;
-	const cooldownMs = typeof r.cooldownMs === "number" && Number.isFinite(r.cooldownMs) && r.cooldownMs >= 0 ? Math.floor(r.cooldownMs) : undefined;
-	const maxRetries = typeof r.maxRetries === "number" && Number.isFinite(r.maxRetries) && r.maxRetries >= 1 ? Math.floor(r.maxRetries) : undefined;
+	const strategy = ["weighted", "round-robin", "sticky"].includes(r.strategy) ? (r.strategy as RotationStrategy) : undefined;
+	const cooldownMs =
+		typeof r.cooldownMs === "number" && Number.isFinite(r.cooldownMs) && r.cooldownMs >= 0 ? Math.floor(r.cooldownMs) : undefined;
+	const maxRetries =
+		typeof r.maxRetries === "number" && Number.isFinite(r.maxRetries) && r.maxRetries >= 1 ? Math.floor(r.maxRetries) : undefined;
 	if (!strategy && cooldownMs === undefined && maxRetries === undefined) return undefined;
 	return { strategy, cooldownMs, maxRetries };
 }

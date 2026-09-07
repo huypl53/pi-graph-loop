@@ -31,16 +31,25 @@ const cmds = {};
 const tools = {};
 const activeToolSet = { active: ["read", "swarm_send_message", "swarm_task_status", "bash"] };
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
-	registerCommand: (name, opts) => { cmds[name] = opts; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
+	registerCommand: (name, opts) => {
+		cmds[name] = opts;
+	},
 	on: () => {},
 	exec: async () => ({ code: 0, stdout: "%1\n", stderr: "" }), // tmux stub: panes resolve, nothing fails
 	getActiveTools: () => [...activeToolSet.active],
-	setActiveTools: (next) => { activeToolSet.active = [...next]; },
+	setActiveTools: (next) => {
+		activeToolSet.active = [...next];
+	},
 	getAllTools: () => Object.values(tools), // gating enumerates registered tools via getAllTools
 };
 factory(pi);
-if (typeof cmds.swarm?.handler !== "function") { console.error("FAIL: /swarm command not registered"); process.exit(1); }
+if (typeof cmds.swarm?.handler !== "function") {
+	console.error("FAIL: /swarm command not registered");
+	process.exit(1);
+}
 
 const scratch = join(tmpdir(), `swarm-deregister-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
@@ -61,10 +70,31 @@ const ctx = {
 };
 
 let fail = 0;
-const ok = (name, cond) => { if (cond) console.log("  ok  ", name); else { fail++; console.error("  FAIL", name); } };
+const ok = (name, cond) => {
+	if (cond) console.log("  ok  ", name);
+	else {
+		fail++;
+		console.error("  FAIL", name);
+	}
+};
 const lastNote = () => notes.at(-1)?.msg || "";
 const lastLevel = () => notes.at(-1)?.level || "";
-const traceEvents = (p) => readdirSync(p.traces).filter((f) => f.endsWith(".jsonl")).flatMap((f) => readFileSync(join(p.traces, f), "utf8").split(/\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean));
+const traceEvents = (p) =>
+	readdirSync(p.traces)
+		.filter((f) => f.endsWith(".jsonl"))
+		.flatMap((f) =>
+			readFileSync(join(p.traces, f), "utf8")
+				.split(/\n/)
+				.filter(Boolean)
+				.map((l) => {
+					try {
+						return JSON.parse(l);
+					} catch {
+						return null;
+					}
+				})
+				.filter(Boolean),
+		);
 const { SWARM_GUEST_ID } = await import(join(here, "..", "src", "constants.ts"));
 
 // Seed swarm state with one idle worker and one busy worker.
@@ -72,8 +102,28 @@ const p = paths(scratch);
 await cmds.swarm.handler("init", ctx);
 {
 	const st = await readState(p, scratch);
-	st.agents["worker-01"] = { id: "worker-01", role: "Implement things", status: "running", roleKind: "implementer", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, tmuxTarget: "sess:0.1", createdAt: new Date().toISOString() };
-	st.agents["worker-02"] = { id: "worker-02", role: "Review things", status: "running", roleKind: "reviewer", capabilities: [], activeTaskIds: ["task-x"], maxConcurrentTasks: 1, tmuxTarget: "sess:0.2", createdAt: new Date().toISOString() };
+	st.agents["worker-01"] = {
+		id: "worker-01",
+		role: "Implement things",
+		status: "running",
+		roleKind: "implementer",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		tmuxTarget: "sess:0.1",
+		createdAt: new Date().toISOString(),
+	};
+	st.agents["worker-02"] = {
+		id: "worker-02",
+		role: "Review things",
+		status: "running",
+		roleKind: "reviewer",
+		capabilities: [],
+		activeTaskIds: ["task-x"],
+		maxConcurrentTasks: 1,
+		tmuxTarget: "sess:0.2",
+		createdAt: new Date().toISOString(),
+	};
 	st.delivered["worker-01"] = [{ id: "msg-1" }]; // seed a delivered ledger entry so the keep-vs-purge assertion is non-vacuous
 	await writeState(p, st);
 }
@@ -82,9 +132,15 @@ mkdirSync(p.mailboxes, { recursive: true });
 
 // --- Case 8 first: usage help on bad invocations (no implementation dependency) ---
 await cmds.swarm.handler("deregister", ctx);
-ok("no arg -> usage warning", /\/swarm deregister here/.test(lastNote()) && /--force/.test(lastNote()) && /--purge/.test(lastNote()) && lastLevel() === "warning");
+ok(
+	"no arg -> usage warning",
+	/\/swarm deregister here/.test(lastNote()) && /--force/.test(lastNote()) && /--purge/.test(lastNote()) && lastLevel() === "warning",
+);
 await cmds.swarm.handler("deregister --purge", ctx);
-ok("flags without id -> usage warning", /\/swarm deregister here/.test(lastNote()) && /--force/.test(lastNote()) && /--purge/.test(lastNote()));
+ok(
+	"flags without id -> usage warning",
+	/\/swarm deregister here/.test(lastNote()) && /--force/.test(lastNote()) && /--purge/.test(lastNote()),
+);
 
 // --- Case 1b: guest 'here' is refused with guidance ---
 const prevAgent = process.env.PI_SWARM_AGENT_ID;
@@ -145,7 +201,10 @@ ok("non-swarm tools untouched by gating", activeToolSet.active.includes("read") 
 	ok("mailbox file untouched (non-destructive)", !existsSync(mailboxFile) || readFileSync(mailboxFile, "utf8") === "");
 	ok("delivered ledger still present", Array.isArray(st.delivered["worker-01"]) && st.delivered["worker-01"].length === 1);
 }
-ok("trace agent.deregister written", traceEvents(p).some((e) => e.event === "agent.deregister" && e.agentId === "worker-01"));
+ok(
+	"trace agent.deregister written",
+	traceEvents(p).some((e) => e.event === "agent.deregister" && e.agentId === "worker-01"),
+);
 
 // --- Case 2a/5: root may deregister another agent by id; --purge removes the record ---
 process.env.PI_SWARM_AGENT_ID = "";
@@ -161,7 +220,17 @@ ok("root deregisters other agent with --force --purge", /Deregistered worker-02/
 // --- Self deregister with explicit own id (equivalent to 'here') ---
 {
 	const st = await readState(p, scratch);
-	st.agents["worker-03"] = { id: "worker-03", role: "Probe role", status: "running", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, tmuxTarget: "sess:0.3", createdAt: new Date().toISOString() };
+	st.agents["worker-03"] = {
+		id: "worker-03",
+		role: "Probe role",
+		status: "running",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		tmuxTarget: "sess:0.3",
+		createdAt: new Date().toISOString(),
+	};
 	await writeState(p, st);
 }
 process.env.PI_SWARM_AGENT_ID = "worker-03";
@@ -178,5 +247,8 @@ process.env.PI_SWARM_AGENT_ID = prevAgent;
 process.env.PI_SWARM_IS_ROOT = prevRoot;
 
 rmSync(scratch, { recursive: true, force: true });
-if (fail) { console.error(`\nDEREGISTER FAIL (${fail})`); process.exit(1); }
+if (fail) {
+	console.error(`\nDEREGISTER FAIL (${fail})`);
+	process.exit(1);
+}
 console.log("\nDEREGISTER PASS");

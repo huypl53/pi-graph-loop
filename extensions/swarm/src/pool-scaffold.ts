@@ -78,7 +78,7 @@ function resolveScaffoldPlan(raw: any): {
 		// Per binding B1: if EITHER block declares modelPool, skip. The runtime precedence resolves
 		// `extensions.swarm` first (mirrors session.ts), but for the scaffold's purpose either
 		// declaration counts as "the user already configured pool rotation".
-		const dest = extIsObject ? fromExt : (topIsObject ? fromTop : {});
+		const dest = extIsObject ? fromExt : topIsObject ? fromTop : {};
 		return { source: extIsObject ? "extensions.swarm" : "swarm", skip: true, destinationBlock: dest, previousKeys: Object.keys(dest) };
 	}
 	if (extIsObject) {
@@ -96,10 +96,7 @@ function resolveScaffoldPlan(raw: any): {
 //
 // `opts.alreadyNotified` is reserved for future symmetry with the durable flag (e.g. a test can short-
 // circuit the flag-check). Currently unused — the durable flag is read by the hook from SwarmState.
-export async function ensurePoolScaffold(
-	cwd: string,
-	opts: { alreadyNotified?: boolean } = {},
-): Promise<ScaffoldResult> {
+export async function ensurePoolScaffold(cwd: string, opts: { alreadyNotified?: boolean } = {}): Promise<ScaffoldResult> {
 	const p = statePaths(cwd);
 	const settingsPath = poolScaffoldSettingsPath(cwd);
 	const piDir = join(cwd, CONFIG_DIR_NAME);
@@ -132,7 +129,11 @@ export async function ensurePoolScaffold(
 	if (existsSync(ymlPath)) {
 		let yml: any = null;
 		let ymlCorrupt = false;
-		try { yml = readSwarmYml(cwd); } catch { ymlCorrupt = true; }
+		try {
+			yml = readSwarmYml(cwd);
+		} catch {
+			ymlCorrupt = true;
+		}
 		if (ymlCorrupt) {
 			await trace(p, "pool.scaffold_skipped_yml_unparseable", { path: ymlPath }).catch(() => {});
 			return { wrote: false, skipped: "modelpool_present", path: ymlPath };
@@ -164,11 +165,21 @@ export async function ensurePoolScaffold(
 		// source === "absent": neither JSON block exists. Scaffold `.pi/swarm.yml` — the comment-friendly
 		// dedicated home (swarm.yml feature; user decision 2026-09-04). settings.json is left untouched.
 		await atomicWriteFile(ymlPath, POOL_SCAFFOLD_YML_PLACEHOLDER);
-		await trace(p, "pool.scaffold_created", { path: ymlPath, previousKeys: [], source: "swarm.yml", modelPool: POOL_SCAFFOLD_PLACEHOLDER }).catch(() => {});
+		await trace(p, "pool.scaffold_created", {
+			path: ymlPath,
+			previousKeys: [],
+			source: "swarm.yml",
+			modelPool: POOL_SCAFFOLD_PLACEHOLDER,
+		}).catch(() => {});
 		return { wrote: true, path: ymlPath, previousKeys: [], notify: POOL_SCAFFOLD_YML_NOTIFY_TEXT };
 	}
 
 	await atomicWriteFile(settingsPath, `${JSON.stringify(nextRaw, null, 2)}\n`);
-	await trace(p, "pool.scaffold_created", { path: settingsPath, previousKeys: plan.previousKeys, source: plan.source, modelPool: nextSwarmBlock.modelPool }).catch(() => {});
+	await trace(p, "pool.scaffold_created", {
+		path: settingsPath,
+		previousKeys: plan.previousKeys,
+		source: plan.source,
+		modelPool: nextSwarmBlock.modelPool,
+	}).catch(() => {});
 	return { wrote: true, path: settingsPath, previousKeys: plan.previousKeys, notify: POOL_SCAFFOLD_NOTIFY_TEXT };
 }

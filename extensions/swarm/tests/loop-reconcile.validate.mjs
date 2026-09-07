@@ -10,8 +10,12 @@ const factory = mod.default;
 const tools = [];
 const cmds = [];
 const pi = {
-	registerTool: (def) => { tools.push(def.name); },
-	registerCommand: (name) => { cmds.push(name); },
+	registerTool: (def) => {
+		tools.push(def.name);
+	},
+	registerCommand: (name) => {
+		cmds.push(name);
+	},
 	on: () => {},
 	exec: async () => ({ code: 1, stdout: "", stderr: "" }),
 };

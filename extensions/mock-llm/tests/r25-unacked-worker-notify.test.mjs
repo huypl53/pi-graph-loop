@@ -27,15 +27,25 @@ const here = dirname(fileURLToPath(import.meta.url));
 const fixturePath = join(here, "..", "fixtures", "r25-unacked-worker-notify.jsonl");
 const repoRoot = join(here, "..", "..", "..");
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (n, c, info) => {
-	if (c) { pass++; console.log("  ok  ", n); }
-	else { fail++; console.error("  FAIL", n, info !== undefined ? `(${JSON.stringify(info).slice(0, 200)})` : ""); }
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n, info !== undefined ? `(${JSON.stringify(info).slice(0, 200)})` : "");
+	}
 };
 
 console.log("== R25 fixture file shape ==");
 ok("fixture file exists", existsSync(fixturePath));
-const lines = existsSync(fixturePath) ? readFileSync(fixturePath, "utf8").split("\n").filter((l) => l.trim() && !l.startsWith("#")) : [];
+const lines = existsSync(fixturePath)
+	? readFileSync(fixturePath, "utf8")
+			.split("\n")
+			.filter((l) => l.trim() && !l.startsWith("#"))
+	: [];
 ok("fixture has 3 scripted turns", lines.length === 3, { lines: lines.length });
 const turns = lines.map((l) => JSON.parse(l));
 ok("turn 0 = text", turns[0]?.events?.[0]?.type === "text");
@@ -64,26 +74,60 @@ await ensureDirs(paths(scratch));
 const st = defaultState("swarm-r25-lane", scratch);
 const now = new Date().toISOString();
 st.agents["root"] = {
-	id: "root", role: "root", roleKind: "root", roleKindExplicit: true,
-	tmuxTarget: "r25lane:orch.1", tmuxSession: "r25lane", tmuxWindow: "orch",
-	mailbox: ".pi/swarm/mailboxes/root.jsonl", capabilities: ["orchestrate"],
-	status: "running", runtimeStatus: "idle", health: "healthy",
-	createdAt: now, updatedAt: now, lastHeartbeatAt: now, activeTaskIds: [],
+	id: "root",
+	role: "root",
+	roleKind: "root",
+	roleKindExplicit: true,
+	tmuxTarget: "r25lane:orch.1",
+	tmuxSession: "r25lane",
+	tmuxWindow: "orch",
+	mailbox: ".pi/swarm/mailboxes/root.jsonl",
+	capabilities: ["orchestrate"],
+	status: "running",
+	runtimeStatus: "idle",
+	health: "healthy",
+	createdAt: now,
+	updatedAt: now,
+	lastHeartbeatAt: now,
+	activeTaskIds: [],
 };
 st.agents["r25-worker"] = {
-	id: "r25-worker", role: "test worker", roleKind: "implementer", roleKindExplicit: false,
-	tmuxTarget: "r25lane:r25.1", tmuxSession: "r25lane", tmuxWindow: "r25",
-	mailbox: ".pi/swarm/mailboxes/r25-worker.jsonl", capabilities: ["implement"],
-	status: "running", runtimeStatus: "idle", health: "healthy",
-	createdAt: now, updatedAt: now, lastHeartbeatAt: now, activeTaskIds: [],
+	id: "r25-worker",
+	role: "test worker",
+	roleKind: "implementer",
+	roleKindExplicit: false,
+	tmuxTarget: "r25lane:r25.1",
+	tmuxSession: "r25lane",
+	tmuxWindow: "r25",
+	mailbox: ".pi/swarm/mailboxes/r25-worker.jsonl",
+	capabilities: ["implement"],
+	status: "running",
+	runtimeStatus: "idle",
+	health: "healthy",
+	createdAt: now,
+	updatedAt: now,
+	lastHeartbeatAt: now,
+	activeTaskIds: [],
 };
 st.messages = st.messages || {};
 for (const id of ["msg-r25-lane-1", "msg-r25-lane-2"]) {
 	st.messages[id] = {
-		id, swarmId: st.swarmId, from: "root", to: "r25-worker",
-		subject: `Task ${id} requiresAck`, priority: "normal", type: "swarm.message", schemaVersion: 1,
-		createdAt: now, body: `seeded ${id}`, requiresAck: true, requiresResponse: false,
-		status: "intercepted", attempts: 1, queuedAt: now, updatedAt: now,
+		id,
+		swarmId: st.swarmId,
+		from: "root",
+		to: "r25-worker",
+		subject: `Task ${id} requiresAck`,
+		priority: "normal",
+		type: "swarm.message",
+		schemaVersion: 1,
+		createdAt: now,
+		body: `seeded ${id}`,
+		requiresAck: true,
+		requiresResponse: false,
+		status: "intercepted",
+		attempts: 1,
+		queuedAt: now,
+		updatedAt: now,
 		headers: { cwd: scratch, senderModel: "test", senderProvider: "test" },
 	};
 }
@@ -98,16 +142,30 @@ delete env.PI_SWARM_IS_ROOT;
 env.PI_SWARM_AGENT_ID = "r25-worker";
 env.PI_MOCK_LLM_TRANSCRIPTS_DIR = join(scratch, ".pi/mock-llm/transcripts");
 
-const r = spawnSync("pi", [
-	"-ne",
-	"-e", join(repoRoot, "extensions/swarm"),
-	"-e", join(repoRoot, "extensions/mock-llm"),
-	"--provider", "mock-llm",
-	"--model", "r25-unacked-worker-notify",
-	"-p", "idle",
-], { cwd: scratch, env, timeout: 30_000, encoding: "utf8" });
+const r = spawnSync(
+	"pi",
+	[
+		"-ne",
+		"-e",
+		join(repoRoot, "extensions/swarm"),
+		"-e",
+		join(repoRoot, "extensions/mock-llm"),
+		"--provider",
+		"mock-llm",
+		"--model",
+		"r25-unacked-worker-notify",
+		"-p",
+		"idle",
+	],
+	{ cwd: scratch, env, timeout: 30_000, encoding: "utf8" },
+);
 
-const orchMail = existsSync(orchMailPath) ? readFileSync(orchMailPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+const orchMail = existsSync(orchMailPath)
+	? readFileSync(orchMailPath, "utf8")
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l))
+	: [];
 const notify = orchMail.find((m) => m.to === "root" && /unacked ack/.test(m.subject || ""));
 ok("[live lane] root mailbox contains the R25 ack-debt notify", !!notify, {
 	totalOrchMessages: orchMail.length,

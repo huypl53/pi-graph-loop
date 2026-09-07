@@ -32,10 +32,16 @@ import { streamMockLLM, resetMockLLMCursor } from "../src/stream.ts";
 const here = dirname(fileURLToPath(import.meta.url));
 const swarmRoot = join(here, "..", "..", "swarm", "src");
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, info) => {
-	if (cond) { pass++; console.log("  ok  ", name); }
-	else { fail++; console.error("  FAIL", name, info ?? ""); }
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
 };
 
 const FIXTURE_MODEL = "supersession-late-result";
@@ -60,7 +66,8 @@ let stream = streamMockLLM(model, makeContext());
 for await (const event of stream) events.push(event);
 const result = await stream.result();
 stream = streamMockLLM(model, makeContext());
-for await (const _ of stream) {}
+for await (const _ of stream) {
+}
 const result2 = await stream.result();
 void result2;
 
@@ -68,7 +75,11 @@ const toolcallStart = events.find((e) => e.type === "toolcall_start");
 const toolcallEnd = events.find((e) => e.type === "toolcall_end");
 ok("F1.a: stream completed with stopReason=stop", result.stopReason === "stop", `got: ${result.stopReason}`);
 ok("F1.b: fixture emitted at least one toolcall", !!toolcallStart, `events: ${JSON.stringify(events.map((e) => e.type))}`);
-ok("F1.c: events include text_start + text_delta (worker speaks)", events.some((e) => e.type === "text_start") && events.some((e) => e.type === "text_delta"), "");
+ok(
+	"F1.c: events include text_start + text_delta (worker speaks)",
+	events.some((e) => e.type === "text_start") && events.some((e) => e.type === "text_delta"),
+	"",
+);
 
 // Pull the late-result attemptId + taskId + nodeId out of the captured toolcall.
 const lateResultToolCall = toolcallEnd?.toolCall;
@@ -76,7 +87,11 @@ const lateResultArgs = lateResultToolCall?.arguments;
 const lateResultAttemptId = lateResultArgs?.attemptId;
 const lateResultTaskId = lateResultArgs?.taskId;
 const lateResultNodeId = lateResultArgs?.nodeId;
-ok("F1.d: captured toolcall carries attemptId/taskId/nodeId", !!(lateResultAttemptId && lateResultTaskId && lateResultNodeId), `args: ${JSON.stringify(lateResultArgs)}`);
+ok(
+	"F1.d: captured toolcall carries attemptId/taskId/nodeId",
+	!!(lateResultAttemptId && lateResultTaskId && lateResultNodeId),
+	`args: ${JSON.stringify(lateResultArgs)}`,
+);
 
 // Find ALL produced transcript files; pick the EARLIEST one for F1 assertions (the F5 replay
 // is a second stream invocation that produces a newer transcript file with a different event set).
@@ -85,7 +100,7 @@ async function findTranscript(modelId, mode = "first") {
 		const out = [];
 		for (const entry of await readdir(dir, { withFileTypes: true })) {
 			const full = join(dir, entry.name);
-			if (entry.isDirectory()) out.push(...await walk(full));
+			if (entry.isDirectory()) out.push(...(await walk(full)));
 			else out.push(full);
 		}
 		return out;
@@ -101,8 +116,16 @@ async function findTranscript(modelId, mode = "first") {
 	throw new Error(`no transcript for ${modelId}`);
 }
 const transcript1 = await findTranscript(FIXTURE_MODEL, "first");
-ok("F1.e: transcript written to .pi/mock-llm/transcripts/supersession-late-result/", !!transcript1 && transcript1.modelId === FIXTURE_MODEL, "");
-ok("F1.f: transcript captured the toolcall", transcript1.events.some((e) => e.type === "toolcall_start"), `event types: ${transcript1.events.map((e) => e.type).join(",")}`);
+ok(
+	"F1.e: transcript written to .pi/mock-llm/transcripts/supersession-late-result/",
+	!!transcript1 && transcript1.modelId === FIXTURE_MODEL,
+	"",
+);
+ok(
+	"F1.f: transcript captured the toolcall",
+	transcript1.events.some((e) => e.type === "toolcall_start"),
+	`event types: ${transcript1.events.map((e) => e.type).join(",")}`,
+);
 
 // F2: checkLateResultRejection returns the refusal envelope for the captured attemptId.
 console.log("\nF2: checkLateResultRejection returns refusal envelope for captured attemptId");
@@ -119,14 +142,27 @@ const { checkLateResultRejection } = tasksMod;
 		attempts: 2,
 		activeAttemptId: "attempt-new",
 		attemptHistory: [
-			{ attemptId: "attempt-old-late-result", attemptNumber: 1, assignee: "worker-old", assignedAt: ts, status: "superseded", supersededAt: ts, supersededBy: "attempt-new", lastActivityAt: ts },
+			{
+				attemptId: "attempt-old-late-result",
+				attemptNumber: 1,
+				assignee: "worker-old",
+				assignedAt: ts,
+				status: "superseded",
+				supersededAt: ts,
+				supersededBy: "attempt-new",
+				lastActivityAt: ts,
+			},
 			{ attemptId: "attempt-new", attemptNumber: 2, assignee: "worker-new", assignedAt: ts, status: "active", lastActivityAt: ts },
 		],
 	};
 	const refusal = checkLateResultRejection(node, lateResultAttemptId, ts);
 	ok("F2.a: refusal is non-null", refusal !== null, `got: ${refusal}`);
-	ok("F2.b: refusal.reason === \"supersession\"", refusal?.reason === "supersession", `got: ${refusal?.reason}`);
-	ok("F2.c: refusal.providedAttemptId === captured attemptId", refusal?.providedAttemptId === lateResultAttemptId, `got: ${refusal?.providedAttemptId}`);
+	ok('F2.b: refusal.reason === "supersession"', refusal?.reason === "supersession", `got: ${refusal?.reason}`);
+	ok(
+		"F2.c: refusal.providedAttemptId === captured attemptId",
+		refusal?.providedAttemptId === lateResultAttemptId,
+		`got: ${refusal?.providedAttemptId}`,
+	);
 }
 
 // F3 + F4: drive the actual tools/tasks.ts:swarm_update_task fencing block via a real seeded
@@ -152,65 +188,204 @@ console.log("\nF3/F4: drive real fence + assert no-mutation + counter stamping")
 		attempts: 2,
 		activeAttemptId: "attempt-new",
 		attemptHistory: [
-			{ attemptId: "attempt-old-late-result", attemptNumber: 1, assignmentMessageId: inboundMsgId, assignee: "worker-old", assignedAt: ts, status: "superseded", supersededAt: ts, supersededBy: "attempt-new", lastActivityAt: ts },
-			{ attemptId: "attempt-new", attemptNumber: 2, assignmentMessageId: newMsgId, assignee: "worker-new", assignedAt: ts, status: "active", lastActivityAt: ts },
+			{
+				attemptId: "attempt-old-late-result",
+				attemptNumber: 1,
+				assignmentMessageId: inboundMsgId,
+				assignee: "worker-old",
+				assignedAt: ts,
+				status: "superseded",
+				supersededAt: ts,
+				supersededBy: "attempt-new",
+				lastActivityAt: ts,
+			},
+			{
+				attemptId: "attempt-new",
+				attemptNumber: 2,
+				assignmentMessageId: newMsgId,
+				assignee: "worker-new",
+				assignedAt: ts,
+				status: "active",
+				lastActivityAt: ts,
+			},
 		],
 	};
-	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify({
-		version: 1, swarmId: "driver", cwd: scratch, tmuxSession: "driver",
-		agents: {
-			"worker-old": { id: "worker-old", role: "implementer", status: "idle", activeTaskIds: [], lastSeenAt: ts, currentModel: "x", provider: "y" },
-			"worker-new": { id: "worker-new", role: "implementer", status: "busy", activeTaskIds: [lateResultTaskId], lastSeenAt: ts, currentModel: "x", provider: "y" },
-			"root": { id: "root", role: "root", status: "idle", activeTaskIds: [], lastSeenAt: ts, currentModel: "x", provider: "y" },
-		},
-		tasks: {},
-		messages: {
-			[inboundMsgId]: { id: inboundMsgId, to: "worker-old", from: "root", subject: "assign", body: "old", conversationId: `task:${lateResultTaskId}:${lateResultNodeId}`, requiresAck: true, status: "superseded", superseded: { at: ts, by: newMsgId, supersededBy: "attempt-new" }, idempotencyKey: "key-old" },
-			[newMsgId]: { id: newMsgId, to: "worker-new", from: "root", subject: "assign", body: "new", conversationId: `task:${lateResultTaskId}:${lateResultNodeId}`, requiresAck: true, status: "injected", idempotencyKey: "key-new" },
-		},
-	}, null, 2));
+	await writeFile(
+		join(scratch, ".pi/swarm/swarm-state.json"),
+		JSON.stringify(
+			{
+				version: 1,
+				swarmId: "driver",
+				cwd: scratch,
+				tmuxSession: "driver",
+				agents: {
+					"worker-old": {
+						id: "worker-old",
+						role: "implementer",
+						status: "idle",
+						activeTaskIds: [],
+						lastSeenAt: ts,
+						currentModel: "x",
+						provider: "y",
+					},
+					"worker-new": {
+						id: "worker-new",
+						role: "implementer",
+						status: "busy",
+						activeTaskIds: [lateResultTaskId],
+						lastSeenAt: ts,
+						currentModel: "x",
+						provider: "y",
+					},
+					root: { id: "root", role: "root", status: "idle", activeTaskIds: [], lastSeenAt: ts, currentModel: "x", provider: "y" },
+				},
+				tasks: {},
+				messages: {
+					[inboundMsgId]: {
+						id: inboundMsgId,
+						to: "worker-old",
+						from: "root",
+						subject: "assign",
+						body: "old",
+						conversationId: `task:${lateResultTaskId}:${lateResultNodeId}`,
+						requiresAck: true,
+						status: "superseded",
+						superseded: { at: ts, by: newMsgId, supersededBy: "attempt-new" },
+						idempotencyKey: "key-old",
+					},
+					[newMsgId]: {
+						id: newMsgId,
+						to: "worker-new",
+						from: "root",
+						subject: "assign",
+						body: "new",
+						conversationId: `task:${lateResultTaskId}:${lateResultNodeId}`,
+						requiresAck: true,
+						status: "injected",
+						idempotencyKey: "key-new",
+					},
+				},
+			},
+			null,
+			2,
+		),
+	);
 
-	await writeFile(join(scratch, ".pi/swarm/tasks", lateResultTaskId, "task.json"), JSON.stringify({
-		version: 1, taskId: lateResultTaskId, title: "driver", goal: "driver", workflow: "feature-dev",
-		allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
-		start: lateResultNodeId, nodes: { [lateResultNodeId]: node }, edges: [], gates: {},
-		currentNodes: [lateResultNodeId], sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
-		createdAt: ts, updatedAt: ts, status: "in_progress",
-	}, null, 2));
+	await writeFile(
+		join(scratch, ".pi/swarm/tasks", lateResultTaskId, "task.json"),
+		JSON.stringify(
+			{
+				version: 1,
+				taskId: lateResultTaskId,
+				title: "driver",
+				goal: "driver",
+				workflow: "feature-dev",
+				allowedFiles: [],
+				acceptanceCriteria: [],
+				validationCommands: [],
+				start: lateResultNodeId,
+				nodes: { [lateResultNodeId]: node },
+				edges: [],
+				gates: {},
+				currentNodes: [lateResultNodeId],
+				sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
+				createdAt: ts,
+				updatedAt: ts,
+				status: "in_progress",
+			},
+			null,
+			2,
+		),
+	);
 
 	// Simulate the fence path the same way tools/tasks.ts:swarm_update_task does:
 	//   checkLateResultRejection → trace → stamp inbound message → throw __LATE_RESULT_REFUSED__.
 	const refusal = checkLateResultRejection(node, lateResultAttemptId, ts);
 	const events = [];
 	if (refusal && node.attemptHistory?.find((a) => a.attemptId === lateResultAttemptId)) {
-		events.push({ ts, event: "message.late_result_rejected", taskId: lateResultTaskId, nodeId: lateResultNodeId, providedAttemptId: refusal.providedAttemptId, reason: "superseded_attempt_late_result" });
+		events.push({
+			ts,
+			event: "message.late_result_rejected",
+			taskId: lateResultTaskId,
+			nodeId: lateResultNodeId,
+			providedAttemptId: refusal.providedAttemptId,
+			reason: "superseded_attempt_late_result",
+		});
 		const attempted = node.attemptHistory.find((a) => a.attemptId === lateResultAttemptId);
 		if (attempted?.assignmentMessageId) {
-			events.push({ ts, event: "message.late_result_rejected", taskId: lateResultTaskId, nodeId: lateResultNodeId, inboundMessageId: attempted.assignmentMessageId, lateResultRejectionCount: 1, reason: "message_counter_stamped" });
+			events.push({
+				ts,
+				event: "message.late_result_rejected",
+				taskId: lateResultTaskId,
+				nodeId: lateResultNodeId,
+				inboundMessageId: attempted.assignmentMessageId,
+				lateResultRejectionCount: 1,
+				reason: "message_counter_stamped",
+			});
 		}
 	}
-	await writeFile(join(scratch, ".pi/swarm/tasks", lateResultTaskId, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/tasks", lateResultTaskId, "events.jsonl"),
+		events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+		"utf8",
+	);
 
 	// Assertions: refusal envelope shape + node unchanged + trace present + counter stamped.
-	ok("F3.a: refusal envelope {refused:true, reason:\"supersession\"}", refusal !== null && refusal.refused === true && refusal.reason === "supersession", `got: ${JSON.stringify(refusal)}`);
-	ok("F3.b: refusal.providedAttemptId matches captured attemptId", refusal?.providedAttemptId === lateResultAttemptId, `got: ${refusal?.providedAttemptId}`);
-	ok("F3.c: refusal.activeAttemptId === \"attempt-new\"", refusal?.activeAttemptId === "attempt-new", `got: ${refusal?.activeAttemptId}`);
+	ok(
+		'F3.a: refusal envelope {refused:true, reason:"supersession"}',
+		refusal !== null && refusal.refused === true && refusal.reason === "supersession",
+		`got: ${JSON.stringify(refusal)}`,
+	);
+	ok(
+		"F3.b: refusal.providedAttemptId matches captured attemptId",
+		refusal?.providedAttemptId === lateResultAttemptId,
+		`got: ${refusal?.providedAttemptId}`,
+	);
+	ok('F3.c: refusal.activeAttemptId === "attempt-new"', refusal?.activeAttemptId === "attempt-new", `got: ${refusal?.activeAttemptId}`);
 	ok("F3.d: node.status unchanged (no mutation)", node.status === "in_progress", `got: ${node.status}`);
 	ok("F3.e: node.activeAttemptId unchanged", node.activeAttemptId === "attempt-new", `got: ${node.activeAttemptId}`);
 	// Two traces are expected: one for the refusal itself + one for the counter-stamp audit.
 	// Both carry `event === message.late_result_rejected`; the second carries `reason: "message_counter_stamped"`.
 	const lateResultTraces = events.filter((e) => e.event === "message.late_result_rejected");
-	ok("F3.f: events.jsonl contains exactly two message.late_result_rejected traces (refusal + counter-stamp audit)", lateResultTraces.length === 2, `got: ${lateResultTraces.length}`);
-	ok("F3.g: trace payload includes providedAttemptId + reason", events.some((e) => e.event === "message.late_result_rejected" && e.providedAttemptId === lateResultAttemptId && e.reason === "superseded_attempt_late_result"), "");
+	ok(
+		"F3.f: events.jsonl contains exactly two message.late_result_rejected traces (refusal + counter-stamp audit)",
+		lateResultTraces.length === 2,
+		`got: ${lateResultTraces.length}`,
+	);
+	ok(
+		"F3.g: trace payload includes providedAttemptId + reason",
+		events.some(
+			(e) =>
+				e.event === "message.late_result_rejected" &&
+				e.providedAttemptId === lateResultAttemptId &&
+				e.reason === "superseded_attempt_late_result",
+		),
+		"",
+	);
 
 	// F4: inbound message.lateResultRejectionCount stamping logic (matching the fence block).
 	const attempted = node.attemptHistory?.find((a) => a.attemptId === lateResultAttemptId);
 	const inboundMsg = { id: attempted.assignmentMessageId, lateResultRejectionCount: 0, lastLateResultRejectionAt: null };
 	inboundMsg.lateResultRejectionCount = (inboundMsg.lateResultRejectionCount ?? 0) + 1;
 	inboundMsg.lastLateResultRejectionAt = ts;
-	ok("F4.a: inbound message.lateResultRejectionCount stamped to 1", inboundMsg.lateResultRejectionCount === 1, `got: ${inboundMsg.lateResultRejectionCount}`);
-	ok("F4.b: inbound message.lastLateResultRejectionAt set", !!inboundMsg.lastLateResultRejectionAt, `got: ${inboundMsg.lastLateResultRejectionAt}`);
-	ok("F4.c: counter increments on repeat refusal", (() => { inboundMsg.lateResultRejectionCount += 1; return inboundMsg.lateResultRejectionCount === 2; })(), "");
+	ok(
+		"F4.a: inbound message.lateResultRejectionCount stamped to 1",
+		inboundMsg.lateResultRejectionCount === 1,
+		`got: ${inboundMsg.lateResultRejectionCount}`,
+	);
+	ok(
+		"F4.b: inbound message.lastLateResultRejectionAt set",
+		!!inboundMsg.lastLateResultRejectionAt,
+		`got: ${inboundMsg.lastLateResultRejectionAt}`,
+	);
+	ok(
+		"F4.c: counter increments on repeat refusal",
+		(() => {
+			inboundMsg.lateResultRejectionCount += 1;
+			return inboundMsg.lateResultRejectionCount === 2;
+		})(),
+		"",
+	);
 
 	await rm(scratch, { recursive: true, force: true });
 }

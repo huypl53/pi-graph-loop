@@ -28,7 +28,9 @@ const factory = mod.default;
 
 const tools = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
 	exec: async (cmd, args) => {
@@ -40,11 +42,21 @@ const pi = {
 };
 factory(pi);
 
-let pass = 0, fail = 0;
-const ok = (n, c, extra) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n, extra ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c, extra) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n, extra ?? "");
+	}
+};
 
 const call = async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd: scratch });
 };
 
@@ -59,10 +71,26 @@ const state = {
 	swarmId: "repro",
 	agents: {
 		root: { id: "root", status: "running", runtimeStatus: "idle", activeTaskIds: [], updatedAt: nowIso },
-		"worker-x": { id: "worker-x", status: "stopped", runtimeStatus: "stopped", activeTaskIds: [], spawnedForTaskId: null, updatedAt: nowIso },
+		"worker-x": {
+			id: "worker-x",
+			status: "stopped",
+			runtimeStatus: "stopped",
+			activeTaskIds: [],
+			spawnedForTaskId: null,
+			updatedAt: nowIso,
+		},
 	},
 	messages: {
-		"msg-old-assignment": { id: "msg-old-assignment", from: "root", to: "worker-x", subject: "Task prior / node n assigned", createdAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), requiresAck: true, status: "acked", ack: { status: "done", at: new Date(Date.now() - 59 * 60 * 1000).toISOString() } },
+		"msg-old-assignment": {
+			id: "msg-old-assignment",
+			from: "root",
+			to: "worker-x",
+			subject: "Task prior / node n assigned",
+			createdAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+			requiresAck: true,
+			status: "acked",
+			ack: { status: "done", at: new Date(Date.now() - 59 * 60 * 1000).toISOString() },
+		},
 	},
 	updatedAt: nowIso,
 };
@@ -94,14 +122,25 @@ const taskPath = join(scratch, ".pi/swarm/tasks/repro-r115/task.json");
 const task0 = JSON.parse(readFileSync(taskPath, "utf8"));
 task0.nodes.implement.assignmentMessageId = "msg-old-assignment";
 task0.nodes.implement.attemptHistory = [
-	{ attemptId: "attempt-old", assignee: "worker-x", status: "superseded", assignedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), supersededBy: null },
+	{
+		attemptId: "attempt-old",
+		assignee: "worker-x",
+		status: "superseded",
+		assignedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+		supersededBy: null,
+	},
 ];
 writeFileSync(taskPath, JSON.stringify(task0, null, 2));
 
 // --- THE REPRO: assign implement to the STOPPED worker ---
 const res = await call("swarm_assign_task", { taskId: "repro-r115", nodeId: "implement", agentId: "worker-x", cwd: scratch });
 const fenced = res?.details?.fenced === true;
-console.log(fenced ? "\nREPRO (RED): fresh assignment to stopped agent was FENCED (reason=" + res?.details?.reason + ")" : "\nassign outcome fenced=", fenced);
+console.log(
+	fenced
+		? "\nREPRO (RED): fresh assignment to stopped agent was FENCED (reason=" + res?.details?.reason + ")"
+		: "\nassign outcome fenced=",
+	fenced,
+);
 
 // Assertions of CORRECT behavior:
 ok("fresh assignment NOT fenced", fenced === false, `reason=${res?.details?.reason}`);
@@ -109,7 +148,11 @@ if (!fenced) {
 	const msgId = res?.details?.messageId;
 	const st1 = JSON.parse(readFileSync(statePath, "utf8"));
 	const rec = st1.messages?.[msgId];
-	ok("canonical assignment message delivered (not fence notice)", Boolean(rec) && !/FENCED/.test(rec?.subject || ""), rec?.subject || "(no record)");
+	ok(
+		"canonical assignment message delivered (not fence notice)",
+		Boolean(rec) && !/FENCED/.test(rec?.subject || ""),
+		rec?.subject || "(no record)",
+	);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

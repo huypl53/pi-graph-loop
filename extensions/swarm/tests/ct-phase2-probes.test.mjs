@@ -78,10 +78,16 @@ const { ensureRoot } = await import(join(srcDir, "identity.ts"));
 // Test harness
 // ============================================================================
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, info) => {
-	if (cond) { pass++; console.log("  ok  ", name); }
-	else { fail++; console.error("  FAIL", name, info ?? ""); }
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
 };
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
@@ -93,8 +99,7 @@ const PROBE_OUTCOME = {};
 
 // Transcript root mirrors the mock-llm provider's default
 // (PI_MOCK_LLM_TRANSCRIPTS_DIR or .pi/mock-llm/transcripts).
-const TRANSCRIPT_ROOT = process.env.PI_MOCK_LLM_TRANSCRIPTS_DIR
-	|| join(process.cwd(), ".pi", "mock-llm", "transcripts");
+const TRANSCRIPT_ROOT = process.env.PI_MOCK_LLM_TRANSCRIPTS_DIR || join(process.cwd(), ".pi", "mock-llm", "transcripts");
 
 function writeProbeTranscript(probeId, modelId, payload) {
 	const nowIso = new Date().toISOString();
@@ -127,7 +132,11 @@ function writeProbeTranscript(probeId, modelId, payload) {
 function makeMockPi(opts = {}) {
 	const sendMessages = [];
 	const emitErrorCalls = [];
-	const runner = { emitError: (e) => { emitErrorCalls.push(e); } };
+	const runner = {
+		emitError: (e) => {
+			emitErrorCalls.push(e);
+		},
+	};
 	const lifecycleHandlers = {}; // event name → array of handlers
 	const lifecycleTimeline = []; // ordered [{event, atMs}]
 	const startMs = Date.now();
@@ -168,15 +177,26 @@ function makeMockPi(opts = {}) {
 		sendCustomMessage: async () => {
 			if (opts.sendCustomMessageShouldReject) throw new Error(opts.sendCustomMessageError || "ctx stale (simulated)");
 		},
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 		// Internal accessors for the test harness
 		__sendMessages: sendMessages,
 		__emitErrorCalls: emitErrorCalls,
 		__lifecycleHandlers: lifecycleHandlers,
 		__lifecycleTimeline: lifecycleTimeline,
-		__emitLifecycle(event) { recordLifecycle(event); const handlers = lifecycleHandlers[event] || []; for (const h of handlers) h({ event }); },
-		__subscribeLifecycle(event, handler) { (lifecycleHandlers[event] ||= []).push(handler); recordLifecycle(`__subscribe:${event}`); },
+		__emitLifecycle(event) {
+			recordLifecycle(event);
+			const handlers = lifecycleHandlers[event] || [];
+			for (const h of handlers) h({ event });
+		},
+		__subscribeLifecycle(event, handler) {
+			(lifecycleHandlers[event] ||= []).push(handler);
+			recordLifecycle(`__subscribe:${event}`);
+		},
 		__runner: runner,
 	};
 	return pi;
@@ -201,23 +221,28 @@ console.log("\n[CT-3.A] nextTurn injection returns void + wrapper invoked synchr
 	const tick1 = Date.now();
 	const sendMessages = pi.__sendMessages;
 
-	ok("CT-3.A sendMessageCallCount === 1",
-		sendMessages.length === 1, `got ${sendMessages.length}`);
-	ok("CT-3.A sendMessageReturnIsUndefined === true (no Promise)",
-		ret === undefined, `got ${ret === undefined ? "undefined" : typeof ret}`);
-	ok("CT-3.A wrapper invoked synchronously on same tick (no microtask gap)",
-		tick1 - tick0 < 5, `deltaMs=${tick1 - tick0}`);
-	ok("CT-3.A opts.deliverAs === 'nextTurn' passed through",
-		sendMessages[0]?.o?.deliverAs === "nextTurn", JSON.stringify(sendMessages[0]?.o));
-	ok("CT-3.A opts.triggerTurn === true passed through",
-		sendMessages[0]?.o?.triggerTurn === true, JSON.stringify(sendMessages[0]?.o));
+	ok("CT-3.A sendMessageCallCount === 1", sendMessages.length === 1, `got ${sendMessages.length}`);
+	ok(
+		"CT-3.A sendMessageReturnIsUndefined === true (no Promise)",
+		ret === undefined,
+		`got ${ret === undefined ? "undefined" : typeof ret}`,
+	);
+	ok("CT-3.A wrapper invoked synchronously on same tick (no microtask gap)", tick1 - tick0 < 5, `deltaMs=${tick1 - tick0}`);
+	ok(
+		"CT-3.A opts.deliverAs === 'nextTurn' passed through",
+		sendMessages[0]?.o?.deliverAs === "nextTurn",
+		JSON.stringify(sendMessages[0]?.o),
+	);
+	ok("CT-3.A opts.triggerTurn === true passed through", sendMessages[0]?.o?.triggerTurn === true, JSON.stringify(sendMessages[0]?.o));
 
-	PROBE_OUTCOME["CT-3.A"] = (sendMessages.length === 1
-		&& ret === undefined
-		&& tick1 - tick0 < 5
-		&& sendMessages[0]?.o?.deliverAs === "nextTurn"
-		&& sendMessages[0]?.o?.triggerTurn === true)
-		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+	PROBE_OUTCOME["CT-3.A"] =
+		sendMessages.length === 1 &&
+		ret === undefined &&
+		tick1 - tick0 < 5 &&
+		sendMessages[0]?.o?.deliverAs === "nextTurn" &&
+		sendMessages[0]?.o?.triggerTurn === true
+			? "CONTRACT_CONFIRMED"
+			: "BUG_FOUND_R_ROW_NEEDED";
 
 	const path = writeProbeTranscript("ct3-nextturn-idle", "ct3-nextturn-idle", {
 		outcome: PROBE_OUTCOME["CT-3.A"],
@@ -267,20 +292,27 @@ console.log("\n[CT-3.B] ctx.isIdle() === true 250ms after nextTurn injection");
 	turnCursorAdvancedSinceInjection = cursorAdvanced;
 	const nextTurnTriggerTurnWasIgnored = !cursorAdvanced && isIdleAfterNextTurnSend && noNewSendMessages;
 
-	ok("CT-3.B isIdleAfterNextTurnSend === true (idle 250ms after injection)",
-		isIdleAfterNextTurnSend, `got ${isIdleAfterNextTurnSend}`);
-	ok("CT-3.B turnCursorAdvancedSinceInjection === false (no scripted turn consumed)",
-		turnCursorAdvancedSinceInjection === false, `got ${turnCursorAdvancedSinceInjection}`);
-	ok("CT-3.B sendMessageCallCount === 1 (only the injection call; no implicit re-call)",
-		sendMessagesAfter === 1, `got ${sendMessagesAfter}`);
-	ok("CT-3.B nextTurnTriggerTurnWasIgnored === true (deliverAs=nextTurn + triggerTurn=true is a no-op)",
-		nextTurnTriggerTurnWasIgnored, `got ${nextTurnTriggerTurnWasIgnored}`);
+	ok("CT-3.B isIdleAfterNextTurnSend === true (idle 250ms after injection)", isIdleAfterNextTurnSend, `got ${isIdleAfterNextTurnSend}`);
+	ok(
+		"CT-3.B turnCursorAdvancedSinceInjection === false (no scripted turn consumed)",
+		turnCursorAdvancedSinceInjection === false,
+		`got ${turnCursorAdvancedSinceInjection}`,
+	);
+	ok(
+		"CT-3.B sendMessageCallCount === 1 (only the injection call; no implicit re-call)",
+		sendMessagesAfter === 1,
+		`got ${sendMessagesAfter}`,
+	);
+	ok(
+		"CT-3.B nextTurnTriggerTurnWasIgnored === true (deliverAs=nextTurn + triggerTurn=true is a no-op)",
+		nextTurnTriggerTurnWasIgnored,
+		`got ${nextTurnTriggerTurnWasIgnored}`,
+	);
 
-	PROBE_OUTCOME["CT-3.B"] = (isIdleAfterNextTurnSend
-		&& turnCursorAdvancedSinceInjection === false
-		&& noNewSendMessages
-		&& nextTurnTriggerTurnWasIgnored)
-		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+	PROBE_OUTCOME["CT-3.B"] =
+		isIdleAfterNextTurnSend && turnCursorAdvancedSinceInjection === false && noNewSendMessages && nextTurnTriggerTurnWasIgnored
+			? "CONTRACT_CONFIRMED"
+			: "BUG_FOUND_R_ROW_NEEDED";
 
 	const path = writeProbeTranscript("ct3-nextturn-idle", "ct3-nextturn-idle", {
 		outcome: PROBE_OUTCOME["CT-3.B"],
@@ -318,20 +350,23 @@ console.log("\n[CT-3.C] queued nextTurn message surfaces in L4 context on next u
 		],
 	};
 
-	const surfacesOnNextUserPrompt = nextTurnContext.messages.some(
-		(m) => m.role === "custom" && m.customType === "ct3-nextturn",
-	);
+	const surfacesOnNextUserPrompt = nextTurnContext.messages.some((m) => m.role === "custom" && m.customType === "ct3-nextturn");
 	const contextIncludesQueuedCustom = nextTurnContext.messages.some(
 		(m) => m.role === "custom" && m.customType === "ct3-nextturn" && m.content === "should be queued until next user prompt",
 	);
 
-	ok("CT-3.C surfacesOnNextUserPrompt === true (queued message in next-turn context)",
-		surfacesOnNextUserPrompt, `got ${surfacesOnNextUserPrompt}`);
-	ok("CT-3.C contextIncludesQueuedCustom === true (customType + content match)",
-		contextIncludesQueuedCustom, `got ${contextIncludesQueuedCustom}`);
+	ok(
+		"CT-3.C surfacesOnNextUserPrompt === true (queued message in next-turn context)",
+		surfacesOnNextUserPrompt,
+		`got ${surfacesOnNextUserPrompt}`,
+	);
+	ok(
+		"CT-3.C contextIncludesQueuedCustom === true (customType + content match)",
+		contextIncludesQueuedCustom,
+		`got ${contextIncludesQueuedCustom}`,
+	);
 
-	PROBE_OUTCOME["CT-3.C"] = (surfacesOnNextUserPrompt && contextIncludesQueuedCustom)
-		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+	PROBE_OUTCOME["CT-3.C"] = surfacesOnNextUserPrompt && contextIncludesQueuedCustom ? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
 
 	const path = writeProbeTranscript("ct3-nextturn-idle", "ct3-nextturn-idle", {
 		outcome: PROBE_OUTCOME["CT-3.C"],
@@ -373,20 +408,27 @@ console.log("\n[CT-4.A] ctx.isIdle() === false during compaction retry window");
 	const isIdleFalseCountDuringCompaction = samples.filter((s) => s.isIdle === false).length;
 	const compactionRetryObservedFalse = isIdleFalseCountDuringCompaction >= 1;
 
-	ok("CT-4.A isIdleSampleCountDuringCompaction === 4 (sampled at 0/100/250/500ms)",
-		isIdleSampleCountDuringCompaction === 4, `got ${isIdleSampleCountDuringCompaction}`);
-	ok("CT-4.A isIdleFalseCountDuringCompaction >= 1 (at least one sample is false)",
-		isIdleFalseCountDuringCompaction >= 1, `got ${isIdleFalseCountDuringCompaction}`);
-	ok("CT-4.A compactionRetryObservedFalse === true",
-		compactionRetryObservedFalse, `got ${compactionRetryObservedFalse}`);
-	ok("CT-4.A samples shape [offset, isIdle]",
+	ok(
+		"CT-4.A isIdleSampleCountDuringCompaction === 4 (sampled at 0/100/250/500ms)",
+		isIdleSampleCountDuringCompaction === 4,
+		`got ${isIdleSampleCountDuringCompaction}`,
+	);
+	ok(
+		"CT-4.A isIdleFalseCountDuringCompaction >= 1 (at least one sample is false)",
+		isIdleFalseCountDuringCompaction >= 1,
+		`got ${isIdleFalseCountDuringCompaction}`,
+	);
+	ok("CT-4.A compactionRetryObservedFalse === true", compactionRetryObservedFalse, `got ${compactionRetryObservedFalse}`);
+	ok(
+		"CT-4.A samples shape [offset, isIdle]",
 		samples.every((s) => typeof s.offsetMs === "number" && typeof s.isIdle === "boolean"),
-		JSON.stringify(samples));
+		JSON.stringify(samples),
+	);
 
-	PROBE_OUTCOME["CT-4.A"] = (isIdleSampleCountDuringCompaction === 4
-		&& isIdleFalseCountDuringCompaction >= 1
-		&& compactionRetryObservedFalse)
-		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+	PROBE_OUTCOME["CT-4.A"] =
+		isIdleSampleCountDuringCompaction === 4 && isIdleFalseCountDuringCompaction >= 1 && compactionRetryObservedFalse
+			? "CONTRACT_CONFIRMED"
+			: "BUG_FOUND_R_ROW_NEEDED";
 
 	const path = writeProbeTranscript("ct4-compaction-retry", "ct4-compaction-retry", {
 		outcome: PROBE_OUTCOME["CT-4.A"],
@@ -422,17 +464,14 @@ console.log("\n[CT-4.B] ctx.isIdle() === true after compaction completes");
 	const isIdleAfterCompactionCompleted = postSample.isIdle === true;
 	const runtimeStatusFlippedToIdle = postSample.runtimeStatus === "idle";
 
-	ok("CT-4.B midSample.isIdle === false (compaction still in flight)",
-		midSample.isIdle === false, `got ${midSample.isIdle}`);
-	ok("CT-4.B postSample.isIdle === true (compaction complete)",
-		isIdleAfterCompactionCompleted, `got ${postSample.isIdle}`);
-	ok("CT-4.B runtimeStatusFlippedToIdle === true",
-		runtimeStatusFlippedToIdle, `got ${runtimeStatusFlippedToIdle}`);
+	ok("CT-4.B midSample.isIdle === false (compaction still in flight)", midSample.isIdle === false, `got ${midSample.isIdle}`);
+	ok("CT-4.B postSample.isIdle === true (compaction complete)", isIdleAfterCompactionCompleted, `got ${postSample.isIdle}`);
+	ok("CT-4.B runtimeStatusFlippedToIdle === true", runtimeStatusFlippedToIdle, `got ${runtimeStatusFlippedToIdle}`);
 
-	PROBE_OUTCOME["CT-4.B"] = (midSample.isIdle === false
-		&& isIdleAfterCompactionCompleted
-		&& runtimeStatusFlippedToIdle)
-		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+	PROBE_OUTCOME["CT-4.B"] =
+		midSample.isIdle === false && isIdleAfterCompactionCompleted && runtimeStatusFlippedToIdle
+			? "CONTRACT_CONFIRMED"
+			: "BUG_FOUND_R_ROW_NEEDED";
 
 	const path = writeProbeTranscript("ct4-compaction-retry", "ct4-compaction-retry", {
 		outcome: PROBE_OUTCOME["CT-4.B"],
@@ -478,24 +517,30 @@ console.log("\n[CT-5] DEPRECATED — see extensions/ct-probe/ct-probe.ts CT5 fac
 
 	captureHandler(ctxAtSessionStart);
 
-	ok("CT-5 ctxSignalUndefinedAtSessionStart === true (ctx.signal === undefined)",
-		capturedSignal === undefined, `got ${typeof capturedSignal} (${String(capturedSignal)})`);
-	ok("CT-5 capturedSignalType === 'undefined'",
-		capturedSignalType === "undefined", `got ${capturedSignalType}`);
-	ok("CT-5 isAbortSignalInstance === false (not an AbortSignal)",
-		isAbortSignalInstance === false, `got ${isAbortSignalInstance}`);
-	ok("CT-5 ctxSignalReads === 1 (the handler read ctx.signal once; the runtime returned undefined)",
-		true, "single-read, value was undefined");
+	ok(
+		"CT-5 ctxSignalUndefinedAtSessionStart === true (ctx.signal === undefined)",
+		capturedSignal === undefined,
+		`got ${typeof capturedSignal} (${String(capturedSignal)})`,
+	);
+	ok("CT-5 capturedSignalType === 'undefined'", capturedSignalType === "undefined", `got ${capturedSignalType}`);
+	ok("CT-5 isAbortSignalInstance === false (not an AbortSignal)", isAbortSignalInstance === false, `got ${isAbortSignalInstance}`);
+	ok(
+		"CT-5 ctxSignalReads === 1 (the handler read ctx.signal once; the runtime returned undefined)",
+		true,
+		"single-read, value was undefined",
+	);
 
 	const ctxSignalReads = 0; // the runtime's contract is that no AbortSignal-shaped value is exposed here
-	ok("CT-5 ctxSignalReads === 0 (zero AbortSignal-typed values returned by runtime at this layer)",
-		ctxSignalReads === 0, `got ${ctxSignalReads}`);
+	ok(
+		"CT-5 ctxSignalReads === 0 (zero AbortSignal-typed values returned by runtime at this layer)",
+		ctxSignalReads === 0,
+		`got ${ctxSignalReads}`,
+	);
 
-	PROBE_OUTCOME["CT-5"] = (capturedSignal === undefined
-		&& capturedSignalType === "undefined"
-		&& isAbortSignalInstance === false
-		&& ctxSignalReads === 0)
-		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+	PROBE_OUTCOME["CT-5"] =
+		capturedSignal === undefined && capturedSignalType === "undefined" && isAbortSignalInstance === false && ctxSignalReads === 0
+			? "CONTRACT_CONFIRMED"
+			: "BUG_FOUND_R_ROW_NEEDED";
 
 	const path = writeProbeTranscript("ct5-ctx-signal", "ct5-ctx-signal", {
 		outcome: PROBE_OUTCOME["CT-5"],
@@ -526,13 +571,22 @@ console.log("\n[CT-6] DEPRECATED — see extensions/ct-probe/ct-probe.ts CT6 fac
 	const ctx = {
 		signal: undefined,
 		cwd: "/scratch/ct6",
-		reload: async () => { stale = true; return Promise.resolve(); },
+		reload: async () => {
+			stale = true;
+			return Promise.resolve();
+		},
 		registerTool: () => {
-			if (stale) throw new Error("This extension ctx is stale; it was torn down by ctx.reload(). Use the ctx returned from withSession() instead.");
+			if (stale)
+				throw new Error(
+					"This extension ctx is stale; it was torn down by ctx.reload(). Use the ctx returned from withSession() instead.",
+				);
 			return { id: "ok" };
 		},
 		registerCommand: () => {
-			if (stale) throw new Error("This extension ctx is stale; it was torn down by ctx.reload(). Use the ctx returned from withSession() instead.");
+			if (stale)
+				throw new Error(
+					"This extension ctx is stale; it was torn down by ctx.reload(). Use the ctx returned from withSession() instead.",
+				);
 			return { id: "ok" };
 		},
 	};
@@ -562,20 +616,23 @@ console.log("\n[CT-6] DEPRECATED — see extensions/ct-probe/ct-probe.ts CT6 fac
 		throwMessageMatchesStalePattern = /This extension ctx is stale/.test(capturedThrowMessage);
 	}
 
-	ok("CT-6 preReload registerTool returned a value (no throw)",
-		preReloadRegisterResult && preReloadRegisterResult.id === "ok", `got ${JSON.stringify(preReloadRegisterResult)}`);
-	ok("CT-6 staleCtxUseCallCount === 1 (single use attempt)",
-		staleCtxUseCallCount === 1, `got ${staleCtxUseCallCount}`);
-	ok("CT-6 staleCtxThrowObserved === true (threw)",
-		staleCtxThrowObserved, `got ${staleCtxThrowObserved}`);
-	ok("CT-6 throwMessageMatchesStalePattern === true (matches /This extension ctx is stale/)",
-		throwMessageMatchesStalePattern, `got ${capturedThrowMessage}`);
+	ok(
+		"CT-6 preReload registerTool returned a value (no throw)",
+		preReloadRegisterResult && preReloadRegisterResult.id === "ok",
+		`got ${JSON.stringify(preReloadRegisterResult)}`,
+	);
+	ok("CT-6 staleCtxUseCallCount === 1 (single use attempt)", staleCtxUseCallCount === 1, `got ${staleCtxUseCallCount}`);
+	ok("CT-6 staleCtxThrowObserved === true (threw)", staleCtxThrowObserved, `got ${staleCtxThrowObserved}`);
+	ok(
+		"CT-6 throwMessageMatchesStalePattern === true (matches /This extension ctx is stale/)",
+		throwMessageMatchesStalePattern,
+		`got ${capturedThrowMessage}`,
+	);
 
-	PROBE_OUTCOME["CT-6"] = (preReloadRegisterResult?.id === "ok"
-		&& staleCtxUseCallCount === 1
-		&& staleCtxThrowObserved
-		&& throwMessageMatchesStalePattern)
-		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+	PROBE_OUTCOME["CT-6"] =
+		preReloadRegisterResult?.id === "ok" && staleCtxUseCallCount === 1 && staleCtxThrowObserved && throwMessageMatchesStalePattern
+			? "CONTRACT_CONFIRMED"
+			: "BUG_FOUND_R_ROW_NEEDED";
 
 	const path = writeProbeTranscript("ct6-stale-ctx", "ct6-stale-ctx", {
 		outcome: PROBE_OUTCOME["CT-6"],
@@ -616,17 +673,14 @@ console.log("\n[CT-7.A] mid-stream agent_end observed; agent_settled NOT yet");
 	const agentSettledEmittedCount = timeline.filter((e) => e.event === "agent_settled").length;
 	const agentSettledNotYetAtMidStream = agentSettledEmittedCount === 0;
 
-	ok("CT-7.A agentEndEmittedCount >= 1",
-		agentEndEmittedCount >= 1, `got ${agentEndEmittedCount}`);
-	ok("CT-7.A agentSettledEmittedCount === 0 (not yet at mid-stream)",
-		agentSettledEmittedCount === 0, `got ${agentSettledEmittedCount}`);
-	ok("CT-7.A agentSettledNotYetAtMidStream === true",
-		agentSettledNotYetAtMidStream, `got ${agentSettledNotYetAtMidStream}`);
+	ok("CT-7.A agentEndEmittedCount >= 1", agentEndEmittedCount >= 1, `got ${agentEndEmittedCount}`);
+	ok("CT-7.A agentSettledEmittedCount === 0 (not yet at mid-stream)", agentSettledEmittedCount === 0, `got ${agentSettledEmittedCount}`);
+	ok("CT-7.A agentSettledNotYetAtMidStream === true", agentSettledNotYetAtMidStream, `got ${agentSettledNotYetAtMidStream}`);
 
-	PROBE_OUTCOME["CT-7.A"] = (agentEndEmittedCount >= 1
-		&& agentSettledEmittedCount === 0
-		&& agentSettledNotYetAtMidStream)
-		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+	PROBE_OUTCOME["CT-7.A"] =
+		agentEndEmittedCount >= 1 && agentSettledEmittedCount === 0 && agentSettledNotYetAtMidStream
+			? "CONTRACT_CONFIRMED"
+			: "BUG_FOUND_R_ROW_NEEDED";
 
 	const path = writeProbeTranscript("ct7-end-vs-settled", "ct7-end-vs-settled", {
 		outcome: PROBE_OUTCOME["CT-7.A"],
@@ -664,20 +718,19 @@ console.log("\n[CT-7.B] agent_settled fires AFTER follow-up consumed");
 	const agentSettledAfterFollowUp = idxAgentSettled > idxFollowUpConsumed && idxFollowUpConsumed > idxAgentEnd;
 	const emissionOrderingMatches = agentSettledAfterFollowUp;
 
-	ok("CT-7.B agentEndEmittedCount >= 1",
-		agentEndEmittedCount >= 1, `got ${agentEndEmittedCount}`);
-	ok("CT-7.B agentSettledEmittedCount >= 1",
-		agentSettledEmittedCount >= 1, `got ${agentSettledEmittedCount}`);
-	ok("CT-7.B agentSettledAfterFollowUp === true (ordering: agent_end < followUp_consumed < agent_settled)",
-		agentSettledAfterFollowUp, `ordering: agent_end=${idxAgentEnd}, followUp=${idxFollowUpConsumed}, agent_settled=${idxAgentSettled}`);
-	ok("CT-7.B emissionOrderingMatches === true",
-		emissionOrderingMatches, `got ${emissionOrderingMatches}`);
+	ok("CT-7.B agentEndEmittedCount >= 1", agentEndEmittedCount >= 1, `got ${agentEndEmittedCount}`);
+	ok("CT-7.B agentSettledEmittedCount >= 1", agentSettledEmittedCount >= 1, `got ${agentSettledEmittedCount}`);
+	ok(
+		"CT-7.B agentSettledAfterFollowUp === true (ordering: agent_end < followUp_consumed < agent_settled)",
+		agentSettledAfterFollowUp,
+		`ordering: agent_end=${idxAgentEnd}, followUp=${idxFollowUpConsumed}, agent_settled=${idxAgentSettled}`,
+	);
+	ok("CT-7.B emissionOrderingMatches === true", emissionOrderingMatches, `got ${emissionOrderingMatches}`);
 
-	PROBE_OUTCOME["CT-7.B"] = (agentEndEmittedCount >= 1
-		&& agentSettledEmittedCount >= 1
-		&& agentSettledAfterFollowUp
-		&& emissionOrderingMatches)
-		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+	PROBE_OUTCOME["CT-7.B"] =
+		agentEndEmittedCount >= 1 && agentSettledEmittedCount >= 1 && agentSettledAfterFollowUp && emissionOrderingMatches
+			? "CONTRACT_CONFIRMED"
+			: "BUG_FOUND_R_ROW_NEEDED";
 
 	const path = writeProbeTranscript("ct7-end-vs-settled", "ct7-end-vs-settled", {
 		outcome: PROBE_OUTCOME["CT-7.B"],
@@ -715,20 +768,19 @@ console.log("\n[CT-8] root pseudo-agent record tmuxTarget === 'unknown' (F2 fram
 	const rootIdMatches = root?.id === "root";
 	const rootRoleKindMatches = root?.roleKind === "root";
 
-	ok("CT-8 rootAgentRecordFound === true (ensureRoot returned a record)",
-		rootAgentRecordFound, `got ${rootAgentRecordFound}`);
-	ok("CT-8 rootTmuxTargetMatchesUnknown === true (literal string 'unknown')",
-		rootTmuxTargetMatchesUnknown, `got ${JSON.stringify(root?.tmuxTarget)}`);
-	ok("CT-8 rootIdMatches === true (id === 'root')",
-		rootIdMatches, `got ${JSON.stringify(root?.id)}`);
-	ok("CT-8 rootRoleKindMatches === true (roleKind === 'root')",
-		rootRoleKindMatches, `got ${JSON.stringify(root?.roleKind)}`);
+	ok("CT-8 rootAgentRecordFound === true (ensureRoot returned a record)", rootAgentRecordFound, `got ${rootAgentRecordFound}`);
+	ok(
+		"CT-8 rootTmuxTargetMatchesUnknown === true (literal string 'unknown')",
+		rootTmuxTargetMatchesUnknown,
+		`got ${JSON.stringify(root?.tmuxTarget)}`,
+	);
+	ok("CT-8 rootIdMatches === true (id === 'root')", rootIdMatches, `got ${JSON.stringify(root?.id)}`);
+	ok("CT-8 rootRoleKindMatches === true (roleKind === 'root')", rootRoleKindMatches, `got ${JSON.stringify(root?.roleKind)}`);
 
-	PROBE_OUTCOME["CT-8"] = (rootAgentRecordFound
-		&& rootTmuxTargetMatchesUnknown
-		&& rootIdMatches
-		&& rootRoleKindMatches)
-		? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+	PROBE_OUTCOME["CT-8"] =
+		rootAgentRecordFound && rootTmuxTargetMatchesUnknown && rootIdMatches && rootRoleKindMatches
+			? "CONTRACT_CONFIRMED"
+			: "BUG_FOUND_R_ROW_NEEDED";
 
 	const path = writeProbeTranscript("ct8-root-unknown", "ct8-root-unknown", {
 		outcome: PROBE_OUTCOME["CT-8"],

@@ -17,8 +17,17 @@ const { proxyMetricEmitLocked } = await import(join(here, "..", "src/taskgraph.t
 const { buildSwarmStatusSummary } = await import(join(here, "..", "src/reconcile.ts"));
 const { registerSwarmCommand } = await import(join(here, "..", "src/command.ts"));
 
-let pass = 0, fail = 0;
-const ok = (name, cond, info) => { if (cond) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, info) => {
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
+};
 
 function makeTask(taskId, assignee, { stale = false, supersessionWindowStart, supersessionCount = 0 } = {}) {
 	const now = Date.now();
@@ -92,7 +101,10 @@ async function makeScratch() {
 	await mkdir(join(dir, ".pi", "swarm", "traces"), { recursive: true });
 	await mkdir(join(dir, ".pi", "swarm", "tasks"), { recursive: true });
 	await mkdir(join(dir, ".pi", "swarm", "mailboxes"), { recursive: true });
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }, null, 2));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }, null, 2),
+	);
 	return dir;
 }
 
@@ -109,13 +121,17 @@ async function readEvents(scratch) {
 	for (const file of files) {
 		const raw = await readFile(file, "utf8").catch(() => "");
 		for (const line of raw.split("\n").filter(Boolean)) {
-			try { out.push(JSON.parse(line)); } catch {}
+			try {
+				out.push(JSON.parse(line));
+			} catch {}
 		}
 	}
 	for (const taskDir of ["task-stale-a", "task-stale-b", "task-fresh"]) {
 		const raw = await readFile(join(scratch, ".pi", "swarm", "tasks", taskDir, "events.jsonl"), "utf8").catch(() => "");
 		for (const line of raw.split("\n").filter(Boolean)) {
-			try { out.push(JSON.parse(line)); } catch {}
+			try {
+				out.push(JSON.parse(line));
+			} catch {}
 		}
 	}
 	return out;
@@ -167,8 +183,22 @@ async function readEvents(scratch) {
 	st.agents["worker-b"].runtimeStatus = "idle";
 	st.proxyMetrics = { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0, lastEmitAt: new Date(now - 120_000).toISOString() };
 	await writeState(p, st);
-	await writeTask(scratch, makeTask("task-stale-a", "worker-a", { stale: true, supersessionCount: 1, supersessionWindowStart: new Date(now - 30_000).toISOString() }));
-	await writeTask(scratch, makeTask("task-stale-b", "worker-b", { stale: true, supersessionCount: 1, supersessionWindowStart: new Date(now - 20_000).toISOString() }));
+	await writeTask(
+		scratch,
+		makeTask("task-stale-a", "worker-a", {
+			stale: true,
+			supersessionCount: 1,
+			supersessionWindowStart: new Date(now - 30_000).toISOString(),
+		}),
+	);
+	await writeTask(
+		scratch,
+		makeTask("task-stale-b", "worker-b", {
+			stale: true,
+			supersessionCount: 1,
+			supersessionWindowStart: new Date(now - 20_000).toISOString(),
+		}),
+	);
 	await writeTask(scratch, makeTask("task-fresh", "worker-a", { stale: false }));
 
 	const first = await withLock(p, async () => {
@@ -191,25 +221,49 @@ async function readEvents(scratch) {
 	ok("C3 snapshot retained", (await readState(p, scratch)).proxyMetrics.staleOpen === 2);
 
 	const summary = await buildSwarmStatusSummary(p, await readState(p, scratch));
-	ok("C4 /swarm status includes proxy metrics line", summary.text.includes("proxy metrics: hungButAlive=2 staleOpen=2 supersessionChurn=2"), summary.text);
+	ok(
+		"C4 /swarm status includes proxy metrics line",
+		summary.text.includes("proxy metrics: hungButAlive=2 staleOpen=2 supersessionChurn=2"),
+		summary.text,
+	);
 
 	const cmds = {};
 	const notes = [];
 	const pi = {
 		registerTool: () => {},
-		registerCommand: (name, opts) => { cmds[name] = opts; },
+		registerCommand: (name, opts) => {
+			cmds[name] = opts;
+		},
 		on: () => {},
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 	};
 	registerSwarmCommand(pi);
 	const prevAgent = process.env.PI_SWARM_AGENT_ID;
 	process.env.PI_SWARM_AGENT_ID = "root";
-	await cmds.swarm.handler("metrics", { cwd: scratch, hasUI: true, ui: { notify: (msg) => notes.push(msg), setStatus: () => {} }, mode: "tui" });
-	if (prevAgent === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = prevAgent;
-	ok("C4 /swarm metrics surfaces proxy snapshot", notes.at(-1)?.includes("proxy metrics: hungButAlive=2 staleOpen=2 supersessionChurn=2"), notes.at(-1));
+	await cmds.swarm.handler("metrics", {
+		cwd: scratch,
+		hasUI: true,
+		ui: { notify: (msg) => notes.push(msg), setStatus: () => {} },
+		mode: "tui",
+	});
+	if (prevAgent === undefined) delete process.env.PI_SWARM_AGENT_ID;
+	else process.env.PI_SWARM_AGENT_ID = prevAgent;
+	ok(
+		"C4 /swarm metrics surfaces proxy snapshot",
+		notes.at(-1)?.includes("proxy metrics: hungButAlive=2 staleOpen=2 supersessionChurn=2"),
+		notes.at(-1),
+	);
 
 	let execCount = 0;
-	const piProbe = { registerTool: () => {}, registerCommand: () => {}, on: () => {}, exec: async () => { execCount++; return { code: 0, stdout: "", stderr: "" }; } };
+	const piProbe = {
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
+		exec: async () => {
+			execCount++;
+			return { code: 0, stdout: "", stderr: "" };
+		},
+	};
 	await withLock(p, async () => {
 		const live = await readState(p, scratch);
 		await proxyMetricEmitLocked(p, live, now + 70_000);

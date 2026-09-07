@@ -24,16 +24,15 @@ const scratch = join(tmpdir(), `swarm-r26-scope-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
 // Real-module import for the unit tests (deterministic, offline, no side effects).
-const {
-	normalizeScopePattern,
-	scopePatternsOverlap,
-	scopesOverlap,
-} = await import(join(here, "..", "src", "taskgraph.ts"));
+const { normalizeScopePattern, scopePatternsOverlap, scopesOverlap } = await import(join(here, "..", "src", "taskgraph.ts"));
 
 let fail = 0;
 const ok = (name, cond, info) => {
 	if (cond) console.log("  ok  ", name);
-	else { fail++; console.error("  FAIL", name, info !== undefined ? `(${JSON.stringify(info)})` : ""); }
+	else {
+		fail++;
+		console.error("  FAIL", name, info !== undefined ? `(${JSON.stringify(info)})` : "");
+	}
 };
 
 console.log("\n== Unit tests ==");
@@ -52,35 +51,43 @@ ok("exact-prefix-not-subtree: ('a/b','a/b/c') === false", scopePatternsOverlap("
 ok("intra-glob: ('src/*.ts','src/a.ts') === true", scopePatternsOverlap("src/*.ts", "src/a.ts") === true);
 ok("intra-glob-mismatch: ('src/*.ts','src/nested/a.ts') === false", scopePatternsOverlap("src/*.ts", "src/nested/a.ts") === false);
 ok("wildcard-subtree: ('src/**','src/a.ts') === true", scopePatternsOverlap("src/**", "src/a.ts") === true);
-ok("brace-glob: ('src/**/*.{ts,tsx}','src/a.ts') stays 'unknown' (unsupported syntax)",
-	scopePatternsOverlap("src/**/*.{ts,tsx}", "src/a.ts") === "unknown");
+ok(
+	"brace-glob: ('src/**/*.{ts,tsx}','src/a.ts') stays 'unknown' (unsupported syntax)",
+	scopePatternsOverlap("src/**/*.{ts,tsx}", "src/a.ts") === "unknown",
+);
 ok("absolute path: ('/etc/passwd','a') stays 'unknown'", scopePatternsOverlap("/etc/passwd", "a") === "unknown");
 ok("parent-traversal: ('a/../b','a') stays 'unknown'", scopePatternsOverlap("a/../b", "a") === "unknown");
 ok("dot-segment: ('./a','./a') stays 'unknown'", scopePatternsOverlap("./a", "./a") === "unknown");
 
 // §3 — double-trailing-slash handled (normalized)
-ok("double-trailing: ('a/b//','a/b/c') === true (collapsed to a/b/)",
-	scopePatternsOverlap("a/b//", "a/b/c") === true);
-ok("internal-double-slash: ('a//b','a') stays 'unknown' (internal // never collapses)",
-	scopePatternsOverlap("a//b", "a") === "unknown");
+ok("double-trailing: ('a/b//','a/b/c') === true (collapsed to a/b/)", scopePatternsOverlap("a/b//", "a/b/c") === true);
+ok("internal-double-slash: ('a//b','a') stays 'unknown' (internal // never collapses)", scopePatternsOverlap("a//b", "a") === "unknown");
 
 // §3 — scopesOverlap returns the right relation for equal trailing-slash dirs
 const eqDisjoint = scopesOverlap({ files: ["ext-a/"] }, { files: ["ext-b/"] });
-ok("scopesOverlap disjoint dirs === {overlap:false}",
-	JSON.stringify(eqDisjoint) === JSON.stringify({ overlap: false }), eqDisjoint);
+ok("scopesOverlap disjoint dirs === {overlap:false}", JSON.stringify(eqDisjoint) === JSON.stringify({ overlap: false }), eqDisjoint);
 
 const eqSame = scopesOverlap({ files: ["ext-a/"] }, { files: ["ext-a/"] });
-ok("scopesOverlap equal trailing-slash dirs === {overlap:true,relation:'equal'}",
-	JSON.stringify(eqSame) === JSON.stringify({ overlap: true, relation: "equal" }), eqSame);
+ok(
+	"scopesOverlap equal trailing-slash dirs === {overlap:true,relation:'equal'}",
+	JSON.stringify(eqSame) === JSON.stringify({ overlap: true, relation: "equal" }),
+	eqSame,
+);
 
 const dirVsFile = scopesOverlap({ files: ["ext-a/"] }, { files: ["ext-a/specific.ts"] });
-ok("scopesOverlap dir vs file inside dir === {overlap:true,relation:'glob-match'}",
-	JSON.stringify(dirVsFile) === JSON.stringify({ overlap: true, relation: "glob-match" }), dirVsFile);
+ok(
+	"scopesOverlap dir vs file inside dir === {overlap:true,relation:'glob-match'}",
+	JSON.stringify(dirVsFile) === JSON.stringify({ overlap: true, relation: "glob-match" }),
+	dirVsFile,
+);
 
 // Unknown-syntax floor still conservatively conflicts
 const unknownSyntax = scopesOverlap({ files: ["{a,b}/"] }, { files: ["c/"] });
-ok("scopesOverlap unknown-syntax (brace glob) still conservatively conflicting",
-	JSON.stringify(unknownSyntax) === JSON.stringify({ overlap: true, relation: "unknown-syntax" }), unknownSyntax);
+ok(
+	"scopesOverlap unknown-syntax (brace glob) still conservatively conflicting",
+	JSON.stringify(unknownSyntax) === JSON.stringify({ overlap: true, relation: "unknown-syntax" }),
+	unknownSyntax,
+);
 
 // normalizeScopePattern returns non-null array for trailing-slash dir
 const np = normalizeScopePattern("a/b/");
@@ -95,7 +102,9 @@ const factory = mod.default;
 
 const tools = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
 	exec: async (cmd, args) => {
@@ -108,13 +117,18 @@ const pi = {
 factory(pi);
 
 const call = async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd: scratch });
 };
 const awaitAs = async (agentId, name, params) => {
 	const prev = process.env.PI_SWARM_AGENT_ID;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	try { return await call(name, params); } finally { process.env.PI_SWARM_AGENT_ID = prev; }
+	try {
+		return await call(name, params);
+	} finally {
+		process.env.PI_SWARM_AGENT_ID = prev;
+	}
 };
 
 async function ensureWorker(agentId, roleKind) {
@@ -148,8 +162,12 @@ const taskIdA = ctA.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 await call("swarm_assign_task", { taskId: taskIdA, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 const planA = JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskIdA}/task.json`), "utf8")).nodes.plan;
 await awaitAs("worker-a", "swarm_update_task", {
-	taskId: taskIdA, nodeId: "plan", status: "done", outcome: "planned",
-	attemptId: planA.activeAttemptId, cwd: scratch,
+	taskId: taskIdA,
+	nodeId: "plan",
+	status: "done",
+	outcome: "planned",
+	attemptId: planA.activeAttemptId,
+	cwd: scratch,
 });
 await call("swarm_assign_task", { taskId: taskIdA, nodeId: "implement", agentId: "worker-a", cwd: scratch });
 ok("26-a/implement active lease held", existsSync(join(scratch, `.pi/swarm/tasks/${taskIdA}/task.json`)));
@@ -173,8 +191,12 @@ const taskIdB = ctB.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 await call("swarm_assign_task", { taskId: taskIdB, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 const planB = JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskIdB}/task.json`), "utf8")).nodes.plan;
 await awaitAs("worker-a", "swarm_update_task", {
-	taskId: taskIdB, nodeId: "plan", status: "done", outcome: "planned",
-	attemptId: planB.activeAttemptId, cwd: scratch,
+	taskId: taskIdB,
+	nodeId: "plan",
+	status: "done",
+	outcome: "planned",
+	attemptId: planB.activeAttemptId,
+	cwd: scratch,
 });
 
 // RED case pre-fix: assigning 26-b/implement to worker-b throws ACTIVE_SCOPE_CONFLICT
@@ -185,8 +207,11 @@ try {
 } catch (err) {
 	bThrew = err;
 }
-ok("26-b assign: succeeds (no ACTIVE_SCOPE_CONFLICT) — disjoint trailing-slash dirs allowed",
-	bThrew === null && bResult !== null, bThrew ? bThrew.errorCode : null);
+ok(
+	"26-b assign: succeeds (no ACTIVE_SCOPE_CONFLICT) — disjoint trailing-slash dirs allowed",
+	bThrew === null && bResult !== null,
+	bThrew ? bThrew.errorCode : null,
+);
 
 // Negative control: same dir on two tasks MUST still conflict (conservative floor for real conflict)
 const ctC = await call("swarm_create_task", {
@@ -206,8 +231,12 @@ const taskIdC = ctC.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 await call("swarm_assign_task", { taskId: taskIdC, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 const planC = JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskIdC}/task.json`), "utf8")).nodes.plan;
 await awaitAs("worker-a", "swarm_update_task", {
-	taskId: taskIdC, nodeId: "plan", status: "done", outcome: "planned",
-	attemptId: planC.activeAttemptId, cwd: scratch,
+	taskId: taskIdC,
+	nodeId: "plan",
+	status: "done",
+	outcome: "planned",
+	attemptId: planC.activeAttemptId,
+	cwd: scratch,
 });
 let cThrew = null;
 try {
@@ -215,9 +244,11 @@ try {
 } catch (err) {
 	cThrew = err;
 }
-ok("negative control: same trailing-slash dir on second task still ACTIVE_SCOPE_CONFLICT",
+ok(
+	"negative control: same trailing-slash dir on second task still ACTIVE_SCOPE_CONFLICT",
 	cThrew !== null && cThrew.errorCode === "ACTIVE_SCOPE_CONFLICT",
-	cThrew ? cThrew.errorCode : null);
+	cThrew ? cThrew.errorCode : null,
+);
 
 // Unknown-syntax negative control: brace-glob scope still conservatively conflicts
 const ctD = await call("swarm_create_task", {
@@ -237,8 +268,12 @@ const taskIdD = ctD.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 await call("swarm_assign_task", { taskId: taskIdD, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 const planD = JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskIdD}/task.json`), "utf8")).nodes.plan;
 await awaitAs("worker-a", "swarm_update_task", {
-	taskId: taskIdD, nodeId: "plan", status: "done", outcome: "planned",
-	attemptId: planD.activeAttemptId, cwd: scratch,
+	taskId: taskIdD,
+	nodeId: "plan",
+	status: "done",
+	outcome: "planned",
+	attemptId: planD.activeAttemptId,
+	cwd: scratch,
 });
 let dThrew = null;
 try {
@@ -246,9 +281,11 @@ try {
 } catch (err) {
 	dThrew = err;
 }
-ok("negative control: unknown-syntax scope still ACTIVE_SCOPE_CONFLICT",
+ok(
+	"negative control: unknown-syntax scope still ACTIVE_SCOPE_CONFLICT",
 	dThrew !== null && dThrew.errorCode === "ACTIVE_SCOPE_CONFLICT",
-	dThrew ? dThrew.errorCode : null);
+	dThrew ? dThrew.errorCode : null,
+);
 
 // Cleanup
 rmSync(scratch, { recursive: true, force: true });

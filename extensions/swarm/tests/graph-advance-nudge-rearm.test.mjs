@@ -39,8 +39,16 @@ await mkdir(join(scratch, ".pi/swarm/tasks"), { recursive: true });
 await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
 await mkdir(join(scratch, ".pi/swarm/traces"), { recursive: true });
 
-let pass = 0, fail = 0;
-const ok = (name, cond, info) => { if (cond) { pass++; } else { fail++; console.error("  FAIL:", name, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, info) => {
+	if (cond) {
+		pass++;
+	} else {
+		fail++;
+		console.error("  FAIL:", name, info ?? "");
+	}
+};
 
 // ---- scratch fixtures ----
 const TASK_ID = "task-graph-advance-rearm";
@@ -52,11 +60,19 @@ async function writeStateFile(state) {
 }
 async function readStateFile() {
 	const p = join(scratch, ".pi/swarm/swarm-state.json");
-	try { return JSON.parse(await readFile(p, "utf8")); } catch { return null; }
+	try {
+		return JSON.parse(await readFile(p, "utf8"));
+	} catch {
+		return null;
+	}
 }
 async function readTaskFile(taskId = TASK_ID) {
 	const p = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
-	try { return JSON.parse(await readFile(p, "utf8")); } catch { return null; }
+	try {
+		return JSON.parse(await readFile(p, "utf8"));
+	} catch {
+		return null;
+	}
 }
 async function writeTask(task) {
 	const tp = join(scratch, `.pi/swarm/tasks/${task.taskId}`);
@@ -69,31 +85,75 @@ async function writeTask(task) {
 async function readEvents(taskId = TASK_ID) {
 	const p = join(scratch, `.pi/swarm/tasks/${taskId}/events.jsonl`);
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function readGlobalEvents() {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function readRootMailbox() {
 	const p = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 
 function freshState(overrides = {}) {
 	const base = {
-		version: 1, swarmId: "test-f2", cwd: scratch,
+		version: 1,
+		swarmId: "test-f2",
+		cwd: scratch,
 		tmuxSession: "test-f2",
 		agents: {
-			"root": {
-				id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99,
-				status: "running", runtimeStatus: "idle", health: "healthy",
-				tmuxSession: "test-f2", tmuxWindow: "orch", tmuxTarget: "test-f2:orch.0",
-				model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch,
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test-f2",
+				tmuxWindow: "orch",
+				tmuxTarget: "test-f2:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
 				mailbox: ".pi/swarm/mailboxes/root.jsonl",
-				createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
 			},
 		},
 		delivered: {},
@@ -105,21 +165,40 @@ function freshState(overrides = {}) {
 
 function freshTask(taskId = TASK_ID, nodeId = NODE_ID, nodeOverrides = {}) {
 	return {
-		version: 1, taskId, title: "test-f2", goal: "test-f2",
-		status: "in_progress", priority: "normal",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		owner: "root", workflow: "feature-dev",
-		allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
-		start: nodeId, currentNodes: [nodeId],
+		version: 1,
+		taskId,
+		title: "test-f2",
+		goal: "test-f2",
+		status: "in_progress",
+		priority: "normal",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: nodeId,
+		currentNodes: [nodeId],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: {
 			[nodeId]: {
-				status: "ready", role: "planner", dependsOn: [], readArtifacts: [], writeArtifacts: [],
-				messageIds: [], attempts: 0, maxAttempts: 1,
+				status: "ready",
+				role: "planner",
+				dependsOn: [],
+				readArtifacts: [],
+				writeArtifacts: [],
+				messageIds: [],
+				attempts: 0,
+				maxAttempts: 1,
 				...nodeOverrides,
 			},
 		},
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 }
 
@@ -133,9 +212,15 @@ async function loadExtension({ identity = "root" } = {}) {
 	const commands = {};
 	const tools = {};
 	const pi = {
-		registerTool: (def) => { tools[def.name] = def; },
-		registerCommand: (name, def) => { commands[name] = def; },
-		on: (ev, fn) => { (handlers[ev] ||= []).push(fn); },
+		registerTool: (def) => {
+			tools[def.name] = def;
+		},
+		registerCommand: (name, def) => {
+			commands[name] = def;
+		},
+		on: (ev, fn) => {
+			(handlers[ev] ||= []).push(fn);
+		},
 		setModel: async () => true,
 		sendMessage: () => {},
 		exec: async (cmd, args) => {
@@ -152,7 +237,10 @@ async function runReconcile({ identity = "root" } = {}) {
 	process.env.PI_SWARM_IS_ROOT = "1";
 	const sessionStart = handlers["session_start"][0];
 	const ctx = {
-		cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false,
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
 		ui: { setStatus: () => {} },
 		model: { id: "glm-5.1", provider: "zai-coding-cn" },
 	};
@@ -177,8 +265,10 @@ async function setupClean({ nodeOverrides = {}, ageMs = 120_000 } = {}) {
 
 	const st = freshState();
 	st.rootLeader = {
-		pid: process.pid, sessionStartedAt: new Date().toISOString(),
-		claimedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(),
+		pid: process.pid,
+		sessionStartedAt: new Date().toISOString(),
+		claimedAt: new Date().toISOString(),
+		lastHeartbeatAt: new Date().toISOString(),
 		agentRecordId: "root",
 	};
 	await writeStateFile(st);
@@ -191,11 +281,17 @@ async function seedGraphAdvanceMessage(st, opts = {}) {
 	const id = `msg-f2-seq${seq}-${Math.random().toString(36).slice(2, 8)}`;
 	const createdAt = overrideCreatedAt || new Date(Date.now() - ageMs).toISOString();
 	st.messages[id] = {
-		id, from: "root", to: "root", status: acked ? "acked" : "injected",
-		createdAt, updatedAt: createdAt,
+		id,
+		from: "root",
+		to: "root",
+		status: acked ? "acked" : "injected",
+		createdAt,
+		updatedAt: createdAt,
 		injectedAt: acked ? undefined : createdAt,
 		ackedAt: acked ? createdAt : undefined,
-		attempts: 1, requiresAck: true, requiresResponse: false,
+		attempts: 1,
+		requiresAck: true,
+		requiresResponse: false,
 		subject: `Node ${NODE_ID} (planner) is READY but unassigned — advance task ${TASK_ID} now`,
 		idempotencyKey: `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:${seq}`,
 	};
@@ -213,10 +309,21 @@ await runReconcile();
 	const mailbox = await readRootMailbox();
 	const events = await readGlobalEvents();
 	const seqRecs = mailbox.filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:1`);
-	ok("exactly one mailbox record with seq:1 idempotency key", seqRecs.length === 1, `mailbox=${JSON.stringify(mailbox.map(m => m.idempotencyKey))}`);
-	ok("durable per-(task,node) seq store stamped to 1", st.graphAdvanceNudgeState?.[TASK_ID]?.[NODE_ID]?.nudgeSeq === 1, `seq=${st.graphAdvanceNudgeState?.[TASK_ID]?.[NODE_ID]?.nudgeSeq}`);
+	ok(
+		"exactly one mailbox record with seq:1 idempotency key",
+		seqRecs.length === 1,
+		`mailbox=${JSON.stringify(mailbox.map((m) => m.idempotencyKey))}`,
+	);
+	ok(
+		"durable per-(task,node) seq store stamped to 1",
+		st.graphAdvanceNudgeState?.[TASK_ID]?.[NODE_ID]?.nudgeSeq === 1,
+		`seq=${st.graphAdvanceNudgeState?.[TASK_ID]?.[NODE_ID]?.nudgeSeq}`,
+	);
 	ok("per-(task,node) lastNudgeAt stamped", typeof st.graphAdvanceNudgeState?.[TASK_ID]?.[NODE_ID]?.lastNudgeAt === "string");
-	ok("graph.advance_nudge_emitted trace recorded with seq:1", events.some((e) => e.event === "graph.advance_nudge_emitted" && e.seq === 1 && e.taskId === TASK_ID && e.nodeId === NODE_ID));
+	ok(
+		"graph.advance_nudge_emitted trace recorded with seq:1",
+		events.some((e) => e.event === "graph.advance_nudge_emitted" && e.seq === 1 && e.taskId === TASK_ID && e.nodeId === NODE_ID),
+	);
 }
 
 // ============================================================================
@@ -226,7 +333,9 @@ console.log("\n[C2] deferral ack + cooldown elapsed -> seq:2 record (distinct id
 {
 	const st = await readStateFile();
 	// Mark the seq:1 record as acked (the deferral scenario) + push its createdAt > cooldown ago.
-	const seq1Id = Object.keys(st.messages).find((id) => st.messages[id].idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:1`);
+	const seq1Id = Object.keys(st.messages).find(
+		(id) => st.messages[id].idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:1`,
+	);
 	ok("seeded seq:1 record exists", !!seq1Id);
 	if (seq1Id) {
 		st.messages[seq1Id] = {
@@ -247,17 +356,26 @@ await runReconcile();
 	const seq1Recs = mailbox.filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:1`);
 	const seq2Recs = mailbox.filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:2`);
 	ok("seq:1 record still present (1)", seq1Recs.length === 1);
-	ok("seq:2 record emitted (1)", seq2Recs.length === 1, `mailbox=${JSON.stringify(mailbox.map(m => m.idempotencyKey))}`);
+	ok("seq:2 record emitted (1)", seq2Recs.length === 1, `mailbox=${JSON.stringify(mailbox.map((m) => m.idempotencyKey))}`);
 	ok("seq:2 has a distinct id from seq:1", seq1Recs[0]?.id !== seq2Recs[0]?.id);
 	ok("seq:2 record requiresAck=true (root must ack the re-arm)", seq2Recs[0]?.requiresAck === true);
 	ok("durable seq store advanced to 2", st.graphAdvanceNudgeState?.[TASK_ID]?.[NODE_ID]?.nudgeSeq === 2);
-	ok("graph.advance_nudge_emitted trace recorded with seq:2", events.some((e) => e.event === "graph.advance_nudge_emitted" && e.seq === 2 && e.taskId === TASK_ID && e.nodeId === NODE_ID));
+	ok(
+		"graph.advance_nudge_emitted trace recorded with seq:2",
+		events.some((e) => e.event === "graph.advance_nudge_emitted" && e.seq === 2 && e.taskId === TASK_ID && e.nodeId === NODE_ID),
+	);
 	// Critical: the bug under test was that the second emit was short-circuited by
 	// findIdempotentMessage and traced as `message.idempotent_reuse`. After the fix, no such trace
 	// fires for the seq:2 emit.
 	const seq2MsgId = seq2Recs[0]?.id;
-	const seq2Reuse = events.filter((e) => e.event === "message.idempotent_reuse" && e.id === seq2MsgId && e.idempotencyKey?.endsWith(":seq:2"));
-	ok("no `message.idempotent_reuse` trace for the seq:2 emit (the bug)", seq2Reuse.length === 0, `reuse events=${JSON.stringify(seq2Reuse)}`);
+	const seq2Reuse = events.filter(
+		(e) => e.event === "message.idempotent_reuse" && e.id === seq2MsgId && e.idempotencyKey?.endsWith(":seq:2"),
+	);
+	ok(
+		"no `message.idempotent_reuse` trace for the seq:2 emit (the bug)",
+		seq2Reuse.length === 0,
+		`reuse events=${JSON.stringify(seq2Reuse)}`,
+	);
 }
 
 // ============================================================================
@@ -267,7 +385,9 @@ console.log("\n[C3] cooldown skip — seq:2 within cooldown -> no seq:3");
 {
 	const st = await readStateFile();
 	// Push seq:2's createdAt within the cooldown window.
-	const seq2Id = Object.keys(st.messages).find((id) => st.messages[id].idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:2`);
+	const seq2Id = Object.keys(st.messages).find(
+		(id) => st.messages[id].idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:2`,
+	);
 	if (seq2Id) {
 		st.messages[seq2Id] = {
 			...st.messages[seq2Id],
@@ -283,7 +403,11 @@ await runReconcile();
 {
 	const mailbox = await readRootMailbox();
 	const seq3Recs = mailbox.filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:3`);
-	ok("no seq:3 record while seq:2 is within cooldown", seq3Recs.length === 0, `mailbox=${JSON.stringify(mailbox.map(m => m.idempotencyKey))}`);
+	ok(
+		"no seq:3 record while seq:2 is within cooldown",
+		seq3Recs.length === 0,
+		`mailbox=${JSON.stringify(mailbox.map((m) => m.idempotencyKey))}`,
+	);
 	const st = await readStateFile();
 	ok("durable seq store stays at 2", st.graphAdvanceNudgeState?.[TASK_ID]?.[NODE_ID]?.nudgeSeq === 2);
 }
@@ -295,7 +419,9 @@ console.log("\n[C4] monotonic seq: prior seq:1 + seq:2 acked + > cooldown -> seq
 {
 	const st = await readStateFile();
 	for (const seq of [1, 2]) {
-		const id = Object.keys(st.messages).find((k) => st.messages[k].idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:${seq}`);
+		const id = Object.keys(st.messages).find(
+			(k) => st.messages[k].idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:${seq}`,
+		);
 		if (id) {
 			st.messages[id] = {
 				...st.messages[id],
@@ -324,7 +450,9 @@ console.log("\n[C5] cap 3 holds — three prior acked records > cooldown -> no n
 {
 	const st = await readStateFile();
 	for (const seq of [1, 2, 3]) {
-		const id = Object.keys(st.messages).find((k) => st.messages[k].idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:${seq}`);
+		const id = Object.keys(st.messages).find(
+			(k) => st.messages[k].idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:${seq}`,
+		);
 		if (id) {
 			st.messages[id] = {
 				...st.messages[id],
@@ -361,7 +489,10 @@ await setupClean();
 	const { handlers } = await loadExtension({ identity: "root" });
 	const sessionStart = handlers["session_start"][0];
 	const ctx = {
-		cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false,
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
 		ui: { setStatus: () => {} },
 		model: { id: "glm-5.1", provider: "zai-coding-cn" },
 	};
@@ -398,8 +529,14 @@ await runReconcile();
 	ok("per-(task,node) lastResolvedAt stamped", typeof st.graphAdvanceNudgeState?.[TASK_ID]?.[NODE_ID]?.lastResolvedAt === "string");
 
 	// Confirm any outstanding seq:1 nudge was auto-acked (the else-branch path).
-	const seq1Recs = Object.values(st.messages || {}).filter((m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:1`);
-	ok("seq:1 record auto-acked after node left ready", seq1Recs.length >= 1 && seq1Recs.every((r) => !!r.ackedAt), `seq1=${JSON.stringify(seq1Recs.map((r) => ({ id: r.id, ackedAt: r.ackedAt })))}`);
+	const seq1Recs = Object.values(st.messages || {}).filter(
+		(m) => m.idempotencyKey === `task:${TASK_ID}:node:${NODE_ID}:nudge:assign:seq:1`,
+	);
+	ok(
+		"seq:1 record auto-acked after node left ready",
+		seq1Recs.length >= 1 && seq1Recs.every((r) => !!r.ackedAt),
+		`seq1=${JSON.stringify(seq1Recs.map((r) => ({ id: r.id, ackedAt: r.ackedAt })))}`,
+	);
 }
 
 // Restore env

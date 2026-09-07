@@ -17,7 +17,9 @@ const scratch = join(tmpdir(), `swarm-func-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 const tools = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
 	exec: async (cmd, args) => {
@@ -29,16 +31,24 @@ const pi = {
 };
 factory(pi);
 const call = async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd: params.cwd || scratch });
 };
 const cwd = scratch;
 let fail = 0;
-const ok = (n, c) => { if (c) console.log("  ok  ", n); else { fail++; console.error("  FAIL", n); } };
+const ok = (n, c) => {
+	if (c) console.log("  ok  ", n);
+	else {
+		fail++;
+		console.error("  FAIL", n);
+	}
+};
 
 const ct = await call("swarm_create_task", { title: "Demo", goal: "g", priority: "normal", cwd });
 ok("create_task returns text", ct?.content?.[0]?.text?.includes("task-"));
-const m = ct.content[0].text.match(/task-[A-Za-z0-9-]+/); const taskId = m[0];
+const m = ct.content[0].text.match(/task-[A-Za-z0-9-]+/);
+const taskId = m[0];
 ok("taskId parsed", !!taskId);
 
 const taskPath = join(cwd, `.pi/swarm/tasks/${taskId}/task.json`);

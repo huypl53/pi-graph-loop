@@ -12,9 +12,9 @@ async function main() {
 		console.error("Usage: node scripts/ji-check.mjs <glob-to-extensions>");
 		process.exit(1);
 	}
-	
+
 	// Convert glob to paths
-	const { glob } = await import('glob');
+	const { glob } = await import("glob");
 	const extPaths = [];
 	for (const pattern of extensions) {
 		const matches = await glob(pattern);
@@ -22,14 +22,14 @@ async function main() {
 			extPaths.push(match);
 		}
 	}
-	
+
 	if (extPaths.length === 0) {
 		console.error("No extension files found");
 		process.exit(1);
 	}
-	
+
 	let hasErrors = false;
-	
+
 	for (const extPath of extPaths) {
 		try {
 			await jiti.import(resolve(process.cwd(), extPath));
@@ -40,11 +40,11 @@ async function main() {
 			hasErrors = true;
 		}
 	}
-	
+
 	if (hasErrors) {
 		process.exit(1);
 	}
-	
+
 	console.log("All extensions parsed successfully with jiti");
 	process.exit(0);
 }

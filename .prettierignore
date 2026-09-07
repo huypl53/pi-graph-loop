@@ -1,0 +1,15 @@
+node_modules/
+out/
+dist/
+graphify-out/
+coverage/
+.pi/
+.gitnexus/
+.codegraph/
+artifacts/
+tmux-snapshots/
+*.jsonl
+*.tgz
+
+# Source-contract tests inspect bounded raw-text windows in this file.
+extensions/swarm/src/tools/tasks.ts

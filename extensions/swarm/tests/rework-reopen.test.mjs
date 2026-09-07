@@ -21,13 +21,22 @@ const scratch = await mkdtemp(join(tmpdir(), `swarm-rework-reopen-${process.pid}
 const originalCwd = process.cwd();
 process.chdir(scratch);
 await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
-await writeFile(join(scratch, ".pi/settings.json"), JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }));
+await writeFile(
+	join(scratch, ".pi/settings.json"),
+	JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }),
+);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, detail) => {
-	if (cond) { pass++; console.log("  ok  ", name); }
-	else { fail++; console.error("  FAIL", name, detail ? `(${detail})` : ""); }
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, detail ? `(${detail})` : "");
+	}
 };
 const expectReject = async (fn, predicate, name) => {
 	try {
@@ -44,27 +53,54 @@ const readTask = async (taskId) => readJson(join(scratch, `.pi/swarm/tasks/${tas
 const readTaskEvents = async (taskId) => {
 	const p = join(scratch, `.pi/swarm/tasks/${taskId}/events.jsonl`);
 	const raw = await readFile(p, "utf8").catch(() => "");
-	return raw.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
+	return raw
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => {
+			try {
+				return JSON.parse(line);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 };
 const readGlobalEvents = async () => {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	const raw = await readFile(p, "utf8").catch(() => "");
-	return raw.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
+	return raw
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => {
+			try {
+				return JSON.parse(line);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 };
 
 const ORIG_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
 const ORIG_IS_ORCH = process.env.PI_SWARM_IS_ROOT;
 
 async function loadExtension({ agentId, isRoot = false } = {}) {
-	if (agentId) process.env.PI_SWARM_AGENT_ID = agentId; else delete process.env.PI_SWARM_AGENT_ID;
-	if (isRoot) process.env.PI_SWARM_IS_ROOT = "1"; else delete process.env.PI_SWARM_IS_ROOT;
+	if (agentId) process.env.PI_SWARM_AGENT_ID = agentId;
+	else delete process.env.PI_SWARM_AGENT_ID;
+	if (isRoot) process.env.PI_SWARM_IS_ROOT = "1";
+	else delete process.env.PI_SWARM_IS_ROOT;
 	const tools = {};
 	const handlers = {};
 	const activeTools = new Set();
 	const pi = {
-		registerTool: (def) => { tools[def.name] = def; activeTools.add(def.name); },
+		registerTool: (def) => {
+			tools[def.name] = def;
+			activeTools.add(def.name);
+		},
 		registerCommand: () => {},
-		on: (ev, fn) => { (handlers[ev] ||= []).push(fn); },
+		on: (ev, fn) => {
+			(handlers[ev] ||= []).push(fn);
+		},
 		exec: async (cmd, args) => {
 			if (cmd === "tmux" && args?.[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
 			return { code: 1, stdout: "", stderr: "" };
@@ -73,7 +109,10 @@ async function loadExtension({ agentId, isRoot = false } = {}) {
 		sendMessage: () => {},
 		getAllTools: () => Object.values(tools).map((t) => ({ name: t.name })),
 		getActiveTools: () => Array.from(activeTools),
-		setActiveTools: (names) => { activeTools.clear(); for (const n of names) activeTools.add(n); },
+		setActiveTools: (names) => {
+			activeTools.clear();
+			for (const n of names) activeTools.add(n);
+		},
 	};
 	const mod = await import(join(here, "..", "index.ts"));
 	mod.default(pi);
@@ -117,12 +156,15 @@ async function updateAs(tools, agentId, isRoot, params) {
 	const prevId = process.env.PI_SWARM_AGENT_ID;
 	const prevOrch = process.env.PI_SWARM_IS_ROOT;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	if (isRoot) process.env.PI_SWARM_IS_ROOT = "1"; else delete process.env.PI_SWARM_IS_ROOT;
+	if (isRoot) process.env.PI_SWARM_IS_ROOT = "1";
+	else delete process.env.PI_SWARM_IS_ROOT;
 	try {
 		return await call(tools, "swarm_update_task", { ...params, cwd: scratch });
 	} finally {
-		if (prevId === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = prevId;
-		if (prevOrch === undefined) delete process.env.PI_SWARM_IS_ROOT; else process.env.PI_SWARM_IS_ROOT = prevOrch;
+		if (prevId === undefined) delete process.env.PI_SWARM_AGENT_ID;
+		else process.env.PI_SWARM_AGENT_ID = prevId;
+		if (prevOrch === undefined) delete process.env.PI_SWARM_IS_ROOT;
+		else process.env.PI_SWARM_IS_ROOT = prevOrch;
 	}
 }
 
@@ -148,7 +190,13 @@ async function updateAs(tools, agentId, isRoot, params) {
 
 	await assign(tools, taskId, "implement", "implementer-a");
 	const implAttempt = (await readTask(taskId)).nodes.implement.activeAttemptId;
-	await updateAs(tools, "implementer-a", false, { taskId, nodeId: "implement", status: "done", outcome: "implemented", attemptId: implAttempt });
+	await updateAs(tools, "implementer-a", false, {
+		taskId,
+		nodeId: "implement",
+		status: "done",
+		outcome: "implemented",
+		attemptId: implAttempt,
+	});
 
 	await assign(tools, taskId, "test", "tester-a");
 	const testAttempt1 = (await readTask(taskId)).nodes.test.activeAttemptId;
@@ -179,10 +227,16 @@ async function updateAs(tools, agentId, isRoot, params) {
 	let globalEvents = await readGlobalEvents();
 	const reopenEvents = globalEvents.filter((e) => e.event === "task.attempt.reopened_by_rework" && e.nodeId === "test");
 	ok("task.attempt.reopened_by_rework trace emitted", reopenEvents.length >= 1);
-	ok("reopen trace carries priorAttemptId", reopenEvents.some((e) => e.priorAttemptId === testAttempt1));
+	ok(
+		"reopen trace carries priorAttemptId",
+		reopenEvents.some((e) => e.priorAttemptId === testAttempt1),
+	);
 	ok("rework ledger records first consumption", Array.isArray(task.reworkConsumption) && task.reworkConsumption.length === 1);
 	const firstConsumption = task.reworkConsumption?.[0];
-	ok("rework ledger captures source attempt", firstConsumption?.sourceAttemptId === fixAttempt && firstConsumption?.reopenedNodeId === "test");
+	ok(
+		"rework ledger captures source attempt",
+		firstConsumption?.sourceAttemptId === fixAttempt && firstConsumption?.reopenedNodeId === "test",
+	);
 
 	await assign(tools, taskId, "test", "tester-a");
 	task = await readTask(taskId);
@@ -217,12 +271,22 @@ async function updateAs(tools, agentId, isRoot, params) {
 	task = await readTask(taskId);
 	const fixAttempt2 = task.nodes.fix.activeAttemptId;
 	ok("fresh fix attempt minted", !!fixAttempt2 && fixAttempt2 !== fixAttempt);
-	await updateAs(tools, "implementer-a", false, { taskId, nodeId: "fix", status: "done", outcome: "implemented", attemptId: fixAttempt2 });
+	await updateAs(tools, "implementer-a", false, {
+		taskId,
+		nodeId: "fix",
+		status: "done",
+		outcome: "implemented",
+		attemptId: fixAttempt2,
+	});
 	task = await readTask(taskId);
 	ok("fresh qualifying source attempt reopens test again", task.nodes.test.status === "ready");
 	ok("fresh cycle clears current attempt", !task.nodes.test.activeAttemptId);
 	ok("fresh cycle appends a second consumption record", task.reworkConsumption.length === 2);
-	ok("fresh cycle uses distinct source attempt identity", task.reworkConsumption[1].sourceAttemptId === fixAttempt2 && task.reworkConsumption[1].sourceAttemptId !== firstConsumption?.sourceAttemptId);
+	ok(
+		"fresh cycle uses distinct source attempt identity",
+		task.reworkConsumption[1].sourceAttemptId === fixAttempt2 &&
+			task.reworkConsumption[1].sourceAttemptId !== firstConsumption?.sourceAttemptId,
+	);
 	await assign(tools, taskId, "test", "tester-a");
 	task = await readTask(taskId);
 	const testAttempt3 = task.nodes.test.activeAttemptId;
@@ -231,15 +295,34 @@ async function updateAs(tools, agentId, isRoot, params) {
 	task = await readTask(taskId);
 	ok("fresh cycle retest completes passed", task.nodes.test.status === "done" && task.nodes.test.outcome === "passed");
 	ok("fresh cycle retains rework ledger length 2", task.reworkConsumption.length === 2);
-	ok("fresh cycle consumption id differs", task.reworkConsumption[1].sourceAttemptId === fixAttempt2 && task.reworkConsumption[1].sourceAttemptId !== firstConsumption?.sourceAttemptId);
+	ok(
+		"fresh cycle consumption id differs",
+		task.reworkConsumption[1].sourceAttemptId === fixAttempt2 &&
+			task.reworkConsumption[1].sourceAttemptId !== firstConsumption?.sourceAttemptId,
+	);
 
 	// ============ 4. Audit immutability + persistence ============
 	const hist = task.nodes.test.attemptHistory;
 	ok("audit history append-only (3 attempts)", hist.length === 3);
-	ok("attempt 1 completed with outcome", hist[0].status === "completed" && hist[0].outcome === "passed" && hist[0].attemptNumber === 1 && hist[0].supersededBy === "<rework>");
-	ok("attempt 2 present as second attempt", hist[1].attemptNumber === 2 && hist[1].assignee === "tester-a" && !!hist[1].assignmentMessageId);
-	ok("attempt 3 completed with outcome", hist[2].status === "completed" && hist[2].outcome === "passed" && hist[2].attemptNumber === 3 && hist[2].supersededBy === undefined);
-	ok("attempt records carry assignee + message id", hist.every((a) => a.assignee === "tester-a" && a.assignmentMessageId));
+	ok(
+		"attempt 1 completed with outcome",
+		hist[0].status === "completed" &&
+			hist[0].outcome === "passed" &&
+			hist[0].attemptNumber === 1 &&
+			hist[0].supersededBy === "<rework>",
+	);
+	ok(
+		"attempt 2 present as second attempt",
+		hist[1].attemptNumber === 2 && hist[1].assignee === "tester-a" && !!hist[1].assignmentMessageId,
+	);
+	ok(
+		"attempt 3 completed with outcome",
+		hist[2].status === "completed" && hist[2].outcome === "passed" && hist[2].attemptNumber === 3 && hist[2].supersededBy === undefined,
+	);
+	ok(
+		"attempt records carry assignee + message id",
+		hist.every((a) => a.assignee === "tester-a" && a.assignmentMessageId),
+	);
 }
 
 // ============================================================
@@ -258,7 +341,7 @@ async function updateAs(tools, agentId, isRoot, params) {
 	await updateAs(tools, "worker-b", false, { taskId, nodeId: "plan", status: "done", outcome: "planned", attemptId: planAttempt });
 	const err = await expectReject(
 		() => updateAs(tools, "worker-b", false, { taskId, nodeId: "plan", status: "ready" }),
-		((e) => Boolean(e?.errorCode) && ["ATTEMPT_TOKEN_REQUIRED", "ATTEMPT_NOT_ACTIVE", "INVALID_TRANSITION"].includes(e.errorCode)),
+		(e) => Boolean(e?.errorCode) && ["ATTEMPT_TOKEN_REQUIRED", "ATTEMPT_NOT_ACTIVE", "INVALID_TRANSITION"].includes(e.errorCode),
 		"worker rejected on done -> ready without force",
 	);
 	ok("worker reopen attempt rejected", Boolean(err));
@@ -312,7 +395,10 @@ async function updateAs(tools, agentId, isRoot, params) {
 	await sleep(25);
 	const task = await readTask(taskId);
 	ok("linear successor becomes current", task.currentNodes.includes("end"));
-	ok("linear path leaves no reopen trace", (await readTaskEvents(taskId)).filter((e) => e.event === "task.attempt.reopened_by_rework").length === 0);
+	ok(
+		"linear path leaves no reopen trace",
+		(await readTaskEvents(taskId)).filter((e) => e.event === "task.attempt.reopened_by_rework").length === 0,
+	);
 	ok("completed linear node stays done", task.nodes.start.status === "done");
 }
 
@@ -333,7 +419,13 @@ async function updateAs(tools, agentId, isRoot, params) {
 	await updateAs(tools, "worker-f", false, { taskId, nodeId: "plan", status: "done", outcome: "planned", attemptId: planAttempt });
 	await assign(tools, taskId, "implement", "worker-g");
 	const implAttempt = (await readTask(taskId)).nodes.implement.activeAttemptId;
-	await updateAs(tools, "worker-g", false, { taskId, nodeId: "implement", status: "done", outcome: "implemented", attemptId: implAttempt });
+	await updateAs(tools, "worker-g", false, {
+		taskId,
+		nodeId: "implement",
+		status: "done",
+		outcome: "implemented",
+		attemptId: implAttempt,
+	});
 	await assign(tools, taskId, "test", "worker-f");
 	const testAttempt = (await readTask(taskId)).nodes.test.activeAttemptId;
 	await updateAs(tools, "worker-f", false, { taskId, nodeId: "test", status: "failed", outcome: "failed", attemptId: testAttempt });
@@ -342,7 +434,10 @@ async function updateAs(tools, agentId, isRoot, params) {
 	ok("failed test makes fix current", task.currentNodes.includes("fix"));
 	ok("failed test reopens fix to ready", task.nodes.fix.status === "ready");
 	const events = await readGlobalEvents();
-	ok("failed path emits one reopen trace", events.some((e) => e.event === "task.attempt.reopened_by_rework" && e.nodeId === "fix"));
+	ok(
+		"failed path emits one reopen trace",
+		events.some((e) => e.event === "task.attempt.reopened_by_rework" && e.nodeId === "fix"),
+	);
 }
 
 // ============================================================
@@ -366,7 +461,13 @@ async function updateAs(tools, agentId, isRoot, params) {
 	await assign(tools, taskId, "implement", "implementer-b");
 	task = await readTask(taskId);
 	const implAttempt = task.nodes.implement.activeAttemptId;
-	await updateAs(tools, "implementer-b", false, { taskId, nodeId: "implement", status: "done", outcome: "implemented", attemptId: implAttempt });
+	await updateAs(tools, "implementer-b", false, {
+		taskId,
+		nodeId: "implement",
+		status: "done",
+		outcome: "implemented",
+		attemptId: implAttempt,
+	});
 	await assign(tools, taskId, "test", "tester-b");
 	task = await readTask(taskId);
 	const testAttempt = task.nodes.test.activeAttemptId;
@@ -377,7 +478,9 @@ async function updateAs(tools, agentId, isRoot, params) {
 	await updateAs(tools, "reviewer-b", false, { taskId, nodeId: "review", status: "done", outcome: "rejected", attemptId: reviewAttempt });
 	task = await readTask(taskId);
 	ok("review rejection reopens fix", task.nodes.fix.status === "ready");
-	const reopenBefore = (await readTaskEvents(taskId)).filter((e) => e.event === "task.attempt.reopened_by_rework" && e.nodeId === "fix").length;
+	const reopenBefore = (await readTaskEvents(taskId)).filter(
+		(e) => e.event === "task.attempt.reopened_by_rework" && e.nodeId === "fix",
+	).length;
 	await assign(tools, taskId, "fix", "implementer-b");
 	task = await readTask(taskId);
 	const fixAttempt = task.nodes.fix.activeAttemptId;
@@ -386,7 +489,9 @@ async function updateAs(tools, agentId, isRoot, params) {
 	ok("fix completion stays done", task.nodes.fix.status === "done");
 	ok("fix completion reopens test", task.nodes.test.status === "ready");
 	ok("fix completion does not re-open fix", task.nodes.fix.status === "done");
-	const reopenAfter = (await readTaskEvents(taskId)).filter((e) => e.event === "task.attempt.reopened_by_rework" && e.nodeId === "fix").length;
+	const reopenAfter = (await readTaskEvents(taskId)).filter(
+		(e) => e.event === "task.attempt.reopened_by_rework" && e.nodeId === "fix",
+	).length;
 	ok("fix reopen trace remains one-shot across fix completion", reopenAfter === reopenBefore);
 }
 
@@ -412,7 +517,13 @@ async function updateAs(tools, agentId, isRoot, params) {
 	await assign(tools, taskId, "implement", "implementer-c");
 	task = await readTask(taskId);
 	attempt = task.nodes.implement.activeAttemptId;
-	await updateAs(tools, "implementer-c", false, { taskId, nodeId: "implement", status: "done", outcome: "implemented", attemptId: attempt });
+	await updateAs(tools, "implementer-c", false, {
+		taskId,
+		nodeId: "implement",
+		status: "done",
+		outcome: "implemented",
+		attemptId: attempt,
+	});
 	await assign(tools, taskId, "test", "tester-c");
 	task = await readTask(taskId);
 	const testAttempt = task.nodes.test.activeAttemptId;
@@ -432,10 +543,19 @@ async function updateAs(tools, agentId, isRoot, params) {
 	await assign(tools, taskId, "fix", "implementer-c");
 	task = await readTask(taskId);
 	const fixAttempt2 = task.nodes.fix.activeAttemptId;
-	await updateAs(tools, "implementer-c", false, { taskId, nodeId: "fix", status: "done", outcome: "implemented", attemptId: fixAttempt2 });
+	await updateAs(tools, "implementer-c", false, {
+		taskId,
+		nodeId: "fix",
+		status: "done",
+		outcome: "implemented",
+		attemptId: fixAttempt2,
+	});
 	task = await readTask(taskId);
 	ok("later reopenable pass reopens test", task.nodes.test.status === "ready");
-	ok("later reopenable pass stamps matching consumption", task.reworkConsumption.some((r) => r.sourceAttemptId === fixAttempt2 && r.reopenedNodeId === "test"));
+	ok(
+		"later reopenable pass stamps matching consumption",
+		task.reworkConsumption.some((r) => r.sourceAttemptId === fixAttempt2 && r.reopenedNodeId === "test"),
+	);
 	const reopenTrace = (await readGlobalEvents()).filter((e) => e.event === "task.attempt.reopened_by_rework" && e.nodeId === "test");
 	ok("reopen trace emitted for the successful pass", reopenTrace.length >= 1);
 }

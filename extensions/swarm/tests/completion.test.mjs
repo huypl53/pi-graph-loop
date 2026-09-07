@@ -16,9 +16,15 @@ const tools = {};
 const cmds = {};
 const handlers = {}; // event -> [handler]
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
-	registerCommand: (name, opts) => { cmds[name] = opts; },
-	on: (ev, h) => { (handlers[ev] ??= []).push(h); },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
+	registerCommand: (name, opts) => {
+		cmds[name] = opts;
+	},
+	on: (ev, h) => {
+		(handlers[ev] ??= []).push(h);
+	},
 	exec: async (_cmd, args) => {
 		if (args?.[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
 		return { code: 0, stdout: "", stderr: "" };
@@ -33,7 +39,7 @@ for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg"]) {
 }
 const complete = (prefix) => cmds.swarm.getArgumentCompletions(prefix);
 const completeScoped = (name, prefix) => cmds[name].getArgumentCompletions(prefix);
-const valsScoped = async (name, prefix) => (await completeScoped(name, prefix) ?? []).map((i) => i.value);
+const valsScoped = async (name, prefix) => ((await completeScoped(name, prefix)) ?? []).map((i) => i.value);
 
 // --- scratch project ---
 const scratch = join(tmpdir(), `swarm-completion-${process.pid}-${Date.now()}`);
@@ -48,26 +54,65 @@ for (const h of handlers.session_start ?? []) await h({}, { cwd: scratch, mode: 
 // Seed: one real task via the tool + two agents written into state.
 // (swarm_create_task is root-gated after the orchestrator->root rename; root the seeder.)
 process.env.PI_SWARM_IS_ROOT = "1";
-const ct = await tools.swarm_create_task.execute("c", { title: "Demo feature", goal: "ship it", cwd: scratch }, undefined, undefined, { cwd: scratch });
+const ct = await tools.swarm_create_task.execute("c", { title: "Demo feature", goal: "ship it", cwd: scratch }, undefined, undefined, {
+	cwd: scratch,
+});
 process.env.PI_SWARM_IS_ROOT = "";
 const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 const st = await readState(p, scratch);
 st.agents = {
-	planner: { id: "planner", role: "Plan the work", status: "idle", roleKind: "planner", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1 },
-	reviewer: { id: "reviewer", role: "Review code", status: "running", roleKind: "reviewer", capabilities: [], activeTaskIds: [taskId], maxConcurrentTasks: 1 },
+	planner: {
+		id: "planner",
+		role: "Plan the work",
+		status: "idle",
+		roleKind: "planner",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+	},
+	reviewer: {
+		id: "reviewer",
+		role: "Review code",
+		status: "running",
+		roleKind: "reviewer",
+		capabilities: [],
+		activeTaskIds: [taskId],
+		maxConcurrentTasks: 1,
+	},
 };
 await writeState(p, st);
 
 let fail = 0;
-const ok = (name, cond) => { if (cond) console.log("  ok  ", name); else { fail++; console.error("  FAIL", name); } };
-const vals = async (prefix) => (await complete(prefix) ?? []).map((i) => i.value);
+const ok = (name, cond) => {
+	if (cond) console.log("  ok  ", name);
+	else {
+		fail++;
+		console.error("  FAIL", name);
+	}
+};
+const vals = async (prefix) => ((await complete(prefix)) ?? []).map((i) => i.value);
 
 // 1. Empty prefix -> all subcommands (28 total incl. lifecycle cmds + panes + flow + deregister).
 const subs = await vals("");
-ok("empty lists all subcommands", subs.length === 28 && subs.includes("graph") && subs.includes("flow") && subs.includes("register") && subs.includes("release") && subs.includes("identity") && subs.includes("goal") && subs.includes("panes") && subs.includes("pool") && subs.includes("deregister"));
+ok(
+	"empty lists all subcommands",
+	subs.length === 28 &&
+		subs.includes("graph") &&
+		subs.includes("flow") &&
+		subs.includes("register") &&
+		subs.includes("release") &&
+		subs.includes("identity") &&
+		subs.includes("goal") &&
+		subs.includes("panes") &&
+		subs.includes("pool") &&
+		subs.includes("deregister"),
+);
 
 // 1b. goal subcommands include update (goal-interval feature).
-ok("goal <space> offers show/set/update/done", JSON.stringify(await vals("goal ")) === JSON.stringify(["goal show", "goal set", "goal update", "goal done"]));
+ok(
+	"goal <space> offers show/set/update/done",
+	JSON.stringify(await vals("goal ")) === JSON.stringify(["goal show", "goal set", "goal update", "goal done"]),
+);
 
 // 2. Partial subcommand filters by prefix.
 const stSubs = await vals("st");
@@ -75,11 +120,20 @@ ok("'st' -> status + stop", JSON.stringify(stSubs) === JSON.stringify(["status",
 
 // 1c. deregister: 'he' prefix offers 'here' plus agent ids; flags after the id.
 ok("'de' -> deregister", JSON.stringify(await vals("de")) === JSON.stringify(["deregister"]));
-ok("deregister <space> offers here + agents", JSON.stringify((await vals("deregister ")).sort()) === JSON.stringify(["deregister here", "deregister planner", "deregister reviewer"]));
+ok(
+	"deregister <space> offers here + agents",
+	JSON.stringify((await vals("deregister ")).sort()) === JSON.stringify(["deregister here", "deregister planner", "deregister reviewer"]),
+);
 ok("deregister he -> here only", JSON.stringify(await vals("deregister he")) === JSON.stringify(["deregister here"]));
 ok("deregister rev -> reviewer", JSON.stringify(await vals("deregister rev")) === JSON.stringify(["deregister reviewer"]));
-ok("deregister here <space> -> flags", JSON.stringify((await vals("deregister here ")).sort()) === JSON.stringify(["deregister here --force", "deregister here --purge"]));
-ok("deregister planner --p -> --purge", JSON.stringify(await vals("deregister planner --p")) === JSON.stringify(["deregister planner --purge"]));
+ok(
+	"deregister here <space> -> flags",
+	JSON.stringify((await vals("deregister here ")).sort()) === JSON.stringify(["deregister here --force", "deregister here --purge"]),
+);
+ok(
+	"deregister planner --p -> --purge",
+	JSON.stringify(await vals("deregister planner --p")) === JSON.stringify(["deregister planner --purge"]),
+);
 ok("deregister extra positional -> nothing", JSON.stringify(await complete("deregister here extra")) === JSON.stringify([]));
 
 // 3. graph + space -> the concise # form by default (value keeps "graph ").
@@ -96,7 +150,10 @@ ok("graph <id-prefix> -> id form", JSON.stringify(graphId) === JSON.stringify([`
 
 // 6. graph 1 <space> -> format options.
 const fmt = await vals("graph 1 ");
-ok("graph 1 <space> -> text/mermaid/json", JSON.stringify(fmt.sort()) === JSON.stringify(["graph 1 json", "graph 1 mermaid", "graph 1 text"]));
+ok(
+	"graph 1 <space> -> text/mermaid/json",
+	JSON.stringify(fmt.sort()) === JSON.stringify(["graph 1 json", "graph 1 mermaid", "graph 1 text"]),
+);
 const fmtPartial = await vals("graph 1 m");
 ok("graph 1 m -> mermaid only", JSON.stringify(fmtPartial) === JSON.stringify(["graph 1 mermaid"]));
 
@@ -128,7 +185,10 @@ ok("spawn id word -> no suggestions", JSON.stringify(spawnId) === JSON.stringify
 
 // 10. identity reload|show then agent id.
 ok("identity <space> -> reload|show", JSON.stringify(await vals("identity ")) === JSON.stringify(["identity reload", "identity show"]));
-ok("identity reload <space> -> agents", JSON.stringify((await vals("identity reload ")).sort()) === JSON.stringify(["identity reload planner", "identity reload reviewer"]));
+ok(
+	"identity reload <space> -> agents",
+	JSON.stringify((await vals("identity reload ")).sort()) === JSON.stringify(["identity reload planner", "identity reload reviewer"]),
+);
 ok("identity show re -> reviewer", JSON.stringify(await vals("identity show re")) === JSON.stringify(["identity show reviewer"]));
 
 // 11. no-arg subcommands yield nothing.
@@ -142,26 +202,55 @@ for (const c of ["attach", "restart", "pause", "resume"]) {
 
 // 13. stop: agent id then flags.
 ok("stop <space> -> agents", JSON.stringify((await vals("stop ")).sort()) === JSON.stringify(["stop planner", "stop reviewer"]));
-ok("stop planner <space> -> flags", JSON.stringify((await vals("stop planner ")).sort()) === JSON.stringify(["stop planner --force", "stop planner --no-kill"]));
+ok(
+	"stop planner <space> -> flags",
+	JSON.stringify((await vals("stop planner ")).sort()) === JSON.stringify(["stop planner --force", "stop planner --no-kill"]),
+);
 ok("stop planner --f -> --force", JSON.stringify(await vals("stop planner --f")) === JSON.stringify(["stop planner --force"]));
 ok("stop planner --no -> --no-kill", JSON.stringify(await vals("stop planner --no")) === JSON.stringify(["stop planner --no-kill"]));
 
 // 14. role: agent, role-kind, then --kind value + flags.
 ok("role rev <space> -> role kinds", JSON.stringify((await vals("role reviewer ")).slice(0, 1)) === JSON.stringify(["role reviewer root"]));
-ok("role r planner --kind <space> -> role kinds", JSON.stringify((await vals("role reviewer planner --kind ")).slice(0, 1)) === JSON.stringify(["role reviewer planner --kind root"]));
-ok("role r planner <space> -> flags", JSON.stringify((await vals("role reviewer planner ")).sort()) === JSON.stringify(["role reviewer planner --caps", "role reviewer planner --kind"]));
+ok(
+	"role r planner --kind <space> -> role kinds",
+	JSON.stringify((await vals("role reviewer planner --kind ")).slice(0, 1)) === JSON.stringify(["role reviewer planner --kind root"]),
+);
+ok(
+	"role r planner <space> -> flags",
+	JSON.stringify((await vals("role reviewer planner ")).sort()) ===
+		JSON.stringify(["role reviewer planner --caps", "role reviewer planner --kind"]),
+);
 
 // 15. sendkey: agent then flags only (keys are free text).
-ok("sendkey planner <space> -> flags", JSON.stringify((await vals("sendkey planner ")).sort()) === JSON.stringify(["sendkey planner --enter", "sendkey planner --literal"]));
+ok(
+	"sendkey planner <space> -> flags",
+	JSON.stringify((await vals("sendkey planner ")).sort()) === JSON.stringify(["sendkey planner --enter", "sendkey planner --literal"]),
+);
 
 // 16. release: agent, then its active task-ids (reviewer holds taskId), then --force.
-ok("release reviewer <space> -> active task", JSON.stringify(await vals(`release reviewer ${taskId.slice(0, 6)}`)) === JSON.stringify([`release reviewer ${taskId}`]));
+ok(
+	"release reviewer <space> -> active task",
+	JSON.stringify(await vals(`release reviewer ${taskId.slice(0, 6)}`)) === JSON.stringify([`release reviewer ${taskId}`]),
+);
 ok("release reviewer -- -> --force", JSON.stringify(await vals("release reviewer --")) === JSON.stringify(["release reviewer --force"]));
 
 // 17. register: first two positionals free text; role kinds at pos 3; flags after.
 ok("register target id <space> -> role kinds", (await vals("register sess:0.1 newagent ")).includes("register sess:0.1 newagent planner"));
-ok("register target id role <space> -> flags", JSON.stringify((await vals("register sess:0.1 newagent planner ")).sort()) === JSON.stringify(["register sess:0.1 newagent planner --inject", "register sess:0.1 newagent planner --kind", "register sess:0.1 newagent planner --model", "register sess:0.1 newagent planner --no-inject", "register sess:0.1 newagent planner --provider"]));
-ok("register ... --kind <space> -> role kinds", (await vals("register sess:0.1 newagent planner --kind ")).includes("register sess:0.1 newagent planner --kind planner"));
+ok(
+	"register target id role <space> -> flags",
+	JSON.stringify((await vals("register sess:0.1 newagent planner ")).sort()) ===
+		JSON.stringify([
+			"register sess:0.1 newagent planner --inject",
+			"register sess:0.1 newagent planner --kind",
+			"register sess:0.1 newagent planner --model",
+			"register sess:0.1 newagent planner --no-inject",
+			"register sess:0.1 newagent planner --provider",
+		]),
+);
+ok(
+	"register ... --kind <space> -> role kinds",
+	(await vals("register sess:0.1 newagent planner --kind ")).includes("register sess:0.1 newagent planner --kind planner"),
+);
 // 17b. register 'here' token: the current-pane shortcut is offered at the target position.
 ok("register <space> offers 'here' (current pane)", (await vals("register ")).includes("register here"));
 ok("register he -> here", (await vals("register he")).includes("register here"));
@@ -172,16 +261,56 @@ ok("junk does not throw", JSON.stringify(await complete("graph     ")) !== null 
 
 // 19. items carry labels + descriptions.
 const items0 = await complete("");
-ok("subcommand items have descriptions", items0.every((i) => i.label && i.description && i.value));
+ok(
+	"subcommand items have descriptions",
+	items0.every((i) => i.label && i.description && i.value),
+);
 
 // 20. scoped command completions expose only their domain and remap to alias values.
-ok("/swarm-agents top-level verbs", JSON.stringify(await valsScoped("swarm-agents", "")) === JSON.stringify(["list", "status", "spawn", "register", "deregister", "panes", "stop", "restart", "role", "pause", "resume", "sendkey", "attach", "release", "mailbox", "identity"]));
-ok("/swarm-agents deregister remaps to /swarm completion", JSON.stringify((await valsScoped("swarm-agents", "deregister ")).sort()) === JSON.stringify(["deregister here", "deregister planner", "deregister reviewer"]));
-ok("/swarm-tasks top-level verbs", JSON.stringify(await valsScoped("swarm-tasks", "")) === JSON.stringify(["list", "graph", "status", "next", "validate"]));
-ok("/swarm-tasks status remaps task completion", JSON.stringify(await valsScoped("swarm-tasks", "status ")) === JSON.stringify(["status 1"]));
+ok(
+	"/swarm-agents top-level verbs",
+	JSON.stringify(await valsScoped("swarm-agents", "")) ===
+		JSON.stringify([
+			"list",
+			"status",
+			"spawn",
+			"register",
+			"deregister",
+			"panes",
+			"stop",
+			"restart",
+			"role",
+			"pause",
+			"resume",
+			"sendkey",
+			"attach",
+			"release",
+			"mailbox",
+			"identity",
+		]),
+);
+ok(
+	"/swarm-agents deregister remaps to /swarm completion",
+	JSON.stringify((await valsScoped("swarm-agents", "deregister ")).sort()) ===
+		JSON.stringify(["deregister here", "deregister planner", "deregister reviewer"]),
+);
+ok(
+	"/swarm-tasks top-level verbs",
+	JSON.stringify(await valsScoped("swarm-tasks", "")) === JSON.stringify(["list", "graph", "status", "next", "validate"]),
+);
+ok(
+	"/swarm-tasks status remaps task completion",
+	JSON.stringify(await valsScoped("swarm-tasks", "status ")) === JSON.stringify(["status 1"]),
+);
 ok("/swarm-msg only offers send", JSON.stringify(await valsScoped("swarm-msg", "")) === JSON.stringify(["send"]));
-ok("/swarm-msg send <space> -> agents", JSON.stringify((await valsScoped("swarm-msg", "send ")).sort()) === JSON.stringify(["send planner", "send reviewer"]));
+ok(
+	"/swarm-msg send <space> -> agents",
+	JSON.stringify((await valsScoped("swarm-msg", "send ")).sort()) === JSON.stringify(["send planner", "send reviewer"]),
+);
 
 rmSync(scratch, { recursive: true, force: true });
-if (fail) { console.error(`\nCOMPLETION FAIL (${fail})`); process.exit(1); }
+if (fail) {
+	console.error(`\nCOMPLETION FAIL (${fail})`);
+	process.exit(1);
+}
 console.log("\nCOMPLETION PASS");

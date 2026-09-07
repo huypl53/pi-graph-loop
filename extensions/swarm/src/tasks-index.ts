@@ -59,7 +59,11 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 	let scanned = 0;
 	if (existsSync(p.tasksDir)) {
 		let entries: string[] = [];
-		try { entries = await readdir(p.tasksDir); } catch { entries = []; }
+		try {
+			entries = await readdir(p.tasksDir);
+		} catch {
+			entries = [];
+		}
 		// Read all (bounded), then surface non-terminal tasks first so the operator sees live work.
 		const read: Array<{ task: TaskState; pm: string }> = [];
 		for (const entry of entries) {
@@ -70,33 +74,74 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 			try {
 				const task = await readTaskState(tp.taskJson);
 				read.push({ task, pm: pmStatus(task) });
-			} catch { /* skip unreadable */ }
+			} catch {
+				/* skip unreadable */
+			}
 		}
-		read.sort((a, b) => (a.pm === "done" || a.pm === "failed" || a.pm === "cancelled" ? 1 : 0) - (b.pm === "done" || b.pm === "failed" || b.pm === "cancelled" ? 1 : 0));
+		read.sort(
+			(a, b) =>
+				(a.pm === "done" || a.pm === "failed" || a.pm === "cancelled" ? 1 : 0) -
+				(b.pm === "done" || b.pm === "failed" || b.pm === "cancelled" ? 1 : 0),
+		);
 		for (const { task, pm } of read) {
 			byTaskStatus[pm] = (byTaskStatus[pm] || 0) + 1;
 			let unacked = 0;
 			for (const node of Object.values(task.nodes)) {
 				if (node.staleAt) staleNodes++;
-				for (const msgId of node.messageIds || []) { const rec = st.messages[msgId]; if (rec && rec.requiresAck && !rec.ackedAt) unacked++; }
+				for (const msgId of node.messageIds || []) {
+					const rec = st.messages[msgId];
+					if (rec && rec.requiresAck && !rec.ackedAt) unacked++;
+				}
 			}
 			const { ready, current } = computeReadyNodes(task);
-			taskLines.push(`task ${task.taskId} ${pm} current=[${current.join(",") || "-"}] next=[${ready.join(",") || "-"}] unacked=${unacked}`);
+			taskLines.push(
+				`task ${task.taskId} ${pm} current=[${current.join(",") || "-"}] next=[${ready.join(",") || "-"}] unacked=${unacked}`,
+			);
 		}
 	}
 	const proxy = st.proxyMetrics || { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0 };
 	const closureLine = `closure: ${byTaskStatus["done"] || 0} done, ${byTaskStatus["in_progress"] || 0} in_progress, ${(byTaskStatus["blocked"] || 0) + (byTaskStatus["stale"] || 0)} blocked/stale, ${byTaskStatus["failed"] || 0} failed`;
 	const lines = [
 		`swarm ${st.swarmId}: ${runningAgents}/${agents.length} agents running, tmux ${st.tmuxSession}`,
-		`agents by runtime: ${Object.entries(byRuntime).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`,
-		`agents by health: ${Object.entries(byHealth).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`,
-		`tasks: ${scanned} scanned, ${Object.entries(byTaskStatus).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}; staleNodes=${staleNodes}; ackMissing=${ackMissing}`,
+		`agents by runtime: ${
+			Object.entries(byRuntime)
+				.map(([k, v]) => `${k}=${v}`)
+				.join(", ") || "none"
+		}`,
+		`agents by health: ${
+			Object.entries(byHealth)
+				.map(([k, v]) => `${k}=${v}`)
+				.join(", ") || "none"
+		}`,
+		`tasks: ${scanned} scanned, ${
+			Object.entries(byTaskStatus)
+				.map(([k, v]) => `${k}=${v}`)
+				.join(", ") || "none"
+		}; staleNodes=${staleNodes}; ackMissing=${ackMissing}`,
 		`proxy metrics: hungButAlive=${proxy.hungButAlive} staleOpen=${proxy.staleOpen} supersessionChurn=${proxy.supersessionChurn}${proxy.lastEmitAt ? ` lastEmitAt=${proxy.lastEmitAt}` : ""}`,
-		st.goal ? `goal: ${st.goal.id} interval=${resolveGoalNudgeIntervalMs(st.goal.nudgeIntervalMs)}ms nudges=${st.goal.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}` : `goal: none`,
+		st.goal
+			? `goal: ${st.goal.id} interval=${resolveGoalNudgeIntervalMs(st.goal.nudgeIntervalMs)}ms nudges=${st.goal.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}`
+			: `goal: none`,
 		closureLine,
 		...taskLines,
 	];
-	return { text: lines.join("\n"), details: { swarmId: st.swarmId, runningAgents, totalAgents: agents.length, byRuntime, byHealth, tasksScanned: scanned, byTaskStatus, staleNodes, ackMissing, proxyMetrics: proxy, closure: closureLine, taskLines } };
+	return {
+		text: lines.join("\n"),
+		details: {
+			swarmId: st.swarmId,
+			runningAgents,
+			totalAgents: agents.length,
+			byRuntime,
+			byHealth,
+			tasksScanned: scanned,
+			byTaskStatus,
+			staleNodes,
+			ackMissing,
+			proxyMetrics: proxy,
+			closure: closureLine,
+			taskLines,
+		},
+	};
 }
 
 // Deterministic, indexed task list shared by `/swarm tasks` and the no-arg / number forms of
@@ -106,18 +151,39 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 export async function listTasksIndexed(p: Paths): Promise<IndexedTask[]> {
 	if (!existsSync(p.tasksDir)) return [];
 	let entries: string[] = [];
-	try { entries = await readdir(p.tasksDir); } catch { return []; }
+	try {
+		entries = await readdir(p.tasksDir);
+	} catch {
+		return [];
+	}
 	const out: IndexedTask[] = [];
 	for (const entry of entries) {
 		if (out.length >= MAX_STATUS_TASKS) break;
 		const tp = taskPaths(p, entry);
 		if (!existsSync(tp.taskJson)) continue;
 		let task: TaskState;
-		try { task = await readTaskState(tp.taskJson); } catch { continue; }
+		try {
+			task = await readTaskState(tp.taskJson);
+		} catch {
+			continue;
+		}
 		const { ready, current } = computeReadyNodes(task);
 		const total = Object.keys(task.nodes).length;
 		const done = Object.values(task.nodes).filter((n) => n.status === "done").length;
-		out.push({ index: 0, taskId: task.taskId, task, tp, status: task.status, title: task.title, createdAt: task.createdAt, updatedAt: task.updatedAt, ready, current, done, total });
+		out.push({
+			index: 0,
+			taskId: task.taskId,
+			task,
+			tp,
+			status: task.status,
+			title: task.title,
+			createdAt: task.createdAt,
+			updatedAt: task.updatedAt,
+			ready,
+			current,
+			done,
+			total,
+		});
 	}
 	out.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.taskId < b.taskId ? -1 : 1));
 	out.forEach((t, i) => (t.index = i + 1));
@@ -132,7 +198,9 @@ export function renderTasksIndexedList(list: IndexedTask[]): string {
 		const cur = t.current.join(",") || "-";
 		const nxt = t.ready.join(",") || "-";
 		const updated = t.updatedAt ? t.updatedAt.slice(5, 16).replace("T", " ") : "?          ";
-		lines.push(`  ${String(t.index).padStart(2)}  ${t.taskId.padEnd(40)} ${t.status.padEnd(12)} ${humanAge(t.updatedAt).padStart(4)}  ${updated}  ${String(t.done)}/${String(t.total).padEnd(3)}    ${cur} → ${nxt}`);
+		lines.push(
+			`  ${String(t.index).padStart(2)}  ${t.taskId.padEnd(40)} ${t.status.padEnd(12)} ${humanAge(t.updatedAt).padStart(4)}  ${updated}  ${String(t.done)}/${String(t.total).padEnd(3)}    ${cur} → ${nxt}`,
+		);
 	}
 	return lines.join("\n");
 }
@@ -140,7 +208,10 @@ export function renderTasksIndexedList(list: IndexedTask[]): string {
 // Resolve a user-supplied task reference: a bare number = list index; otherwise exact then prefix
 // task-id match (so uuid, full id, or a unique prefix all work). Returns the matched task plus the
 // full list so callers can re-render the list with a hint on miss/ambiguity.
-export async function resolveTaskArg(p: Paths, arg?: string): Promise<{ hit?: IndexedTask; list: IndexedTask[]; missReason?: string; ambiguous?: string[] }> {
+export async function resolveTaskArg(
+	p: Paths,
+	arg?: string,
+): Promise<{ hit?: IndexedTask; list: IndexedTask[]; missReason?: string; ambiguous?: string[] }> {
 	const list = await listTasksIndexed(p);
 	const trim = (arg || "").trim();
 	if (!trim) return { list, missReason: "no task reference given" };

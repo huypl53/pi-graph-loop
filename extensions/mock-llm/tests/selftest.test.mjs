@@ -3,7 +3,14 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import mockLLM from "../index.ts";
-import { clearFixtureCache, discoverModelConfigs, fixtureDir, fixtureFilePath, listFixtureDiscovery, loadFixtureFile } from "../src/fixtures.ts";
+import {
+	clearFixtureCache,
+	discoverModelConfigs,
+	fixtureDir,
+	fixtureFilePath,
+	listFixtureDiscovery,
+	loadFixtureFile,
+} from "../src/fixtures.ts";
 import { resetMockLLMCursor, streamMockLLM } from "../src/stream.ts";
 
 const tmp = join(tmpdir(), `mock-llm-selftest-${Date.now()}`);
@@ -25,7 +32,88 @@ await mockLLM({
 assert.equal(registered.name, "mock-llm", "provider should register as mock-llm");
 assert.equal(registered.config.api, "mock-llm-stream");
 assert.equal(registered.config.models.length, 77, "expected 77 scenario models");
-assert.deepEqual((await discoverModelConfigs()).map((model) => model.id).sort(), ["429-mid-edit","ack-lifecycle-booking","agent-retirement-lease","agent-retirement-sweep","assignment-fence-stale-attempt","audit-invariant-violation","auto-close-evidence-closure","cancel-supersession","commit-no-evidence","ct1-prereload-sendmessage","ct2-r15-surface-bound","ct3-nextturn-idle","ct4-compaction-retry","ct5-session-start-signal","ct6-reload-stale-ctx","ct7-end-vs-settled","dead-letter-final","delivery-repair-retry","drift-then-wake","edit-not-persisted","gc-retention-dryrun","goal-busy-epoch-reset","goal-clear-refusal","goal-interval-inherit","goal-interval-reanchor","goal-nudge-backoff-epoch-rearm","goal-nudge-surface-starve","graph-advance-nudge-rearm","handoff-chain","heartbeat-gc-dead-pane","idle-nudge-recovery","initial-ready-nudge","inprogress-death","liveness-stale-open","mailbox-delivery-read","midturn-assign","qualification-gate-create","qualification-gate-human-discuss","root-visible-surface-gap","parallel-fail-a","parallel-fail-b","pool-engine-retry-gated-swap-exhausted","pool-quota-bench-cooldown-recovery","pool-spawn-fallback-all-tagged-benched","pool-strict-roles-tagged-only","priority-high-interrupt","priority-high-interrupt-rate-limited","proxy-metrics-emit","prune-retention-apply","quota-429-then-recovery","quota-exhausted-all-turns","r12-shared-pool-mass-sweep","r13-root-unknown-target","r14-goal-empty-pool-vacuous","r15-normal-unknown-target-busy","r16-idle-goal-regression","r17-ct2-real-lane","r17-ct2-real-lane-worker","r18-scratch-pi-startup","r25-unacked-worker-notify","r27-goal-task-independent","reconcile-offset","reconcile-repair-retry","response-credit-verified-result","response-missing-settle","response-required-death","settled-with-open-assignment","shared-context-a","shared-context-b","stale-all-agents","supersession-late-result","supersession-race-new","supersession-race-old","swarm-yml-pool","task-graph-semantics","torn-json-then-recovery","wake-up-escalation-reminder"].sort());
+assert.deepEqual(
+	(await discoverModelConfigs()).map((model) => model.id).sort(),
+	[
+		"429-mid-edit",
+		"ack-lifecycle-booking",
+		"agent-retirement-lease",
+		"agent-retirement-sweep",
+		"assignment-fence-stale-attempt",
+		"audit-invariant-violation",
+		"auto-close-evidence-closure",
+		"cancel-supersession",
+		"commit-no-evidence",
+		"ct1-prereload-sendmessage",
+		"ct2-r15-surface-bound",
+		"ct3-nextturn-idle",
+		"ct4-compaction-retry",
+		"ct5-session-start-signal",
+		"ct6-reload-stale-ctx",
+		"ct7-end-vs-settled",
+		"dead-letter-final",
+		"delivery-repair-retry",
+		"drift-then-wake",
+		"edit-not-persisted",
+		"gc-retention-dryrun",
+		"goal-busy-epoch-reset",
+		"goal-clear-refusal",
+		"goal-interval-inherit",
+		"goal-interval-reanchor",
+		"goal-nudge-backoff-epoch-rearm",
+		"goal-nudge-surface-starve",
+		"graph-advance-nudge-rearm",
+		"handoff-chain",
+		"heartbeat-gc-dead-pane",
+		"idle-nudge-recovery",
+		"initial-ready-nudge",
+		"inprogress-death",
+		"liveness-stale-open",
+		"mailbox-delivery-read",
+		"midturn-assign",
+		"qualification-gate-create",
+		"qualification-gate-human-discuss",
+		"root-visible-surface-gap",
+		"parallel-fail-a",
+		"parallel-fail-b",
+		"pool-engine-retry-gated-swap-exhausted",
+		"pool-quota-bench-cooldown-recovery",
+		"pool-spawn-fallback-all-tagged-benched",
+		"pool-strict-roles-tagged-only",
+		"priority-high-interrupt",
+		"priority-high-interrupt-rate-limited",
+		"proxy-metrics-emit",
+		"prune-retention-apply",
+		"quota-429-then-recovery",
+		"quota-exhausted-all-turns",
+		"r12-shared-pool-mass-sweep",
+		"r13-root-unknown-target",
+		"r14-goal-empty-pool-vacuous",
+		"r15-normal-unknown-target-busy",
+		"r16-idle-goal-regression",
+		"r17-ct2-real-lane",
+		"r17-ct2-real-lane-worker",
+		"r18-scratch-pi-startup",
+		"r25-unacked-worker-notify",
+		"r27-goal-task-independent",
+		"reconcile-offset",
+		"reconcile-repair-retry",
+		"response-credit-verified-result",
+		"response-missing-settle",
+		"response-required-death",
+		"settled-with-open-assignment",
+		"shared-context-a",
+		"shared-context-b",
+		"stale-all-agents",
+		"supersession-late-result",
+		"supersession-race-new",
+		"supersession-race-old",
+		"swarm-yml-pool",
+		"task-graph-semantics",
+		"torn-json-then-recovery",
+		"wake-up-escalation-reminder",
+	].sort(),
+);
 assert.equal((await listFixtureDiscovery()).length, 77);
 
 function makeContext() {
@@ -65,7 +153,7 @@ async function latestTranscript(modelId) {
 		const out = [];
 		for (const entry of entries) {
 			const full = join(dir, entry.name);
-			if (entry.isDirectory()) out.push(...await walk(full));
+			if (entry.isDirectory()) out.push(...(await walk(full)));
 			else out.push(full);
 		}
 		return out;
@@ -95,7 +183,9 @@ await withFixture("zz-selftest-stream-error", "{not json}\n", async () => {
 	resetMockLLMCursor("zz-selftest-stream-error");
 	const model = { id: "zz-selftest-stream-error", provider: "mock-llm", api: "mock-llm-stream" };
 	let unhandled = null;
-	const onUnhandled = (reason) => { unhandled = reason; };
+	const onUnhandled = (reason) => {
+		unhandled = reason;
+	};
 	process.once("unhandledRejection", onUnhandled);
 	const { events, result } = await collect(streamMockLLM(model, makeContext()));
 	await new Promise((resolve) => setTimeout(resolve, 0));
@@ -108,21 +198,29 @@ await withFixture("zz-selftest-stream-error", "{not json}\n", async () => {
 
 // Terminal emission regression: if the stream end path throws while replayTurn is already
 // handling an error, the helper must keep the terminal signal single-shot.
-await withFixture("zz-selftest-double-terminal", JSON.stringify({ stopReason: "stop", events: [{ type: "error", kind: "429", status: 429 }] }) + "\n", async () => {
-	resetMockLLMCursor("zz-selftest-double-terminal");
-	const model = { id: "zz-selftest-double-terminal", provider: "mock-llm", api: "mock-llm-stream" };
-	const stream = streamMockLLM(model, makeContext());
-	stream.end = () => { throw new Error("end boom"); };
-	let unhandled = null;
-	const onUnhandled = (reason) => { unhandled = reason; };
-	process.once("unhandledRejection", onUnhandled);
-	const { events, result } = await collect(stream);
-	await new Promise((resolve) => setTimeout(resolve, 0));
-	process.removeListener("unhandledRejection", onUnhandled);
-	assert.equal(result.stopReason, "error");
-	assert.equal(events.filter((event) => event.type === "error").length, 1);
-	assert.equal(unhandled, null);
-});
+await withFixture(
+	"zz-selftest-double-terminal",
+	JSON.stringify({ stopReason: "stop", events: [{ type: "error", kind: "429", status: 429 }] }) + "\n",
+	async () => {
+		resetMockLLMCursor("zz-selftest-double-terminal");
+		const model = { id: "zz-selftest-double-terminal", provider: "mock-llm", api: "mock-llm-stream" };
+		const stream = streamMockLLM(model, makeContext());
+		stream.end = () => {
+			throw new Error("end boom");
+		};
+		let unhandled = null;
+		const onUnhandled = (reason) => {
+			unhandled = reason;
+		};
+		process.once("unhandledRejection", onUnhandled);
+		const { events, result } = await collect(stream);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		process.removeListener("unhandledRejection", onUnhandled);
+		assert.equal(result.stopReason, "error");
+		assert.equal(events.filter((event) => event.type === "error").length, 1);
+		assert.equal(unhandled, null);
+	},
+);
 
 // Missing required field should surface a clear error.
 await withFixture("zz-selftest-missing-field", JSON.stringify({ events: [{ type: "text", delayMs: 0 }] }) + "\n", async () => {
@@ -130,38 +228,56 @@ await withFixture("zz-selftest-missing-field", JSON.stringify({ events: [{ type:
 });
 
 // Invalid delay values should be rejected.
-await withFixture("zz-selftest-negative-delay", JSON.stringify({ events: [{ type: "text", text: "hi", delayMs: -1 }] }) + "\n", async () => {
-	await assert.rejects(() => loadFixtureFile("zz-selftest-negative-delay"), /delayMs/i);
-});
+await withFixture(
+	"zz-selftest-negative-delay",
+	JSON.stringify({ events: [{ type: "text", text: "hi", delayMs: -1 }] }) + "\n",
+	async () => {
+		await assert.rejects(() => loadFixtureFile("zz-selftest-negative-delay"), /delayMs/i);
+	},
+);
 
 // Script exhaustion should become a terminal error on the second request.
-await withFixture("zz-selftest-script-exhausted", JSON.stringify({ stopReason: "stop", events: [{ type: "text", text: "one turn" }] }) + "\n", async () => {
-	resetMockLLMCursor("zz-selftest-script-exhausted");
-	const model = { id: "zz-selftest-script-exhausted", provider: "mock-llm", api: "mock-llm-stream" };
-	const first = await collect(streamMockLLM(model, makeContext()));
-	assert.equal(first.result.stopReason, "stop");
-	const second = await collect(streamMockLLM(model, makeContext()));
-	assert.equal(second.result.stopReason, "error");
-	assert.match(second.result.errorMessage, /script_exhausted/i);
-});
+await withFixture(
+	"zz-selftest-script-exhausted",
+	JSON.stringify({ stopReason: "stop", events: [{ type: "text", text: "one turn" }] }) + "\n",
+	async () => {
+		resetMockLLMCursor("zz-selftest-script-exhausted");
+		const model = { id: "zz-selftest-script-exhausted", provider: "mock-llm", api: "mock-llm-stream" };
+		const first = await collect(streamMockLLM(model, makeContext()));
+		assert.equal(first.result.stopReason, "stop");
+		const second = await collect(streamMockLLM(model, makeContext()));
+		assert.equal(second.result.stopReason, "error");
+		assert.match(second.result.errorMessage, /script_exhausted/i);
+	},
+);
 
 // Transcript ordering must include start -> text_start -> ... -> done for a successful request.
-await withFixture("zz-selftest-transcript-order", JSON.stringify({ stopReason: "stop", events: [{ type: "text", text: "hello", chunks: ["he", "llo"] }, { type: "stop", reason: "stop" }] }) + "\n", async () => {
-	resetMockLLMCursor("zz-selftest-transcript-order");
-	const model = { id: "zz-selftest-transcript-order", provider: "mock-llm", api: "mock-llm-stream" };
-	const { events, result } = await collect(streamMockLLM(model, makeContext()));
-	assert.equal(result.stopReason, "stop");
-	assert.ok(events.some((event) => event.type === "text_start"));
-	const transcript = await latestTranscript("zz-selftest-transcript-order");
-	const types = transcript.events.map((event) => event.type);
-	assert.equal(types[0], "start");
-	assert.ok(types.includes("text_start"));
-	assert.ok(types.includes("text_delta"));
-	assert.ok(types.includes("text_end"));
-	assert.equal(types.at(-1), "done");
-	assert.ok(types.indexOf("start") < types.indexOf("text_start"));
-	assert.ok(types.indexOf("text_start") < types.indexOf("done"));
-});
+await withFixture(
+	"zz-selftest-transcript-order",
+	JSON.stringify({
+		stopReason: "stop",
+		events: [
+			{ type: "text", text: "hello", chunks: ["he", "llo"] },
+			{ type: "stop", reason: "stop" },
+		],
+	}) + "\n",
+	async () => {
+		resetMockLLMCursor("zz-selftest-transcript-order");
+		const model = { id: "zz-selftest-transcript-order", provider: "mock-llm", api: "mock-llm-stream" };
+		const { events, result } = await collect(streamMockLLM(model, makeContext()));
+		assert.equal(result.stopReason, "stop");
+		assert.ok(events.some((event) => event.type === "text_start"));
+		const transcript = await latestTranscript("zz-selftest-transcript-order");
+		const types = transcript.events.map((event) => event.type);
+		assert.equal(types[0], "start");
+		assert.ok(types.includes("text_start"));
+		assert.ok(types.includes("text_delta"));
+		assert.ok(types.includes("text_end"));
+		assert.equal(types.at(-1), "done");
+		assert.ok(types.indexOf("start") < types.indexOf("text_start"));
+		assert.ok(types.indexOf("text_start") < types.indexOf("done"));
+	},
+);
 
 // Existing scenario coverage stays intact.
 {

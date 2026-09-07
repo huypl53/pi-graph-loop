@@ -13,7 +13,14 @@ const PUMP_RETRIGGER_DELAY_MS = 60 * 1000;
 const PUMP_RETRIGGER_MAX = 3;
 
 let failures = 0;
-function assert(cond, msg) { if (!cond) { failures++; console.error("  ✗ FAIL:", msg); } else { console.log("  ✓", msg); } }
+function assert(cond, msg) {
+	if (!cond) {
+		failures++;
+		console.error("  ✗ FAIL:", msg);
+	} else {
+		console.log("  ✓", msg);
+	}
+}
 
 // In-memory model of one root pump session + mailbox + message records.
 function freshWorld() {

@@ -19,9 +19,27 @@ const mkPi = (tmuxImpl) => ({
 	},
 });
 
-let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n); } };
-const throws = async (n, p) => { try { await p; fail++; console.error("  FAIL", n, "(did not throw)"); } catch { pass++; console.log("  ok  ", n); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n);
+	}
+};
+const throws = async (n, p) => {
+	try {
+		await p;
+		fail++;
+		console.error("  FAIL", n, "(did not throw)");
+	} catch {
+		pass++;
+		console.log("  ok  ", n);
+	}
+};
 
 console.log("\n[1] isHereToken recognizes the magic 'current pane' tokens");
 ok("here", isHereToken("here"));
@@ -36,7 +54,10 @@ ok("empty rejected", !isHereToken(""));
 console.log("\n[2] resolveRegisterTarget passes explicit targets through unchanged (no tmux call)");
 {
 	let called = false;
-	const pi = mkPi(async () => { called = true; return { code: 0, stdout: "", stderr: "" }; });
+	const pi = mkPi(async () => {
+		called = true;
+		return { code: 0, stdout: "", stderr: "" };
+	});
 	const t = await resolveRegisterTarget(pi, "mysess:research.1");
 	ok("explicit target unchanged", t === "mysess:research.1");
 	ok("no tmux call for explicit target", called === false);
@@ -51,9 +72,9 @@ console.log("\n[3] 'here' resolves to the current pane target when inside tmux")
 	});
 	const cur = await currentPaneTarget(pi);
 	ok("current pane detected", !!cur && cur.target === "work:0.1" && cur.paneId === "%7" && cur.session === "work");
-	ok("here -> current target", await resolveRegisterTarget(pi, "here") === "work:0.1");
-	ok("self -> current target", await resolveRegisterTarget(pi, "self") === "work:0.1");
-	ok(". -> current target", await resolveRegisterTarget(pi, ".") === "work:0.1");
+	ok("here -> current target", (await resolveRegisterTarget(pi, "here")) === "work:0.1");
+	ok("self -> current target", (await resolveRegisterTarget(pi, "self")) === "work:0.1");
+	ok(". -> current target", (await resolveRegisterTarget(pi, ".")) === "work:0.1");
 	delete process.env.TMUX;
 }
 
@@ -62,7 +83,11 @@ console.log("\n[4] 'here' throws a clear, actionable error when not inside tmux"
 	delete process.env.TMUX;
 	const pi = mkPi(async () => ({ code: 0, stdout: "", stderr: "" }));
 	let msg = "";
-	try { await resolveRegisterTarget(pi, "here"); } catch (e) { msg = String(e.message || e); }
+	try {
+		await resolveRegisterTarget(pi, "here");
+	} catch (e) {
+		msg = String(e.message || e);
+	}
 	ok("throws outside tmux", /not running inside tmux/i.test(msg));
 	ok("error mentions /swarm panes", msg.includes("/swarm panes"));
 }
@@ -72,11 +97,13 @@ console.log("\n[5] listAllPanes parses every pane, formats targets, and flags th
 	process.env.TMUX = "/tmp/tmux-501/default,1234,0";
 	const pi = mkPi(async (args) => {
 		if (args[0] === "display-message") return { code: 0, stdout: "work\t0\t1\t%7\n", stderr: "" };
-		if (args[0] === "list-panes") return { code: 0, stdout: [
-			"work\t0\t0\t%5\tbash\tlogs\t0",
-			"work\t0\t1\t%7\tpi\tmain\t1",
-			"other\t1\t0\t%9\tnode\tbuild\t1",
-		].join("\n") + "\n", stderr: "" };
+		if (args[0] === "list-panes")
+			return {
+				code: 0,
+				stdout:
+					["work\t0\t0\t%5\tbash\tlogs\t0", "work\t0\t1\t%7\tpi\tmain\t1", "other\t1\t0\t%9\tnode\tbuild\t1"].join("\n") + "\n",
+				stderr: "",
+			};
 		return { code: 1, stdout: "", stderr: "" };
 	});
 	const panes = await listAllPanes(pi);

@@ -22,17 +22,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { readSwarmSettings } from "../src/session.ts";
-import {
-	classifySwarmSettings,
-	effectiveConfig,
-	effectiveBenchMs,
-	validateSwarmSettings,
-} from "../src/pool.ts";
+import { classifySwarmSettings, effectiveConfig, effectiveBenchMs, validateSwarmSettings } from "../src/pool.ts";
 import { ensurePoolScaffold } from "../src/pool-scaffold.ts";
 import { _clearQuotaResetCacheForTests } from "../src/pool.ts";
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) pass++; else { fail++; console.error("  FAIL:", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) pass++;
+	else {
+		fail++;
+		console.error("  FAIL:", name);
+	}
+};
 
 const scratch = await mkdtemp(join(tmpdir(), "pool-yaml-test-"));
 await mkdir(join(scratch, ".pi"), { recursive: true });
@@ -95,7 +97,10 @@ await writeSettings({ swarm: { modelPool: [{ model: "json-model", provider: "p1"
 	const s = readSwarmSettings(scratch);
 	ok("R2: settings.json swarm block wins over yml", s.modelPool?.length === 1 && s.modelPool[0].model === "json-model");
 	// extensions.swarm still wins over top-level swarm even when yml exists
-	await writeSettings({ swarm: { modelPool: [{ model: "top", provider: "p" }] }, extensions: { swarm: { modelPool: [{ model: "ext", provider: "p" }] } } });
+	await writeSettings({
+		swarm: { modelPool: [{ model: "top", provider: "p" }] },
+		extensions: { swarm: { modelPool: [{ model: "ext", provider: "p" }] } },
+	});
 	const s2 = readSwarmSettings(scratch);
 	ok("R2: extensions.swarm precedence preserved over yml", s2.modelPool?.[0]?.model === "ext");
 }
@@ -125,7 +130,10 @@ await resetScratch();
 	ok("R4: yml file exists", existsSync(ymlPath));
 	ok("R4: settings.json NOT created", !existsSync(settingsPath));
 	const text = await readFile(ymlPath, "utf8");
-	ok("R4: scaffold documents full surface (commented), no active null", /#\s*-\s*model:/.test(text) && !/^\s*-?\s*model:\s*null\s*$/m.test(text));
+	ok(
+		"R4: scaffold documents full surface (commented), no active null",
+		/#\s*-\s*model:/.test(text) && !/^\s*-?\s*model:\s*null\s*$/m.test(text),
+	);
 	ok("R4: scaffold is YAML (comment guidance present)", /#/.test(text));
 }
 // R4b: yml declares a pool -> skip
@@ -165,7 +173,10 @@ await writeYml("modelPool: [unclosed\n  this is : : not valid yaml :::\n\t- ?");
 {
 	const v = validateSwarmSettings(scratch);
 	ok("R6: validate ok:false on corrupt yml", v.ok === false);
-	ok("R6: error kind swarm_yml_unreadable", v.errors.some((e) => e.kind === "swarm_yml_unreadable"));
+	ok(
+		"R6: error kind swarm_yml_unreadable",
+		v.errors.some((e) => e.kind === "swarm_yml_unreadable"),
+	);
 	const s = readSwarmSettings(scratch);
 	ok("R6: readers degrade to {}", JSON.stringify(s) === "{}");
 }
@@ -181,7 +192,11 @@ rotation:
 `);
 {
 	_clearQuotaResetCacheForTests();
-	const bench = effectiveBenchMs({ model: "glm-5.1", provider: "zai-coding-cn" }, { strategy: "weighted", cooldownMs: 60000, maxRetries: 2 }, scratch);
+	const bench = effectiveBenchMs(
+		{ model: "glm-5.1", provider: "zai-coding-cn" },
+		{ strategy: "weighted", cooldownMs: 60000, maxRetries: 2 },
+		scratch,
+	);
 	ok("R7: quotaResetMs (7200000) floors bench above cooldown", bench === 7200000);
 }
 

@@ -34,8 +34,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 // fresh dynamic import with a cache-busting query string.
 const { paths, readState, writeState, trace } = await import(join(here, "..", "src", "state.ts"));
 
-let pass = 0, fail = 0;
-const ok = (n, c, info) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL:", n, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c, info) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL:", n, info ?? "");
+	}
+};
 
 // Shared scratch dir for all fixtures except E (which needs its own dir to avoid env leakage
 // between fixtures). E gets a fresh dir AND a fresh module import (cache-bust).
@@ -59,16 +68,37 @@ async function countEvents(name, eventsPath) {
 	try {
 		const raw = await readFile(eventsPath, "utf8");
 		const lines = raw.split("\n").filter(Boolean);
-		return lines.filter((l) => { try { const o = JSON.parse(l); return o.event === name; } catch { return false; } }).length;
-	} catch { return 0; }
+		return lines.filter((l) => {
+			try {
+				const o = JSON.parse(l);
+				return o.event === name;
+			} catch {
+				return false;
+			}
+		}).length;
+	} catch {
+		return 0;
+	}
 }
 
 // Helper: read the events file into parsed objects (latest snapshot).
 async function readEvents(eventsPath) {
 	try {
 		const raw = await readFile(eventsPath, "utf8");
-		return raw.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-	} catch { return []; }
+		return raw
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.filter(Boolean);
+	} catch {
+		return [];
+	}
 }
 
 // Helper: clear env, set env, then re-import pool.ts with a cache-busting query. Mirrors the
@@ -80,14 +110,17 @@ async function loadPoolFresh() {
 
 // Seed the scratch dir with a model pool. Each fixture may overwrite this to change quotaResetMs.
 async function seedSettings(pool) {
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1",
-			defaultProvider: "zai-coding-cn",
-			modelPool: pool,
-			rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
-		},
-	}));
+	await writeFile(
+		join(dir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: {
+				defaultModel: "glm-5.1",
+				defaultProvider: "zai-coding-cn",
+				modelPool: pool,
+				rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
+			},
+		}),
+	);
 }
 
 // Seed a SwarmAgent with optional activeTaskIds.
@@ -150,7 +183,11 @@ async function seedAgent(agentId, opts = {}) {
 	// Allowance: 86_398_000ms (1-second slack per B-4). Upper bound: 86_400_000 + wall-clock jitter
 	// (the 3-ms jitter seen on the first run is from `Date.now() + ms` evaluation happening a few
 	// ms after the before snapshot).
-	ok("case A: 1 quota error benches for ~24h (86_398_000..86_400_500ms per B-4)", benchMs >= 86_398_000 && benchMs <= 86_400_500, `benchMs=${benchMs}`);
+	ok(
+		"case A: 1 quota error benches for ~24h (86_398_000..86_400_500ms per B-4)",
+		benchMs >= 86_398_000 && benchMs <= 86_400_500,
+		`benchMs=${benchMs}`,
+	);
 	ok("case A: lastBenchReason stamped as 'quota'", glmHealth.lastBenchReason === "quota", `lastBenchReason=${glmHealth.lastBenchReason}`);
 	ok("case A: benchStreak=1 after first immediate quota bench", glmHealth.benchStreak === 1, `benchStreak=${glmHealth.benchStreak}`);
 }
@@ -165,7 +202,9 @@ async function seedAgent(agentId, opts = {}) {
 		{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
 	]);
 	process.chdir(dir);
-	const { recordProviderError, slotKey, effectiveBenchMs, _clearQuotaResetCacheForTests } = await import(join(here, "..", "src", "pool.ts"));
+	const { recordProviderError, slotKey, effectiveBenchMs, _clearQuotaResetCacheForTests } = await import(
+		join(here, "..", "src", "pool.ts")
+	);
 	_clearQuotaResetCacheForTests(); // clear cache that case A populated for this cwd
 	const p = await seedAgent("worker-b");
 	const glmSlot = { model: "glm-5.1", provider: "zai-coding-cn" };
@@ -196,7 +235,9 @@ async function seedAgent(agentId, opts = {}) {
 	]);
 	process.chdir(dir);
 	const { paths: pathsLocal, readState: rsLocal, writeState: wsLocal } = await import(join(here, "..", "src", "state.ts"));
-	const { readPoolHealth, writePoolHealth, withPoolLock, _clearQuotaResetCacheForTests } = await import(join(here, "..", "src", "pool.ts"));
+	const { readPoolHealth, writePoolHealth, withPoolLock, _clearQuotaResetCacheForTests } = await import(
+		join(here, "..", "src", "pool.ts")
+	);
 	_clearQuotaResetCacheForTests();
 	const { evaluateSlotRecoveryLocked } = await import(join(here, "..", "src", "reconcile.ts"));
 	const p = pathsLocal(dir);
@@ -215,12 +256,26 @@ async function seedAgent(agentId, opts = {}) {
 	});
 
 	// Drive the recovery scan directly. The root pump also calls this on every tick.
-	const fakePi = { registerTool: () => {}, registerCommand: () => {}, on: () => {}, sendMessage: () => {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
+	const fakePi = {
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
+		sendMessage: () => {},
+		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+	};
 	const st = await rsLocal(p, dir);
 	const nowMs = Date.now();
 	const result = await evaluateSlotRecoveryLocked(fakePi, dir, p, st, nowMs);
-	ok("case C: evaluateSlotRecoveryLocked emitted >= 1 event", result.emitted >= 1, `emitted=${result.emitted} reasons=${JSON.stringify(result.reasons)}`);
-	ok("case C: reason counter includes 'expired_quota'", (result.reasons.expired_quota || 0) >= 1, `reasons=${JSON.stringify(result.reasons)}`);
+	ok(
+		"case C: evaluateSlotRecoveryLocked emitted >= 1 event",
+		result.emitted >= 1,
+		`emitted=${result.emitted} reasons=${JSON.stringify(result.reasons)}`,
+	);
+	ok(
+		"case C: reason counter includes 'expired_quota'",
+		(result.reasons.expired_quota || 0) >= 1,
+		`reasons=${JSON.stringify(result.reasons)}`,
+	);
 
 	// Trace file should contain pool.slot_recovered.
 	const evCount = await countEvents("pool.slot_recovered", p.events);
@@ -232,8 +287,16 @@ async function seedAgent(agentId, opts = {}) {
 	ok("case C: trace payload has agentId", recovered?.agentId === "worker-c", `agentId=${recovered?.agentId}`);
 	ok("case C: trace payload has slot", recovered?.slot === "zai-coding-cn/glm-5.1", `slot=${recovered?.slot}`);
 	ok("case C: trace payload has remainingTasks > 0", recovered?.remainingTasks > 0, `remainingTasks=${recovered?.remainingTasks}`);
-	ok("case C: trace payload has afterMs (>=0)", typeof recovered?.afterMs === "number" && recovered.afterMs >= 0, `afterMs=${recovered?.afterMs}`);
-	ok("case C: trace payload has benchMs (>=0; stamped at bench time)", typeof recovered?.benchMs === "number" && recovered.benchMs >= 0, `benchMs=${recovered?.benchMs}`);
+	ok(
+		"case C: trace payload has afterMs (>=0)",
+		typeof recovered?.afterMs === "number" && recovered.afterMs >= 0,
+		`afterMs=${recovered?.afterMs}`,
+	);
+	ok(
+		"case C: trace payload has benchMs (>=0; stamped at bench time)",
+		typeof recovered?.benchMs === "number" && recovered.benchMs >= 0,
+		`benchMs=${recovered?.benchMs}`,
+	);
 
 	// Idempotent: second call should NOT emit (lastRecoveredAt dedupe).
 	const result2 = await evaluateSlotRecoveryLocked(fakePi, dir, p, st, nowMs + 1000);
@@ -242,7 +305,11 @@ async function seedAgent(agentId, opts = {}) {
 
 	// lastRecoveredAt should be stamped on the slot.
 	const h2 = await readPoolHealth(p);
-	ok("case C: lastRecoveredAt stamped on the slot", Boolean(h2.slots["zai-coding-cn/glm-5.1"]?.lastRecoveredAt), `lastRecoveredAt=${h2.slots["zai-coding-cn/glm-5.1"]?.lastRecoveredAt}`);
+	ok(
+		"case C: lastRecoveredAt stamped on the slot",
+		Boolean(h2.slots["zai-coding-cn/glm-5.1"]?.lastRecoveredAt),
+		`lastRecoveredAt=${h2.slots["zai-coding-cn/glm-5.1"]?.lastRecoveredAt}`,
+	);
 }
 
 // =============================================================================
@@ -256,7 +323,9 @@ async function seedAgent(agentId, opts = {}) {
 	]);
 	process.chdir(dir);
 	const { paths: pathsLocal, readState: rsLocal } = await import(join(here, "..", "src", "state.ts"));
-	const { readPoolHealth, writePoolHealth, withPoolLock, _clearQuotaResetCacheForTests } = await import(join(here, "..", "src", "pool.ts"));
+	const { readPoolHealth, writePoolHealth, withPoolLock, _clearQuotaResetCacheForTests } = await import(
+		join(here, "..", "src", "pool.ts")
+	);
 	_clearQuotaResetCacheForTests();
 	const { evaluateSlotRecoveryLocked } = await import(join(here, "..", "src", "reconcile.ts"));
 	const p = pathsLocal(dir);
@@ -275,12 +344,22 @@ async function seedAgent(agentId, opts = {}) {
 		await writePoolHealth(p, h);
 	});
 
-	const fakePi = { registerTool: () => {}, registerCommand: () => {}, on: () => {}, sendMessage: () => {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
+	const fakePi = {
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
+		sendMessage: () => {},
+		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+	};
 	const st = await rsLocal(p, dir);
 	const nowMs = Date.now();
 	const result = await evaluateSlotRecoveryLocked(fakePi, dir, p, st, nowMs);
 	ok("case D: bench expired + no active tasks => 0 emitted", result.emitted === 0, `emitted=${result.emitted}`);
-	ok("case D: reason counter includes 'expired_no_tasks'", (result.reasons.expired_no_tasks || 0) >= 1, `reasons=${JSON.stringify(result.reasons)}`);
+	ok(
+		"case D: reason counter includes 'expired_no_tasks'",
+		(result.reasons.expired_no_tasks || 0) >= 1,
+		`reasons=${JSON.stringify(result.reasons)}`,
+	);
 
 	const evCount = await countEvents("pool.slot_recovered", p.events);
 	ok("case D: NO pool.slot_recovered trace fired", evCount === 0, `count=${evCount}`);
@@ -298,17 +377,20 @@ async function seedAgent(agentId, opts = {}) {
 	const envDir = await mkdtemp(join(tmpdir(), "quota-reset-env-"));
 	await mkdir(join(envDir, ".pi"), { recursive: true });
 	// No quotaResetMs in per-slot config — env var should provide the floor.
-	await writeFile(join(envDir, ".pi", "settings.json"), JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1",
-			defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-			],
-			rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
-		},
-	}));
+	await writeFile(
+		join(envDir, ".pi", "settings.json"),
+		JSON.stringify({
+			swarm: {
+				defaultModel: "glm-5.1",
+				defaultProvider: "zai-coding-cn",
+				modelPool: [
+					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
+					{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+				],
+				rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
+			},
+		}),
+	);
 	process.chdir(envDir);
 
 	// Save and reset env vars for the duration of this case.
@@ -323,13 +405,24 @@ async function seedAgent(agentId, opts = {}) {
 	const ts = new Date().toISOString();
 	const st = await rsLocal(p, envDir);
 	st.agents["worker-e"] = {
-		id: "worker-e", role: "worker", roleKind: "worker", capabilities: [],
-		activeTaskIds: [], maxConcurrentTasks: 5,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		tmuxSession: "sess", tmuxWindow: "worker-e", tmuxTarget: "sess:worker-e.0",
-		model: "glm-5.1", provider: "zai-coding-cn", cwd: envDir,
+		id: "worker-e",
+		role: "worker",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 5,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: "sess",
+		tmuxWindow: "worker-e",
+		tmuxTarget: "sess:worker-e.0",
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: envDir,
 		mailbox: ".pi/swarm/mailboxes/x.jsonl",
-		createdAt: ts, updatedAt: ts,
+		createdAt: ts,
+		updatedAt: ts,
 	};
 	await wsLocal(p, st);
 
@@ -346,7 +439,11 @@ async function seedAgent(agentId, opts = {}) {
 	const h = await poolEnv.readPoolHealth(p);
 	const glmHealth = h.slots[poolEnv.slotKey(glmSlot)];
 	const benchMs = new Date(glmHealth.cooldownUntil).getTime() - before;
-	ok("case E: env floor produces ~1h bench (3_600_000ms ± tolerance)", benchMs >= 3_599_500 && benchMs <= 3_600_500, `benchMs=${benchMs}`);
+	ok(
+		"case E: env floor produces ~1h bench (3_600_000ms ± tolerance)",
+		benchMs >= 3_599_500 && benchMs <= 3_600_500,
+		`benchMs=${benchMs}`,
+	);
 
 	// Per-slot value wins when set (env override only when per-slot is absent/0).
 	const glmSlotWithQuota = { model: "glm-5.1", provider: "zai-coding-cn", quotaResetMs: 86_400_000 };
@@ -373,7 +470,9 @@ async function seedAgent(agentId, opts = {}) {
 	]);
 	process.chdir(dir);
 	const { paths: pathsLocal, readState: rsLocal } = await import(join(here, "..", "src", "state.ts"));
-	const { readPoolHealth, writePoolHealth, recordProviderError, withPoolLock, _clearQuotaResetCacheForTests } = await import(join(here, "..", "src", "pool.ts"));
+	const { readPoolHealth, writePoolHealth, recordProviderError, withPoolLock, _clearQuotaResetCacheForTests } = await import(
+		join(here, "..", "src", "pool.ts")
+	);
 	_clearQuotaResetCacheForTests();
 	const { evaluateSlotRecoveryLocked } = await import(join(here, "..", "src", "reconcile.ts"));
 	const p = pathsLocal(dir);
@@ -391,11 +490,21 @@ async function seedAgent(agentId, opts = {}) {
 		};
 		await writePoolHealth(p, h);
 	});
-	const fakePi = { registerTool: () => {}, registerCommand: () => {}, on: () => {}, sendMessage: () => {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
+	const fakePi = {
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
+		sendMessage: () => {},
+		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+	};
 	const st = await rsLocal(p, dir);
 	const result = await evaluateSlotRecoveryLocked(fakePi, dir, p, st, Date.now());
 	ok("case F: auth-bench (lastBenchReason != 'quota') => 0 emitted", result.emitted === 0, `emitted=${result.emitted}`);
-	ok("case F: reason counter includes 'not_quota_bench'", (result.reasons.not_quota_bench || 0) >= 1, `reasons=${JSON.stringify(result.reasons)}`);
+	ok(
+		"case F: reason counter includes 'not_quota_bench'",
+		(result.reasons.not_quota_bench || 0) >= 1,
+		`reasons=${JSON.stringify(result.reasons)}`,
+	);
 
 	// Now overwrite with a quota bench and verify the recovery scan emits.
 	await withPoolLock(p, async () => {
@@ -422,10 +531,18 @@ async function seedAgent(agentId, opts = {}) {
 	});
 	await recordProviderError(p, glmSlot, "transient", "fetch failed: ECONNREFUSED msg1");
 	const h3 = await readPoolHealth(p);
-	ok("case F: 1 transient strike (below maxRetries=2) does NOT bench", !h3.slots["zai-coding-cn/glm-5.1"]?.cooldownUntil, `cooldownUntil=${h3.slots["zai-coding-cn/glm-5.1"]?.cooldownUntil}`);
+	ok(
+		"case F: 1 transient strike (below maxRetries=2) does NOT bench",
+		!h3.slots["zai-coding-cn/glm-5.1"]?.cooldownUntil,
+		`cooldownUntil=${h3.slots["zai-coding-cn/glm-5.1"]?.cooldownUntil}`,
+	);
 	await recordProviderError(p, glmSlot, "transient", "fetch failed: ETIMEDOUT msg2");
 	const h4 = await readPoolHealth(p);
-	ok("case F: 2 transient strikes (at maxRetries) benches + stamps lastBenchReason='transient'", h4.slots["zai-coding-cn/glm-5.1"]?.lastBenchReason === "transient", `lastBenchReason=${h4.slots["zai-coding-cn/glm-5.1"]?.lastBenchReason}`);
+	ok(
+		"case F: 2 transient strikes (at maxRetries) benches + stamps lastBenchReason='transient'",
+		h4.slots["zai-coding-cn/glm-5.1"]?.lastBenchReason === "transient",
+		`lastBenchReason=${h4.slots["zai-coding-cn/glm-5.1"]?.lastBenchReason}`,
+	);
 }
 
 // =============================================================================
@@ -441,7 +558,8 @@ async function seedAgent(agentId, opts = {}) {
 	]);
 	process.chdir(dir);
 	const { paths: pathsLocal, readState: rsLocal } = await import(join(here, "..", "src", "state.ts"));
-	const { readPoolHealth, writePoolHealth, recordProviderError, recordSlotSuccess, withPoolLock, _clearQuotaResetCacheForTests } = await import(join(here, "..", "src", "pool.ts"));
+	const { readPoolHealth, writePoolHealth, recordProviderError, recordSlotSuccess, withPoolLock, _clearQuotaResetCacheForTests } =
+		await import(join(here, "..", "src", "pool.ts"));
 	_clearQuotaResetCacheForTests();
 	const { evaluateSlotRecoveryLocked } = await import(join(here, "..", "src", "reconcile.ts"));
 	const p = pathsLocal(dir);
@@ -457,16 +575,36 @@ async function seedAgent(agentId, opts = {}) {
 	// 2. Success — must preserve lastBenchReason + benchStreak, clear cooldownUntil.
 	await recordSlotSuccess(p, glmSlot);
 	const h2 = await readPoolHealth(p);
-	ok("case G step 2: cooldownUntil cleared after success", !h2.slots["zai-coding-cn/glm-5.1"].cooldownUntil, `cooldownUntil=${h2.slots["zai-coding-cn/glm-5.1"].cooldownUntil}`);
-	ok("case G step 2 (B-3): lastBenchReason preserved across success", h2.slots["zai-coding-cn/glm-5.1"].lastBenchReason === "quota", `lastBenchReason=${h2.slots["zai-coding-cn/glm-5.1"].lastBenchReason}`);
-	ok("case G step 2 (B-3): benchStreak preserved across success", h2.slots["zai-coding-cn/glm-5.1"].benchStreak === 1, `benchStreak=${h2.slots["zai-coding-cn/glm-5.1"].benchStreak}`);
-	ok("case G step 2: failures cleared after success", h2.slots["zai-coding-cn/glm-5.1"].failures === 0, `failures=${h2.slots["zai-coding-cn/glm-5.1"].failures}`);
+	ok(
+		"case G step 2: cooldownUntil cleared after success",
+		!h2.slots["zai-coding-cn/glm-5.1"].cooldownUntil,
+		`cooldownUntil=${h2.slots["zai-coding-cn/glm-5.1"].cooldownUntil}`,
+	);
+	ok(
+		"case G step 2 (B-3): lastBenchReason preserved across success",
+		h2.slots["zai-coding-cn/glm-5.1"].lastBenchReason === "quota",
+		`lastBenchReason=${h2.slots["zai-coding-cn/glm-5.1"].lastBenchReason}`,
+	);
+	ok(
+		"case G step 2 (B-3): benchStreak preserved across success",
+		h2.slots["zai-coding-cn/glm-5.1"].benchStreak === 1,
+		`benchStreak=${h2.slots["zai-coding-cn/glm-5.1"].benchStreak}`,
+	);
+	ok(
+		"case G step 2: failures cleared after success",
+		h2.slots["zai-coding-cn/glm-5.1"].failures === 0,
+		`failures=${h2.slots["zai-coding-cn/glm-5.1"].failures}`,
+	);
 
 	// 3. New bench — must stamp a FRESH lastBenchReason + clear lastRecoveredAt (none yet).
 	await recordProviderError(p, glmSlot, "quota", "Error 429: exceeded your current quota again");
 	const h3 = await readPoolHealth(p);
 	ok("case G step 3: bench #2 stamped", Boolean(h3.slots["zai-coding-cn/glm-5.1"].cooldownUntil));
-	ok("case G step 3: benchStreak bumped to 2 (was 1, +1)", h3.slots["zai-coding-cn/glm-5.1"].benchStreak === 2, `benchStreak=${h3.slots["zai-coding-cn/glm-5.1"].benchStreak}`);
+	ok(
+		"case G step 3: benchStreak bumped to 2 (was 1, +1)",
+		h3.slots["zai-coding-cn/glm-5.1"].benchStreak === 2,
+		`benchStreak=${h3.slots["zai-coding-cn/glm-5.1"].benchStreak}`,
+	);
 
 	// 4. Force cooldown expiry + recovery scan must emit.
 	await withPoolLock(p, async () => {
@@ -475,7 +613,13 @@ async function seedAgent(agentId, opts = {}) {
 		delete h.slots["zai-coding-cn/glm-5.1"].lastRecoveredAt;
 		await writePoolHealth(p, h);
 	});
-	const fakePi = { registerTool: () => {}, registerCommand: () => {}, on: () => {}, sendMessage: () => {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
+	const fakePi = {
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
+		sendMessage: () => {},
+		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+	};
 	const st = await rsLocal(p, dir);
 	const result = await evaluateSlotRecoveryLocked(fakePi, dir, p, st, Date.now());
 	ok("case G step 4: bench #2 expire + active task => emitted", result.emitted >= 1, `emitted=${result.emitted}`);
@@ -515,20 +659,24 @@ async function seedAgent(agentId, opts = {}) {
 // =============================================================================
 {
 	await resetFixtureState();
-	await seedSettings([
-		{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, quotaResetMs: -1 },
-	]);
+	await seedSettings([{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, quotaResetMs: -1 }]);
 	process.chdir(dir);
 	const { validateSwarmSettings, _clearQuotaResetCacheForTests } = await import(join(here, "..", "src", "pool.ts"));
 	_clearQuotaResetCacheForTests();
 	const v = validateSwarmSettings(dir);
-	ok("case I: validateSwarmSettings flags slot_bad_quota_reset", !v.ok && v.errors.some((e) => e.kind === "slot_bad_quota_reset"), `errors=${JSON.stringify(v.errors.map((e) => e.kind))}`);
+	ok(
+		"case I: validateSwarmSettings flags slot_bad_quota_reset",
+		!v.ok && v.errors.some((e) => e.kind === "slot_bad_quota_reset"),
+		`errors=${JSON.stringify(v.errors.map((e) => e.kind))}`,
+	);
 
-	await seedSettings([
-		{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, quotaResetMs: "abc" },
-	]);
+	await seedSettings([{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, quotaResetMs: "abc" }]);
 	const v2 = validateSwarmSettings(dir);
-	ok("case I: validateSwarmSettings flags slot_bad_quota_reset (string)", !v2.ok && v2.errors.some((e) => e.kind === "slot_bad_quota_reset"), `errors=${JSON.stringify(v2.errors.map((e) => e.kind))}`);
+	ok(
+		"case I: validateSwarmSettings flags slot_bad_quota_reset (string)",
+		!v2.ok && v2.errors.some((e) => e.kind === "slot_bad_quota_reset"),
+		`errors=${JSON.stringify(v2.errors.map((e) => e.kind))}`,
+	);
 }
 
 // =============================================================================
@@ -543,7 +691,9 @@ async function seedAgent(agentId, opts = {}) {
 	]);
 	process.chdir(dir);
 	const { paths: pathsLocal, readState: rsLocal } = await import(join(here, "..", "src", "state.ts"));
-	const { readPoolHealth, writePoolHealth, withPoolLock, _clearQuotaResetCacheForTests } = await import(join(here, "..", "src", "pool.ts"));
+	const { readPoolHealth, writePoolHealth, withPoolLock, _clearQuotaResetCacheForTests } = await import(
+		join(here, "..", "src", "pool.ts")
+	);
 	_clearQuotaResetCacheForTests();
 	const { evaluateSlotRecoveryLocked } = await import(join(here, "..", "src", "reconcile.ts"));
 	const p = pathsLocal(dir);
@@ -562,12 +712,22 @@ async function seedAgent(agentId, opts = {}) {
 		};
 		await writePoolHealth(p, h);
 	});
-	const fakePi = { registerTool: () => {}, registerCommand: () => {}, on: () => {}, sendMessage: () => {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
+	const fakePi = {
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
+		sendMessage: () => {},
+		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+	};
 	const st = await rsLocal(p, dir);
 	await evaluateSlotRecoveryLocked(fakePi, dir, p, st, Date.now());
 	const events = await readEvents(p.events);
 	const recovered = events.find((e) => e.event === "pool.slot_recovered");
-	ok("case J: recovery trace benchMs matches stamped lastBenchMs", recovered?.benchMs === expectedBenchMs, `got benchMs=${recovered?.benchMs} expected=${expectedBenchMs}`);
+	ok(
+		"case J: recovery trace benchMs matches stamped lastBenchMs",
+		recovered?.benchMs === expectedBenchMs,
+		`got benchMs=${recovered?.benchMs} expected=${expectedBenchMs}`,
+	);
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);

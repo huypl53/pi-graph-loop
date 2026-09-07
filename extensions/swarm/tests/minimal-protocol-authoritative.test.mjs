@@ -31,14 +31,33 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), `swarm-minimal-protocol-authoritative-${process.pid}-${Date.now()}`));
 await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name);
+	}
+};
 
 // ---- scratch helpers ----
 async function readGlobalEvents() {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
-	const out = txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	const out = txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 	// Also gather task-scoped events (swarm_update_task emits via traceTask which writes to
 	// .pi/swarm/tasks/<taskId>/events.jsonl). Task events share the same {ts, event, ...data} shape.
 	try {
@@ -48,7 +67,9 @@ async function readGlobalEvents() {
 			const tp = join(tasksDir, taskId, "events.jsonl");
 			const tt = await readFile(tp, "utf8").catch(() => "");
 			for (const l of tt.split("\n").filter(Boolean)) {
-				try { out.push(JSON.parse(l)); } catch {}
+				try {
+					out.push(JSON.parse(l));
+				} catch {}
 			}
 		}
 	} catch {}
@@ -56,7 +77,11 @@ async function readGlobalEvents() {
 }
 async function readStateFile() {
 	const p = join(scratch, ".pi/swarm/swarm-state.json");
-	try { return JSON.parse(await readFile(p, "utf8")); } catch { return null; }
+	try {
+		return JSON.parse(await readFile(p, "utf8"));
+	} catch {
+		return null;
+	}
 }
 
 // ---- shared: load extension with a controllable identity ----
@@ -78,9 +103,16 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const tools = {};
 	let activeTools = new Set(); // current active set (subset of registered names)
 	const pi = {
-		registerTool: (def) => { tools[def.name] = def; activeTools.add(def.name); },
-		registerCommand: (name, def) => { commands[name] = def; },
-		on: (ev, fn) => { (handlers[ev] ||= []).push(fn); },
+		registerTool: (def) => {
+			tools[def.name] = def;
+			activeTools.add(def.name);
+		},
+		registerCommand: (name, def) => {
+			commands[name] = def;
+		},
+		on: (ev, fn) => {
+			(handlers[ev] ||= []).push(fn);
+		},
 		exec: async (cmd, args) => {
 			if (cmd === "tmux" && args?.[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
 			return { code: 1, stdout: "", stderr: "" };
@@ -89,15 +121,19 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 		sendMessage: () => {},
 		getAllTools: () => Object.values(tools).map((t) => ({ name: t.name })),
 		getActiveTools: () => Array.from(activeTools),
-		setActiveTools: (names) => { activeTools = new Set(names); },
+		setActiveTools: (names) => {
+			activeTools = new Set(names);
+		},
 	};
 	const mod = await import(join(here, "..", "index.ts"));
 	mod.default(pi);
 	// Fire session_start so applySwarmToolGating runs (it is normally invoked by the hooks on
 	// session_start; without this the active tool set is the "all registered" superset, not the
 	// profile-gated set). cwd MUST be the scratch dir — see ISOLATION CONTRACT above.
-	for (const fn of (handlers.session_start || [])) {
-		try { await fn({}, { cwd: scratch, mode: "tui", hasUI: false, ui: { setStatus: () => {}, notify: () => {} } }); } catch {}
+	for (const fn of handlers.session_start || []) {
+		try {
+			await fn({}, { cwd: scratch, mode: "tui", hasUI: false, ui: { setStatus: () => {}, notify: () => {} } });
+		} catch {}
 	}
 	return { pi, handlers, tools, commands };
 }
@@ -116,22 +152,85 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const msgId = "msg-auth-1";
 	const beforeTs = new Date().toISOString();
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/worker-a.jsonl"), JSON.stringify({
-		id: msgId, swarmId: "test", from: "root", to: "worker-a", subject: "hi",
-		priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: beforeTs,
-		body: "hello", requiresAck: true, headers: {},
-	}) + "\n", "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/mailboxes/worker-a.jsonl"),
+		JSON.stringify({
+			id: msgId,
+			swarmId: "test",
+			from: "root",
+			to: "worker-a",
+			subject: "hi",
+			priority: "normal",
+			type: "swarm.message",
+			schemaVersion: 1,
+			createdAt: beforeTs,
+			body: "hello",
+			requiresAck: true,
+			headers: {},
+		}) + "\n",
+		"utf8",
+	);
 
 	const st = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
-			"worker-a": { id: "worker-a", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-a", tmuxTarget: "test:worker-a.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
+			"worker-a": {
+				id: "worker-a",
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "worker-a",
+				tmuxTarget: "test:worker-a.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
 		},
 		delivered: { "worker-a": [] },
 		messages: {},
 	};
-	st.messages[msgId] = { id: msgId, from: "root", to: "worker-a", status: "queued", createdAt: beforeTs, updatedAt: beforeTs, attempts: 0, requiresAck: true };
+	st.messages[msgId] = {
+		id: msgId,
+		from: "root",
+		to: "worker-a",
+		status: "queued",
+		createdAt: beforeTs,
+		updatedAt: beforeTs,
+		attempts: 0,
+		requiresAck: true,
+	};
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(st, null, 2), "utf8");
 
 	const out = await tools.swarm_check_mailbox.execute("c1", { markDelivered: true }, undefined, undefined, { cwd: scratch });
@@ -183,25 +282,102 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const workerId = "worker-c";
 	const beforeTs = new Date().toISOString();
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/worker-c.jsonl"), JSON.stringify({
-		id: assignMsgId, swarmId: "test", from: "root", to: workerId, subject: "Task t-1 / node n-1 assigned",
-		priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: beforeTs,
-		body: "Assignment", requiresAck: true, requiresResponse: true, conversationId: "task:t-1:n-1", headers: {},
-	}) + "\n", "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/mailboxes/worker-c.jsonl"),
+		JSON.stringify({
+			id: assignMsgId,
+			swarmId: "test",
+			from: "root",
+			to: workerId,
+			subject: "Task t-1 / node n-1 assigned",
+			priority: "normal",
+			type: "swarm.message",
+			schemaVersion: 1,
+			createdAt: beforeTs,
+			body: "Assignment",
+			requiresAck: true,
+			requiresResponse: true,
+			conversationId: "task:t-1:n-1",
+			headers: {},
+		}) + "\n",
+		"utf8",
+	);
 
 	const st = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
-			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [workerId], maxConcurrentTasks: 1, status: "running", runtimeStatus: "response_missing", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: beforeTs },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
+			[workerId]: {
+				id: workerId,
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [workerId],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "response_missing",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: workerId,
+				tmuxTarget: `test:${workerId}.0`,
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
 		},
 		delivered: { "worker-c": [assignMsgId] },
-		messages: { [assignMsgId]: { id: assignMsgId, from: "root", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: true, requiresResponse: true, conversationId: "task:t-1:n-1", response: { status: "missing", missingAt: beforeTs } } },
+		messages: {
+			[assignMsgId]: {
+				id: assignMsgId,
+				from: "root",
+				to: workerId,
+				status: "injected",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+				injectedAt: beforeTs,
+				attempts: 1,
+				requiresAck: true,
+				requiresResponse: true,
+				conversationId: "task:t-1:n-1",
+				response: { status: "missing", missingAt: beforeTs },
+			},
+		},
 	};
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(st, null, 2), "utf8");
 
 	// Worker sends a reply.
-	await tools3.swarm_send_message.execute("c3", { to: "root", body: "Result", replyTo: assignMsgId, requiresAck: false }, undefined, undefined, { cwd: scratch });
+	await tools3.swarm_send_message.execute(
+		"c3",
+		{ to: "root", body: "Result", replyTo: assignMsgId, requiresAck: false },
+		undefined,
+		undefined,
+		{ cwd: scratch },
+	);
 
 	const after = await readStateFile();
 	const rec = after?.messages?.[assignMsgId];
@@ -233,26 +409,116 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const workerId = "worker-c";
 	const convoId = "task:t-1:n-1";
 	const beforeTs = new Date().toISOString();
-	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify({
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
-		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
-			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "response_missing", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: beforeTs },
-		},
-		delivered: { [workerId]: [assignMsgId, reminderMsgId] },
-		messages: {
-			[assignMsgId]: { id: assignMsgId, from: "root", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: true, requiresResponse: true, conversationId: convoId, response: { status: "missing", missingAt: beforeTs } },
-			[reminderMsgId]: { id: reminderMsgId, from: "root", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: false, requiresResponse: false, conversationId: convoId, replyTo: assignMsgId, response: { status: "not_required" } },
-		},
-	}, null, 2), "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/swarm-state.json"),
+		JSON.stringify(
+			{
+				version: 1,
+				swarmId: "test",
+				cwd: scratch,
+				tmuxSession: "test",
+				agents: {
+					root: {
+						id: "root",
+						role: "root",
+						roleKind: "root",
+						capabilities: [],
+						activeTaskIds: [],
+						maxConcurrentTasks: 99,
+						status: "running",
+						runtimeStatus: "idle",
+						health: "healthy",
+						tmuxSession: "test",
+						tmuxWindow: "orch",
+						tmuxTarget: "test:orch.0",
+						model: "glm-5.1",
+						provider: "zai-coding-cn",
+						cwd: scratch,
+						mailbox: ".pi/swarm/mailboxes/root.jsonl",
+						createdAt: beforeTs,
+						updatedAt: beforeTs,
+					},
+					[workerId]: {
+						id: workerId,
+						role: "worker",
+						roleKind: "worker",
+						capabilities: [],
+						activeTaskIds: [],
+						maxConcurrentTasks: 1,
+						status: "running",
+						runtimeStatus: "response_missing",
+						health: "healthy",
+						tmuxSession: "test",
+						tmuxWindow: workerId,
+						tmuxTarget: `test:${workerId}.0`,
+						model: "glm-5.1",
+						provider: "zai-coding-cn",
+						cwd: scratch,
+						mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
+						createdAt: beforeTs,
+						updatedAt: beforeTs,
+					},
+				},
+				delivered: { [workerId]: [assignMsgId, reminderMsgId] },
+				messages: {
+					[assignMsgId]: {
+						id: assignMsgId,
+						from: "root",
+						to: workerId,
+						status: "injected",
+						createdAt: beforeTs,
+						updatedAt: beforeTs,
+						injectedAt: beforeTs,
+						attempts: 1,
+						requiresAck: true,
+						requiresResponse: true,
+						conversationId: convoId,
+						response: { status: "missing", missingAt: beforeTs },
+					},
+					[reminderMsgId]: {
+						id: reminderMsgId,
+						from: "root",
+						to: workerId,
+						status: "injected",
+						createdAt: beforeTs,
+						updatedAt: beforeTs,
+						injectedAt: beforeTs,
+						attempts: 1,
+						requiresAck: false,
+						requiresResponse: false,
+						conversationId: convoId,
+						replyTo: assignMsgId,
+						response: { status: "not_required" },
+					},
+				},
+			},
+			null,
+			2,
+		),
+		"utf8",
+	);
 
 	// Reply from the reminder thread, but keep the original assignment conversationId so the
 	// eventual verified result is credited to the original assignment record.
-	await tools4.swarm_send_message.execute("c4", { to: "root", body: "Result via reminder hint", replyTo: reminderMsgId, conversationId: convoId, requiresAck: false }, undefined, undefined, { cwd: scratch });
+	await tools4.swarm_send_message.execute(
+		"c4",
+		{ to: "root", body: "Result via reminder hint", replyTo: reminderMsgId, conversationId: convoId, requiresAck: false },
+		undefined,
+		undefined,
+		{ cwd: scratch },
+	);
 	const afterSend = await readStateFile();
-	const reply = Object.values(afterSend?.messages || {}).find((m) => m.from === workerId && m.replyTo === reminderMsgId && m.conversationId === convoId);
+	const reply = Object.values(afterSend?.messages || {}).find(
+		(m) => m.from === workerId && m.replyTo === reminderMsgId && m.conversationId === convoId,
+	);
 	ok("gate=1 reminder-thread reply exists on the reminder thread", Boolean(reply));
-	await tools4.swarm_ack_message.execute("c4-ack", { messageId: assignMsgId, status: "done", resultMessageId: reply?.id }, undefined, undefined, { cwd: scratch });
+	await tools4.swarm_ack_message.execute(
+		"c4-ack",
+		{ messageId: assignMsgId, status: "done", resultMessageId: reply?.id },
+		undefined,
+		undefined,
+		{ cwd: scratch },
+	);
 
 	await handlers4["agent_settled"][0]({}, { cwd: scratch, mode: "tui", isIdle: () => true });
 	const after = await readStateFile();
@@ -267,8 +533,14 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	ok("gate=1 response debt clears after the actual verification path", after?.agents?.[workerId]?.runtimeStatus === "idle");
 
 	const events = await readGlobalEvents();
-	ok("gate=1 response verification records the original assignment resultMessageId", assign?.response?.resultMessageId === verifiedReply?.id);
-	ok("gate=1 settled-with-missing-response noise stays quiet after in-thread reply", !events.some((e) => e.event === "message.response_missing.settled.notify" && e.agentId === workerId));
+	ok(
+		"gate=1 response verification records the original assignment resultMessageId",
+		assign?.response?.resultMessageId === verifiedReply?.id,
+	);
+	ok(
+		"gate=1 settled-with-missing-response noise stays quiet after in-thread reply",
+		!events.some((e) => e.event === "message.response_missing.settled.notify" && e.agentId === workerId),
+	);
 }
 
 // ============================================================
@@ -287,36 +559,132 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const workerId = "worker-c";
 	const convoId = "task:t-2:n-2";
 	const beforeTs = new Date().toISOString();
-	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify({
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
-		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
-			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "response_missing", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: beforeTs },
-		},
-		delivered: { [workerId]: [assignMsgId, reminderMsgId] },
-		messages: {
-			[assignMsgId]: { id: assignMsgId, from: "root", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: true, requiresResponse: true, conversationId: convoId, response: { status: "missing", missingAt: beforeTs } },
-			[reminderMsgId]: { id: reminderMsgId, from: "root", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: false, requiresResponse: false, conversationId: convoId, replyTo: assignMsgId, response: { status: "not_required" } },
-		},
-	}, null, 2), "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/swarm-state.json"),
+		JSON.stringify(
+			{
+				version: 1,
+				swarmId: "test",
+				cwd: scratch,
+				tmuxSession: "test",
+				agents: {
+					root: {
+						id: "root",
+						role: "root",
+						roleKind: "root",
+						capabilities: [],
+						activeTaskIds: [],
+						maxConcurrentTasks: 99,
+						status: "running",
+						runtimeStatus: "idle",
+						health: "healthy",
+						tmuxSession: "test",
+						tmuxWindow: "orch",
+						tmuxTarget: "test:orch.0",
+						model: "glm-5.1",
+						provider: "zai-coding-cn",
+						cwd: scratch,
+						mailbox: ".pi/swarm/mailboxes/root.jsonl",
+						createdAt: beforeTs,
+						updatedAt: beforeTs,
+					},
+					[workerId]: {
+						id: workerId,
+						role: "worker",
+						roleKind: "worker",
+						capabilities: [],
+						activeTaskIds: [],
+						maxConcurrentTasks: 1,
+						status: "running",
+						runtimeStatus: "response_missing",
+						health: "healthy",
+						tmuxSession: "test",
+						tmuxWindow: workerId,
+						tmuxTarget: `test:${workerId}.0`,
+						model: "glm-5.1",
+						provider: "zai-coding-cn",
+						cwd: scratch,
+						mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
+						createdAt: beforeTs,
+						updatedAt: beforeTs,
+					},
+				},
+				delivered: { [workerId]: [assignMsgId, reminderMsgId] },
+				messages: {
+					[assignMsgId]: {
+						id: assignMsgId,
+						from: "root",
+						to: workerId,
+						status: "injected",
+						createdAt: beforeTs,
+						updatedAt: beforeTs,
+						injectedAt: beforeTs,
+						attempts: 1,
+						requiresAck: true,
+						requiresResponse: true,
+						conversationId: convoId,
+						response: { status: "missing", missingAt: beforeTs },
+					},
+					[reminderMsgId]: {
+						id: reminderMsgId,
+						from: "root",
+						to: workerId,
+						status: "injected",
+						createdAt: beforeTs,
+						updatedAt: beforeTs,
+						injectedAt: beforeTs,
+						attempts: 1,
+						requiresAck: false,
+						requiresResponse: false,
+						conversationId: convoId,
+						replyTo: assignMsgId,
+						response: { status: "not_required" },
+					},
+				},
+			},
+			null,
+			2,
+		),
+		"utf8",
+	);
 
-	await tools4b.swarm_send_message.execute("c4b", { to: "root", body: "Wrong thread", replyTo: reminderMsgId, conversationId: "task:wrong:thread", requiresAck: false }, undefined, undefined, { cwd: scratch });
+	await tools4b.swarm_send_message.execute(
+		"c4b",
+		{ to: "root", body: "Wrong thread", replyTo: reminderMsgId, conversationId: "task:wrong:thread", requiresAck: false },
+		undefined,
+		undefined,
+		{ cwd: scratch },
+	);
 	const afterSend = await readStateFile();
-	const badReply = Object.values(afterSend?.messages || {}).find((m) => m.from === workerId && m.replyTo === reminderMsgId && m.conversationId === "task:wrong:thread");
+	const badReply = Object.values(afterSend?.messages || {}).find(
+		(m) => m.from === workerId && m.replyTo === reminderMsgId && m.conversationId === "task:wrong:thread",
+	);
 	ok("gate=1 mismatched reminder-thread reply exists on the reminder thread", Boolean(badReply));
 	let threw = false;
 	try {
-		await tools4b.swarm_ack_message.execute("c4b-ack", { messageId: assignMsgId, status: "done", resultMessageId: badReply?.id }, undefined, undefined, { cwd: scratch });
+		await tools4b.swarm_ack_message.execute(
+			"c4b-ack",
+			{ messageId: assignMsgId, status: "done", resultMessageId: badReply?.id },
+			undefined,
+			undefined,
+			{ cwd: scratch },
+		);
 	} catch (err) {
 		threw = true;
-		ok("gate=1 mismatched reminder-thread reply is rejected on the real path", String(err?.message || err).includes("INVALID_RESULT_MESSAGE"));
+		ok(
+			"gate=1 mismatched reminder-thread reply is rejected on the real path",
+			String(err?.message || err).includes("INVALID_RESULT_MESSAGE"),
+		);
 	}
 	ok("gate=1 mismatched reminder-thread reply did throw", threw);
 
 	const after = await readStateFile();
 	const assign = after?.messages?.[assignMsgId];
 	ok("gate=1 mismatched reminder-thread reply does not verify the original assignment", assign?.response?.status !== "verified");
-	ok("gate=1 mismatched reminder-thread reply leaves response debt in place", after?.agents?.[workerId]?.runtimeStatus === "response_missing");
+	ok(
+		"gate=1 mismatched reminder-thread reply leaves response debt in place",
+		after?.agents?.[workerId]?.runtimeStatus === "response_missing",
+	);
 }
 
 // ============================================================
@@ -335,27 +703,105 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const workerId = "worker-d";
 	const beforeTs = new Date().toISOString();
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/worker-d.jsonl"), JSON.stringify({
-		id: assignMsgId, swarmId: "test", from: "root", to: workerId, subject: "Task t-2 / node n-2 assigned",
-		priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: beforeTs,
-		body: "Assignment", requiresAck: true, requiresResponse: true, conversationId: "task:t-2:n-2", headers: {},
-	}) + "\n", "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/mailboxes/worker-d.jsonl"),
+		JSON.stringify({
+			id: assignMsgId,
+			swarmId: "test",
+			from: "root",
+			to: workerId,
+			subject: "Task t-2 / node n-2 assigned",
+			priority: "normal",
+			type: "swarm.message",
+			schemaVersion: 1,
+			createdAt: beforeTs,
+			body: "Assignment",
+			requiresAck: true,
+			requiresResponse: true,
+			conversationId: "task:t-2:n-2",
+			headers: {},
+		}) + "\n",
+		"utf8",
+	);
 
 	// Mark the assignment as superseded (by a reassignment, for example).
 	const supersededTs = new Date().toISOString();
 	const st = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: supersededTs },
-			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: supersededTs },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: beforeTs,
+				updatedAt: supersededTs,
+			},
+			[workerId]: {
+				id: workerId,
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: workerId,
+				tmuxTarget: `test:${workerId}.0`,
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
+				createdAt: beforeTs,
+				updatedAt: supersededTs,
+			},
 		},
 		delivered: { "worker-d": [assignMsgId] },
-		messages: { [assignMsgId]: { id: assignMsgId, from: "root", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: true, requiresResponse: true, conversationId: "task:t-2:n-2", response: { status: "waived", waivedAt: supersededTs, waivedBy: "root" }, superseded: { at: supersededTs, by: "root", supersededBy: "msg-reassign-new" } } },
+		messages: {
+			[assignMsgId]: {
+				id: assignMsgId,
+				from: "root",
+				to: workerId,
+				status: "injected",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+				injectedAt: beforeTs,
+				attempts: 1,
+				requiresAck: true,
+				requiresResponse: true,
+				conversationId: "task:t-2:n-2",
+				response: { status: "waived", waivedAt: supersededTs, waivedBy: "root" },
+				superseded: { at: supersededTs, by: "root", supersededBy: "msg-reassign-new" },
+			},
+		},
 	};
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(st, null, 2), "utf8");
 
 	// Worker tries to reply to the superseded assignment.
-	await tools4.swarm_send_message.execute("c4", { to: "root", body: "Late result", replyTo: assignMsgId, requiresAck: false }, undefined, undefined, { cwd: scratch });
+	await tools4.swarm_send_message.execute(
+		"c4",
+		{ to: "root", body: "Late result", replyTo: assignMsgId, requiresAck: false },
+		undefined,
+		undefined,
+		{ cwd: scratch },
+	);
 
 	const after = await readStateFile();
 	const rec = after?.messages?.[assignMsgId];
@@ -393,48 +839,167 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const assignMsgId = "msg-assign-5";
 	const resultMsgId = "msg-result-5";
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/worker-e.jsonl"), JSON.stringify({
-		id: assignMsgId, swarmId: "test", from: "root", to: workerId, subject: "Task assigned",
-		priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: beforeTs,
-		body: "Work", requiresAck: true, requiresResponse: true, conversationId: `task:${taskId}:n1`, headers: {},
-	}) + "\n", "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/mailboxes/worker-e.jsonl"),
+		JSON.stringify({
+			id: assignMsgId,
+			swarmId: "test",
+			from: "root",
+			to: workerId,
+			subject: "Task assigned",
+			priority: "normal",
+			type: "swarm.message",
+			schemaVersion: 1,
+			createdAt: beforeTs,
+			body: "Work",
+			requiresAck: true,
+			requiresResponse: true,
+			conversationId: `task:${taskId}:n1`,
+			headers: {},
+		}) + "\n",
+		"utf8",
+	);
 
 	const st = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
-			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [taskId], spawnedForTaskId: taskId, maxConcurrentTasks: 1, status: "running", runtimeStatus: "response_missing", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: beforeTs },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
+			[workerId]: {
+				id: workerId,
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [taskId],
+				spawnedForTaskId: taskId,
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "response_missing",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: workerId,
+				tmuxTarget: `test:${workerId}.0`,
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
 		},
 		delivered: { [workerId]: [assignMsgId] },
 		messages: {
-			[assignMsgId]: { id: assignMsgId, from: "root", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: true, requiresResponse: true, conversationId: `task:${taskId}:n1`, response: { status: "sent", resultMessageId: resultMsgId, sentAt: beforeTs } },
-			[resultMsgId]: { id: resultMsgId, from: workerId, to: "root", status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: false, requiresResponse: false, conversationId: `task:${taskId}:n1`, replyTo: assignMsgId, response: { status: "not_required" } },
+			[assignMsgId]: {
+				id: assignMsgId,
+				from: "root",
+				to: workerId,
+				status: "injected",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+				injectedAt: beforeTs,
+				attempts: 1,
+				requiresAck: true,
+				requiresResponse: true,
+				conversationId: `task:${taskId}:n1`,
+				response: { status: "sent", resultMessageId: resultMsgId, sentAt: beforeTs },
+			},
+			[resultMsgId]: {
+				id: resultMsgId,
+				from: workerId,
+				to: "root",
+				status: "injected",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+				injectedAt: beforeTs,
+				attempts: 1,
+				requiresAck: false,
+				requiresResponse: false,
+				conversationId: `task:${taskId}:n1`,
+				replyTo: assignMsgId,
+				response: { status: "not_required" },
+			},
 		},
 	};
 
 	const task = {
-		version: 1, taskId, title: "Task 5", goal: "Test terminal update", status: "in_progress",
-		priority: "normal", createdAt: beforeTs, updatedAt: beforeTs, owner: "root",
-		workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
-		start: "n1", currentNodes: ["n1"],
+		version: 1,
+		taskId,
+		title: "Task 5",
+		goal: "Test terminal update",
+		status: "in_progress",
+		priority: "normal",
+		createdAt: beforeTs,
+		updatedAt: beforeTs,
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "n1",
+		currentNodes: ["n1"],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: {
-			n1: { status: "in_progress", role: "worker", assignee: workerId, dependsOn: [],
-				allowedFiles: [], messageIds: [assignMsgId], attempts: 1, maxAttempts: 3,
-				lastActivityAt: beforeTs, assignmentMessageId: assignMsgId,
+			n1: {
+				status: "in_progress",
+				role: "worker",
+				assignee: workerId,
+				dependsOn: [],
+				allowedFiles: [],
+				messageIds: [assignMsgId],
+				attempts: 1,
+				maxAttempts: 3,
+				lastActivityAt: beforeTs,
+				assignmentMessageId: assignMsgId,
 				// No activeAttemptId in test fixture (bypasses attempt fencing so terminal-update
 				// validation logic can be exercised without requiring attempt token).
 			},
 		},
-		edges: [], handoffs: [{ fromNode: null, toNode: "n1", by: "root", toAgent: workerId, messageId: assignMsgId, at: beforeTs, kind: "assign", status: "injected" }],
-		gates: {}, editLocks: {}, evidence: {},
+		edges: [],
+		handoffs: [
+			{
+				fromNode: null,
+				toNode: "n1",
+				by: "root",
+				toAgent: workerId,
+				messageId: assignMsgId,
+				at: beforeTs,
+				kind: "assign",
+				status: "injected",
+			},
+		],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(st, null, 2), "utf8");
 	await writeFile(join(taskDir, "task.json"), JSON.stringify(task, null, 2), "utf8");
 
 	// Worker closes the node with status=done.
-	const updateResult = await tools5.swarm_update_task.execute("c5", { taskId, nodeId: "n1", status: "done" }, undefined, undefined, { cwd: scratch });
+	const updateResult = await tools5.swarm_update_task.execute("c5", { taskId, nodeId: "n1", status: "done" }, undefined, undefined, {
+		cwd: scratch,
+	});
 	ok("swarm_update_task returns success", typeof updateResult?.content?.[0]?.text === "string");
 
 	const afterState = await readStateFile();
@@ -473,14 +1038,57 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const workerId = "worker-f";
 	const beforeTs = new Date().toISOString();
 	const st = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
 			// Seed lastReconcileDryRunAt to 90s ago (older than the 60s default rate-limit) so the first
 			// call passes and stamps the ledger. The 2nd call within the window then hits RECONCILE_RATE_LIMITED.
-			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: beforeTs, lastReconcileDryRunAt: new Date(Date.now() - 90_000).toISOString() },
+			[workerId]: {
+				id: workerId,
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: workerId,
+				tmuxTarget: `test:${workerId}.0`,
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+				lastReconcileDryRunAt: new Date(Date.now() - 90_000).toISOString(),
+			},
 		},
-		delivered: {}, messages: {},
+		delivered: {},
+		messages: {},
 	};
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(st, null, 2), "utf8");
 
@@ -527,7 +1135,13 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const swarmAll = allTools.filter((n) => n.startsWith("swarm_"));
 	const swarmActive = activeTools.filter((n) => n.startsWith("swarm_"));
 
-	const expectedWorker = new Set(["swarm_check_mailbox", "swarm_send_message", "swarm_update_task", "swarm_task_status", "swarm_reconcile"]);
+	const expectedWorker = new Set([
+		"swarm_check_mailbox",
+		"swarm_send_message",
+		"swarm_update_task",
+		"swarm_task_status",
+		"swarm_reconcile",
+	]);
 	const missing = [...expectedWorker].filter((n) => !swarmActive.includes(n));
 	const extra = swarmActive.filter((n) => !expectedWorker.has(n));
 
@@ -547,14 +1161,28 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const activeTools = (pi8.getActiveTools?.() || []).filter((n) => n.startsWith("swarm_"));
 
 	const expectedOrch = new Set([
-		"swarm_check_mailbox", "swarm_send_message", "swarm_update_task", "swarm_task_status", "swarm_reconcile", "swarm_audit",
-		"swarm_agent_status", "swarm_list_agents", "swarm_spawn_agent", "swarm_create_task", "swarm_confirm_qualification", "swarm_assign_task",
-		"swarm_set_goal", "swarm_mark_goal_done",
+		"swarm_check_mailbox",
+		"swarm_send_message",
+		"swarm_update_task",
+		"swarm_task_status",
+		"swarm_reconcile",
+		"swarm_audit",
+		"swarm_agent_status",
+		"swarm_list_agents",
+		"swarm_spawn_agent",
+		"swarm_create_task",
+		"swarm_confirm_qualification",
+		"swarm_assign_task",
+		"swarm_set_goal",
+		"swarm_mark_goal_done",
 	]);
 	const missing = [...expectedOrch].filter((n) => !activeTools.includes(n));
 	const extra = activeTools.filter((n) => !expectedOrch.has(n));
 
-	ok("gate=1 root: exactly 14 distinct root tools active", activeTools.length === expectedOrch.size && missing.length === 0 && extra.length === 0);
+	ok(
+		"gate=1 root: exactly 14 distinct root tools active",
+		activeTools.length === expectedOrch.size && missing.length === 0 && extra.length === 0,
+	);
 }
 
 // ============================================================
@@ -567,17 +1195,65 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 
 	const beforeTs = new Date().toISOString();
 	const st = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
-			"worker-a": { id: "worker-a", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-a", tmuxTarget: "test:worker-a.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
+			"worker-a": {
+				id: "worker-a",
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "worker-a",
+				tmuxTarget: "test:worker-a.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
 		},
-		delivered: {}, messages: {},
+		delivered: {},
+		messages: {},
 	};
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(st, null, 2), "utf8");
 
 	const { tools: tools9 } = await loadExtension({ identity: "root" });
-	const sendResult = await tools9.swarm_send_message.execute("c9", { to: "worker-a", body: "Test", requiresAck: true }, undefined, undefined, { cwd: scratch });
+	const sendResult = await tools9.swarm_send_message.execute(
+		"c9",
+		{ to: "worker-a", body: "Test", requiresAck: true },
+		undefined,
+		undefined,
+		{ cwd: scratch },
+	);
 	const body = sendResult?.content?.[0]?.text || "";
 	ok("gate=1: [PI-SWARM ACK REQUIRED] NOT in rendered body", !body.includes("[PI-SWARM ACK REQUIRED]"));
 }
@@ -607,19 +1283,85 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 
 	// (a) check_mailbox site
 	const msgId = "msg-check-11";
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/worker-h.jsonl"), JSON.stringify({
-		id: msgId, swarmId: "test", from: "root", to: workerId, subject: "check",
-		priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: beforeTs,
-		body: "check", requiresAck: true, headers: {},
-	}) + "\n", "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/mailboxes/worker-h.jsonl"),
+		JSON.stringify({
+			id: msgId,
+			swarmId: "test",
+			from: "root",
+			to: workerId,
+			subject: "check",
+			priority: "normal",
+			type: "swarm.message",
+			schemaVersion: 1,
+			createdAt: beforeTs,
+			body: "check",
+			requiresAck: true,
+			headers: {},
+		}) + "\n",
+		"utf8",
+	);
 
 	const st11 = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
-			[workerId]: { id: workerId, role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: workerId, tmuxTarget: `test:${workerId}.0`, model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`, createdAt: beforeTs, updatedAt: beforeTs },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
+			[workerId]: {
+				id: workerId,
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: workerId,
+				tmuxTarget: `test:${workerId}.0`,
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
 		},
-		delivered: {}, messages: { [msgId]: { id: msgId, from: "root", to: workerId, status: "queued", createdAt: beforeTs, updatedAt: beforeTs, attempts: 0, requiresAck: true } },
+		delivered: {},
+		messages: {
+			[msgId]: {
+				id: msgId,
+				from: "root",
+				to: workerId,
+				status: "queued",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+				attempts: 0,
+				requiresAck: true,
+			},
+		},
 	};
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(st11, null, 2), "utf8");
 
@@ -627,19 +1369,64 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 
 	// (b) reply site
 	const assignMsgId = "msg-reply-11";
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/worker-h.jsonl"), JSON.stringify({
-		id: assignMsgId, swarmId: "test", from: "root", to: workerId, subject: "assign",
-		priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: beforeTs,
-		body: "assign", requiresAck: true, requiresResponse: true, conversationId: "task:t-11:n-11", headers: {},
-	}) + "\n", "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/mailboxes/worker-h.jsonl"),
+		JSON.stringify({
+			id: assignMsgId,
+			swarmId: "test",
+			from: "root",
+			to: workerId,
+			subject: "assign",
+			priority: "normal",
+			type: "swarm.message",
+			schemaVersion: 1,
+			createdAt: beforeTs,
+			body: "assign",
+			requiresAck: true,
+			requiresResponse: true,
+			conversationId: "task:t-11:n-11",
+			headers: {},
+		}) + "\n",
+		"utf8",
+	);
 
-	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify({
-		...st11,
-		delivered: { [workerId]: [assignMsgId] },
-		messages: { ...st11.messages, [assignMsgId]: { id: assignMsgId, from: "root", to: workerId, status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: true, requiresResponse: true, conversationId: "task:t-11:n-11", response: { status: "missing", missingAt: beforeTs } } },
-	}, null, 2), "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/swarm-state.json"),
+		JSON.stringify(
+			{
+				...st11,
+				delivered: { [workerId]: [assignMsgId] },
+				messages: {
+					...st11.messages,
+					[assignMsgId]: {
+						id: assignMsgId,
+						from: "root",
+						to: workerId,
+						status: "injected",
+						createdAt: beforeTs,
+						updatedAt: beforeTs,
+						injectedAt: beforeTs,
+						attempts: 1,
+						requiresAck: true,
+						requiresResponse: true,
+						conversationId: "task:t-11:n-11",
+						response: { status: "missing", missingAt: beforeTs },
+					},
+				},
+			},
+			null,
+			2,
+		),
+		"utf8",
+	);
 
-	await tools11.swarm_send_message.execute("c11b", { to: "root", body: "reply", replyTo: assignMsgId, requiresAck: false }, undefined, undefined, { cwd: scratch });
+	await tools11.swarm_send_message.execute(
+		"c11b",
+		{ to: "root", body: "reply", replyTo: assignMsgId, requiresAck: false },
+		undefined,
+		undefined,
+		{ cwd: scratch },
+	);
 
 	const events = await readGlobalEvents();
 	const derived = events.filter((e) => e.event === "message.lifecycle_derived" && e.gate === 1 && !e.shadow);
@@ -659,25 +1446,93 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const msgId = "msg-legacy-12";
 	const beforeTs = new Date().toISOString();
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/worker-i.jsonl"), JSON.stringify({
-		id: msgId, swarmId: "test", from: "root", to: "worker-i", subject: "legacy ack",
-		priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: beforeTs,
-		body: "legacy", requiresAck: true, headers: {},
-	}) + "\n", "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/mailboxes/worker-i.jsonl"),
+		JSON.stringify({
+			id: msgId,
+			swarmId: "test",
+			from: "root",
+			to: "worker-i",
+			subject: "legacy ack",
+			priority: "normal",
+			type: "swarm.message",
+			schemaVersion: 1,
+			createdAt: beforeTs,
+			body: "legacy",
+			requiresAck: true,
+			headers: {},
+		}) + "\n",
+		"utf8",
+	);
 
 	const st = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
-			"worker-i": { id: "worker-i", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-i", tmuxTarget: "test:worker-i.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-i.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
+			"worker-i": {
+				id: "worker-i",
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "worker-i",
+				tmuxTarget: "test:worker-i.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/worker-i.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
 		},
 		delivered: { "worker-i": [msgId] },
-		messages: { [msgId]: { id: msgId, from: "root", to: "worker-i", status: "injected", createdAt: beforeTs, updatedAt: beforeTs, injectedAt: beforeTs, attempts: 1, requiresAck: true } },
+		messages: {
+			[msgId]: {
+				id: msgId,
+				from: "root",
+				to: "worker-i",
+				status: "injected",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+				injectedAt: beforeTs,
+				attempts: 1,
+				requiresAck: true,
+			},
+		},
 	};
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(st, null, 2), "utf8");
 
 	// Worker acks with legacy swarm_ack_message (requiresAck:true flow still works).
-	const ackResult = await tools12.swarm_ack_message.execute("c12", { messageId: msgId, status: "done" }, undefined, undefined, { cwd: scratch });
+	const ackResult = await tools12.swarm_ack_message.execute("c12", { messageId: msgId, status: "done" }, undefined, undefined, {
+		cwd: scratch,
+	});
 	ok("gate=1: legacy swarm_ack_message(done) succeeds", typeof ackResult?.content?.[0]?.text === "string");
 
 	const after = await readStateFile();
@@ -688,6 +1543,8 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 console.log(`\n${pass} pass, ${fail} fail`);
 // Process-boundary env cleanup: restore the identity the test process was started with so the
 // scenario identities (worker-a…worker-i, root) never leak beyond this run.
-if (ORIG_PI_SWARM_AGENT_ID === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = ORIG_PI_SWARM_AGENT_ID;
-if (ORIG_PI_SWARM_IS_ROOT === undefined) delete process.env.PI_SWARM_IS_ROOT; else process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
+if (ORIG_PI_SWARM_AGENT_ID === undefined) delete process.env.PI_SWARM_AGENT_ID;
+else process.env.PI_SWARM_AGENT_ID = ORIG_PI_SWARM_AGENT_ID;
+if (ORIG_PI_SWARM_IS_ROOT === undefined) delete process.env.PI_SWARM_IS_ROOT;
+else process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 if (fail > 0) process.exit(1);

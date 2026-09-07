@@ -18,21 +18,49 @@ rmSync(scratch, { recursive: true, force: true });
 mkdirSync(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
 mkdirSync(join(scratch, ".pi/swarm/traces/tmux"), { recursive: true });
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.error("  FAIL:", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) {
+		pass++;
+	} else {
+		fail++;
+		console.error("  FAIL:", name);
+	}
+};
 
 // --- Issue C: idempotency index (O(1) lookup, correct result) ---
 const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts")).catch(() => ({}));
 {
 	const st = { messages: {}, swarmId: "s" };
 	for (let i = 0; i < 300; i++) {
-		st.messages[`m${i}`] = { id: `m${i}`, from: i < 150 ? "root" : "planner", to: i < 150 ? "worker" : "root", status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 1, requiresAck: true, ...(i === 42 ? { idempotencyKey: "k42" } : {}) };
+		st.messages[`m${i}`] = {
+			id: `m${i}`,
+			from: i < 150 ? "root" : "planner",
+			to: i < 150 ? "worker" : "root",
+			status: "injected",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+			attempts: 1,
+			requiresAck: true,
+			...(i === 42 ? { idempotencyKey: "k42" } : {}),
+		};
 	}
 	const hit = findIdempotentMessage(st, "root", "worker", "k42");
 	ok("index finds existing idempotent record", hit?.id === "m42");
 	ok("index misses absent key", findIdempotentMessage(st, "root", "worker", "nope") === undefined);
 	ok("index built + cached", st.idempotencyIndex && Object.keys(st.idempotencyIndex).length === 1);
-	st.messages.m2000 = { id: "m2000", from: "root", to: "worker", status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 1, requiresAck: true, idempotencyKey: "k43" };
+	st.messages.m2000 = {
+		id: "m2000",
+		from: "root",
+		to: "worker",
+		status: "injected",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		attempts: 1,
+		requiresAck: true,
+		idempotencyKey: "k43",
+	};
 	ok("index rebuilds on count change", findIdempotentMessage(st, "root", "worker", "k43")?.id === "m2000");
 }
 
@@ -40,10 +68,29 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 {
 	const { readMailbox, readMailboxCached } = await import(join(here, "..", "src/mailbox.ts"));
 	const { mailboxPath } = await import(join(here, "..", "src/state.ts"));
-	const p = { mailboxes: join(scratch, ".pi/swarm/mailboxes"), traces: join(scratch, ".pi/swarm/traces"), root: join(scratch, ".pi/swarm") };
+	const p = {
+		mailboxes: join(scratch, ".pi/swarm/mailboxes"),
+		traces: join(scratch, ".pi/swarm/traces"),
+		root: join(scratch, ".pi/swarm"),
+	};
 	const file = mailboxPath(p, "root");
 	const lines = [];
-	for (let i = 0; i < 200; i++) lines.push(JSON.stringify({ id: `msg-${i}`, from: "a", to: "root", body: String(i), swarmId: "s", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date().toISOString(), requiresAck: true, headers: {} }));
+	for (let i = 0; i < 200; i++)
+		lines.push(
+			JSON.stringify({
+				id: `msg-${i}`,
+				from: "a",
+				to: "root",
+				body: String(i),
+				swarmId: "s",
+				priority: "normal",
+				type: "swarm.message",
+				schemaVersion: 1,
+				createdAt: new Date().toISOString(),
+				requiresAck: true,
+				headers: {},
+			}),
+		);
 	writeFileSync(file, lines.join("\n") + "\n");
 	const a = await readMailbox(p, "root");
 	ok("readMailbox parses all 200", a.length === 200);
@@ -51,7 +98,25 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 	const b2 = await readMailboxCached(p, "root");
 	ok("cached read identical to full read", b1.length === 200 && b2.length === 200 && b1[0].id === b2[0].id);
 	ok("second cached read returns SAME array (no re-parse)", b1 === b2);
-	writeFileSync(file, lines.join("\n") + "\n" + JSON.stringify({ id: "msg-new", from: "a", to: "root", body: "x", swarmId: "s", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: new Date().toISOString(), requiresAck: true, headers: {} }) + "\n");
+	writeFileSync(
+		file,
+		lines.join("\n") +
+			"\n" +
+			JSON.stringify({
+				id: "msg-new",
+				from: "a",
+				to: "root",
+				body: "x",
+				swarmId: "s",
+				priority: "normal",
+				type: "swarm.message",
+				schemaVersion: 1,
+				createdAt: new Date().toISOString(),
+				requiresAck: true,
+				headers: {},
+			}) +
+			"\n",
+	);
 	const b3 = await readMailboxCached(p, "root");
 	ok("cache invalidates on append", b3.length === 201 && b3 !== b1);
 }
@@ -62,23 +127,53 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 	const old = new Date(Date.now() - 20 * 60_000).toISOString(); // old enough to trip TTL
 	const msgId = "msg-repro-ttl";
 	const state = {
-		version: 1, swarmId: "s", cwd: scratch, tmuxSession: "sess",
-		agents: {}, delivered: { root: [] },
+		version: 1,
+		swarmId: "s",
+		cwd: scratch,
+		tmuxSession: "sess",
+		agents: {},
+		delivered: { root: [] },
 		messages: {
-			[msgId]: { id: msgId, from: "root", to: "worker-1", status: "queued", createdAt: old, updatedAt: old, attempts: 0, requiresAck: true, ttlMs: 1 },
+			[msgId]: {
+				id: msgId,
+				from: "root",
+				to: "worker-1",
+				status: "queued",
+				createdAt: old,
+				updatedAt: old,
+				attempts: 0,
+				requiresAck: true,
+				ttlMs: 1,
+			},
 		},
-		createdAt: old, updatedAt: old,
+		createdAt: old,
+		updatedAt: old,
 	};
 	writeFileSync(stateFile, JSON.stringify(state));
 
-	const pi = { exec: async () => ({ code: 1, stdout: "", stderr: "" }), sendMessage: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} };
+	const pi = {
+		exec: async () => ({ code: 1, stdout: "", stderr: "" }),
+		sendMessage: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
+	};
 	const result = await reconcile(pi, scratch, paths(scratch), { dryRun: false, mark: false });
 	const after = JSON.parse(readFileSync(stateFile, "utf8"));
 	ok("ttl-expired actionable not dead_lettered", after.messages[msgId].status !== "dead_letter");
 	ok("ttl-expired actionable remains queued", after.messages[msgId].status === "queued");
-	ok("ttl-expired actionable ttl_stale surfaced", result.actions.some((a) => a.action === "ttl_stale"));
+	ok(
+		"ttl-expired actionable ttl_stale surfaced",
+		result.actions.some((a) => a.action === "ttl_stale"),
+	);
 
-	after.messages[msgId] = { ...after.messages[msgId], status: "acked", ackedAt: old, updatedAt: old, lastAck: { by: "worker-1", status: "done", at: old } };
+	after.messages[msgId] = {
+		...after.messages[msgId],
+		status: "acked",
+		ackedAt: old,
+		updatedAt: old,
+		lastAck: { by: "worker-1", status: "done", at: old },
+	};
 	writeFileSync(stateFile, JSON.stringify(after, null, 2));
 	const postAck = JSON.parse(readFileSync(stateFile, "utf8"));
 	const gcRes = pruneState(postAck, { keepMessages: 0 });
@@ -93,23 +188,75 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 	const old = new Date(Date.now() - 20 * 60_000).toISOString(); // 20 min ago > ACK_MISSING_MS / REINJECT_AFTER_MS
 	const msgId = "msg-repro-a";
 	const state = {
-		version: 1, swarmId: "s", cwd: scratch, tmuxSession: "sess",
+		version: 1,
+		swarmId: "s",
+		cwd: scratch,
+		tmuxSession: "sess",
 		agents: {
-			"worker-1": { id: "worker-1", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "sess", tmuxWindow: "worker-1", tmuxTarget: "sess:worker-1.0", model: "m", provider: "p", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-1.jsonl", createdAt: old, updatedAt: old },
+			"worker-1": {
+				id: "worker-1",
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "sess",
+				tmuxWindow: "worker-1",
+				tmuxTarget: "sess:worker-1.0",
+				model: "m",
+				provider: "p",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/worker-1.jsonl",
+				createdAt: old,
+				updatedAt: old,
+			},
 		},
 		delivered: { "worker-1": [] },
 		messages: {
-			[msgId]: { id: msgId, from: "root", to: "worker-1", status: "injected", createdAt: old, updatedAt: old, injectedAt: old, attempts: 1, requiresAck: true, reinjects: 0 },
+			[msgId]: {
+				id: msgId,
+				from: "root",
+				to: "worker-1",
+				status: "injected",
+				createdAt: old,
+				updatedAt: old,
+				injectedAt: old,
+				attempts: 1,
+				requiresAck: true,
+				reinjects: 0,
+			},
 		},
-		createdAt: old, updatedAt: old,
+		createdAt: old,
+		updatedAt: old,
 	};
 	writeFileSync(stateFile, JSON.stringify(state));
-	writeFileSync(join(scratch, ".pi/swarm/mailboxes/worker-1.jsonl"), JSON.stringify({ id: msgId, swarmId: "s", from: "root", to: "worker-1", subject: "s", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: old, body: "repro A", requiresAck: true, headers: {} }) + "\n");
+	writeFileSync(
+		join(scratch, ".pi/swarm/mailboxes/worker-1.jsonl"),
+		JSON.stringify({
+			id: msgId,
+			swarmId: "s",
+			from: "root",
+			to: "worker-1",
+			subject: "s",
+			priority: "normal",
+			type: "swarm.message",
+			schemaVersion: 1,
+			createdAt: old,
+			body: "repro A",
+			requiresAck: true,
+			headers: {},
+		}) + "\n",
+	);
 
 	let sendKeysCalls = 0;
 	const tools = {};
 	const pi = {
-		registerTool: (def) => { tools[def.name] = def; },
+		registerTool: (def) => {
+			tools[def.name] = def;
+		},
 		registerCommand: () => {},
 		on: () => {},
 		exec: async (cmd, args) => {
@@ -118,7 +265,10 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 				const fmt = args[args.length - 1];
 				return { code: 0, stdout: fmt.includes("pane_current_command") ? "node\n" : "%1\n", stderr: "" };
 			}
-			if (cmd === "tmux" && args[0] === "send-keys") { sendKeysCalls++; return { code: 0, stdout: "", stderr: "" }; }
+			if (cmd === "tmux" && args[0] === "send-keys") {
+				sendKeysCalls++;
+				return { code: 0, stdout: "", stderr: "" };
+			}
 			if (cmd === "tmux" && args[0] === "capture-pane") return { code: 0, stdout: "", stderr: "" };
 			return { code: 1, stdout: "", stderr: "" };
 		},

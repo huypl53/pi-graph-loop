@@ -105,13 +105,17 @@ async function runCell({ id, argv, cwd, env, teeWrap }) {
 		}
 		const argvQuoted = argv.map((a) => JSON.stringify(a)).join(" ");
 		const shellCmd = `cd ${JSON.stringify(cwd)} && env ${envAssignments.join(" ")} ${piPath} ${argvQuoted} 2>&1 | tee ${JSON.stringify(TEE_LOG)}`;
-			child = spawn("/bin/sh", ["-c", shellCmd], {
+		child = spawn("/bin/sh", ["-c", shellCmd], {
 			stdio: ["ignore", "pipe", "pipe"],
 			env: baseEnv,
 			detached: false,
 		});
-		child.stdout.on("data", (chunk) => { stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]); });
-		child.stderr.on("data", (chunk) => { stderrBuffer = Buffer.concat([stderrBuffer, chunk]); });
+		child.stdout.on("data", (chunk) => {
+			stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
+		});
+		child.stderr.on("data", (chunk) => {
+			stderrBuffer = Buffer.concat([stderrBuffer, chunk]);
+		});
 	} else {
 		// TTY-preserving: no pipe, no redirection. We read the raw stdout/stderr fds.
 		// For "TTY preserved" semantics, we must NOT redirect. We capture by piping in node,
@@ -128,8 +132,12 @@ async function runCell({ id, argv, cwd, env, teeWrap }) {
 			env: baseEnv,
 			detached: false,
 		});
-		child.stdout.on("data", (chunk) => { stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]); });
-		child.stderr.on("data", (chunk) => { stderrBuffer = Buffer.concat([stderrBuffer, chunk]); });
+		child.stdout.on("data", (chunk) => {
+			stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
+		});
+		child.stderr.on("data", (chunk) => {
+			stderrBuffer = Buffer.concat([stderrBuffer, chunk]);
+		});
 	}
 
 	const exited = new Promise((resolve) => {
@@ -146,8 +154,14 @@ async function runCell({ id, argv, cwd, env, teeWrap }) {
 
 	// Bounded timeout: 25s per cell (probe-timeouts aggregated; pi normally <10s with mock-llm)
 	const timeout = setTimeout(() => {
-		try { child.kill("SIGTERM"); } catch {}
-		setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
+		try {
+			child.kill("SIGTERM");
+		} catch {}
+		setTimeout(() => {
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+		}, 2000);
 	}, 25_000);
 
 	await exited;
@@ -165,7 +179,7 @@ async function runCell({ id, argv, cwd, env, teeWrap }) {
 				const entries = await readdir(dir, { withFileTypes: true });
 				for (const entry of entries) {
 					const full = join(dir, entry.name);
-					if (entry.isDirectory()) out.push(...await walk(full));
+					if (entry.isDirectory()) out.push(...(await walk(full)));
 					else out.push(full);
 				}
 			} catch {}
@@ -261,21 +275,31 @@ for (let i = 0; i < CELLS.length; i++) {
 	result.label = label;
 	result.argv_built = argv;
 	results.push(result);
-	process.stdout.write(`exit=${result.exit_code} stdout=${result.stdout_bytes} stderr=${result.stderr_bytes} lifetime=${result.lifetime_ms}ms transcripts=${result.transcript_presence}\n`);
+	process.stdout.write(
+		`exit=${result.exit_code} stdout=${result.stdout_bytes} stderr=${result.stderr_bytes} lifetime=${result.lifetime_ms}ms transcripts=${result.transcript_presence}\n`,
+	);
 }
 
 // Write machine-readable matrix
 const matrixPath = join(ARTIFACT_DIR, "launch-recipe-matrix.json");
-await writeFile(matrixPath, JSON.stringify({
-	model: MODEL_ID,
-	repo: REPO,
-	scratchRoot,
-	generatedAt: new Date().toISOString(),
-	cells: results,
-}, null, 2));
+await writeFile(
+	matrixPath,
+	JSON.stringify(
+		{
+			model: MODEL_ID,
+			repo: REPO,
+			scratchRoot,
+			generatedAt: new Date().toISOString(),
+			cells: results,
+		},
+		null,
+		2,
+	),
+);
 
 // Compute the classification table
-const RED_SHAPE = (r) => r.exit_code === 0 && r.stdout_bytes === 0 && r.stderr_bytes === 0 && r.lifetime_ms < 5000 && r.transcript_presence === 0;
+const RED_SHAPE = (r) =>
+	r.exit_code === 0 && r.stdout_bytes === 0 && r.stderr_bytes === 0 && r.lifetime_ms < 5000 && r.transcript_presence === 0;
 const GREEN_SHAPE = (r) => r.stdout_bytes > 0 && r.transcript_presence > 0;
 
 const table = results.map((r) => ({
@@ -294,8 +318,12 @@ const table = results.map((r) => ({
 }));
 
 console.log("\n=== R18 16-cell matrix ===");
-console.log("cell                                | tee | cwd     | -ne | -p  | exit | stdout | stderr | life(ms) | xcripts | classification");
-console.log("------------------------------------|-----|---------|-----|-----|------|--------|--------|----------|---------|----------------------");
+console.log(
+	"cell                                | tee | cwd     | -ne | -p  | exit | stdout | stderr | life(ms) | xcripts | classification",
+);
+console.log(
+	"------------------------------------|-----|---------|-----|-----|------|--------|--------|----------|---------|----------------------",
+);
 for (const row of table) {
 	const cellShort = row.cell.replace(/^cell-/, "");
 	console.log(
@@ -321,7 +349,9 @@ console.log(`\n-- attribution --`);
 console.log(`RED without tee:  ${noTeeRed}`);
 console.log(`RED with tee:     ${teeRed}`);
 console.log(`GREEN with -p:    ${pGreen} (out of ${table.filter((r) => r.useP).length} -p cells)`);
-console.log(`GREEN without -p: ${table.filter((r) => !r.useP && r.classification.startsWith("GREEN")).length} (out of ${noPOnly} no-prompt cells)`);
+console.log(
+	`GREEN without -p: ${table.filter((r) => !r.useP && r.classification.startsWith("GREEN")).length} (out of ${noPOnly} no-prompt cells)`,
+);
 
 // Required observable: at least one cell must be RED to confirm the silent-exit signature is reproducible
 assert.ok(redCount >= 1, `expected at least one RED cell; got 0 (table=${JSON.stringify(table, null, 2)})`);
@@ -329,7 +359,9 @@ assert.ok(redCount >= 1, `expected at least one RED cell; got 0 (table=${JSON.st
 assert.ok(greenCount >= 1, `expected at least one GREEN cell; got 0 (table=${JSON.stringify(table, null, 2)})`);
 
 // Cleanup scratch root
-try { await rm(scratchRoot, { recursive: true, force: true }); } catch {}
+try {
+	await rm(scratchRoot, { recursive: true, force: true });
+} catch {}
 
 console.log(`\nR18 16-cell matrix written to ${matrixPath}`);
 console.log(`R18 driver OK`);

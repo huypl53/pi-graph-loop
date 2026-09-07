@@ -20,17 +20,20 @@ import { tmpdir } from "node:os";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ensurePoolScaffold, poolScaffoldSettingsPath, poolScaffoldYmlPath } from "../src/pool-scaffold.ts";
-import {
-	POOL_SCAFFOLD_DOC_HINT,
-	POOL_SCAFFOLD_NOTIFY_TEXT,
-	POOL_SCAFFOLD_YML_NOTIFY_TEXT,
-} from "../src/constants.ts";
+import { POOL_SCAFFOLD_DOC_HINT, POOL_SCAFFOLD_NOTIFY_TEXT, POOL_SCAFFOLD_YML_NOTIFY_TEXT } from "../src/constants.ts";
 import { parse as parseYaml } from "yaml";
 import { atomicWriteFile, paths, readState, readJsonlRecords, withLock, writeState } from "../src/state.ts";
 import { now } from "../src/utils.ts";
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) pass++; else { fail++; console.error("  FAIL:", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) pass++;
+	else {
+		fail++;
+		console.error("  FAIL:", name);
+	}
+};
 
 const deepEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -72,9 +75,15 @@ async function makeCase(name) {
 	// Follow-up 2026-09-05: the template is now comments-only guidance (full config surface
 	// documented, everything commented out). No active `model: null` junk; body parses to null.
 	ok("A: yml template has no active model: null", !/^\s*-?\s*model:\s*null\s*$/m.test(ymlText));
-	ok("A: yml template documents the full config surface", /#\s*-\s*model:/.test(ymlText) && /#\s*rotation:/.test(ymlText) && /#\s*defaultModel:/.test(ymlText));
+	ok(
+		"A: yml template documents the full config surface",
+		/#\s*-\s*model:/.test(ymlText) && /#\s*rotation:/.test(ymlText) && /#\s*defaultModel:/.test(ymlText),
+	);
 	const yml = parseYaml(ymlText);
-	ok("A: comments-only template parses to empty (nothing active)", yml === null || yml === undefined || Object.keys(yml ?? {}).length === 0);
+	ok(
+		"A: comments-only template parses to empty (nothing active)",
+		yml === null || yml === undefined || Object.keys(yml ?? {}).length === 0,
+	);
 	const traces = await readTraces(dir, "pool.scaffold_created");
 	ok("A: pool.scaffold_created trace emitted", traces.length === 1);
 	ok("A: trace.previousKeys is []", deepEqual(traces[0]?.previousKeys, []));
@@ -253,7 +262,10 @@ async function makeCase(name) {
 	// Fire 8 concurrent calls. atomicWriteFile guarantees no torn write; ensurePoolScaffold may write
 	// the same payload multiple times (idempotent), so the final file must be parseable + valid.
 	const results = await Promise.all(Array.from({ length: 8 }, () => ensurePoolScaffold(dir, {})));
-	ok("I: every concurrent call wrote", results.every((r) => r.wrote === true));
+	ok(
+		"I: every concurrent call wrote",
+		results.every((r) => r.wrote === true),
+	);
 	const afterYml = parseYaml(await readFile(poolScaffoldYmlPath(dir), "utf8"));
 	ok("I: final yml is parseable (comments-only -> null, not torn)", afterYml === null || afterYml === undefined);
 	ok("I: final yml declares no active config (comments-only template)", !afterYml?.modelPool);
@@ -312,16 +324,27 @@ async function makeCase(name) {
 	const missing = await readJsonSafe(join(dir, ".pi", "does-not-exist.json"));
 	ok("L: readJsonSafe returns undefined for ENOENT", missing === undefined);
 	let threw = false;
-	try { await readJsonSafe(join(dir, "..", "package.json")); /* existing file, not JSON */ } catch { threw = true; }
+	try {
+		await readJsonSafe(join(dir, "..", "package.json")); /* existing file, not JSON */
+	} catch {
+		threw = true;
+	}
 	// package.json IS valid JSON in this repo, so try an obviously-non-JSON path:
-	try { await readJsonSafe("/dev/null"); } catch { threw = true; }
+	try {
+		await readJsonSafe("/dev/null");
+	} catch {
+		threw = true;
+	}
 	ok("L: readJsonSafe throws for non-JSON content", threw === true);
 }
 
 // === Case M: constants exported as expected ===
 {
 	ok("M: POOL_SCAFFOLD_NOTIFY_TEXT is non-empty", typeof POOL_SCAFFOLD_NOTIFY_TEXT === "string" && POOL_SCAFFOLD_NOTIFY_TEXT.length > 0);
-	ok("M: POOL_SCAFFOLD_DOC_HINT references docs/swarm/tools.md#configuration", POOL_SCAFFOLD_DOC_HINT === "docs/swarm/tools.md#configuration");
+	ok(
+		"M: POOL_SCAFFOLD_DOC_HINT references docs/swarm/tools.md#configuration",
+		POOL_SCAFFOLD_DOC_HINT === "docs/swarm/tools.md#configuration",
+	);
 }
 
 // === Case N: poolScaffoldSettingsPath returns the expected location ===

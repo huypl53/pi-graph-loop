@@ -1,11 +1,25 @@
 // === swarm/mailbox.ts — auto-extracted from index.ts (verbatim bodies) ===
-import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	defineTool,
+	CONFIG_DIR_NAME,
+	truncateHead,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath, open } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { MessageRecord, MessageResponseStatus, MessageStatus, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
 import type { OrphanClearReason } from "./agents.ts";
-import { PI_SWARM_MINIMAL_PROTOCOL, SEND_SETTLE_MS, MAX_REINJECTS, TRACE_LIFECYCLE_DERIVED, TRACE_REPLY_REJECTED_SUPERSEDED } from "./constants.ts";
+import {
+	PI_SWARM_MINIMAL_PROTOCOL,
+	SEND_SETTLE_MS,
+	MAX_REINJECTS,
+	TRACE_LIFECYCLE_DERIVED,
+	TRACE_REPLY_REJECTED_SUPERSEDED,
+} from "./constants.ts";
 import { appendJsonl, mailboxPath, readState, readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "./state.ts";
 import { buildSystemDelivery } from "./delivery.ts";
 import { capturePane, isPanePiLike, sendToPane, tmux } from "./tmux.ts";
@@ -18,9 +32,12 @@ export function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status
 	const ts = now();
 	const prev = state.messages[msg.id];
 	const requiresResponse = msg.requiresResponse ?? prev?.requiresResponse ?? false;
-	const response = patch.response || prev?.response || (requiresResponse
-		? { status: "missing" as MessageResponseStatus, missingAt: ts }
-		: { status: "not_required" as MessageResponseStatus });
+	const response =
+		patch.response ||
+		prev?.response ||
+		(requiresResponse
+			? { status: "missing" as MessageResponseStatus, missingAt: ts }
+			: { status: "not_required" as MessageResponseStatus });
 	state.messages[msg.id] = {
 		id: msg.id,
 		from: msg.from,
@@ -45,15 +62,14 @@ export function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status
 }
 
 export function isResponseTrackingActive(rec: Pick<MessageRecord, "status" | "lastAck" | "requiresResponse">) {
-	return rec.requiresResponse && rec.status !== "dead_letter" && rec.status !== "queued" && (rec.status !== "failed" || Boolean(rec.lastAck));
+	return (
+		rec.requiresResponse && rec.status !== "dead_letter" && rec.status !== "queued" && (rec.status !== "failed" || Boolean(rec.lastAck))
+	);
 }
 
 export function responseMissingRecords(st: SwarmState, agentId: string) {
-	return Object.values(st.messages || {}).filter((m) =>
-		m.to === agentId &&
-		isResponseTrackingActive(m) &&
-		m.response?.status !== "verified" &&
-		m.response?.status !== "waived"
+	return Object.values(st.messages || {}).filter(
+		(m) => m.to === agentId && isResponseTrackingActive(m) && m.response?.status !== "verified" && m.response?.status !== "waived",
 	);
 }
 
@@ -63,26 +79,35 @@ export function responseMissingRecords(st: SwarmState, agentId: string) {
 // injected, intercepted, queued} are all debt. Returns ids + the live records for the caller to
 // build the notify body / idempotency key.
 export function unackedRequiresAckRecords(st: SwarmState, agentId: string) {
-	return Object.values(st.messages || {}).filter((m) =>
-		m.to === agentId &&
-		m.requiresAck === true &&
-		!m.ackedAt &&
-		!m.superseded &&
-		(m.status === "mailbox_delivered" || m.status === "injected" || m.status === "intercepted" || m.status === "queued")
+	return Object.values(st.messages || {}).filter(
+		(m) =>
+			m.to === agentId &&
+			m.requiresAck === true &&
+			!m.ackedAt &&
+			!m.superseded &&
+			(m.status === "mailbox_delivered" || m.status === "injected" || m.status === "intercepted" || m.status === "queued"),
 	);
 }
 
 export function verifiedResponseCount(st: SwarmState, agentId: string) {
-	return Object.values(st.messages || {}).filter((m) => m.to === agentId && m.requiresResponse && m.response?.status === "verified").length;
+	return Object.values(st.messages || {}).filter((m) => m.to === agentId && m.requiresResponse && m.response?.status === "verified")
+		.length;
 }
 
 export function validateResultMessage(st: SwarmState, rec: MessageRecord, resultMessageId: string, agentId: string) {
 	const result = st.messages[resultMessageId];
 	if (!result) throw new Error(`INVALID_RESULT_MESSAGE: resultMessageId ${resultMessageId} does not exist in swarm state.`);
-	if (result.from !== agentId) throw new Error(`INVALID_RESULT_MESSAGE: result ${resultMessageId} was sent by ${result.from}, not ${agentId}.`);
-	if (result.to !== rec.from) throw new Error(`INVALID_RESULT_MESSAGE: result ${resultMessageId} is addressed to ${result.to}, expected original sender ${rec.from}.`);
+	if (result.from !== agentId)
+		throw new Error(`INVALID_RESULT_MESSAGE: result ${resultMessageId} was sent by ${result.from}, not ${agentId}.`);
+	if (result.to !== rec.from)
+		throw new Error(
+			`INVALID_RESULT_MESSAGE: result ${resultMessageId} is addressed to ${result.to}, expected original sender ${rec.from}.`,
+		);
 	const linked = result.replyTo === rec.id || (Boolean(result.conversationId) && result.conversationId === rec.conversationId);
-	if (!linked) throw new Error(`INVALID_RESULT_MESSAGE: result ${resultMessageId} must replyTo ${rec.id} or share conversationId ${rec.conversationId || "(none)"}.`);
+	if (!linked)
+		throw new Error(
+			`INVALID_RESULT_MESSAGE: result ${resultMessageId} must replyTo ${rec.id} or share conversationId ${rec.conversationId || "(none)"}.`,
+		);
 	return result;
 }
 
@@ -115,11 +140,20 @@ export function findIdempotentMessage(st: SwarmState, from: string, to: string, 
 // full-file parse per pump tick on unbounded root mailboxes. Falls back to a full read (and
 // returns its length) when the file shrank or no checkpoint exists. Returns the parsed messages and
 // the new offset to persist as the checkpoint.
-export async function readMailboxSince(p: Paths, agentId: string, offset: number, maxLines = 500): Promise<{ messages: SwarmMessage[]; offset: number; truncated: boolean }> {
+export async function readMailboxSince(
+	p: Paths,
+	agentId: string,
+	offset: number,
+	maxLines = 500,
+): Promise<{ messages: SwarmMessage[]; offset: number; truncated: boolean }> {
 	const file = mailboxPath(p, agentId);
 	if (!existsSync(file)) return { messages: [], offset: 0, truncated: false };
 	let size = 0;
-	try { size = (await stat(file)).size; } catch { return { messages: [], offset: 0, truncated: false }; }
+	try {
+		size = (await stat(file)).size;
+	} catch {
+		return { messages: [], offset: 0, truncated: false };
+	}
 	if (size < offset || offset <= 0) {
 		// No/shrunk checkpoint: full read, bounded to the last maxLines lines.
 		const all = await readMailbox(p, agentId);
@@ -143,7 +177,11 @@ export async function readMailboxSince(p: Paths, agentId: string, offset: number
 		const out: SwarmMessage[] = [];
 		let bad = 0;
 		for (const line of text.split("\n").filter(Boolean)) {
-			try { out.push(JSON.parse(line) as SwarmMessage); } catch { bad++; }
+			try {
+				out.push(JSON.parse(line) as SwarmMessage);
+			} catch {
+				bad++;
+			}
 		}
 		if (bad) await trace(p, "mailbox.corrupt_lines_ignored", { agentId, file, bad, incremental: true }).catch(() => {});
 		// Bound the parse per tick (protects a huge single append between ticks).
@@ -165,7 +203,11 @@ export async function readMailboxCached(p: Paths, agentId: string): Promise<Swar
 	const file = mailboxPath(p, agentId);
 	if (!existsSync(file)) return [];
 	let s: { size: number; mtimeMs: number };
-	try { s = await stat(file); } catch { return readMailbox(p, agentId); }
+	try {
+		s = await stat(file);
+	} catch {
+		return readMailbox(p, agentId);
+	}
 	const hit = mailboxReadCache.get(file);
 	if (hit && hit.size === s.size && hit.mtimeMs === s.mtimeMs) return hit.msgs;
 	const msgs = await readMailbox(p, agentId);
@@ -194,7 +236,9 @@ export async function readMailbox(p: Paths, agentId: string): Promise<SwarmMessa
 
 function buildInjectionProbe(state: SwarmState, msg: SwarmMessage, outcome: "success" | "failure", attempts: number, reinjects: number) {
 	const related = Object.values(state.messages || {}).filter((rec) => rec.to === msg.to && rec.id !== msg.id);
-	const successes = related.filter((rec) => rec.status === "injected" || rec.status === "mailbox_delivered" || rec.status === "intercepted").length;
+	const successes = related.filter(
+		(rec) => rec.status === "injected" || rec.status === "mailbox_delivered" || rec.status === "intercepted",
+	).length;
 	const failures = related.filter((rec) => rec.status === "failed" && !rec.lastAck).length;
 	const total = successes + failures + 1;
 	const failureRate = Number(((failures + (outcome === "failure" ? 1 : 0)) / total).toFixed(3));
@@ -205,7 +249,19 @@ function buildInjectionProbe(state: SwarmState, msg: SwarmMessage, outcome: "suc
 export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg: SwarmMessage) {
 	const agent = state.agents[msg.to];
 	if (!agent) {
-		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "failure", reason: "unknown agent", probe: buildInjectionProbe(state, msg, "failure", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+		await trace(p, "message.inject.probe", {
+			id: msg.id,
+			to: msg.to,
+			outcome: "failure",
+			reason: "unknown agent",
+			probe: buildInjectionProbe(
+				state,
+				msg,
+				"failure",
+				(state.messages[msg.id]?.attempts || 0) + 1,
+				state.messages[msg.id]?.reinjects || 0,
+			),
+		});
 		return { delivered: false, reason: "unknown agent" };
 	}
 	// Mailbox-only recipients (e.g. the root pseudo-agent) have no swarm tmux pane. The
@@ -214,11 +270,35 @@ export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg
 	// (pumpRootMailbox, on session_start/agent_settled/interval) or swarm_check_mailbox;
 	// callers must NOT pre-mark it delivered (see deliverMessageLocked) so the pump can surface it.
 	if (!agent.tmuxTarget || agent.tmuxTarget === "unknown") {
-		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "success", reason: "mailbox-only", probe: buildInjectionProbe(state, msg, "success", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+		await trace(p, "message.inject.probe", {
+			id: msg.id,
+			to: msg.to,
+			outcome: "success",
+			reason: "mailbox-only",
+			probe: buildInjectionProbe(
+				state,
+				msg,
+				"success",
+				(state.messages[msg.id]?.attempts || 0) + 1,
+				state.messages[msg.id]?.reinjects || 0,
+			),
+		});
 		return { delivered: true, mailboxOnly: true, reason: "recipient has no tmux pane (mailbox-only)" };
 	}
 	if (agent.status !== "running") {
-		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "failure", reason: "target agent not running", probe: buildInjectionProbe(state, msg, "failure", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+		await trace(p, "message.inject.probe", {
+			id: msg.id,
+			to: msg.to,
+			outcome: "failure",
+			reason: "target agent not running",
+			probe: buildInjectionProbe(
+				state,
+				msg,
+				"failure",
+				(state.messages[msg.id]?.attempts || 0) + 1,
+				state.messages[msg.id]?.reinjects || 0,
+			),
+		});
 		return { delivered: false, reason: "target agent not running" };
 	}
 	// Issue D: a live pane that is NOT running pi (e.g. the shell after a crash/exit) must not be marked
@@ -227,14 +307,38 @@ export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg
 	// eligibility too. Fail-open on unknown commands (see isPanePiLike).
 	const panePi = await isPanePiLike(pi, agent.tmuxTarget);
 	if (!panePi.piLike) {
-		await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "failure", reason: `pane alive but not running pi (pane_current_command=${panePi.command || "?"})`, probe: buildInjectionProbe(state, msg, "failure", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+		await trace(p, "message.inject.probe", {
+			id: msg.id,
+			to: msg.to,
+			outcome: "failure",
+			reason: `pane alive but not running pi (pane_current_command=${panePi.command || "?"})`,
+			probe: buildInjectionProbe(
+				state,
+				msg,
+				"failure",
+				(state.messages[msg.id]?.attempts || 0) + 1,
+				state.messages[msg.id]?.reinjects || 0,
+			),
+		});
 		return { delivered: false, reason: `pane alive but not running pi (pane_current_command=${panePi.command || "?"})` };
 	}
 	const before = await capturePane(pi, p, msg.to, agent.tmuxTarget, `deliver-${msg.id}-before`);
 	await sendToPane(pi, agent.tmuxTarget, buildSystemDelivery(msg));
 	await sleep(SEND_SETTLE_MS);
 	const after = await capturePane(pi, p, msg.to, agent.tmuxTarget, `deliver-${msg.id}-after`);
-	await trace(p, "message.inject.probe", { id: msg.id, to: msg.to, outcome: "success", reason: "tmux send-keys succeeded", probe: buildInjectionProbe(state, msg, "success", (state.messages[msg.id]?.attempts || 0) + 1, state.messages[msg.id]?.reinjects || 0) });
+	await trace(p, "message.inject.probe", {
+		id: msg.id,
+		to: msg.to,
+		outcome: "success",
+		reason: "tmux send-keys succeeded",
+		probe: buildInjectionProbe(
+			state,
+			msg,
+			"success",
+			(state.messages[msg.id]?.attempts || 0) + 1,
+			state.messages[msg.id]?.reinjects || 0,
+		),
+	});
 	return { delivered: true, mailboxOnly: false, before, after };
 }
 
@@ -242,7 +346,25 @@ export async function deliver(pi: ExtensionAPI, p: Paths, state: SwarmState, msg
 // root pseudo-agent) and appends to the recipient mailbox; it does NOT read/write state or
 // acquire the lock. Callers that already hold the swarm lock (task tools that send within one atomic
 // operation) use this directly and writeState once afterward.
-export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Paths, st: SwarmState, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string; clearReason?: OrphanClearReason }): Promise<{ msg: SwarmMessage; delivery: any }> {
+export async function deliverMessageLocked(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	params: {
+		to: string;
+		body: string;
+		subject?: string;
+		priority?: string;
+		conversationId?: string;
+		replyTo?: string;
+		requiresAck?: boolean;
+		requiresResponse?: boolean;
+		ttlMs?: number;
+		idempotencyKey?: string;
+		clearReason?: OrphanClearReason;
+	},
+): Promise<{ msg: SwarmMessage; delivery: any }> {
 	const to = safeId(params.to);
 	const from = currentAgentId();
 	if (to === "root") ensureRoot(st, cwd, p);
@@ -254,8 +376,21 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 		if (existing) {
 			const original = (await readMailbox(p, to)).find((m) => m.id === existing.id);
 			if (!original) throw new Error(`Idempotency record ${existing.id} exists but mailbox entry is missing for ${to}`);
-			await trace(p, "message.idempotent_reuse", { id: existing.id, from, to, idempotencyKey: params.idempotencyKey, status: existing.status });
-			return { msg: original, delivery: { reused: true, delivered: existing.status === "injected" || existing.status === "intercepted" || existing.status === "acked", status: existing.status } };
+			await trace(p, "message.idempotent_reuse", {
+				id: existing.id,
+				from,
+				to,
+				idempotencyKey: params.idempotencyKey,
+				status: existing.status,
+			});
+			return {
+				msg: original,
+				delivery: {
+					reused: true,
+					delivered: existing.status === "injected" || existing.status === "intercepted" || existing.status === "acked",
+					status: existing.status,
+				},
+			};
 		}
 	}
 
@@ -281,7 +416,18 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	};
 	upsertMessageRecord(st, m, "queued", { queuedAt: createdAt });
 	await appendJsonl(mailboxPath(p, to), m);
-	await trace(p, "message.enqueue", { id: m.id, from: m.from, to: m.to, subject: m.subject, priority: m.priority, conversationId: m.conversationId, replyTo: m.replyTo, requiresAck: m.requiresAck, requiresResponse: m.requiresResponse, idempotencyKey: m.idempotencyKey });
+	await trace(p, "message.enqueue", {
+		id: m.id,
+		from: m.from,
+		to: m.to,
+		subject: m.subject,
+		priority: m.priority,
+		conversationId: m.conversationId,
+		replyTo: m.replyTo,
+		requiresAck: m.requiresAck,
+		requiresResponse: m.requiresResponse,
+		idempotencyKey: m.idempotencyKey,
+	});
 
 	// === Issue 24.b — assignment-style message auto-stamp ===
 	// Detect an assignment-style message by `conversationId` matching `task:<taskId>:<nodeId>` AND
@@ -321,7 +467,12 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 						node.lastActivityAt = now();
 						await writeTaskState(tp, task);
 						assignmentAutoStamped = true;
-						await trace(p, "message.deliver.assignment_auto_stamp", { taskId, nodeId, assignee: to, priorAssignee: priorAssignee || null });
+						await trace(p, "message.deliver.assignment_auto_stamp", {
+							taskId,
+							nodeId,
+							assignee: to,
+							priorAssignee: priorAssignee || null,
+						});
 						// === Issue 24.e — assignment-mismatch advisory trace ===
 						// If after the stamp, node.assignee was set to someone OTHER than `to` BEFORE
 						// we stamped (race: a concurrent mutation set it elsewhere), the message is
@@ -330,13 +481,19 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 						// (the recipient may legitimately need context for a handover).
 						if (priorAssignee && priorAssignee !== to) {
 							await trace(p, "message.deliver.assignment_mismatch", {
-								taskId, nodeId, messageTo: to, nodeAssignee: to, priorAssignee,
+								taskId,
+								nodeId,
+								messageTo: to,
+								nodeAssignee: to,
+								priorAssignee,
 								severity: "warn",
 								note: "assignment-style message delivered to a recipient other than the current node.assignee; investigate for an in-flight reassign race or configuration error",
 							});
 						}
 					}
-				} catch { /* best-effort; auto-stamp is observability, never blocks delivery */ }
+				} catch {
+					/* best-effort; auto-stamp is observability, never blocks delivery */
+				}
 			}
 		}
 	}
@@ -367,9 +524,15 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 						rec.lifecycleStage = d.stage;
 						rec.lifecycleSource = d.source;
 						await trace(p, TRACE_LIFECYCLE_DERIVED, {
-							messageId: m.id, from: rec.from, to: rec.to,
-							field: d.field, source: d.source, stage: d.stage,
-							gate: 1, reason: d.reason, via: "deliverMessageLocked.mailbox_only",
+							messageId: m.id,
+							from: rec.from,
+							to: rec.to,
+							field: d.field,
+							source: d.source,
+							stage: d.stage,
+							gate: 1,
+							reason: d.reason,
+							via: "deliverMessageLocked.mailbox_only",
 						}).catch(() => {});
 					}
 				}
@@ -383,7 +546,11 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 			upsertMessageRecord(st, m, "injected", { injectedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1 });
 		}
 	} else {
-		upsertMessageRecord(st, m, "failed", { failedAt: now(), attempts: (st.messages[m.id]?.attempts || 0) + 1, lastError: delivery?.reason || "delivery skipped" });
+		upsertMessageRecord(st, m, "failed", {
+			failedAt: now(),
+			attempts: (st.messages[m.id]?.attempts || 0) + 1,
+			lastError: delivery?.reason || "delivery skipped",
+		});
 	}
 	// === Issue 25 Phase 2: gate-aware reply auto-verify (proposal §B.2 + §B.3, plan §2.4(a)) ===
 	// Under gate=1, an accepted reply to an OPEN (non-superseded, current attempt context) record
@@ -398,20 +565,36 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 	if (params.replyTo) {
 		const original = st.messages[params.replyTo];
 		if (original?.requiresResponse && original.to === from && original.from === to) {
-			const replyContextCurrent = !original.superseded && !(original.lastError?.startsWith("ack_missing"));
+			const replyContextCurrent = !original.superseded && !original.lastError?.startsWith("ack_missing");
 			const traceBase = { id: original.id, resultMessageId: m.id, from, to, gate: PI_SWARM_MINIMAL_PROTOCOL };
 			if (PI_SWARM_MINIMAL_PROTOCOL === 1 && replyContextCurrent) {
 				let validationPassed = true;
-				try { validateResultMessage(st, original, m.id, from); }
-				catch (err) {
+				try {
+					validateResultMessage(st, original, m.id, from);
+				} catch (err) {
 					validationPassed = false;
-					await trace(p, TRACE_REPLY_REJECTED_SUPERSEDED, { ...traceBase, reason: "validation_failed", error: String((err as Error)?.message || err), proposal: "§B.3" }).catch(() => {});
+					await trace(p, TRACE_REPLY_REJECTED_SUPERSEDED, {
+						...traceBase,
+						reason: "validation_failed",
+						error: String((err as Error)?.message || err),
+						proposal: "§B.3",
+					}).catch(() => {});
 				}
 				if (validationPassed) {
-					original.response = { ...(original.response || { status: "missing" as MessageResponseStatus }), status: "verified", resultMessageId: m.id, sentAt: now(), verifiedAt: now(), lastError: undefined };
+					original.response = {
+						...(original.response || { status: "missing" as MessageResponseStatus }),
+						status: "verified",
+						resultMessageId: m.id,
+						sentAt: now(),
+						verifiedAt: now(),
+						lastError: undefined,
+					};
 					original.updatedAt = now();
 					// Read context off the existing record via the conversationId regex (no new fields).
-					const idMatch = typeof original.conversationId === "string" ? original.conversationId.match(/^task:([a-z0-9_-]+):([a-z0-9_-]+)$/) : null;
+					const idMatch =
+						typeof original.conversationId === "string"
+							? original.conversationId.match(/^task:([a-z0-9_-]+):([a-z0-9_-]+)$/)
+							: null;
 					const d = deriveLifecycleFromTrigger(original, { kind: "reply_accepted", taskId: idMatch?.[1], nodeId: idMatch?.[2] });
 					if (d.kind === "set") {
 						(original as any)[d.field] = d.value;
@@ -419,15 +602,24 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 						original.lifecycleSource = d.source;
 						original.terminalReason = d.reason;
 						await trace(p, TRACE_LIFECYCLE_DERIVED, {
-							messageId: original.id, from: original.from, to: original.to,
-							field: d.field, source: d.source, stage: d.stage,
-							gate: 1, reason: d.reason, via: "deliverMessageLocked.reply",
+							messageId: original.id,
+							from: original.from,
+							to: original.to,
+							field: d.field,
+							source: d.source,
+							stage: d.stage,
+							gate: 1,
+							reason: d.reason,
+							via: "deliverMessageLocked.reply",
 						}).catch(() => {});
 					}
 					// Release response debt: if the assignee's runtimeStatus was "response_missing" and
 					// this was their last open response, unstick it. responseMissingRecords is the
 					// existing Phase-0 helper; no new derivation. Atomic with the response stamp.
-					if (st.agents[original.to]?.runtimeStatus === "response_missing" && responseMissingRecords(st, original.to).length === 0) {
+					if (
+						st.agents[original.to]?.runtimeStatus === "response_missing" &&
+						responseMissingRecords(st, original.to).length === 0
+					) {
 						st.agents[original.to].runtimeStatus = "idle";
 						st.agents[original.to].updatedAt = now();
 					}
@@ -436,7 +628,13 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 					// Validation failed (e.g. conversationId mismatch) — advisory-only "sent" path,
 					// same shape as the gate=0 path. The engine still records the reply was sent but
 					// does NOT verify the assignment and does NOT clear debt.
-					original.response = { ...(original.response || { status: "missing" as MessageResponseStatus }), status: "sent", resultMessageId: m.id, sentAt: now(), lastError: undefined };
+					original.response = {
+						...(original.response || { status: "missing" as MessageResponseStatus }),
+						status: "sent",
+						resultMessageId: m.id,
+						sentAt: now(),
+						lastError: undefined,
+					};
 					original.updatedAt = now();
 					await trace(p, "message.response.sent", { ...traceBase, advisory: true });
 				}
@@ -445,7 +643,9 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 				// Emit a fence trace on the superseded branch so dashboards see the rejection.
 				if (PI_SWARM_MINIMAL_PROTOCOL === 1 && original.superseded) {
 					await trace(p, TRACE_REPLY_REJECTED_SUPERSEDED, {
-						...traceBase, reason: "superseded", supersededBy: original.superseded.supersededBy,
+						...traceBase,
+						reason: "superseded",
+						supersededBy: original.superseded.supersededBy,
 						proposal: "§B.3",
 					}).catch(() => {});
 				}
@@ -457,7 +657,11 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 			}
 		}
 	}
-	await trace(p, delivery?.delivered ? (delivery.mailboxOnly ? "message.deliver.mailbox_only" : "message.inject.ok") : "message.inject.skip", { id: m.id, to: m.to, delivery, markedDelivered: Boolean(delivery?.delivered), status: st.messages[m.id]?.status });
+	await trace(
+		p,
+		delivery?.delivered ? (delivery.mailboxOnly ? "message.deliver.mailbox_only" : "message.inject.ok") : "message.inject.skip",
+		{ id: m.id, to: m.to, delivery, markedDelivered: Boolean(delivery?.delivered), status: st.messages[m.id]?.status },
+	);
 	// Orphan-spawn watchdog clear (Issue 14, B1 binding §2.2 + §2.3 collapse into one site here):
 	// any successful inbound delivery (tmux-injected OR mailbox-only) is sufficient to resolve the
 	// orphan — the agent now has a contractually visible message. A failed delivery does NOT clear
@@ -472,12 +676,31 @@ export async function deliverMessageLocked(pi: ExtensionAPI, cwd: string, p: Pat
 		try {
 			const { clearOrphanWatch } = await import("./agents.ts");
 			await clearOrphanWatch(p, st, m.to, params.clearReason ?? "swarm_send_message");
-		} catch { /* best-effort; never fail delivery on a watchdog bookkeeping error */ }
+		} catch {
+			/* best-effort; never fail delivery on a watchdog bookkeeping error */
+		}
 	}
 	return { msg: m, delivery };
 }
 
-export async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths, params: { to: string; body: string; subject?: string; priority?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; ttlMs?: number; idempotencyKey?: string; clearReason?: OrphanClearReason }) {
+export async function enqueueAndDeliver(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	params: {
+		to: string;
+		body: string;
+		subject?: string;
+		priority?: string;
+		conversationId?: string;
+		replyTo?: string;
+		requiresAck?: boolean;
+		requiresResponse?: boolean;
+		ttlMs?: number;
+		idempotencyKey?: string;
+		clearReason?: OrphanClearReason;
+	},
+) {
 	return withLock(p, async () => {
 		const st = await readState(p, cwd);
 		const r = await deliverMessageLocked(pi, cwd, p, st, params);
@@ -490,7 +713,14 @@ export async function enqueueAndDeliver(pi: ExtensionAPI, cwd: string, p: Paths,
 // (e.g. after stale-status repair / reassign) does not leave duplicate requiresResponse messages
 // that nag response_missing or block reuse. Best-effort: never throws (assignment must still succeed).
 // Source of prior ids: task.handoffs (kind="assign", toNode) — not conversationId substrings.
-export async function supersedeOpenAssignments(p: Paths, st: SwarmState, task: TaskState, nodeId: string, newMsgId: string, by: string): Promise<string[]> {
+export async function supersedeOpenAssignments(
+	p: Paths,
+	st: SwarmState,
+	task: TaskState,
+	nodeId: string,
+	newMsgId: string,
+	by: string,
+): Promise<string[]> {
 	const supersededIds: string[] = [];
 	try {
 		const priorIds = (task.handoffs || [])
@@ -511,7 +741,13 @@ export async function supersedeOpenAssignments(p: Paths, st: SwarmState, task: T
 			rec.superseded = { at: ts, by, supersededBy: newMsgId };
 			// waived response excludes this message from the existing reconcile response_missing block
 			// (response?.status !== "waived") and from responseMissingRecords() — no new reconcile code needed.
-			rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: "waived" as MessageResponseStatus, waivedAt: ts, waivedBy: by, lastError: undefined };
+			rec.response = {
+				...(rec.response || { status: "missing" as MessageResponseStatus }),
+				status: "waived" as MessageResponseStatus,
+				waivedAt: ts,
+				waivedBy: by,
+				lastError: undefined,
+			};
 			rec.updatedAt = ts;
 			supersededIds.push(mid);
 			await trace(p, "message.superseded", { id: mid, supersededBy: newMsgId, taskId: task.taskId, nodeId });
@@ -524,7 +760,12 @@ export async function supersedeOpenAssignments(p: Paths, st: SwarmState, task: T
 			agent.updatedAt = now();
 		}
 	} catch (err) {
-		await trace(p, "message.supersede_failed", { taskId: task.taskId, nodeId, newMsgId, error: String((err as Error)?.message || err) });
+		await trace(p, "message.supersede_failed", {
+			taskId: task.taskId,
+			nodeId,
+			newMsgId,
+			error: String((err as Error)?.message || err),
+		});
 	}
 	return supersededIds;
 }
@@ -536,7 +777,13 @@ export async function supersedeOpenAssignments(p: Paths, st: SwarmState, task: T
 // guard in swarm_ack_message. Returns the count of messages that were newly superseded.
 // Read-only on intent: mutates only MessageRecord.superseded fields + emits trace events; does not
 // touch messages.delivered, agent.activeTaskIds (handled separately), or node state.
-export async function supersedeTaskAssignmentMessages(p: Paths, st: SwarmState, task: TaskState, reason: string, by: string): Promise<{ supersededIds: string[]; skipped: number }> {
+export async function supersedeTaskAssignmentMessages(
+	p: Paths,
+	st: SwarmState,
+	task: TaskState,
+	reason: string,
+	by: string,
+): Promise<{ supersededIds: string[]; skipped: number }> {
 	const supersededIds: string[] = [];
 	let skipped = 0;
 	const ts = now();
@@ -544,11 +791,26 @@ export async function supersedeTaskAssignmentMessages(p: Paths, st: SwarmState, 
 		if (!mid) return;
 		if (mid.startsWith("__")) return; // never touch synthetic markers
 		const rec = st.messages[mid];
-		if (!rec) { skipped++; return; }
-		if (rec.status === "failed" || rec.status === "dead_letter") { skipped++; return; }
-		if (rec.superseded) { skipped++; return; }
+		if (!rec) {
+			skipped++;
+			return;
+		}
+		if (rec.status === "failed" || rec.status === "dead_letter") {
+			skipped++;
+			return;
+		}
+		if (rec.superseded) {
+			skipped++;
+			return;
+		}
 		rec.superseded = { at: ts, by, supersededBy: reason };
-		rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: "waived" as MessageResponseStatus, waivedAt: ts, waivedBy: by, lastError: undefined };
+		rec.response = {
+			...(rec.response || { status: "missing" as MessageResponseStatus }),
+			status: "waived" as MessageResponseStatus,
+			waivedAt: ts,
+			waivedBy: by,
+			lastError: undefined,
+		};
 		rec.updatedAt = ts;
 		supersededIds.push(mid);
 		await trace(p, "message.superseded", { id: mid, supersededBy: reason, taskId: task.taskId, nodeId, by });
@@ -594,7 +856,14 @@ export type LifecycleStage = "delivered" | "surfaced" | "seen" | "processing" | 
 
 export type LifecycleDerivation =
 	| { kind: "no_change"; reason: string }
-	| { kind: "set"; field: "mailboxDeliveredAt" | "seenAt" | "processingAt" | "respondedAt" | "terminalAt"; value: string; source: string; stage: LifecycleStage; reason: string };
+	| {
+			kind: "set";
+			field: "mailboxDeliveredAt" | "seenAt" | "processingAt" | "respondedAt" | "terminalAt";
+			value: string;
+			source: string;
+			stage: LifecycleStage;
+			reason: string;
+	  };
 
 export type LifecycleTrigger =
 	| { kind: "mailbox_appended" }
@@ -612,20 +881,42 @@ export function deriveLifecycleFromTrigger(rec: MessageRecord, trigger: Lifecycl
 		case "mailbox_appended": {
 			// Transport-only receipt. NEVER produces seenAt — proposal §A invariant.
 			if (rec.mailboxDeliveredAt) return { kind: "no_change", reason: "mailboxDeliveredAt already set" };
-			return { kind: "set", field: "mailboxDeliveredAt", value: at, source: "mailbox.appended", stage: "delivered", reason: "durable mailbox append succeeded" };
+			return {
+				kind: "set",
+				field: "mailboxDeliveredAt",
+				value: at,
+				source: "mailbox.appended",
+				stage: "delivered",
+				reason: "durable mailbox append succeeded",
+			};
 		}
 		case "mailbox_surfaced": {
 			// swarm_check_mailbox returned this envelope. Distinct from pane injection per proposal §A.
 			if (rec.seenAt) return { kind: "no_change", reason: "seenAt already set" };
-			return { kind: "set", field: "seenAt", value: at, source: "mailbox.surfaced", stage: "seen", reason: "swarm_check_mailbox surfaced envelope" };
+			return {
+				kind: "set",
+				field: "seenAt",
+				value: at,
+				source: "mailbox.surfaced",
+				stage: "seen",
+				reason: "swarm_check_mailbox surfaced envelope",
+			};
 		}
 		case "task_tool": {
 			// Requires matching taskId/nodeId/attemptId. We do NOT inspect the conversationId regex — the
 			// proposal §B.2 fence says the assignment reply branch re-verifies the assignment under lock.
 			// For task_tool evidence we accept the caller's context only when it's present.
-			if (!trigger.taskId || !trigger.nodeId || !trigger.attemptId) return { kind: "no_change", reason: "task_tool missing taskId/nodeId/attemptId" };
+			if (!trigger.taskId || !trigger.nodeId || !trigger.attemptId)
+				return { kind: "no_change", reason: "task_tool missing taskId/nodeId/attemptId" };
 			if (rec.processingAt) return { kind: "no_change", reason: "processingAt already set" };
-			return { kind: "set", field: "processingAt", value: at, source: "task.tool", stage: "processing", reason: `recipient tool for task=${trigger.taskId} node=${trigger.nodeId} attempt=${trigger.attemptId}` };
+			return {
+				kind: "set",
+				field: "processingAt",
+				value: at,
+				source: "task.tool",
+				stage: "processing",
+				reason: `recipient tool for task=${trigger.taskId} node=${trigger.nodeId} attempt=${trigger.attemptId}`,
+			};
 		}
 		case "reply_accepted": {
 			if (rec.respondedAt) return { kind: "no_change", reason: "respondedAt already set" };
@@ -637,19 +928,47 @@ export function deriveLifecycleFromTrigger(rec: MessageRecord, trigger: Lifecycl
 		case "task_node_terminal": {
 			// Phase 1 never stamps terminalAt under gate=0; the caller is responsible for gating.
 			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
-			return { kind: "set", field: "terminalAt", value: at, source: "task.node_terminal", stage: "terminal", reason: `matching fenced node reached terminal status (task=${trigger.taskId ?? "?"} node=${trigger.nodeId ?? "?"} attempt=${trigger.attemptId ?? "?"})` };
+			return {
+				kind: "set",
+				field: "terminalAt",
+				value: at,
+				source: "task.node_terminal",
+				stage: "terminal",
+				reason: `matching fenced node reached terminal status (task=${trigger.taskId ?? "?"} node=${trigger.nodeId ?? "?"} attempt=${trigger.attemptId ?? "?"})`,
+			};
 		}
 		case "supersession": {
 			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
-			return { kind: "set", field: "terminalAt", value: at, source: "supersession", stage: "terminal", reason: `superseded by ${trigger.supersededBy || "(unknown)"}` };
+			return {
+				kind: "set",
+				field: "terminalAt",
+				value: at,
+				source: "supersession",
+				stage: "terminal",
+				reason: `superseded by ${trigger.supersededBy || "(unknown)"}`,
+			};
 		}
 		case "deadline_exceeded": {
 			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
-			return { kind: "set", field: "terminalAt", value: at, source: "responseDeadlineMs", stage: "terminal", reason: `response deadline ${trigger.deadlineMs ?? "?"}ms exceeded without reply/terminal` };
+			return {
+				kind: "set",
+				field: "terminalAt",
+				value: at,
+				source: "responseDeadlineMs",
+				stage: "terminal",
+				reason: `response deadline ${trigger.deadlineMs ?? "?"}ms exceeded without reply/terminal`,
+			};
 		}
 		case "ttl_expired": {
 			if (rec.terminalAt) return { kind: "no_change", reason: "terminalAt already set" };
-			return { kind: "set", field: "terminalAt", value: at, source: "ttl_expired", stage: "terminal", reason: "TTL/attempts exhausted; message moved to dead_letter" };
+			return {
+				kind: "set",
+				field: "terminalAt",
+				value: at,
+				source: "ttl_expired",
+				stage: "terminal",
+				reason: "TTL/attempts exhausted; message moved to dead_letter",
+			};
 		}
 	}
 }

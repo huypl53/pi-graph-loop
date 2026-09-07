@@ -36,8 +36,17 @@ const src = await import(join(here, "../src/reconcile.ts"));
 const { paths, ensureDirs, readState, writeState } = await import(join(here, "../src/state.ts"));
 const { ensureRoot, claimRootLeader } = await import(join(here, "../src/identity.ts"));
 
-let pass = 0, fail = 0;
-const ok = (name, condition, info = "") => { if (condition) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name, info); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, condition, info = "") => {
+	if (condition) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info);
+	}
+};
 
 process.env.PI_SWARM_AGENT_ID = "root";
 
@@ -49,7 +58,14 @@ process.env.PI_SWARM_AGENT_ID = "root";
 	await ensureDirs(p);
 	const st = await readState(p, dir);
 	ensureRoot(st, dir, p);
-	st.agents["w"] = { id: "w", role: "r", roleKind: "worker", status: "running", runtimeStatus: "idle", lastHeartbeatAt: new Date().toISOString() };
+	st.agents["w"] = {
+		id: "w",
+		role: "r",
+		roleKind: "worker",
+		status: "running",
+		runtimeStatus: "idle",
+		lastHeartbeatAt: new Date().toISOString(),
+	};
 	st.goal = { id: "g1", text: "probe", setAt: new Date().toISOString(), setBy: "root", origin: "root", consecutiveNoResolveNudges: 0 };
 	await writeState(p, st);
 	await claimRootLeader(st, Date.now(), process.pid);
@@ -57,10 +73,21 @@ process.env.PI_SWARM_AGENT_ID = "root";
 	const pi = { sendMessage: async () => true, registerTool: () => {}, on: () => {} };
 	const ctx = { cwd: dir, mode: "tui", isIdle: () => true };
 	await src.pumpRootMailbox(pi, ctx, p, "watchdog");
-	await new Promise(r => setTimeout(r, 200));
+	await new Promise((r) => setTimeout(r, 200));
 	const traceLines = existsSync(p.events) ? readFileSync(p.events, "utf8") : "";
-	ok("pump tick with goal: no goal.nudge.error ReferenceError", !traceLines.includes("goal.nudge.error"), traceLines.split("\n").filter(l => l.includes("goal.nudge.error")).join("; "));
-	ok("pump tick with goal: streak sample traced (goal.idle_check)", traceLines.includes("goal.idle_check"), traceLines.split("\n").filter(Boolean).slice(0, 6).join("; "));
+	ok(
+		"pump tick with goal: no goal.nudge.error ReferenceError",
+		!traceLines.includes("goal.nudge.error"),
+		traceLines
+			.split("\n")
+			.filter((l) => l.includes("goal.nudge.error"))
+			.join("; "),
+	);
+	ok(
+		"pump tick with goal: streak sample traced (goal.idle_check)",
+		traceLines.includes("goal.idle_check"),
+		traceLines.split("\n").filter(Boolean).slice(0, 6).join("; "),
+	);
 	ok("pump tick with goal: no idle.epoch.error", !traceLines.includes("idle.epoch.error"));
 }
 
@@ -72,15 +99,39 @@ process.env.PI_SWARM_AGENT_ID = "root";
 	await ensureDirs(p);
 	const st = await readState(p, dir);
 	ensureRoot(st, dir, p);
-	st.agents["w"] = { id: "w", role: "r", roleKind: "worker", status: "running", runtimeStatus: "idle", lastHeartbeatAt: new Date().toISOString() };
+	st.agents["w"] = {
+		id: "w",
+		role: "r",
+		roleKind: "worker",
+		status: "running",
+		runtimeStatus: "idle",
+		lastHeartbeatAt: new Date().toISOString(),
+	};
 	await writeState(p, st);
 	const msg = { id: "m1", idempotencyKey: "task:t1:node:a:nudge:assign:seq:1", createdAt: new Date().toISOString() };
-	const taskIndex = { t1: { taskId: "t1", status: "in_progress", start: "a", edges: [], handoffs: [], nodes: { a: { status: "assigned", assignee: "w", dependsOn: [] } } } };
+	const taskIndex = {
+		t1: {
+			taskId: "t1",
+			status: "in_progress",
+			start: "a",
+			edges: [],
+			handoffs: [],
+			nodes: { a: { status: "assigned", assignee: "w", dependsOn: [] } },
+		},
+	};
 	let result = null;
 	let threw = null;
-	try { result = await src.staleSurfaceReason(p, st, msg, taskIndex, Date.now()); } catch (err) { threw = String(err); }
+	try {
+		result = await src.staleSurfaceReason(p, st, msg, taskIndex, Date.now());
+	} catch (err) {
+		threw = String(err);
+	}
 	ok("graph-advance key surface check: no ReferenceError (checkStallNotificationStale imported)", threw === null, threw);
-	ok("graph-advance key surface check returns a verdict", threw === null && result !== null && typeof result.stale === "boolean", JSON.stringify(result));
+	ok(
+		"graph-advance key surface check returns a verdict",
+		threw === null && result !== null && typeof result.stale === "boolean",
+		JSON.stringify(result),
+	);
 }
 
 // --- Guard 3: static source check — every identifier referenced as a call in surface.ts

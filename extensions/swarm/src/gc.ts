@@ -36,9 +36,10 @@ function isTerminal(rec: MessageRecord): boolean {
 }
 
 export function pruneState(st: SwarmState, opts: PruneOptions = {}): { removed: number; kept: number } {
-	const keepMessages = typeof opts.keepMessages === "number" && Number.isFinite(opts.keepMessages) && opts.keepMessages >= 0
-		? Math.floor(opts.keepMessages)
-		: DEFAULT_KEEP_MESSAGES;
+	const keepMessages =
+		typeof opts.keepMessages === "number" && Number.isFinite(opts.keepMessages) && opts.keepMessages >= 0
+			? Math.floor(opts.keepMessages)
+			: DEFAULT_KEEP_MESSAGES;
 
 	st.messages ||= {};
 	st.delivered ||= {};
@@ -48,7 +49,8 @@ export function pruneState(st: SwarmState, opts: PruneOptions = {}): { removed: 
 	// Always keep the most-recent `keepMessages` by updatedAt (fall back to createdAt), breaking
 	// ties by id. Sort ascending (oldest first); the most-recent sit at the tail.
 	const ordered = ids.slice().sort((a, b) => {
-		const ra = st.messages[a], rb = st.messages[b];
+		const ra = st.messages[a],
+			rb = st.messages[b];
 		const ua = ra?.updatedAt || ra?.createdAt || "";
 		const ub = rb?.updatedAt || rb?.createdAt || "";
 		if (ua !== ub) return ua < ub ? -1 : 1;

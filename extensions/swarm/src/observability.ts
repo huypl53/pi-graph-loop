@@ -25,7 +25,11 @@ function clock(iso: string): string {
 
 function fmtValue(value: unknown): string {
 	if (value == null) return "";
-	if (Array.isArray(value)) return `[${value.map((item) => fmtValue(item)).filter(Boolean).join(", ")}]`;
+	if (Array.isArray(value))
+		return `[${value
+			.map((item) => fmtValue(item))
+			.filter(Boolean)
+			.join(", ")}]`;
 	if (typeof value === "object") return JSON.stringify(value);
 	return String(value);
 }
@@ -82,11 +86,17 @@ async function readTailJsonl(file: string, limitBytes = 65536): Promise<Record<s
 		const buffer = Buffer.allocUnsafe(size - readStart);
 		const { bytesRead } = await fh.read(buffer, 0, buffer.length, readStart);
 		const text = buffer.subarray(0, bytesRead).toString("utf8");
-		const slice = start > 0 ? (() => {
-			const idx = text.indexOf("\n");
-			return idx >= 0 ? text.slice(idx + 1) : "";
-		})() : text;
-		const lines = slice.split(/\n/).map((l) => l.trim()).filter(Boolean);
+		const slice =
+			start > 0
+				? (() => {
+						const idx = text.indexOf("\n");
+						return idx >= 0 ? text.slice(idx + 1) : "";
+					})()
+				: text;
+		const lines = slice
+			.split(/\n/)
+			.map((l) => l.trim())
+			.filter(Boolean);
 		const records: Record<string, any>[] = [];
 		for (const line of lines) {
 			try {
@@ -106,24 +116,24 @@ async function readTailJsonl(file: string, limitBytes = 65536): Promise<Record<s
 
 export async function readRecentEvents(p: Paths, tp: TaskPaths, limit: number): Promise<EventLine[]> {
 	if (!Number.isFinite(limit) || limit <= 0) return [];
-	const [swarmRecords, taskRecords] = await Promise.all([
-		readTailJsonl(p.events),
-		readTailJsonl(tp.events),
-	]);
+	const [swarmRecords, taskRecords] = await Promise.all([readTailJsonl(p.events), readTailJsonl(tp.events)]);
 	const merged = [
 		...swarmRecords.map((raw, seq) => ({ raw, source: "swarm" as const, seq })),
 		...taskRecords.map((raw, seq) => ({ raw, source: "task" as const, seq })),
 	]
-		.map(({ raw, source, seq }) => ({
-			ts: raw.ts,
-			tsMs: Date.parse(raw.ts),
-			event: String(raw.event),
-			source,
-			seq,
-			raw,
-		} as const))
+		.map(
+			({ raw, source, seq }) =>
+				({
+					ts: raw.ts,
+					tsMs: Date.parse(raw.ts),
+					event: String(raw.event),
+					source,
+					seq,
+					raw,
+				}) as const,
+		)
 		.filter((rec) => Number.isFinite(rec.tsMs));
-	merged.sort((a, b) => (a.tsMs - b.tsMs) || (a.seq - b.seq) || a.source.localeCompare(b.source));
+	merged.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq || a.source.localeCompare(b.source));
 	return merged.slice(Math.max(0, merged.length - limit)).map((rec) => ({
 		ts: rec.ts,
 		event: rec.event,
@@ -148,7 +158,10 @@ function renderNodeLine(id: string, node: TaskState["nodes"][string]): string {
 
 function renderAgentLine(task: TaskState, agent: SwarmAgent): string {
 	const activeHere = Object.entries(task.nodes)
-		.filter(([, node]) => node.assignee === agent.id && (node.status === "assigned" || node.status === "in_progress" || node.status === "ready"))
+		.filter(
+			([, node]) =>
+				node.assignee === agent.id && (node.status === "assigned" || node.status === "in_progress" || node.status === "ready"),
+		)
 		.map(([id]) => id);
 	const active = (agent.activeTaskIds || []).map((taskId) => {
 		if (taskId !== task.taskId) return taskId;
@@ -196,5 +209,10 @@ export async function buildFlowSnapshot(
 	const { ready, current } = computeReadyNodes(task);
 	const closure = computeTaskClosure(st, task, tp);
 	const events = await readRecentEvents(p, tp, limit);
-	return renderFlowSnapshot(task, ready, current, st.agents, events, { index, open: closure.openNodes, stale: closure.staleNodes, eventLimit: limit });
+	return renderFlowSnapshot(task, ready, current, st.agents, events, {
+		index,
+		open: closure.openNodes,
+		stale: closure.staleNodes,
+		eventLimit: limit,
+	});
 }

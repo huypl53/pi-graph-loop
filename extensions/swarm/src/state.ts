@@ -1,10 +1,29 @@
 // === swarm/state.ts — auto-extracted from index.ts (verbatim bodies) ===
-import { defineTool, CONFIG_DIR_NAME, truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	defineTool,
+	CONFIG_DIR_NAME,
+	truncateHead,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep, basename } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import type { EvidenceDigest, IterationSession, LoopState, MemoryRecord, MetricContract, Paths, RunRecord, SwarmState, TaskPaths, TaskState } from "./types.ts";
+import type {
+	EvidenceDigest,
+	IterationSession,
+	LoopState,
+	MemoryRecord,
+	MetricContract,
+	Paths,
+	RunRecord,
+	SwarmState,
+	TaskPaths,
+	TaskState,
+} from "./types.ts";
 import { EXT, LOCK_STALE_MS, STATE_VERSION } from "./constants.ts";
 import { ensureAgentDefaults, isSafeRelativePath, normalizeTaskNode, now, projectSlug, safeId, sleep } from "./utils.ts";
 import { tmux } from "./tmux.ts";
@@ -78,7 +97,10 @@ export async function withLock<T>(p: Paths, fn: () => Promise<T>): Promise<T> {
 }
 
 export function defaultState(cwd: string): SwarmState {
-	const swarmId = `swarm-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 6)}`;
+	const swarmId = `swarm-${new Date()
+		.toISOString()
+		.replace(/[-:.TZ]/g, "")
+		.slice(0, 14)}-${randomUUID().slice(0, 6)}`;
 	const ts = now();
 	return {
 		version: STATE_VERSION,
@@ -100,7 +122,9 @@ export function defaultState(cwd: string): SwarmState {
 async function backupCorruptFile(file: string): Promise<void> {
 	try {
 		await rename(file, `${file}.corrupt.bak`);
-	} catch { /* best-effort; the caller's error message already references the .bak path */ }
+	} catch {
+		/* best-effort; the caller's error message already references the .bak path */
+	}
 }
 
 function corruptParseError(file: string, err: unknown): Error {
@@ -195,12 +219,23 @@ async function backupBeforeWrite(file: string, backupsDir: string): Promise<void
 		await writeFile(join(backupsDir, name), prev, "utf8");
 		// Prune oldest backups of this file beyond KEEP_BACKUPS.
 		const prefix = `${basename(file)}.`;
-		const ts = (f) => { const m = f.slice(prefix.length).match(/^(\d+)-(\d+)/); return m ? parseInt(m[1], 10) * 1e7 + parseInt(m[2], 10) : 0; };
-		const entries = (await readdir(backupsDir)).filter((f) => f.startsWith(prefix) && /^\d+/.test(f.slice(prefix.length))).sort((a, b) => ts(a) - ts(b));
+		const ts = (f) => {
+			const m = f.slice(prefix.length).match(/^(\d+)-(\d+)/);
+			return m ? parseInt(m[1], 10) * 1e7 + parseInt(m[2], 10) : 0;
+		};
+		const entries = (await readdir(backupsDir))
+			.filter((f) => f.startsWith(prefix) && /^\d+/.test(f.slice(prefix.length)))
+			.sort((a, b) => ts(a) - ts(b));
 		for (const old of entries.slice(0, Math.max(0, entries.length - KEEP_BACKUPS))) {
-			try { await rm(join(backupsDir, old), { force: true }); } catch { /* best-effort */ }
+			try {
+				await rm(join(backupsDir, old), { force: true });
+			} catch {
+				/* best-effort */
+			}
 		}
-	} catch { /* best-effort; backup must never block the write */ }
+	} catch {
+		/* best-effort; backup must never block the write */
+	}
 }
 
 export async function writeState(p: Paths, state: SwarmState) {
@@ -238,7 +273,8 @@ export async function readTaskState(file: string): Promise<TaskState> {
 	if (task.qualification) {
 		task.qualification.artifact ||= "artifacts/qualification-gate.md";
 		if (task.qualification.mode !== "human-discuss") task.qualification.mode = "auto";
-		if (!["ready", "awaiting-confirmation", "confirmed"].includes(task.qualification.status)) task.qualification.status = task.qualification.mode === "human-discuss" ? "awaiting-confirmation" : "ready";
+		if (!["ready", "awaiting-confirmation", "confirmed"].includes(task.qualification.status))
+			task.qualification.status = task.qualification.mode === "human-discuss" ? "awaiting-confirmation" : "ready";
 	}
 	task.reworkConsumption ||= [];
 	task.sharedContext ||= { summary: "", decisions: [], openQuestions: [], risks: [] };
@@ -255,7 +291,10 @@ export async function traceTask(tp: TaskPaths, event: string, data: Record<strin
 	await appendJsonl(tp.events, { ts: now(), event, ...data });
 }
 
-export async function readTaskByRef(p: Paths, ref: { taskId?: string; path?: string }): Promise<{ task: TaskState; tp: TaskPaths; taskId: string }> {
+export async function readTaskByRef(
+	p: Paths,
+	ref: { taskId?: string; path?: string },
+): Promise<{ task: TaskState; tp: TaskPaths; taskId: string }> {
 	let file: string | undefined;
 	if (ref.path && existsSync(ref.path)) file = ref.path;
 	else if (ref.taskId) {
@@ -299,19 +338,29 @@ export async function captureEvidenceDigests(cwd: string, refs: string[]): Promi
 		try {
 			const data = await readFile(await resolveEvidencePath(cwd, ref));
 			out.push({ ref, sha256: createHash("sha256").update(data).digest("hex"), size: data.byteLength });
-		} catch { /* existence/boundary is enforced by the promotion gate, not run recording */ }
+		} catch {
+			/* existence/boundary is enforced by the promotion gate, not run recording */
+		}
 	}
 	return out;
 }
 
 export async function readJsonlRecords<T = any>(file: string): Promise<T[]> {
 	let raw: string;
-	try { raw = await readFile(file, "utf8"); } catch { return []; }
+	try {
+		raw = await readFile(file, "utf8");
+	} catch {
+		return [];
+	}
 	const out: T[] = [];
 	for (const line of raw.split("\n")) {
 		const t = line.trim();
 		if (!t) continue;
-		try { out.push(JSON.parse(t) as T); } catch { /* malformed records are ignored by legacy readers */ }
+		try {
+			out.push(JSON.parse(t) as T);
+		} catch {
+			/* malformed records are ignored by legacy readers */
+		}
 	}
 	return out;
 }
@@ -327,7 +376,10 @@ export async function readJsonlLatestById<T extends Record<string, any>>(file: s
 	return Array.from(latest.values());
 }
 
-export async function checkEvidenceRefs(cwd: string, refs: string[]): Promise<{ ok: boolean; reasons: string[]; checked: { ref: string; exists: boolean; readable: boolean }[] }> {
+export async function checkEvidenceRefs(
+	cwd: string,
+	refs: string[],
+): Promise<{ ok: boolean; reasons: string[]; checked: { ref: string; exists: boolean; readable: boolean }[] }> {
 	const reasons: string[] = [];
 	const checked: { ref: string; exists: boolean; readable: boolean }[] = [];
 	for (const ref of refs) {
@@ -346,11 +398,13 @@ export async function checkEvidenceRefs(cwd: string, refs: string[]): Promise<{ 
 			readable = true;
 		} catch (err) {
 			exists = existsSync(lexical);
-			if (exists && String((err as Error)?.message || err).includes("outside project cwd")) reasons.push(`evidence ref resolves outside project cwd: ${ref}`);
+			if (exists && String((err as Error)?.message || err).includes("outside project cwd"))
+				reasons.push(`evidence ref resolves outside project cwd: ${ref}`);
 		}
 		checked.push({ ref, exists, readable });
 		if (!exists) reasons.push(`evidence ref does not exist: ${ref}`);
-		else if (!readable && !reasons.some((r) => r === `evidence ref resolves outside project cwd: ${ref}`)) reasons.push(`evidence ref exists but is not readable: ${ref}`);
+		else if (!readable && !reasons.some((r) => r === `evidence ref resolves outside project cwd: ${ref}`))
+			reasons.push(`evidence ref exists but is not readable: ${ref}`);
 	}
 	return { ok: reasons.length === 0, reasons, checked };
 }
@@ -360,12 +414,18 @@ export async function verifyEvidenceDigests(cwd: string, refs: string[], digests
 	const byRef = new Map((digests || []).map((d) => [d.ref, d] as const));
 	for (const ref of refs) {
 		const recorded = byRef.get(ref);
-		if (!recorded) { reasons.push(`evidence ref has no recorded digest: ${ref}`); continue; }
+		if (!recorded) {
+			reasons.push(`evidence ref has no recorded digest: ${ref}`);
+			continue;
+		}
 		try {
 			const data = await readFile(await resolveEvidencePath(cwd, ref));
 			const current = createHash("sha256").update(data).digest("hex");
-			if (current !== recorded.sha256 || data.byteLength !== recorded.size) reasons.push(`evidence ref changed after run recording: ${ref}`);
-		} catch { /* checkEvidenceRefs reports missing/unreadable */ }
+			if (current !== recorded.sha256 || data.byteLength !== recorded.size)
+				reasons.push(`evidence ref changed after run recording: ${ref}`);
+		} catch {
+			/* checkEvidenceRefs reports missing/unreadable */
+		}
 	}
 	return reasons;
 }

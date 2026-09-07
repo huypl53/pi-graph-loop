@@ -27,7 +27,9 @@ mkdirSync(scratch, { recursive: true });
 // === Test harness: mock pi + import the real extension factory ===
 const tools = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
 	exec: async (cmd, args) => {
@@ -54,19 +56,30 @@ const setAgent = async (id, isOrch = false) => {
 };
 
 const makeCall = () => async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error(`no tool ${name}`);
+	const t = tools[name];
+	if (!t) throw new Error(`no tool ${name}`);
 	return t.execute("call", params, undefined, undefined, { cwd: params.cwd || scratch });
 };
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, detail) => {
-	if (cond) { pass++; console.log("  ok  ", name); }
-	else { fail++; console.error("  FAIL", name, detail || ""); }
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, detail || "");
+	}
 };
-const asJson = (r) => r && r.content && r.content[0] && r.content[0].text ? r.content[0].text : String(r);
+const asJson = (r) => (r && r.content && r.content[0] && r.content[0].text ? r.content[0].text : String(r));
 const expectErr = async (fn, code) => {
-	try { const r = await fn(); return { ok: false, err: null, r }; }
-	catch (err) { return { ok: err?.message?.startsWith(code) || err?.message?.includes(code), err: err?.message || String(err), r: null }; }
+	try {
+		const r = await fn();
+		return { ok: false, err: null, r };
+	} catch (err) {
+		return { ok: err?.message?.startsWith(code) || err?.message?.includes(code), err: err?.message || String(err), r: null };
+	}
 };
 
 const buildTask = async (call, label) => {
@@ -81,9 +94,19 @@ const buildTask = async (call, label) => {
 		priority: "normal",
 		nodes: {
 			plan: { role: "planner", dependsOn: [], readArtifacts: [], writeArtifacts: ["artifacts/plan.md"] },
-			implement: { role: "implementer", dependsOn: ["plan"], readArtifacts: ["artifacts/plan.md"], writeArtifacts: ["artifacts/impl.md"] },
+			implement: {
+				role: "implementer",
+				dependsOn: ["plan"],
+				readArtifacts: ["artifacts/plan.md"],
+				writeArtifacts: ["artifacts/impl.md"],
+			},
 			test: { role: "tester", dependsOn: ["implement"], readArtifacts: ["artifacts/impl.md"], writeArtifacts: ["artifacts/test.md"] },
-			review: { role: "reviewer", dependsOn: ["test"], readArtifacts: ["artifacts/test.md"], writeArtifacts: ["artifacts/review.md"] },
+			review: {
+				role: "reviewer",
+				dependsOn: ["test"],
+				readArtifacts: ["artifacts/test.md"],
+				writeArtifacts: ["artifacts/review.md"],
+			},
 		},
 		edges: [
 			{ from: "plan", to: "implement", when: "planned" },
@@ -119,17 +142,38 @@ const stampAssignee = (taskId, nodeId, assignee, attemptId) => {
 	});
 	// Also record in handoffs so supersedeTaskAssignmentMessages picks it up
 	j.handoffs = j.handoffs || [];
-	j.handoffs.push({ fromNode: null, toNode: nodeId, kind: "assign", messageId: msgId, taskId, by: assignee, at: new Date().toISOString() });
+	j.handoffs.push({
+		fromNode: null,
+		toNode: nodeId,
+		kind: "assign",
+		messageId: msgId,
+		taskId,
+		by: assignee,
+		at: new Date().toISOString(),
+	});
 	writeFileSync(path, JSON.stringify(j, null, 2));
 };
 
 const registerAgent = (st, id) => {
 	st.agents[id] = st.agents[id] || {
-		id, role: id, roleKind: "worker", capabilities: [], activeTaskIds: [],
-		maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy",
-		tmuxSession: "test", tmuxWindow: id, tmuxTarget: `test:${id}.0`,
-		model: "x", provider: "y", cwd: scratch, mailbox: `.pi/swarm/mailboxes/${id}.jsonl`,
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+		id,
+		role: id,
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: "test",
+		tmuxWindow: id,
+		tmuxTarget: `test:${id}.0`,
+		model: "x",
+		provider: "y",
+		cwd: scratch,
+		mailbox: `.pi/swarm/mailboxes/${id}.jsonl`,
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
 	};
 };
 
@@ -143,11 +187,21 @@ const materializeAssignments = (taskId, nodeIds) => {
 		if (node.assignmentMessageId) {
 			registerAgent(st, node.assignee);
 			st.messages[node.assignmentMessageId] = {
-				id: node.assignmentMessageId, from: "root", to: node.assignee,
-				status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-				attempts: 1, requiresAck: true, conversationId: `task:${taskId}:${nodeId}`,
-				subject: "assignment", priority: "normal", type: "swarm.message", schemaVersion: 1,
-				body: "test", headers: {},
+				id: node.assignmentMessageId,
+				from: "root",
+				to: node.assignee,
+				status: "injected",
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+				attempts: 1,
+				requiresAck: true,
+				conversationId: `task:${taskId}:${nodeId}`,
+				subject: "assignment",
+				priority: "normal",
+				type: "swarm.message",
+				schemaVersion: 1,
+				body: "test",
+				headers: {},
 			};
 			st.delivered[node.assignee] = Array.from(new Set([...(st.delivered[node.assignee] || []), node.assignmentMessageId]));
 		}
@@ -165,7 +219,8 @@ const materializeAssignments = (taskId, nodeIds) => {
 	stampAssignee(taskId, "test", "tester-01", "att-test-1");
 	const planPath = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
 	const t0 = JSON.parse(readFileSync(planPath, "utf8"));
-	t0.nodes.plan.status = "done"; t0.nodes.plan.outcome = "planned";
+	t0.nodes.plan.status = "done";
+	t0.nodes.plan.outcome = "planned";
 	writeFileSync(planPath, JSON.stringify(t0, null, 2));
 	const r = await call("swarm_update_task", { taskId, nodeId: "implement", force: true, cancelTask: true, cwd: scratch });
 	ok("root cancel returned a result", asJson(r).length > 0);
@@ -176,8 +231,14 @@ const materializeAssignments = (taskId, nodeIds) => {
 	ok("test node.status = cancelled", j.nodes.test.status === "cancelled");
 	ok("review node.status = cancelled", j.nodes.review.status === "cancelled");
 	ok("plan (terminal done) NOT mutated", j.nodes.plan.status === "done");
-	ok("implement attempt history shows cancelled", j.nodes.implement.attemptHistory.find((a) => a.attemptId === "att-impl-1").status === "cancelled");
-	ok("test attempt history shows cancelled", j.nodes.test.attemptHistory.find((a) => a.attemptId === "att-test-1").status === "cancelled");
+	ok(
+		"implement attempt history shows cancelled",
+		j.nodes.implement.attemptHistory.find((a) => a.attemptId === "att-impl-1").status === "cancelled",
+	);
+	ok(
+		"test attempt history shows cancelled",
+		j.nodes.test.attemptHistory.find((a) => a.attemptId === "att-test-1").status === "cancelled",
+	);
 	const statePath = join(scratch, ".pi/swarm/swarm-state.json");
 	try {
 		const st = JSON.parse(readFileSync(statePath, "utf8"));
@@ -194,7 +255,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 	const taskId = await buildTask(call, "t2");
 	const { ok: codeOk, err } = await expectErr(
 		() => call("swarm_update_task", { taskId, nodeId: "plan", force: true, cancelTask: true, cwd: scratch }),
-		"CANCEL_FORBIDDEN"
+		"CANCEL_FORBIDDEN",
 	);
 	ok("worker cancel rejected with CANCEL_FORBIDDEN", codeOk, err);
 }
@@ -206,7 +267,7 @@ const materializeAssignments = (taskId, nodeIds) => {
 	const taskId = await buildTask(call, "t3");
 	const { ok: codeOk, err } = await expectErr(
 		() => call("swarm_update_task", { taskId, nodeId: "plan", cancelTask: true, cwd: scratch }),
-		"CANCEL_REQUIRES_FORCE"
+		"CANCEL_REQUIRES_FORCE",
 	);
 	ok("root cancel without force rejected with CANCEL_REQUIRES_FORCE", codeOk, err);
 }
@@ -219,8 +280,16 @@ const materializeAssignments = (taskId, nodeIds) => {
 	stampAssignee(taskId, "plan", "planner-01", "att-plan-2");
 	await call("swarm_update_task", { taskId, nodeId: "plan", force: true, cancelTask: true, cwd: scratch });
 	const { ok: codeOk, err } = await expectErr(
-		() => call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", attemptId: "att-plan-2", cwd: scratch }),
-		"TASK_CANCELLED"
+		() =>
+			call("swarm_update_task", {
+				taskId,
+				nodeId: "plan",
+				status: "done",
+				outcome: "planned",
+				attemptId: "att-plan-2",
+				cwd: scratch,
+			}),
+		"TASK_CANCELLED",
 	);
 	ok("late update on cancelled task rejected with TASK_CANCELLED", codeOk, err);
 	const taskPath = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
@@ -241,12 +310,16 @@ const materializeAssignments = (taskId, nodeIds) => {
 	await call("swarm_update_task", { taskId, nodeId: "plan", force: true, cancelTask: true, cwd: scratch });
 	const statePath = join(scratch, ".pi/swarm/swarm-state.json");
 	const stAfter = JSON.parse(readFileSync(statePath, "utf8"));
-	ok("test 5 setup: message was superseded by cancellation", Boolean(stAfter.messages[msgId]?.superseded), `superseded=${JSON.stringify(stAfter.messages[msgId]?.superseded)}`);
+	ok(
+		"test 5 setup: message was superseded by cancellation",
+		Boolean(stAfter.messages[msgId]?.superseded),
+		`superseded=${JSON.stringify(stAfter.messages[msgId]?.superseded)}`,
+	);
 	await setAgent("planner-01", false);
 	const call2 = makeCall();
 	const { ok: codeOk, err } = await expectErr(
 		() => call2("swarm_ack_message", { messageId: msgId, status: "processing", cwd: scratch }),
-		"ASSIGNMENT_SUPERSEDED"
+		"ASSIGNMENT_SUPERSEDED",
 	);
 	ok("late ACK on superseded assignment rejected with ASSIGNMENT_SUPERSEDED", codeOk, err);
 }
@@ -262,11 +335,21 @@ const materializeAssignments = (taskId, nodeIds) => {
 	registerAgent(st, "planner-01");
 	registerAgent(st, "planner-02");
 	st.messages[msg1] = {
-		id: msg1, from: "root", to: "planner-01",
-		status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		attempts: 1, requiresAck: true, conversationId: `task:${taskId}:plan`,
-		subject: "assignment v1", priority: "normal", type: "swarm.message", schemaVersion: 1,
-		body: "first assignment", headers: {},
+		id: msg1,
+		from: "root",
+		to: "planner-01",
+		status: "injected",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		attempts: 1,
+		requiresAck: true,
+		conversationId: `task:${taskId}:plan`,
+		subject: "assignment v1",
+		priority: "normal",
+		type: "swarm.message",
+		schemaVersion: 1,
+		body: "first assignment",
+		headers: {},
 	};
 	st.delivered["planner-01"] = Array.from(new Set([...(st.delivered["planner-01"] || []), msg1]));
 	const taskPath = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
@@ -279,7 +362,11 @@ const materializeAssignments = (taskId, nodeIds) => {
 	const ar = await call("swarm_assign_task", { taskId, nodeId: "plan", assignee: "planner-02", cwd: scratch });
 	ok("reassignment call returned a result", asJson(ar).length > 0);
 	const st2 = JSON.parse(readFileSync(statePath, "utf8"));
-	ok("reassignment supersedes prior assignment message", Boolean(st2.messages[msg1]?.superseded), `st2.messages[msg1]=${JSON.stringify(st2.messages[msg1])}`);
+	ok(
+		"reassignment supersedes prior assignment message",
+		Boolean(st2.messages[msg1]?.superseded),
+		`st2.messages[msg1]=${JSON.stringify(st2.messages[msg1])}`,
+	);
 	ok("superseded message response.status = waived", st2.messages[msg1]?.response?.status === "waived");
 }
 
@@ -288,9 +375,24 @@ const materializeAssignments = (taskId, nodeIds) => {
 	await setAgent("root", true);
 	const call = makeCall();
 	const idempKey = `idem-test-${Date.now()}`;
-	const r1 = await call("swarm_send_message", { to: "planner-01", body: "dup test", subject: "dup", requiresAck: false, idempotencyKey: idempKey, cwd: scratch });
-	const r2 = await call("swarm_send_message", { to: "planner-01", body: "dup test", subject: "dup", requiresAck: false, idempotencyKey: idempKey, cwd: scratch });
-	const t1 = asJson(r1), t2 = asJson(r2);
+	const r1 = await call("swarm_send_message", {
+		to: "planner-01",
+		body: "dup test",
+		subject: "dup",
+		requiresAck: false,
+		idempotencyKey: idempKey,
+		cwd: scratch,
+	});
+	const r2 = await call("swarm_send_message", {
+		to: "planner-01",
+		body: "dup test",
+		subject: "dup",
+		requiresAck: false,
+		idempotencyKey: idempKey,
+		cwd: scratch,
+	});
+	const t1 = asJson(r1),
+		t2 = asJson(r2);
 	const id1 = (t1.match(/msg-[\w-]+/) || [])[0];
 	const id2 = (t2.match(/msg-[\w-]+/) || [])[0];
 	ok("duplicate delivery returns same message id", Boolean(id1 && id1 === id2), `id1=${id1} id2=${id2}`);
@@ -305,12 +407,16 @@ const materializeAssignments = (taskId, nodeIds) => {
 	await call("swarm_update_task", { taskId, nodeId: "plan", force: true, cancelTask: true, cwd: scratch });
 	const taskEvents = join(scratch, `.pi/swarm/tasks/${taskId}/events.jsonl`);
 	let traceText = "";
-	try { traceText = readFileSync(taskEvents, "utf8"); } catch {}
+	try {
+		traceText = readFileSync(taskEvents, "utf8");
+	} catch {}
 	ok("per-task trace file written", traceText.length > 0);
 	ok("per-task trace contains task.cancel.revoke_all event", traceText.includes("task.cancel.revoke_all"));
 	const globalTraces = join(scratch, ".pi/swarm/traces/events.jsonl");
 	let globalTrace = "";
-	try { globalTrace = readFileSync(globalTraces, "utf8"); } catch {}
+	try {
+		globalTrace = readFileSync(globalTraces, "utf8");
+	} catch {}
 	ok("global trace contains message.superseded event", globalTrace.includes("message.superseded"));
 	const taskPath = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
 	const j = JSON.parse(readFileSync(taskPath, "utf8"));
@@ -346,13 +452,18 @@ const materializeAssignments = (taskId, nodeIds) => {
 		priority: "normal",
 		nodes: { only: { role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [] } },
 		edges: [],
-		acceptanceCriteria: [], validationCommands: [], cwd: scratch,
+		acceptanceCriteria: [],
+		validationCommands: [],
+		cwd: scratch,
 	});
 	const legacyId = (asJson(ct).match(/task-[A-Za-z0-9-]+/) || [])[0];
 	ok("legacy task created", !!legacyId);
 	const legacyPath = join(scratch, `.pi/swarm/tasks/${legacyId}/task.json`);
 	const lj = JSON.parse(readFileSync(legacyPath, "utf8"));
-	for (const n of Object.values(lj.nodes)) { delete n.attemptHistory; delete n.activeAttemptId; }
+	for (const n of Object.values(lj.nodes)) {
+		delete n.attemptHistory;
+		delete n.activeAttemptId;
+	}
 	writeFileSync(legacyPath, JSON.stringify(lj, null, 2));
 	const st = await call("swarm_task_status", { taskId: legacyId, cwd: scratch });
 	ok("legacy task status readable", asJson(st).includes("Legacy task"));
@@ -374,9 +485,14 @@ const materializeAssignments = (taskId, nodeIds) => {
 	ok("isTaskOrNodeCancelled(task, plan) on cancelled node = true", isTaskOrNodeCancelled(j, "plan") === true);
 	const ct2 = await call("swarm_create_task", {
 		taskId: `task-uncancelled-${Math.random().toString(36).slice(2, 8)}`,
-		title: "Uncancelled", goal: "g", priority: "normal",
+		title: "Uncancelled",
+		goal: "g",
+		priority: "normal",
 		nodes: { a: { role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [] } },
-		edges: [], acceptanceCriteria: [], validationCommands: [], cwd: scratch,
+		edges: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		cwd: scratch,
 	});
 	const uncId = (asJson(ct2).match(/task-[A-Za-z0-9-]+/) || [])[0];
 	const uncPath = join(scratch, `.pi/swarm/tasks/${uncId}/task.json`);
@@ -425,10 +541,14 @@ const materializeAssignments = (taskId, nodeIds) => {
 	let fenceErr = null;
 	try {
 		await call("swarm_update_task", { taskId, nodeId: "implement", status: "in_progress", cwd: scratch });
-	} catch (e) { fenceErr = e; }
+	} catch (e) {
+		fenceErr = e;
+	}
 	const tAfter = readFileSync(taskPath, "utf8");
-	ok("stranger worker on cancelled task rejected with TASK_CANCELLED (not NODE_ASSIGNEE_MISMATCH)",
-		Boolean(fenceErr) && /TASK_CANCELLED/.test(String(fenceErr.message || fenceErr)));
+	ok(
+		"stranger worker on cancelled task rejected with TASK_CANCELLED (not NODE_ASSIGNEE_MISMATCH)",
+		Boolean(fenceErr) && /TASK_CANCELLED/.test(String(fenceErr.message || fenceErr)),
+	);
 	ok("cancelled task state unchanged after stranger attempt", tBefore === tAfter);
 }
 
@@ -451,16 +571,36 @@ const materializeAssignments = (taskId, nodeIds) => {
 	j.nodes.implement.assignee = "implementer-01";
 	j.nodes.implement.activeAttemptId = "att-current";
 	j.nodes.implement.assignmentMessageId = currentId;
-	j.nodes.implement.attemptHistory = [{
-		attemptId: "att-current", attemptNumber: 1, assignmentMessageId: currentId,
-		assignee: "implementer-01", assignedAt: new Date().toISOString(), status: "active",
-	}];
+	j.nodes.implement.attemptHistory = [
+		{
+			attemptId: "att-current",
+			attemptNumber: 1,
+			assignmentMessageId: currentId,
+			assignee: "implementer-01",
+			assignedAt: new Date().toISOString(),
+			status: "active",
+		},
+	];
 	j.nodes.implement.status = "in_progress";
 	// Historical assign handoff (older worker, no taskId on row — this is the bug case)
 	j.handoffs = j.handoffs || [];
-	j.handoffs.push({ fromNode: null, toNode: "implement", kind: "assign", messageId: olderId, by: "planner-01", at: new Date().toISOString() });
+	j.handoffs.push({
+		fromNode: null,
+		toNode: "implement",
+		kind: "assign",
+		messageId: olderId,
+		by: "planner-01",
+		at: new Date().toISOString(),
+	});
 	// Current assign handoff
-	j.handoffs.push({ fromNode: null, toNode: "implement", kind: "assign", messageId: currentId, by: "root", at: new Date().toISOString() });
+	j.handoffs.push({
+		fromNode: null,
+		toNode: "implement",
+		kind: "assign",
+		messageId: currentId,
+		by: "root",
+		at: new Date().toISOString(),
+	});
 	writeFileSync(path, JSON.stringify(j, null, 2));
 	// Register both messages in swarm state
 	const statePath = join(scratch, ".pi/swarm/swarm-state.json");
@@ -468,11 +608,21 @@ const materializeAssignments = (taskId, nodeIds) => {
 	registerAgent(st, "implementer-01");
 	for (const mid of [olderId, currentId]) {
 		st.messages[mid] = {
-			id: mid, from: "root", to: "implementer-01",
-			status: "injected", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-			attempts: 1, requiresAck: true, conversationId: `task:${taskId}:implement`,
-			subject: "assignment", priority: "normal", type: "swarm.message", schemaVersion: 1,
-			body: "test", headers: {},
+			id: mid,
+			from: "root",
+			to: "implementer-01",
+			status: "injected",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+			attempts: 1,
+			requiresAck: true,
+			conversationId: `task:${taskId}:implement`,
+			subject: "assignment",
+			priority: "normal",
+			type: "swarm.message",
+			schemaVersion: 1,
+			body: "test",
+			headers: {},
 		};
 		st.delivered["implementer-01"] = Array.from(new Set([...(st.delivered["implementer-01"] || []), mid]));
 	}

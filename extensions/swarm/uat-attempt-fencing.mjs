@@ -29,7 +29,9 @@ const factory = mod.default;
 
 const tools = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
 	exec: async (cmd, args) => {
@@ -46,20 +48,27 @@ const checks = [];
 const ok = (name, cond, detail) => {
 	checks.push({ name, pass: !!cond, detail });
 	if (cond) console.log(`  PASS  ${name}${detail ? "  " + detail : ""}`);
-	else { fail++; console.error(`  FAIL  ${name}${detail ? "  " + detail : ""}`); }
+	else {
+		fail++;
+		console.error(`  FAIL  ${name}${detail ? "  " + detail : ""}`);
+	}
 };
 
 const call = async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd: scratch });
 };
 const as = async (agentId, name, params) => {
 	const prev = process.env.PI_SWARM_AGENT_ID;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	try { return await call(name, params); } finally { process.env.PI_SWARM_AGENT_ID = prev; }
+	try {
+		return await call(name, params);
+	} finally {
+		process.env.PI_SWARM_AGENT_ID = prev;
+	}
 };
-const readTaskJson = (taskId) =>
-	JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskId}/task.json`), "utf8"));
+const readTaskJson = (taskId) => JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskId}/task.json`), "utf8"));
 const readNode = (taskId, nodeId) => readTaskJson(taskId).nodes[nodeId];
 
 try {
@@ -74,14 +83,15 @@ try {
 			plan: { role: "planner", writeArtifacts: ["artifacts/plan.md"] },
 			implement: { role: "implementer", dependsOn: ["plan"] },
 		},
-		edges: [
-			{ from: "plan", to: "implement", when: "planned" },
-		],
+		edges: [{ from: "plan", to: "implement", when: "planned" }],
 	});
 	const taskId = (ct.content[0].text.match(/task-[A-Za-z0-9-]+/) || [])[0];
 	ok("create_task returned a taskId", !!taskId, `taskId=${taskId}`);
 	const initialNode = readNode(taskId, "plan");
-	ok("plan node starts ready with no attempt", !initialNode.activeAttemptId && (!initialNode.attemptHistory || initialNode.attemptHistory.length === 0));
+	ok(
+		"plan node starts ready with no attempt",
+		!initialNode.activeAttemptId && (!initialNode.attemptHistory || initialNode.attemptHistory.length === 0),
+	);
 
 	// 2. Register a planner agent (via the real register tool, then re-register so tmuxTarget is harmless).
 	const reg = await as("planner-a", "swarm_register_agent", {
@@ -95,7 +105,11 @@ try {
 
 	// 3. Assign plan -> planner-a, capture activeAttemptId + history length.
 	const assign1 = await call("swarm_assign_task", { taskId, nodeId: "plan", agentId: "planner-a", cwd: scratch });
-	ok("assign_task plan -> planner-a succeeded", /assigned plan to planner-a|Assigned plan to planner-a/i.test(assign1.content[0].text) || true, assign1.content[0].text.split("\n")[0]);
+	ok(
+		"assign_task plan -> planner-a succeeded",
+		/assigned plan to planner-a|Assigned plan to planner-a/i.test(assign1.content[0].text) || true,
+		assign1.content[0].text.split("\n")[0],
+	);
 	const n1 = readNode(taskId, "plan");
 	const attempt1 = n1.activeAttemptId;
 	ok("plan has activeAttemptId after first assign", !!attempt1, `activeAttemptId=${attempt1}`);
@@ -110,7 +124,11 @@ try {
 
 	// 5. Update with correct attemptId -> in_progress succeeds (caller = planner-a, the assignee).
 	const upOk = await as("planner-a", "swarm_update_task", {
-		taskId, nodeId: "plan", status: "in_progress", attemptId: attempt1, cwd: scratch,
+		taskId,
+		nodeId: "plan",
+		status: "in_progress",
+		attemptId: attempt1,
+		cwd: scratch,
 	});
 	const n2 = readNode(taskId, "plan");
 	ok("update_task with active attemptId -> in_progress", n2.status === "in_progress", `status=${n2.status}`);
@@ -121,14 +139,27 @@ try {
 	let mismatchedCode = null;
 	try {
 		await as("planner-a", "swarm_update_task", {
-			taskId, nodeId: "plan", status: "done", outcome: "planned", attemptId: bogus, cwd: scratch,
+			taskId,
+			nodeId: "plan",
+			status: "done",
+			outcome: "planned",
+			attemptId: bogus,
+			cwd: scratch,
 		});
 	} catch (err) {
 		mismatched = true;
 		mismatchedCode = err.errorCode;
 	}
-	ok("bogus attemptId -> ATTEMPT_TOKEN_MISMATCH", mismatched && mismatchedCode === "ATTEMPT_TOKEN_MISMATCH", `got errorCode=${mismatchedCode}`);
-	ok("node state unchanged after bogus update", readNode(taskId, "plan").status === "in_progress", `status=${readNode(taskId, "plan").status}`);
+	ok(
+		"bogus attemptId -> ATTEMPT_TOKEN_MISMATCH",
+		mismatched && mismatchedCode === "ATTEMPT_TOKEN_MISMATCH",
+		`got errorCode=${mismatchedCode}`,
+	);
+	ok(
+		"node state unchanged after bogus update",
+		readNode(taskId, "plan").status === "in_progress",
+		`status=${readNode(taskId, "plan").status}`,
+	);
 } catch (err) {
 	fail++;
 	console.error("UNEXPECTED ERROR:", err && (err.stack || err.message || err));

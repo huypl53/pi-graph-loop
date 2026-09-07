@@ -32,7 +32,9 @@ const factory = mod.default;
 
 const tools = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
 	registerCommand: () => {},
 	on: () => {},
 	exec: async (cmd, args) => {
@@ -45,21 +47,36 @@ const pi = {
 factory(pi);
 
 let fail = 0;
-const ok = (n, c) => { if (c) console.log("  ok  ", n); else { fail++; console.error("  FAIL", n); } };
+const ok = (n, c) => {
+	if (c) console.log("  ok  ", n);
+	else {
+		fail++;
+		console.error("  FAIL", n);
+	}
+};
 
 const call = async (name, params) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd: scratch });
 };
 const as = (agentId, fn) => {
 	const prev = process.env.PI_SWARM_AGENT_ID;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	try { return fn(); } finally { process.env.PI_SWARM_AGENT_ID = prev; }
+	try {
+		return fn();
+	} finally {
+		process.env.PI_SWARM_AGENT_ID = prev;
+	}
 };
 const awaitAs = async (agentId, name, params) => {
 	const prev = process.env.PI_SWARM_AGENT_ID;
 	process.env.PI_SWARM_AGENT_ID = agentId;
-	try { return await call(name, params); } finally { process.env.PI_SWARM_AGENT_ID = prev; }
+	try {
+		return await call(name, params);
+	} finally {
+		process.env.PI_SWARM_AGENT_ID = prev;
+	}
 };
 const expectErrorCode = async (agentId, name, params, code) => {
 	try {
@@ -80,27 +97,33 @@ const expectErrorCode = async (agentId, name, params, code) => {
 	}
 };
 
-const readTask = (taskId) =>
-	JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskId}/task.json`), "utf8"));
+const readTask = (taskId) => JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskId}/task.json`), "utf8"));
 const readNode = (taskId, nodeId) => readTask(taskId).nodes[nodeId];
 
 // Register two worker agents so swarm_assign_task can target them by explicit agentId.
 // Simplest reliable path: write minimal agent identity cards + state via register tool.
 async function ensureWorker(agentId, roleKind) {
-	await awaitAs(agentId, "swarm_register_agent", { tmuxTarget: "unknown", role: `test ${roleKind}`, roleKind, id: agentId, inject: false });
+	await awaitAs(agentId, "swarm_register_agent", {
+		tmuxTarget: "unknown",
+		role: `test ${roleKind}`,
+		roleKind,
+		id: agentId,
+		inject: false,
+	});
 }
 
 // ---- setup: create a task with a linear plan -> implement graph with a rework edge implement<-plan
 const ct = await call("swarm_create_task", {
-	title: "Attempt fencing", goal: "g", priority: "normal", cwd: scratch,
+	title: "Attempt fencing",
+	goal: "g",
+	priority: "normal",
+	cwd: scratch,
 	start: "plan",
 	nodes: {
 		plan: { role: "planner", writeArtifacts: ["artifacts/plan.md"] },
 		implement: { role: "implementer", dependsOn: ["plan"] },
 	},
-	edges: [
-		{ from: "plan", to: "implement", when: "planned" },
-	],
+	edges: [{ from: "plan", to: "implement", when: "planned" }],
 });
 const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 
@@ -136,13 +159,28 @@ ok("reassign after blocked mints new attempt", !!attempt2 && attempt2 !== attemp
 ok("prior attempt superseded", n2.attemptHistory.find((a) => a.attemptId === attempt1)?.status === "superseded");
 
 // Stale update using attempt1 token must be fenced.
-await expectErrorCode("worker-a", "swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", attemptId: attempt1, cwd: scratch }, "ATTEMPT_TOKEN_MISMATCH");
+await expectErrorCode(
+	"worker-a",
+	"swarm_update_task",
+	{ taskId, nodeId: "plan", status: "done", outcome: "planned", attemptId: attempt1, cwd: scratch },
+	"ATTEMPT_TOKEN_MISMATCH",
+);
 ok("state unchanged after stale update", readNode(taskId, "plan").status === "assigned");
 
 // Active token still works.
-await awaitAs("worker-a", "swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", attemptId: attempt2, cwd: scratch });
+await awaitAs("worker-a", "swarm_update_task", {
+	taskId,
+	nodeId: "plan",
+	status: "done",
+	outcome: "planned",
+	attemptId: attempt2,
+	cwd: scratch,
+});
 ok("active token update succeeds", readNode(taskId, "plan").status === "done");
-ok("terminal attempt recorded as completed", readNode(taskId, "plan").attemptHistory.find((a) => a.attemptId === attempt2)?.status === "completed");
+ok(
+	"terminal attempt recorded as completed",
+	readNode(taskId, "plan").attemptHistory.find((a) => a.attemptId === attempt2)?.status === "completed",
+);
 
 // ============ 2. Cross-agent reassign + rework fencing ============
 // implement depends on plan(planned) -> now ready. Assign to worker-a (implementer role ok).
@@ -158,11 +196,37 @@ ok("cross-agent reassign supersedes prior", implNode.attemptHistory.find((a) => 
 const implAttempt2 = readNode(taskId, "implement").activeAttemptId;
 // impl-a's stale update is fenced (assignee check fires first — acceptable: state is protected).
 {
-	try { await awaitAs("impl-a", "swarm_update_task", { taskId, nodeId: "implement", status: "done", outcome: "implemented", attemptId: implAttempt1, cwd: scratch }); ok("impl-a stale update rejected", false); }
-	catch (err) { ok(`impl-a stale update rejected (${err.errorCode})`, err.errorCode === "ATTEMPT_TOKEN_MISMATCH" || err.errorCode === "NODE_ASSIGNEE_MISMATCH"); }
+	try {
+		await awaitAs("impl-a", "swarm_update_task", {
+			taskId,
+			nodeId: "implement",
+			status: "done",
+			outcome: "implemented",
+			attemptId: implAttempt1,
+			cwd: scratch,
+		});
+		ok("impl-a stale update rejected", false);
+	} catch (err) {
+		ok(
+			`impl-a stale update rejected (${err.errorCode})`,
+			err.errorCode === "ATTEMPT_TOKEN_MISMATCH" || err.errorCode === "NODE_ASSIGNEE_MISMATCH",
+		);
+	}
 }
-await expectErrorCode("impl-b", "swarm_update_task", { taskId, nodeId: "implement", status: "done", outcome: "implemented", cwd: scratch }, "ATTEMPT_TOKEN_REQUIRED");
-await awaitAs("impl-b", "swarm_update_task", { taskId, nodeId: "implement", status: "failed", outcome: "failed", attemptId: implAttempt2, cwd: scratch });
+await expectErrorCode(
+	"impl-b",
+	"swarm_update_task",
+	{ taskId, nodeId: "implement", status: "done", outcome: "implemented", cwd: scratch },
+	"ATTEMPT_TOKEN_REQUIRED",
+);
+await awaitAs("impl-b", "swarm_update_task", {
+	taskId,
+	nodeId: "implement",
+	status: "failed",
+	outcome: "failed",
+	attemptId: implAttempt2,
+	cwd: scratch,
+});
 const failedNode = readNode(taskId, "implement");
 ok("failed attempt recorded", failedNode.attemptHistory.find((a) => a.attemptId === implAttempt2)?.status === "failed");
 
@@ -171,7 +235,10 @@ ok("failed attempt recorded", failedNode.attemptHistory.find((a) => a.attemptId 
 // that reaches done with a matching outcome is reopened. Sequence here: test fails -> fix ready ->
 // fix done(implemented) reopens test via the rework edge fix->test.
 const ct2 = await call("swarm_create_task", {
-	title: "Rework fencing", goal: "g", priority: "normal", cwd: scratch,
+	title: "Rework fencing",
+	goal: "g",
+	priority: "normal",
+	cwd: scratch,
 	start: "plan",
 	nodes: {
 		plan: { role: "planner" },
@@ -192,21 +259,49 @@ const taskId2 = ct2.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 await ensureWorker("tester-1", "tester");
 await call("swarm_assign_task", { taskId: taskId2, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 const rwPlan = readNode(taskId2, "plan").activeAttemptId;
-await awaitAs("worker-a", "swarm_update_task", { taskId: taskId2, nodeId: "plan", status: "done", outcome: "planned", attemptId: rwPlan, cwd: scratch });
+await awaitAs("worker-a", "swarm_update_task", {
+	taskId: taskId2,
+	nodeId: "plan",
+	status: "done",
+	outcome: "planned",
+	attemptId: rwPlan,
+	cwd: scratch,
+});
 await call("swarm_assign_task", { taskId: taskId2, nodeId: "implement", agentId: "impl-a", cwd: scratch });
 const rwImpl = readNode(taskId2, "implement").activeAttemptId;
-await awaitAs("impl-a", "swarm_update_task", { taskId: taskId2, nodeId: "implement", status: "done", outcome: "implemented", attemptId: rwImpl, cwd: scratch });
+await awaitAs("impl-a", "swarm_update_task", {
+	taskId: taskId2,
+	nodeId: "implement",
+	status: "done",
+	outcome: "implemented",
+	attemptId: rwImpl,
+	cwd: scratch,
+});
 await call("swarm_assign_task", { taskId: taskId2, nodeId: "test", agentId: "tester-1", cwd: scratch });
 const rwTest1 = readNode(taskId2, "test").activeAttemptId;
 ok("failed attempt on test recorded", !!rwTest1);
-await awaitAs("tester-1", "swarm_update_task", { taskId: taskId2, nodeId: "test", status: "failed", outcome: "failed", attemptId: rwTest1, cwd: scratch });
+await awaitAs("tester-1", "swarm_update_task", {
+	taskId: taskId2,
+	nodeId: "test",
+	status: "failed",
+	outcome: "failed",
+	attemptId: rwTest1,
+	cwd: scratch,
+});
 ok("test failed makes fix actionable", readTask(taskId2).currentNodes.includes("fix"));
 // fix completes -> rework edge fix->test reopens test.
 await ensureWorker("fixer-1", "implementer");
 await call("swarm_assign_task", { taskId: taskId2, nodeId: "fix", agentId: "fixer-1", cwd: scratch });
 const rwFix = readNode(taskId2, "fix").activeAttemptId;
 ok("fix attempt on rework node", !!rwFix);
-await awaitAs("fixer-1", "swarm_update_task", { taskId: taskId2, nodeId: "fix", status: "done", outcome: "implemented", attemptId: rwFix, cwd: scratch });
+await awaitAs("fixer-1", "swarm_update_task", {
+	taskId: taskId2,
+	nodeId: "fix",
+	status: "done",
+	outcome: "implemented",
+	attemptId: rwFix,
+	cwd: scratch,
+});
 const testAfterRework = readNode(taskId2, "test");
 ok("rework reopens test as ready", testAfterRework.status === "ready");
 ok("rework clears activeAttemptId", !testAfterRework.activeAttemptId);
@@ -216,21 +311,44 @@ ok("rework keeps prior attempt terminal status failed", testAfterRework.attemptH
 // Reopened node is unassigned; under Issue 24.a, a non-assignee CLAIMS the node (no longer
 // rejected with NODE_ASSIGNEE_MISMATCH). The stale pre-rework attempt token the caller passes is
 // then fenced as ATTEMPT_TOKEN_MISMATCH after the claim mints a fresh attempt.
-await expectErrorCode("tester-1", "swarm_update_task", { taskId: taskId2, nodeId: "test", status: "done", outcome: "passed", attemptId: rwTest1, cwd: scratch }, "ATTEMPT_TOKEN_MISMATCH");
+await expectErrorCode(
+	"tester-1",
+	"swarm_update_task",
+	{ taskId: taskId2, nodeId: "test", status: "done", outcome: "passed", attemptId: rwTest1, cwd: scratch },
+	"ATTEMPT_TOKEN_MISMATCH",
+);
 // Reassign after rework mints a fresh attempt; the OLD token must be fenced.
 await call("swarm_assign_task", { taskId: taskId2, nodeId: "test", agentId: "tester-1", cwd: scratch });
 const rwTest2 = readNode(taskId2, "test").activeAttemptId;
 ok("reassign after rework mints new attempt", !!rwTest2 && rwTest2 !== rwTest1);
-await expectErrorCode("tester-1", "swarm_update_task", { taskId: taskId2, nodeId: "test", status: "done", outcome: "passed", attemptId: rwTest1, cwd: scratch }, "ATTEMPT_TOKEN_MISMATCH");
-await awaitAs("tester-1", "swarm_update_task", { taskId: taskId2, nodeId: "test", status: "done", outcome: "passed", attemptId: rwTest2, cwd: scratch });
+await expectErrorCode(
+	"tester-1",
+	"swarm_update_task",
+	{ taskId: taskId2, nodeId: "test", status: "done", outcome: "passed", attemptId: rwTest1, cwd: scratch },
+	"ATTEMPT_TOKEN_MISMATCH",
+);
+await awaitAs("tester-1", "swarm_update_task", {
+	taskId: taskId2,
+	nodeId: "test",
+	status: "done",
+	outcome: "passed",
+	attemptId: rwTest2,
+	cwd: scratch,
+});
 ok("post-rework active token works", readNode(taskId2, "test").attemptHistory.at(-1).status === "completed");
 
 // ============ 4. Audit immutability + persistence ============
 const hist = readNode(taskId2, "test").attemptHistory;
 ok("audit history append-only (2 attempts)", hist.length === 2);
-ok("attempt 1 failed, annotated superseded by <rework>", hist[0].status === "failed" && hist[0].supersededBy === "<rework>" && hist[0].attemptNumber === 1);
+ok(
+	"attempt 1 failed, annotated superseded by <rework>",
+	hist[0].status === "failed" && hist[0].supersededBy === "<rework>" && hist[0].attemptNumber === 1,
+);
 ok("attempt 2 completed with outcome", hist[1].status === "completed" && hist[1].outcome === "passed" && hist[1].attemptNumber === 2);
-ok("attempt records carry assignee + message id", hist.every((a) => a.assignee === "tester-1" && a.assignmentMessageId));
+ok(
+	"attempt records carry assignee + message id",
+	hist.every((a) => a.assignee === "tester-1" && a.assignmentMessageId),
+);
 
 // Legacy compat: strip attempt fields from plan in task 2 and verify update works via assignee check.
 const t2path = join(scratch, `.pi/swarm/tasks/${taskId2}/task.json`);

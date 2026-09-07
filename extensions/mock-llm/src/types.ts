@@ -4,42 +4,42 @@ export type MockLLMStopReason = "stop" | "toolUse" | "length" | "error" | "abort
 
 export type MockLLMFixtureEvent =
 	| {
-		  type: "text";
-		  text: string;
-		  delayMs?: number;
-		  chunks?: string[];
+			type: "text";
+			text: string;
+			delayMs?: number;
+			chunks?: string[];
 	  }
 	| {
-		  type: "thinking";
-		  text: string;
-		  delayMs?: number;
-		  chunks?: string[];
+			type: "thinking";
+			text: string;
+			delayMs?: number;
+			chunks?: string[];
 	  }
 	| {
-		  type: "toolcall";
-		  name: string;
-		  id?: string;
-		  arguments: Record<string, unknown> | string;
-		  delayMs?: number;
-		  chunks?: string[];
+			type: "toolcall";
+			name: string;
+			id?: string;
+			arguments: Record<string, unknown> | string;
+			delayMs?: number;
+			chunks?: string[];
 	  }
 	| {
-		  type: "hang";
-		  delayMs?: number;
-		  until?: "abort";
+			type: "hang";
+			delayMs?: number;
+			until?: "abort";
 	  }
 	| {
-		  type: "error";
-		  kind: "429" | "torn_json" | "abort";
-		  delayMs?: number;
-		  status?: number;
-		  message?: string;
-		  body?: unknown;
+			type: "error";
+			kind: "429" | "torn_json" | "abort";
+			delayMs?: number;
+			status?: number;
+			message?: string;
+			body?: unknown;
 	  }
 	| {
-		  type: "stop";
-		  reason?: Extract<MockLLMStopReason, "stop" | "toolUse" | "length">;
-		  delayMs?: number;
+			type: "stop";
+			reason?: Extract<MockLLMStopReason, "stop" | "toolUse" | "length">;
+			delayMs?: number;
 	  };
 
 export interface MockLLLMTurn {

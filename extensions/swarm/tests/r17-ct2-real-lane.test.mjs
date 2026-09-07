@@ -29,9 +29,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const {
-	pumpRootMailbox,
-} = await import(join(here, "..", "src/reconcile.ts"));
+const { pumpRootMailbox } = await import(join(here, "..", "src/reconcile.ts"));
 const { paths, withLock, readState, writeState } = await import(join(here, "..", "src/state.ts"));
 const { ensureRoot, heartbeatRootLeader, claimRootLeader } = await import(join(here, "..", "src/identity.ts"));
 const { deliverMessageLocked } = await import(join(here, "..", "src/mailbox.ts"));
@@ -54,12 +52,20 @@ const { registerMessagesTools } = await import(join(here, "..", "src/tools/messa
 // L5: LLM consumption — proven by the companion tmux lane; here we record
 //     the boundary was reached and the test exits before claiming GREEN.
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 function ok(name, cond, info) {
-	if (cond) { pass++; console.log(`  ok   ${name}`); }
-	else { fail++; console.log(`  FAIL ${name}${info !== undefined ? " " + (typeof info === "string" ? info : JSON.stringify(info)) : ""}`); }
+	if (cond) {
+		pass++;
+		console.log(`  ok   ${name}`);
+	} else {
+		fail++;
+		console.log(`  FAIL ${name}${info !== undefined ? " " + (typeof info === "string" ? info : JSON.stringify(info)) : ""}`);
+	}
 }
-function section(name) { console.log(`\n[${name}]`); }
+function section(name) {
+	console.log(`\n[${name}]`);
+}
 
 const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
 const ORIG_PI_SWARM_IS_ROOT = process.env.PI_SWARM_IS_ROOT;
@@ -78,7 +84,18 @@ function freshScratch() {
 function readEvents(scratch) {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	if (!existsSync(p)) return [];
-	return readFileSync(p, "utf8").trim().split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return readFileSync(p, "utf8")
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 function clearEvents(scratch) {
 	mkdirSync(join(scratch, ".pi/swarm/traces"), { recursive: true });
@@ -87,7 +104,11 @@ function clearEvents(scratch) {
 function readRootMailbox(scratch) {
 	const p = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 	if (!existsSync(p)) return [];
-	return readFileSync(p, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+	return readFileSync(p, "utf8")
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => JSON.parse(l));
 }
 
 function makePiMock() {
@@ -97,9 +118,15 @@ function makePiMock() {
 	const pi = {
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
-		sendMessage: (m, opts) => { sendMessages.push({ customType: m.customType, options: opts, msg: m }); },
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		sendMessage: (m, opts) => {
+			sendMessages.push({ customType: m.customType, options: opts, msg: m });
+		},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 	return { pi, sendMessages };
 }
@@ -111,40 +138,78 @@ async function seedBusyRoot({ scratch, busy = true, workerId = "worker-r17", tas
 	const nowMs = Date.now();
 	const ts = new Date(nowMs - 1_000).toISOString();
 	const initial = {
-		version: 1, swarmId: "r17-test", cwd: scratch, tmuxSession: "r17",
+		version: 1,
+		swarmId: "r17-test",
+		cwd: scratch,
+		tmuxSession: "r17",
 		agents: {
 			[workerId]: {
-				id: workerId, role: workerId, roleKind: "implementer", capabilities: [],
-				activeTaskIds: [taskId], maxConcurrentTasks: 1,
-				status: "running", runtimeStatus: "idle", health: "healthy",
-				tmuxAlive: true, tmuxSession: "r17", tmuxWindow: workerId,
+				id: workerId,
+				role: workerId,
+				roleKind: "implementer",
+				capabilities: [],
+				activeTaskIds: [taskId],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxAlive: true,
+				tmuxSession: "r17",
+				tmuxWindow: workerId,
 				tmuxTarget: `r17:${workerId}.0`,
-				model: "gpt-5.4-mini", provider: "openai",
-				cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
-				createdAt: ts, updatedAt: ts,
+				model: "gpt-5.4-mini",
+				provider: "openai",
+				cwd: scratch,
+				mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
+				createdAt: ts,
+				updatedAt: ts,
 				lastHeartbeatAt: new Date(nowMs - 100).toISOString(),
 			},
 		},
-		delivered: {}, messages: {},
-		createdAt: ts, updatedAt: ts,
+		delivered: {},
+		messages: {},
+		createdAt: ts,
+		updatedAt: ts,
 	};
 	writeFileSync(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(initial, null, 2));
 
 	const taskDir = join(scratch, ".pi/swarm/tasks", taskId);
 	mkdirSync(taskDir, { recursive: true });
 	const taskJson = {
-		version: 1, taskId, title: "R17 victim task", goal: "test", status: "in_progress", priority: "normal",
-		createdAt: ts, updatedAt: ts, owner: "root", workflow: "feature-dev",
-		allowedFiles: [], acceptanceCriteria: [], validationCommands: [], start: "implement",
+		version: 1,
+		taskId,
+		title: "R17 victim task",
+		goal: "test",
+		status: "in_progress",
+		priority: "normal",
+		createdAt: ts,
+		updatedAt: ts,
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "implement",
 		currentNodes: ["implement"],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: {
 			implement: {
-				status: "in_progress", role: "implementer", assignee: workerId, dependsOn: [],
-				allowedFiles: [], messageIds: [], attempts: 1, maxAttempts: 3, lastActivityAt: ts,
+				status: "in_progress",
+				role: "implementer",
+				assignee: workerId,
+				dependsOn: [],
+				allowedFiles: [],
+				messageIds: [],
+				attempts: 1,
+				maxAttempts: 3,
+				lastActivityAt: ts,
 			},
 		},
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 	writeFileSync(join(taskDir, "task.json"), JSON.stringify(taskJson, null, 2));
 
@@ -167,10 +232,16 @@ async function injectNormalPriorityResult({ scratch, taskId, p }) {
 				exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 				setModel: async () => true,
 				sendMessage: () => {},
-				getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-				registerTool: () => {}, registerCommand: () => {}, on: () => {},
+				getAllTools: () => [],
+				getActiveTools: () => [],
+				setActiveTools: () => {},
+				registerTool: () => {},
+				registerCommand: () => {},
+				on: () => {},
 			},
-			scratch, p, st,
+			scratch,
+			p,
+			st,
 			{
 				to: "root",
 				priority: "normal",
@@ -198,16 +269,22 @@ section("CT-2.A busy root + normal-priority result → 0 pi.sendMessage, 1 L1 du
 	const L1Before = readRootMailbox(scratch).length;
 
 	const { pi, sendMessages } = makePiMock();
-	const ctxBusy = { cwd: scratch, mode: "tui", isIdle: () => false, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctxBusy = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => false,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	const pumpResult = await pumpRootMailbox(pi, ctxBusy, p, "watchdog");
 
 	const L1After = readRootMailbox(scratch).length;
-	ok("CT-2.A L1 mailboxAppendCount === 1 (durable contract intact)",
-		L1After === 1, { before: L1Before, after: L1After });
-	ok("CT-2.A L3 sendMessages.length === 0 (root mid-turn; no surface within busy window)",
-		sendMessages.length === 0, { got: sendMessages.length });
-	ok("CT-2.A delivered === 0 (pump reports no surface)",
-		pumpResult.delivered === 0, { delivered: pumpResult.delivered });
+	ok("CT-2.A L1 mailboxAppendCount === 1 (durable contract intact)", L1After === 1, { before: L1Before, after: L1After });
+	ok("CT-2.A L3 sendMessages.length === 0 (root mid-turn; no surface within busy window)", sendMessages.length === 0, {
+		got: sendMessages.length,
+	});
+	ok("CT-2.A delivered === 0 (pump reports no surface)", pumpResult.delivered === 0, { delivered: pumpResult.delivered });
 }
 
 // ----------------------------------------------------------------------------
@@ -220,7 +297,14 @@ section("CT-2.B root agent_settled → 1 pi.sendMessage with triggerTurn=true");
 	await injectNormalPriorityResult({ scratch, taskId: "task-r17-ct2-y", p });
 
 	const { pi, sendMessages } = makePiMock();
-	const ctxBusy = { cwd: scratch, mode: "tui", isIdle: () => false, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctxBusy = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => false,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	await pumpRootMailbox(pi, ctxBusy, p, "watchdog");
 	const afterBusy = sendMessages.length;
 
@@ -232,15 +316,19 @@ section("CT-2.B root agent_settled → 1 pi.sendMessage with triggerTurn=true");
 		await writeState(p, st);
 	});
 
-	const ctxIdle = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctxIdle = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	await pumpRootMailbox(pi, ctxIdle, p, "agent_settled");
 
-	ok("CT-2.B sendMessages.length === 0 after busy tick (mid-turn suppression preserved)",
-		afterBusy === 0, { got: afterBusy });
-	ok("CT-2.B sendMessages.length === 1 after agent_settled",
-		sendMessages.length === 1, { got: sendMessages.length });
-	ok("CT-2.B L3 opts.triggerTurn === true",
-		sendMessages[0]?.options?.triggerTurn === true, { options: sendMessages[0]?.options });
+	ok("CT-2.B sendMessages.length === 0 after busy tick (mid-turn suppression preserved)", afterBusy === 0, { got: afterBusy });
+	ok("CT-2.B sendMessages.length === 1 after agent_settled", sendMessages.length === 1, { got: sendMessages.length });
+	ok("CT-2.B L3 opts.triggerTurn === true", sendMessages[0]?.options?.triggerTurn === true, { options: sendMessages[0]?.options });
 }
 
 // ----------------------------------------------------------------------------
@@ -259,7 +347,14 @@ section("CT-2.C replay does NOT add another pi.sendMessage (R10-1 consumerReceip
 		if (st.consumerReceipts?.root) st.consumerReceipts.root.entries = {};
 		await writeState(p, st);
 	});
-	const ctxIdle = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctxIdle = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	await pumpRootMailbox(pi, ctxIdle, p, "agent_settled_t1");
 	const afterT1 = sendMessages.length;
 	await pumpRootMailbox(pi, ctxIdle, p, "agent_settled_t2");
@@ -297,26 +392,41 @@ section("R15 B1 regression guard — swarm_send_message return text contains NO 
 			(async () => {
 				process.env.PI_SWARM_AGENT_ID = "worker-r17-guard";
 				process.env.PI_SWARM_IS_ROOT = "";
-				const fakeCtx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+				const fakeCtx = {
+					cwd: scratch,
+					mode: "tui",
+					isIdle: () => true,
+					hasUI: false,
+					ui: { setStatus: () => {} },
+					model: { id: "gpt-5.4-mini", provider: "openai" },
+				};
 				const result = await tool.execute(
 					"call-r17-guard",
 					{ to: "root", priority: "normal", subject: "guard", body: "guard body" },
-					undefined, () => {}, fakeCtx,
+					undefined,
+					() => {},
+					fakeCtx,
 				);
-				capturedText = typeof result === "string" ? result : result?.content?.[0]?.text ?? JSON.stringify(result);
+				capturedText = typeof result === "string" ? result : (result?.content?.[0]?.text ?? JSON.stringify(result));
 			})();
 		},
-		registerCommand: () => {}, on: () => {},
+		registerCommand: () => {},
+		on: () => {},
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
-		setModel: async () => true, sendMessage: () => {},
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
+		setModel: async () => true,
+		sendMessage: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
 	};
 	registerMessagesTools(fakePi);
 	await new Promise((r) => setTimeout(r, 60));
 	ok("R15 B1 guard captured tool output", typeof capturedText === "string", { got: typeof capturedText });
-	ok("R15 B1 guard text does NOT contain false promise 'surfaces within ~5s' (or similar time-bound)",
+	ok(
+		"R15 B1 guard text does NOT contain false promise 'surfaces within ~5s' (or similar time-bound)",
 		Boolean(capturedText) && !/surfaces (mailbox )?within ~?5s/i.test(capturedText),
-		capturedText ? `"${capturedText.slice(0, 220)}..."` : "null");
+		capturedText ? `"${capturedText.slice(0, 220)}..."` : "null",
+	);
 }
 
 // ----------------------------------------------------------------------------

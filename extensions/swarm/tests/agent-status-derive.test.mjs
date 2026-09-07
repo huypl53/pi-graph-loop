@@ -33,10 +33,16 @@ try {
 	deriveTaskProgressState = null;
 }
 
-let passed = 0, failed = 0;
+let passed = 0,
+	failed = 0;
 const ok = (n, c, info) => {
-	if (c) { passed++; console.log("  ok  ", n); }
-	else { failed++; console.error("  FAIL:", n, info ?? ""); }
+	if (c) {
+		passed++;
+		console.log("  ok  ", n);
+	} else {
+		failed++;
+		console.error("  FAIL:", n, info ?? "");
+	}
 };
 
 const ALL_STATES = ["active", "stalled", "completed_unverified", "awaiting_input", "idle_blocked", "dead"];
@@ -44,23 +50,40 @@ const ALL_STATES = ["active", "stalled", "completed_unverified", "awaiting_input
 function makeAgent(overrides = {}) {
 	const nowIso = new Date().toISOString();
 	return {
-		id: "agent-x", role: "implementer", roleKind: "worker", capabilities: [],
-		activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		tmuxSession: "sess", tmuxWindow: "agent-x", tmuxTarget: "sess:agent-x.0",
-		model: "glm-5.1", provider: "zai-coding-cn", cwd: "/tmp",
+		id: "agent-x",
+		role: "implementer",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: "sess",
+		tmuxWindow: "agent-x",
+		tmuxTarget: "sess:agent-x.0",
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: "/tmp",
 		mailbox: ".pi/swarm/mailboxes/agent-x.jsonl",
 		lastHeartbeatAt: nowIso,
 		lastToolAt: nowIso,
-		createdAt: nowIso, updatedAt: nowIso,
+		createdAt: nowIso,
+		updatedAt: nowIso,
 		...overrides,
 	};
 }
 
 function makeState(agent, extras = {}) {
 	return {
-		version: 1, swarmId: "swarm-x", cwd: "/tmp", tmuxSession: "sess",
-		agents: { "agent-x": agent, "root": { id: "root", runtimeStatus: "idle", status: "running", health: "healthy", lastHeartbeatAt: new Date().toISOString() } },
+		version: 1,
+		swarmId: "swarm-x",
+		cwd: "/tmp",
+		tmuxSession: "sess",
+		agents: {
+			"agent-x": agent,
+			root: { id: "root", runtimeStatus: "idle", status: "running", health: "healthy", lastHeartbeatAt: new Date().toISOString() },
+		},
 		delivered: {},
 		messages: {},
 		createdAt: new Date().toISOString(),
@@ -94,7 +117,18 @@ console.log("\n--- Case 2: idle_blocked (responseMissing / ackMissing / deadLett
 {
 	const agent = makeAgent({});
 	const st = makeState(agent, {
-		messages: { "msg-1": { id: "msg-1", to: "agent-x", from: "root", status: "injected", requiresAck: true, requiresResponse: true, response: { status: "missing" }, createdAt: new Date().toISOString() } },
+		messages: {
+			"msg-1": {
+				id: "msg-1",
+				to: "agent-x",
+				from: "root",
+				status: "injected",
+				requiresAck: true,
+				requiresResponse: true,
+				response: { status: "missing" },
+				createdAt: new Date().toISOString(),
+			},
+		},
 	});
 	const ctx = { nowMs: Date.now() };
 	const out = typeof deriveTaskProgressState === "function" ? deriveTaskProgressState(agent, st, ctx) : "MISSING_HELPER";
@@ -103,7 +137,17 @@ console.log("\n--- Case 2: idle_blocked (responseMissing / ackMissing / deadLett
 {
 	const agent = makeAgent({});
 	const st = makeState(agent, {
-		messages: { "msg-2": { id: "msg-2", to: "agent-x", from: "root", status: "injected", requiresAck: true, ackMissingAt: new Date().toISOString(), createdAt: new Date().toISOString() } },
+		messages: {
+			"msg-2": {
+				id: "msg-2",
+				to: "agent-x",
+				from: "root",
+				status: "injected",
+				requiresAck: true,
+				ackMissingAt: new Date().toISOString(),
+				createdAt: new Date().toISOString(),
+			},
+		},
 	});
 	const ctx = { nowMs: Date.now() };
 	const out = typeof deriveTaskProgressState === "function" ? deriveTaskProgressState(agent, st, ctx) : "MISSING_HELPER";
@@ -112,7 +156,16 @@ console.log("\n--- Case 2: idle_blocked (responseMissing / ackMissing / deadLett
 {
 	const agent = makeAgent({});
 	const st = makeState(agent, {
-		messages: { "msg-3": { id: "msg-3", to: "agent-x", from: "root", status: "dead_letter", requiresAck: false, createdAt: new Date().toISOString() } },
+		messages: {
+			"msg-3": {
+				id: "msg-3",
+				to: "agent-x",
+				from: "root",
+				status: "dead_letter",
+				requiresAck: false,
+				createdAt: new Date().toISOString(),
+			},
+		},
 	});
 	const ctx = { nowMs: Date.now() };
 	const out = typeof deriveTaskProgressState === "function" ? deriveTaskProgressState(agent, st, ctx) : "MISSING_HELPER";
@@ -170,8 +223,12 @@ console.log("\n--- Case 5: active (recent tool activity) ---");
 	const st = makeState(agent, {
 		messages: {
 			"msg-verified": {
-				id: "msg-verified", to: "agent-x", from: "root", status: "acked",
-				requiresAck: true, requiresResponse: true,
+				id: "msg-verified",
+				to: "agent-x",
+				from: "root",
+				status: "acked",
+				requiresAck: true,
+				requiresResponse: true,
 				response: { status: "verified" },
 				createdAt: new Date(now - 5 * 60_000).toISOString(),
 			},
@@ -212,7 +269,11 @@ console.log("\n--- Exclusivity: every returned value is one of the 6 named state
 	for (const o of configs) {
 		const a = makeAgent(o);
 		const out = typeof deriveTaskProgressState === "function" ? deriveTaskProgressState(a, states, { nowMs: now }) : "MISSING_HELPER";
-		ok(`exclusivity: ${JSON.stringify(o)} -> ${out}`, typeof out === "string" && (ALL_STATES.includes(out) || out === "MISSING_HELPER"), `got=${out}`);
+		ok(
+			`exclusivity: ${JSON.stringify(o)} -> ${out}`,
+			typeof out === "string" && (ALL_STATES.includes(out) || out === "MISSING_HELPER"),
+			`got=${out}`,
+		);
 	}
 }
 

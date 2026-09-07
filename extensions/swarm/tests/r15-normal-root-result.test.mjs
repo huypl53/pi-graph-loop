@@ -66,15 +66,30 @@ function freshScratch() {
 let pass = 0;
 let fail = 0;
 function ok(name, cond, detail) {
-	if (cond) { pass++; console.log(`  ok   ${name}`); }
-	else { fail++; console.log(`  FAIL ${name}${detail ? " " + (typeof detail === "string" ? detail : JSON.stringify(detail)) : ""}`); }
+	if (cond) {
+		pass++;
+		console.log(`  ok   ${name}`);
+	} else {
+		fail++;
+		console.log(`  FAIL ${name}${detail ? " " + (typeof detail === "string" ? detail : JSON.stringify(detail)) : ""}`);
+	}
 }
 
 function readEvents(scratch) {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	if (!existsSync(p)) return [];
 	const txt = readFileSync(p, "utf8").trim();
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 function clearEvents(scratch) {
 	mkdirSync(join(scratch, ".pi/swarm/traces"), { recursive: true });
@@ -83,7 +98,11 @@ function clearEvents(scratch) {
 function readRootMailbox(scratch) {
 	const p = join(scratch, ".pi/swarm/mailboxes/root.jsonl");
 	if (!existsSync(p)) return [];
-	return readFileSync(p, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+	return readFileSync(p, "utf8")
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => JSON.parse(l));
 }
 
 function makePiMockWithCounters({ busy = true } = {}) {
@@ -94,8 +113,12 @@ function makePiMockWithCounters({ busy = true } = {}) {
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
 		sendMessage: (m, opts) => sendMessages.push({ customType: m.customType, options: opts, msg: m }),
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-		registerTool: () => {}, registerCommand: () => {}, on: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: () => {},
 	};
 	return { pi, sendMessages };
 }
@@ -122,20 +145,38 @@ async function seedNormalResultShape({ busy = true, workerId = "fs-planner", tas
 	// A worker settle is irrelevant to the root pump; we set the root's
 	// runtimeStatus to tool_running so the pump's effective-agent-set-not-idle condition fires.
 	const initial = {
-		version: 1, swarmId: "r15-test", cwd: scratch, tmuxSession: "r15",
+		version: 1,
+		swarmId: "r15-test",
+		cwd: scratch,
+		tmuxSession: "r15",
 		agents: {
 			[workerId]: {
-				id: workerId, role: workerId, roleKind: "implementer", capabilities: [],
-				activeTaskIds: [taskId], maxConcurrentTasks: 1,
-				status: "running", runtimeStatus: "idle", health: "healthy",
-				tmuxAlive: true, tmuxSession: "r15", tmuxWindow: workerId, tmuxTarget: `r15:${workerId}.0`,
-				model: "gpt-5.4-mini", provider: "openai",
-				cwd: scratch, mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
-				createdAt: workerTs, updatedAt: workerTs, lastHeartbeatAt: new Date(nowMs - 100).toISOString(),
+				id: workerId,
+				role: workerId,
+				roleKind: "implementer",
+				capabilities: [],
+				activeTaskIds: [taskId],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxAlive: true,
+				tmuxSession: "r15",
+				tmuxWindow: workerId,
+				tmuxTarget: `r15:${workerId}.0`,
+				model: "gpt-5.4-mini",
+				provider: "openai",
+				cwd: scratch,
+				mailbox: `.pi/swarm/mailboxes/${workerId}.jsonl`,
+				createdAt: workerTs,
+				updatedAt: workerTs,
+				lastHeartbeatAt: new Date(nowMs - 100).toISOString(),
 			},
 		},
-		delivered: {}, messages: {},
-		createdAt: workerTs, updatedAt: workerTs,
+		delivered: {},
+		messages: {},
+		createdAt: workerTs,
+		updatedAt: workerTs,
 	};
 	writeFileSync(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(initial, null, 2));
 
@@ -143,13 +184,40 @@ async function seedNormalResultShape({ busy = true, workerId = "fs-planner", tas
 	const taskDir = join(scratch, ".pi/swarm/tasks", taskId);
 	mkdirSync(taskDir, { recursive: true });
 	const task = {
-		version: 1, taskId, title: "R15 victim task", goal: "test", status: "in_progress",
-		priority: "normal", createdAt: workerTs, updatedAt: workerTs, owner: "root",
-		workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
-		start: "implement", currentNodes: ["implement"],
+		version: 1,
+		taskId,
+		title: "R15 victim task",
+		goal: "test",
+		status: "in_progress",
+		priority: "normal",
+		createdAt: workerTs,
+		updatedAt: workerTs,
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "implement",
+		currentNodes: ["implement"],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
-		nodes: { implement: { status: "in_progress", role: "implementer", assignee: workerId, dependsOn: [], allowedFiles: [], messageIds: [], attempts: 1, maxAttempts: 3, lastActivityAt: workerTs } },
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		nodes: {
+			implement: {
+				status: "in_progress",
+				role: "implementer",
+				assignee: workerId,
+				dependsOn: [],
+				allowedFiles: [],
+				messageIds: [],
+				attempts: 1,
+				maxAttempts: 3,
+				lastActivityAt: workerTs,
+			},
+		},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 	writeFileSync(join(taskDir, "task.json"), JSON.stringify(task, null, 2));
 
@@ -182,8 +250,20 @@ async function seedNormalResultShape({ busy = true, workerId = "fs-planner", tas
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
 		await deliverMessageLocked(
-			{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
-			scratch, p, st,
+			{
+				exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+				setModel: async () => true,
+				sendMessage: () => {},
+				getAllTools: () => [],
+				getActiveTools: () => [],
+				setActiveTools: () => {},
+				registerTool: () => {},
+				registerCommand: () => {},
+				on: () => {},
+			},
+			scratch,
+			p,
+			st,
 			{
 				to: "root",
 				priority: "normal",
@@ -213,7 +293,14 @@ async function captureSwarmSendMessageToolOutput(scratch, workerId = "fs-planner
 				(async () => {
 					process.env.PI_SWARM_AGENT_ID = workerId;
 					process.env.PI_SWARM_IS_ROOT = "";
-					const fakeCtx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+					const fakeCtx = {
+						cwd: scratch,
+						mode: "tui",
+						isIdle: () => true,
+						hasUI: false,
+						ui: { setStatus: () => {} },
+						model: { id: "gpt-5.4-mini", provider: "openai" },
+					};
 					const result = await tool.execute(
 						"call-r15-red",
 						{
@@ -227,15 +314,18 @@ async function captureSwarmSendMessageToolOutput(scratch, workerId = "fs-planner
 						() => {},
 						fakeCtx,
 					);
-					capturedText = typeof result === "string" ? result : result?.content?.[0]?.text ?? JSON.stringify(result);
+					capturedText = typeof result === "string" ? result : (result?.content?.[0]?.text ?? JSON.stringify(result));
 				})();
 			}
 		},
-		registerCommand: () => {}, on: () => {},
+		registerCommand: () => {},
+		on: () => {},
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 		setModel: async () => true,
 		sendMessage: () => {},
-		getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
 	};
 	const fakePi = capturedRegister;
 	// Force the registration through the production module so the production
@@ -247,7 +337,9 @@ async function captureSwarmSendMessageToolOutput(scratch, workerId = "fs-planner
 }
 
 // --- R15-S1: busy-root normal-priority result (the incident shape) ---
-console.log("\n[R15-S1] normal-priority worker result to unknown-target root + busy root → 0 pi.sendMessage + literal '~5s' is the false-promise shape");
+console.log(
+	"\n[R15-S1] normal-priority worker result to unknown-target root + busy root → 0 pi.sendMessage + literal '~5s' is the false-promise shape",
+);
 {
 	const scratch = freshScratch();
 	const workerId = "fs-planner";
@@ -256,12 +348,23 @@ console.log("\n[R15-S1] normal-priority worker result to unknown-target root + b
 
 	// L1 boundary counter captured BEFORE the tool-capture step (which itself enqueues a second message).
 	const mailboxBeforeToolCapture = readRootMailbox(scratch);
-	ok("R15-S1 mailboxAppendCount === 1 (L1 durable contract intact, pre-tool-capture)", mailboxBeforeToolCapture.length === 1, `got ${mailboxBeforeToolCapture.length}`);
+	ok(
+		"R15-S1 mailboxAppendCount === 1 (L1 durable contract intact, pre-tool-capture)",
+		mailboxBeforeToolCapture.length === 1,
+		`got ${mailboxBeforeToolCapture.length}`,
+	);
 
 	// L2 boundary counter — pump the root mailbox under busy.
 	const { pi, sendMessages } = makePiMockWithCounters({ busy: true });
 	const p = paths(scratch);
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => false, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => false,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	const result = await pumpRootMailbox(pi, ctx, p, "watchdog");
 	ok("R15-S1 sendMessages.length === 0 (L2 boundary: no surface for busy root)", sendMessages.length === 0, `got ${sendMessages.length}`);
 	ok("R15-S1 result.delivered === 0 (no surface on busy)", result.delivered === 0, { delivered: result.delivered });
@@ -269,7 +372,11 @@ console.log("\n[R15-S1] normal-priority worker result to unknown-target root + b
 	// Capture the REAL swarm_send_message tool output to assert the literal text.
 	const toolOutput = await captureSwarmSendMessageToolOutput(scratch, workerId, taskId);
 	ok("R15-S1 captured tool output (swarm_send_message return text)", typeof toolOutput === "string", `got ${typeof toolOutput}`);
-	ok("R15-S1 false-promise literal text ABSENT from tool output (post-fix)", toolOutput && !toolOutput.includes("within ~5s"), toolOutput ? `"${toolOutput.slice(0, 200)}..."` : "null");
+	ok(
+		"R15-S1 false-promise literal text ABSENT from tool output (post-fix)",
+		toolOutput && !toolOutput.includes("within ~5s"),
+		toolOutput ? `"${toolOutput.slice(0, 200)}..."` : "null",
+	);
 	if (toolOutput) {
 		console.log(`    tool output: ${toolOutput.slice(0, 240)}${toolOutput.length > 240 ? "..." : ""}`);
 	}
@@ -285,7 +392,14 @@ console.log("\n[R15-S2] idle-root with explicit agent_settled trigger → 1 pi.s
 	await seedNormalResultShape({ busy: false, workerId, taskId, scratch });
 
 	const { pi, sendMessages } = makePiMockWithCounters({ busy: false });
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	const result = await pumpRootMailbox(pi, ctx, p, "agent_settled");
 	ok("R15-S2 sendMessages.length === 1 (L2 boundary: legitimate idle path)", sendMessages.length === 1, `got ${sendMessages.length}`);
 	ok("R15-S2 sendMessage triggerTurn === true", sendMessages[0]?.options?.triggerTurn === true);
@@ -302,7 +416,14 @@ console.log("\n[R15-S3] replay guard — second tick on same mailbox state does 
 	await seedNormalResultShape({ busy: false, workerId, taskId, scratch });
 
 	const { pi, sendMessages } = makePiMockWithCounters({ busy: false });
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	await pumpRootMailbox(pi, ctx, p, "agent_settled_t1");
 	const sendAfterFirst = sendMessages.length;
 	await pumpRootMailbox(pi, ctx, p, "agent_settled_t2");
@@ -326,8 +447,20 @@ console.log("\n[R15-S4] R13 high-priority unknown-target bypass still works (pri
 		const ids = Object.keys(st.messages).filter((id) => st.messages[id].to === "root");
 		for (const id of ids) delete st.messages[id];
 		await deliverMessageLocked(
-			{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
-			scratch, p, st,
+			{
+				exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+				setModel: async () => true,
+				sendMessage: () => {},
+				getAllTools: () => [],
+				getActiveTools: () => [],
+				setActiveTools: () => {},
+				registerTool: () => {},
+				registerCommand: () => {},
+				on: () => {},
+			},
+			scratch,
+			p,
+			st,
 			{
 				to: "root",
 				priority: "high",
@@ -350,7 +483,14 @@ console.log("\n[R15-S4] R13 high-priority unknown-target bypass still works (pri
 	// worker has an activeTaskIds pointer while runtimeStatus=idle), but the
 	// root's own idle/agent_settled is true so the surface loop runs
 	// and the bypass fires for priority-high.
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	await pumpRootMailbox(pi, ctx, p, "watchdog");
 	ok("R15-S4 priority-high still surfaces via R13 bypass (1 pi.sendMessage)", sendMessages.length === 1, `got ${sendMessages.length}`);
 }
@@ -364,7 +504,9 @@ const s5Scratch = freshScratch();
 	await seedNormalResultShape({ busy: true, workerId, taskId, scratch: s5Scratch });
 	const events = readEvents(s5Scratch);
 	const mailboxOnlyTrace = events.filter((e) => e.event === "message.deliver.mailbox_only");
-	ok("R15-S5 message.deliver.mailbox_only trace present (durable semantics intact)", mailboxOnlyTrace.length >= 1, { count: mailboxOnlyTrace.length });
+	ok("R15-S5 message.deliver.mailbox_only trace present (durable semantics intact)", mailboxOnlyTrace.length >= 1, {
+		count: mailboxOnlyTrace.length,
+	});
 	const mailbox = readRootMailbox(s5Scratch);
 	ok("R15-S5 mailboxAppendCount === 1", mailbox.length === 1, `got ${mailbox.length}`);
 }
@@ -396,8 +538,20 @@ console.log("\n[R15-S6] R13 bypass MUST NOT fire for normal-priority (the B1 bou
 		const ids = Object.keys(st.messages).filter((id) => st.messages[id].to === "root");
 		for (const id of ids) delete st.messages[id];
 		await deliverMessageLocked(
-			{ exec: async () => ({ code: 0, stdout: "", stderr: "" }), setModel: async () => true, sendMessage: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {}, registerTool: () => {}, registerCommand: () => {}, on: () => {} },
-			s6Scratch, p, st,
+			{
+				exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+				setModel: async () => true,
+				sendMessage: () => {},
+				getAllTools: () => [],
+				getActiveTools: () => [],
+				setActiveTools: () => {},
+				registerTool: () => {},
+				registerCommand: () => {},
+				on: () => {},
+			},
+			s6Scratch,
+			p,
+			st,
 			{
 				to: "root",
 				priority: "normal",
@@ -412,12 +566,27 @@ console.log("\n[R15-S6] R13 bypass MUST NOT fire for normal-priority (the B1 bou
 		await writeState(p, st);
 	});
 	const { pi, sendMessages } = makePiMockWithCounters({ busy: true });
-	const ctx = { cwd: s6Scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "gpt-5.4-mini", provider: "openai" } };
+	const ctx = {
+		cwd: s6Scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
 	await pumpRootMailbox(pi, ctx, p, "watchdog");
-	ok("R15-S6 sendMessages.length === 0 (normal priority does NOT trigger R13 bypass)", sendMessages.length === 0, `got ${sendMessages.length}`);
+	ok(
+		"R15-S6 sendMessages.length === 0 (normal priority does NOT trigger R13 bypass)",
+		sendMessages.length === 0,
+		`got ${sendMessages.length}`,
+	);
 	const events = readEvents(s6Scratch);
 	const bypassTrace = events.filter((e) => e.event === "notification.surface.bypass_high_unknown_target");
-	ok("R15-S6 NO notification.surface.bypass_high_unknown_target trace for normal priority", bypassTrace.length === 0, `got ${bypassTrace.length}`);
+	ok(
+		"R15-S6 NO notification.surface.bypass_high_unknown_target trace for normal priority",
+		bypassTrace.length === 0,
+		`got ${bypassTrace.length}`,
+	);
 }
 
 // --- Cleanup ---
@@ -426,7 +595,9 @@ process.env.PI_SWARM_IS_ROOT = ORIG_PI_SWARM_IS_ROOT;
 
 console.log(`\nR15-NORMAL-ROOT-RESULT ${fail === 0 ? "PASS" : "FAIL"} (${pass} passed, ${fail} failed)`);
 if (fail > 0) {
-	console.error("\n  ↳ RED regression reproduced — the false ~5s promise in tools/messages.ts:42-48 must be removed (B1 honest removal) without altering mailbox/normal busy suppression/reconcile behavior.");
+	console.error(
+		"\n  ↳ RED regression reproduced — the false ~5s promise in tools/messages.ts:42-48 must be removed (B1 honest removal) without altering mailbox/normal busy suppression/reconcile behavior.",
+	);
 	process.exit(1);
 }
 process.exit(0);

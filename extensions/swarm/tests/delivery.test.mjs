@@ -12,12 +12,20 @@
 import { isDeliveryFailureRetryable } from "../index.ts";
 import { responseMissingRecords } from "../src/mailbox.ts";
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.error("  FAIL:", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) {
+		pass++;
+	} else {
+		fail++;
+		console.error("  FAIL:", name);
+	}
+};
 
 const delivered = { status: "injected", lastAck: undefined };
 const ackedDone = { status: "acked", lastAck: { status: "done" } };
-const deliveryFail = { status: "failed", lastAck: undefined };      // never reached recipient -> retry
+const deliveryFail = { status: "failed", lastAck: undefined }; // never reached recipient -> retry
 const ackedFailed = { status: "failed", lastAck: { status: "failed" } }; // recipient processed + failed -> LOOP source
 const queued = { status: "queued", lastAck: undefined };
 const ackedSeen = { status: "injected", lastAck: { status: "seen" } }; // progress ack, still in-flight
@@ -43,12 +51,32 @@ ok("live acked-failed record would NOT be re-injected by reconcile", isDeliveryF
 const trackingState = {
 	messages: {
 		m1: { id: "m1", to: "worker-1", requiresResponse: true, status: "failed", response: { status: "missing" }, lastAck: undefined },
-		m2: { id: "m2", to: "worker-1", requiresResponse: true, status: "failed", response: { status: "missing" }, lastAck: { by: "worker-1", status: "processing", at: "2026-01-01T00:00:00.000Z" } },
-		m3: { id: "m3", to: "worker-1", requiresResponse: true, status: "injected", response: { status: "verified" }, lastAck: { by: "worker-1", status: "done", resultMessageId: "r3", at: "2026-01-01T00:00:00.000Z" } },
+		m2: {
+			id: "m2",
+			to: "worker-1",
+			requiresResponse: true,
+			status: "failed",
+			response: { status: "missing" },
+			lastAck: { by: "worker-1", status: "processing", at: "2026-01-01T00:00:00.000Z" },
+		},
+		m3: {
+			id: "m3",
+			to: "worker-1",
+			requiresResponse: true,
+			status: "injected",
+			response: { status: "verified" },
+			lastAck: { by: "worker-1", status: "done", resultMessageId: "r3", at: "2026-01-01T00:00:00.000Z" },
+		},
 	},
 };
-ok("failed-without-ack stays out of response tracking", responseMissingRecords(trackingState, "worker-1").some((r) => r.id === "m1") === false);
-ok("failed-then-processing ack enters response tracking", responseMissingRecords(trackingState, "worker-1").some((r) => r.id === "m2") === true);
+ok(
+	"failed-without-ack stays out of response tracking",
+	responseMissingRecords(trackingState, "worker-1").some((r) => r.id === "m1") === false,
+);
+ok(
+	"failed-then-processing ack enters response tracking",
+	responseMissingRecords(trackingState, "worker-1").some((r) => r.id === "m2") === true,
+);
 ok("verified response is not missing", responseMissingRecords(trackingState, "worker-1").some((r) => r.id === "m3") === false);
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);

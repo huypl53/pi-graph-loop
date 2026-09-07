@@ -12,7 +12,9 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const { readState, readTaskState, paths, ensureDirs, mailboxPath, withLock, writeState, atomicWriteFile, taskPaths } = await import(join(here, "..", "src", "state.ts"));
+const { readState, readTaskState, paths, ensureDirs, mailboxPath, withLock, writeState, atomicWriteFile, taskPaths } = await import(
+	join(here, "..", "src", "state.ts")
+);
 const { readMailbox } = await import(join(here, "..", "src", "mailbox.ts"));
 const { LOCK_STALE_MS } = await import(join(here, "..", "src", "constants.ts"));
 const { mkdir, writeFile, rename, readdir } = await import("node:fs/promises");
@@ -34,14 +36,31 @@ const pi = {
 const scratch = join(tmpdir(), `swarm-corrupt-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 
-let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n);
+	}
+};
 const throws = async (n, p, predicate) => {
-	try { await p(); fail++; console.error("  FAIL", n, "(did not throw)"); }
-	catch (err) {
+	try {
+		await p();
+		fail++;
+		console.error("  FAIL", n, "(did not throw)");
+	} catch (err) {
 		const msg = String(err?.message || err);
-		if (!predicate || predicate(msg)) { pass++; console.log("  ok  ", n); }
-		else { fail++; console.error("  FAIL", n, `(wrong error: ${msg})`); }
+		if (!predicate || predicate(msg)) {
+			pass++;
+			console.log("  ok  ", n);
+		} else {
+			fail++;
+			console.error("  FAIL", n, `(wrong error: ${msg})`);
+		}
 	}
 };
 
@@ -57,8 +76,7 @@ console.log("\n[1] readState recovers from corrupt swarm-state.json");
 	ok("returns a SwarmState object", typeof st === "object" && st !== null);
 	ok("swarmId is set (valid default)", typeof st.swarmId === "string" && /^swarm-/.test(st.swarmId));
 	ok("cwd points at scratch", st.cwd === scratch);
-	ok("agents/delivered/messages back-filled to objects",
-		st.agents && st.delivered && st.messages && typeof st.agents === "object");
+	ok("agents/delivered/messages back-filled to objects", st.agents && st.delivered && st.messages && typeof st.agents === "object");
 	ok("corrupt state backed up to .corrupt.bak", existsSync(`${p.state}.corrupt.bak`));
 	ok("backup holds the original garbage", readFileSync(`${p.state}.corrupt.bak`, "utf8") === GARBAGE);
 	// recovery traced for post-mortem
@@ -85,15 +103,46 @@ console.log("\n[2] readTaskState throws a clear error on corrupt task.json");
 console.log("\n[3] readMailbox ignores malformed JSONL lines");
 {
 	const file = mailboxPath(p, "root");
-	writeFileSync(file, [
-		JSON.stringify({ id: "msg-good-1", swarmId: "swarm-x", from: "a", to: "root", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: "t1", body: "ok", requiresAck: false, headers: {} }),
-		"msg-178619-bad-not-json",
-		JSON.stringify({ id: "msg-good-2", swarmId: "swarm-x", from: "b", to: "root", priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: "t2", body: "ok2", requiresAck: true, headers: {} }),
-	].join("\n") + "\n", "utf8");
+	writeFileSync(
+		file,
+		[
+			JSON.stringify({
+				id: "msg-good-1",
+				swarmId: "swarm-x",
+				from: "a",
+				to: "root",
+				priority: "normal",
+				type: "swarm.message",
+				schemaVersion: 1,
+				createdAt: "t1",
+				body: "ok",
+				requiresAck: false,
+				headers: {},
+			}),
+			"msg-178619-bad-not-json",
+			JSON.stringify({
+				id: "msg-good-2",
+				swarmId: "swarm-x",
+				from: "b",
+				to: "root",
+				priority: "normal",
+				type: "swarm.message",
+				schemaVersion: 1,
+				createdAt: "t2",
+				body: "ok2",
+				requiresAck: true,
+				headers: {},
+			}),
+		].join("\n") + "\n",
+		"utf8",
+	);
 	const msgs = await readMailbox(p, "root");
 	ok("readMailbox returns the valid records", msgs.length === 2 && msgs[0].id === "msg-good-1" && msgs[1].id === "msg-good-2");
 	const events = readFileSync(p.events, "utf8");
-	ok("malformed mailbox line traced and ignored", /mailbox\.corrupt_lines_ignored/.test(events) && events.includes("\"bad\":1") && events.includes("\"firstBadLine\":2"));
+	ok(
+		"malformed mailbox line traced and ignored",
+		/mailbox\.corrupt_lines_ignored/.test(events) && events.includes('"bad":1') && events.includes('"firstBadLine":2'),
+	);
 }
 
 // --- [4] Normal valid parses still work unchanged ---
@@ -108,7 +157,17 @@ console.log("\n[4] normal valid parses still work");
 	ok("readState parses a valid file back (same swarmId)", again.swarmId === created.swarmId);
 
 	// readState: hand-written valid state is parsed and back-filled (not treated as corrupt).
-	const validState = { version: created.version, swarmId: "swarm-handwritten", cwd: fresh, tmuxSession: "s", agents: {}, delivered: {}, messages: {}, createdAt: "t", updatedAt: "t" };
+	const validState = {
+		version: created.version,
+		swarmId: "swarm-handwritten",
+		cwd: fresh,
+		tmuxSession: "s",
+		agents: {},
+		delivered: {},
+		messages: {},
+		createdAt: "t",
+		updatedAt: "t",
+	};
 	writeFileSync(fp.state, JSON.stringify(validState), "utf8");
 	const parsed = await readState(fp, fresh);
 	ok("readState parses hand-written valid state", parsed.swarmId === "swarm-handwritten");
@@ -118,7 +177,15 @@ console.log("\n[4] normal valid parses still work");
 	// readTaskState: valid task.json parses and normalizes nodes.
 	const goodTaskPath = join(p.tasksDir, "task-good", "task.json");
 	mkdirSync(dirname(goodTaskPath), { recursive: true });
-	writeFileSync(goodTaskPath, JSON.stringify({ taskId: "task-good", status: "in_progress", nodes: { n1: { id: "n1", status: "pending", role: "worker", dependsOn: [] } } }), "utf8");
+	writeFileSync(
+		goodTaskPath,
+		JSON.stringify({
+			taskId: "task-good",
+			status: "in_progress",
+			nodes: { n1: { id: "n1", status: "pending", role: "worker", dependsOn: [] } },
+		}),
+		"utf8",
+	);
 	const task = await readTaskState(goodTaskPath);
 	ok("readTaskState parses valid task.json", task.taskId === "task-good");
 	ok("readTaskState normalizes edges/sharedContext defaults", Array.isArray(task.edges) && task.sharedContext);
@@ -133,7 +200,7 @@ console.log("\n[5] regression: stale lock removed and acquired");
 	// Set mtime to > LOCK_STALE_MS ago (using real constant, condition C1)
 	const staleTime = new Date(Date.now() - LOCK_STALE_MS - 1000);
 	utimesSync(lockPath, staleTime, staleTime);
-	
+
 	// Lock acquisition should succeed (stale lock removed)
 	let acquired = false;
 	await withLock(p, async () => {
@@ -154,17 +221,19 @@ console.log("\n[6] regression: fresh lock detection and retry logic verified");
 	mkdirSync(lockPath, { recursive: true });
 	const freshTime = new Date(Date.now() - 1000);
 	utimesSync(lockPath, freshTime, freshTime);
-	
+
 	// Verify lock exists and is fresh (mtime within LOCK_STALE_MS)
 	ok("fresh lock directory exists", existsSync(lockPath));
-	
+
 	// Verify the constant is correct (2 * LOCK_STALE_MS = 120s)
 	const expectedTimeout = LOCK_STALE_MS * 2;
 	ok("timeout value is 2 * LOCK_STALE_MS", expectedTimeout === 120_000);
-	
+
 	// Document: full timeout test would take 120s, not practical for CI
-	console.log(`    (note: fresh lock timeout of ${expectedTimeout}ms not tested in CI for speed; detection logic verified in production code)`);
-	
+	console.log(
+		`    (note: fresh lock timeout of ${expectedTimeout}ms not tested in CI for speed; detection logic verified in production code)`,
+	);
+
 	// Cleanup
 	rmSync(lockPath, { recursive: true, force: true });
 }
@@ -175,7 +244,7 @@ console.log("\n[7] failure injection: kill mid-write preserves original");
 	const testFile = join(scratch, "kill-test.json");
 	const originalContent = JSON.stringify({ version: 1, test: "original" });
 	writeFileSync(testFile, originalContent, "utf8");
-	
+
 	// Intercept atomicWriteFile to simulate kill between writeFile and rename
 	let killBeforeRename = false;
 	const realAtomicWrite = atomicWriteFile;
@@ -189,13 +258,13 @@ console.log("\n[7] failure injection: kill mid-write preserves original");
 		}
 		await rename(tmp, file);
 	};
-	
+
 	// Simulate kill mid-write
 	killBeforeRename = true;
 	try {
 		await injectedAtomicWrite(testFile, "{partial");
 	} catch {}
-	
+
 	// Verify original intact
 	ok("original file intact after mid-write abort", readFileSync(testFile, "utf8") === originalContent);
 	// Verify temp file pattern was used (tmp file name includes timestamp)
@@ -214,7 +283,7 @@ console.log("\n[8] failure injection: concurrent writes serialized under lock");
 	const { writeState: realWriteState } = await import(join(here, "..", "src/state.ts"));
 	const state1 = await readState(p, scratch);
 	const state2 = await readState(p, scratch);
-	
+
 	// Track write order via incrementing counter
 	let writeOrder = [];
 	let counter = 0;
@@ -244,7 +313,10 @@ console.log("\n[8] failure injection: concurrent writes serialized under lock");
 	// lock first, so we assert that final matches whichever writer's withLock block ran LAST.
 	const lastWriter = writeOrder[writeOrder.length - 1].who;
 	const lastCounter = writeOrder[writeOrder.length - 1].counter;
-	ok("final state has one counter value (last writer won)", typeof final.counter === "number" && (final.counter === 1 || final.counter === 2));
+	ok(
+		"final state has one counter value (last writer won)",
+		typeof final.counter === "number" && (final.counter === 1 || final.counter === 2),
+	);
 	ok("final state has one writer value (last writer won)", final.writer === "writer1" || final.writer === "writer2");
 	ok("both counter and writer from same write (atomicity)", final.writer === lastWriter && final.counter === lastCounter);
 }
@@ -257,7 +329,7 @@ console.log("\n[9] failure injection: task update fencing verified");
 	// this test verifies the attempt metadata structure)
 	const tp = taskPaths(p, "fencing-verify");
 	mkdirSync(tp.root, { recursive: true });
-	
+
 	// Create a task with active attempt fencing metadata
 	const task = {
 		taskId: "fencing-verify",
@@ -275,8 +347,8 @@ console.log("\n[9] failure injection: task update fencing verified");
 				assignee: "worker-a",
 				activeAttemptId: "attempt-active-123",
 				attemptHistory: [
-					{ attemptId: "attempt-active-123", assignee: "worker-a", status: "active", assignedAt: new Date().toISOString() }
-				]
+					{ attemptId: "attempt-active-123", assignee: "worker-a", status: "active", assignedAt: new Date().toISOString() },
+				],
 			},
 			implement: {
 				id: "implement",
@@ -284,8 +356,8 @@ console.log("\n[9] failure injection: task update fencing verified");
 				role: "implementer",
 				dependsOn: ["plan"],
 				messageIds: [],
-				attemptHistory: []
-			}
+				attemptHistory: [],
+			},
 		},
 		edges: [{ from: "plan", to: "implement", when: "planned" }],
 		currentNodes: ["plan"],
@@ -296,23 +368,26 @@ console.log("\n[9] failure injection: task update fencing verified");
 		gates: {},
 		editLocks: {},
 		evidence: {},
-		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] }
+		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 	};
 	writeFileSync(tp.taskJson, JSON.stringify(task, null, 2), "utf8");
-	
+
 	// Verify fencing metadata structure exists (predicate can check this)
 	const readTask = await readTaskState(tp.taskJson);
 	ok("task has active attempt metadata", readTask.nodes.plan.activeAttemptId === "attempt-active-123");
-	ok("task has attempt history array", Array.isArray(readTask.nodes.plan.attemptHistory) && readTask.nodes.plan.attemptHistory.length === 1);
+	ok(
+		"task has attempt history array",
+		Array.isArray(readTask.nodes.plan.attemptHistory) && readTask.nodes.plan.attemptHistory.length === 1,
+	);
 	ok("attempt has assignee", readTask.nodes.plan.attemptHistory[0].assignee === "worker-a");
 	ok("attempt has status active", readTask.nodes.plan.attemptHistory[0].status === "active");
-	
+
 	// Verify the predicate: stale update would be rejected (attemptId mismatch)
 	const currentAttemptId = readTask.nodes.plan.activeAttemptId;
 	const staleAttemptId = "stale-attempt-999";
 	ok("fencing predicate: stale attemptId mismatch", staleAttemptId !== currentAttemptId);
 	ok("fencing predicate: active attemptId matches", currentAttemptId === "attempt-active-123");
-	
+
 	// Cleanup
 	rmSync(tp.root, { recursive: true, force: true });
 }
@@ -330,7 +405,14 @@ console.log("\n[10] cross-file consistency: missing message detected by reconcil
 		createdAt: new Date().toISOString(),
 		updatedAt: new Date().toISOString(),
 		nodes: {
-			plan: { id: "plan", status: "assigned", role: "planner", dependsOn: [], messageIds: ["msg-phantom"], assignee: "planner-agent" }
+			plan: {
+				id: "plan",
+				status: "assigned",
+				role: "planner",
+				dependsOn: [],
+				messageIds: ["msg-phantom"],
+				assignee: "planner-agent",
+			},
 		},
 		edges: [],
 		currentNodes: ["plan"],
@@ -341,20 +423,20 @@ console.log("\n[10] cross-file consistency: missing message detected by reconcil
 		gates: {},
 		editLocks: {},
 		evidence: {},
-		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] }
+		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 	};
 	writeFileSync(tp.taskJson, JSON.stringify(task, null, 2), "utf8");
-	
+
 	// Read state (message not in state)
 	const st = await readState(p, scratch);
 	ok("state does not contain phantom message", !st.messages["msg-phantom"]);
-	
+
 	// Call real reconcileTasks - should detect drift
 	const actions = await reconcileTasks(pi, p, st, { dryRun: true, mark: false, nowMs: Date.now() });
-	const staleAction = actions.find(a => a.messageId === "drift-msg-test/plan" && a.action === "task_node_stale");
+	const staleAction = actions.find((a) => a.messageId === "drift-msg-test/plan" && a.action === "task_node_stale");
 	ok("reconcile detects missing message drift", staleAction !== undefined);
 	ok("stale action reason mentions missing message", staleAction && staleAction.reason.includes("msg-phantom"));
-	
+
 	// Cleanup
 	rmSync(tp.root, { recursive: true, force: true });
 }
@@ -372,7 +454,7 @@ console.log("\n[11] cross-file consistency: missing agent detected by reconcile"
 		createdAt: new Date().toISOString(),
 		updatedAt: new Date().toISOString(),
 		nodes: {
-			plan: { id: "plan", status: "assigned", role: "planner", dependsOn: [], messageIds: [], assignee: "ghost-agent" }
+			plan: { id: "plan", status: "assigned", role: "planner", dependsOn: [], messageIds: [], assignee: "ghost-agent" },
 		},
 		edges: [],
 		currentNodes: ["plan"],
@@ -383,20 +465,20 @@ console.log("\n[11] cross-file consistency: missing agent detected by reconcile"
 		gates: {},
 		editLocks: {},
 		evidence: {},
-		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] }
+		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 	};
 	writeFileSync(tp.taskJson, JSON.stringify(task, null, 2), "utf8");
-	
+
 	// Read state (agent not in state)
 	const st = await readState(p, scratch);
 	ok("state does not contain ghost agent", !st.agents["ghost-agent"]);
-	
+
 	// Call real reconcileTasks - should detect drift
 	const actions = await reconcileTasks(pi, p, st, { dryRun: true, mark: false, nowMs: Date.now() });
-	const staleAction = actions.find(a => a.messageId === "drift-agent-test/plan" && a.action === "task_node_stale");
+	const staleAction = actions.find((a) => a.messageId === "drift-agent-test/plan" && a.action === "task_node_stale");
 	ok("reconcile detects missing agent drift", staleAction !== undefined);
 	ok("stale action reason mentions missing agent", staleAction && staleAction.reason.includes("ghost-agent"));
-	
+
 	// Cleanup
 	rmSync(tp.root, { recursive: true, force: true });
 }
@@ -407,20 +489,22 @@ console.log("\n[12] regression: backupBeforeWrite coverage check");
 	// Check if writeIteration and writeLoopState have backup coverage
 	// This documents the current state - they use atomicWriteFile but NOT backupBeforeWrite
 	const stateCode = readFileSync(join(here, "..", "src", "state.ts"), "utf8");
-	
+
 	// Check if writeIteration exists and uses atomicWriteFile
 	const hasWriteIteration = /export async function writeIteration/.test(stateCode);
 	ok("writeIteration function exists", hasWriteIteration);
-	
+
 	const hasWriteLoopState = /export async function writeLoopState/.test(stateCode);
 	ok("writeLoopState function exists", hasWriteLoopState);
-	
+
 	// Document: iteration/loop state use atomicWriteFile without backupBeforeWrite
 	// This is documented in plan review as a known deviation - these are ephemeral
 	// session-state files, not persistent state like swarm-state.json/task.json
 	// Backup is not needed because these are recreatable from running process state
-	
-	console.log("    (note: writeIteration/writeLoopState use atomicWriteFile without backupBeforeWrite - accepted as documented in plan review)");
+
+	console.log(
+		"    (note: writeIteration/writeLoopState use atomicWriteFile without backupBeforeWrite - accepted as documented in plan review)",
+	);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

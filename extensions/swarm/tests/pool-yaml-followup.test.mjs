@@ -21,8 +21,15 @@ import { join } from "node:path";
 import { validateSwarmSettings } from "../src/pool.ts";
 import { ensurePoolScaffold } from "../src/pool-scaffold.ts";
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) pass++; else { fail++; console.error("  FAIL:", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) pass++;
+	else {
+		fail++;
+		console.error("  FAIL:", name);
+	}
+};
 
 const scratch = await mkdtemp(join(tmpdir(), "pool-yaml-followup-"));
 await mkdir(join(scratch, ".pi"), { recursive: true });
@@ -42,7 +49,7 @@ const registryProbe = {
 const savedHome = process.env.HOME;
 const fakeHome = join(scratch, "home");
 await mkdir(join(fakeHome, ".pi", "agent"), { recursive: true });
-await writeFile(join(fakeHome, ".pi", "agent", "auth.json"), JSON.stringify({ "openai": { type: "api_key", key: "test" } }));
+await writeFile(join(fakeHome, ".pi", "agent", "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "test" } }));
 process.env.HOME = fakeHome;
 const savedKey = process.env.OPENAI_API_KEY;
 const savedCcs = process.env.CCS_API_KEY;
@@ -50,11 +57,18 @@ delete process.env.CCS_API_KEY;
 delete process.env.OPENAI_API_KEY; // the scratch auth.json provides openai's key instead
 
 // === F2: validate checks slot resolvability via the registry probe ===
-await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [
-	{ model: "glm-5.3", provider: "ccs" },           // resolvable model, NO api key -> slot_no_credential
-	{ model: "gpt-5.4-mini", provider: "openai" },   // fully resolvable
-	{ model: "nonexistent-model", provider: "ccs" }  // not in registry -> slot_unresolvable
-] } }));
+await writeFile(
+	settingsPath,
+	JSON.stringify({
+		swarm: {
+			modelPool: [
+				{ model: "glm-5.3", provider: "ccs" }, // resolvable model, NO api key -> slot_no_credential
+				{ model: "gpt-5.4-mini", provider: "openai" }, // fully resolvable
+				{ model: "nonexistent-model", provider: "ccs" }, // not in registry -> slot_unresolvable
+			],
+		},
+	}),
+);
 
 {
 	const v = validateSwarmSettings(scratch, { registryProbe });
@@ -62,7 +76,10 @@ await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [
 	ok("F2: unresolvable slot flagged", kinds.has("slot_unresolvable"));
 	ok("F2: resolvable slot not flagged", !v.errors.some((e) => e.field === "modelPool[1]"));
 	ok("F2: missing credential flagged", kinds.has("slot_no_credential"));
-	ok("F2: credential failure is a warning-grade error only for that slot", v.errors.filter((e) => e.kind === "slot_no_credential").length === 1);
+	ok(
+		"F2: credential failure is a warning-grade error only for that slot",
+		v.errors.filter((e) => e.kind === "slot_no_credential").length === 1,
+	);
 }
 // No probe available → resolvability checks degrade to struct-only (no crash, no false errors)
 {
@@ -74,8 +91,14 @@ await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [
 await writeFile(ymlPath, "");
 {
 	const v = validateSwarmSettings(scratch, { registryProbe });
-	ok("F1: empty yml + JSON config → swarm_yml_empty warning", v.warnings.some((w) => w.kind === "swarm_yml_empty"));
-	ok("F1: warning names .pi/swarm.yml", v.warnings.some((w) => w.kind === "swarm_yml_empty" && /swarm\.yml/.test(w.message)));
+	ok(
+		"F1: empty yml + JSON config → swarm_yml_empty warning",
+		v.warnings.some((w) => w.kind === "swarm_yml_empty"),
+	);
+	ok(
+		"F1: warning names .pi/swarm.yml",
+		v.warnings.some((w) => w.kind === "swarm_yml_empty" && /swarm\.yml/.test(w.message)),
+	);
 	ok("F1: ok not flipped by the empty-yml warning (JSON pool drives ok)", v.ok === false); // false due to F2 errors, not the warning
 }
 // F1b: empty yml + NO JSON pool → scaffold fills the commented placeholder
@@ -91,16 +114,31 @@ await rm(settingsPath, { force: true });
 	ok("F1b: full template — weight documented", /#\s*weight:/.test(text));
 	ok("F1b: full template — roles documented", /#\s*roles:/.test(text));
 	ok("F1b: full template — quotaReset documented", /#\s*quotaReset:/.test(text));
-	ok("F1b: full template — rotation block commented", /#\s*rotation:/.test(text) && /#\s*strategy:/.test(text) && /#\s*cooldownMs:/.test(text) && /#\s*maxRetries:/.test(text));
+	ok(
+		"F1b: full template — rotation block commented",
+		/#\s*rotation:/.test(text) && /#\s*strategy:/.test(text) && /#\s*cooldownMs:/.test(text) && /#\s*maxRetries:/.test(text),
+	);
 	ok("F1b: full template — defaultModel/defaultProvider documented", /#\s*defaultModel:/.test(text) && /#\s*defaultProvider:/.test(text));
 	ok("F1b: no active model: null junk lines", !/^\s*-\s*model:\s*null\s*$/m.test(text) && !/^\s*model:\s*null\s*$/m.test(text));
-	ok("F1b: placeholder parses as valid YAML (comments-only body)", await (async () => { try { const y = await (await import("yaml")).parse(text); return y === null || y === undefined || Object.keys(y ?? {}).length === 0; } catch { return false; } })());
+	ok(
+		"F1b: placeholder parses as valid YAML (comments-only body)",
+		await (async () => {
+			try {
+				const y = await (await import("yaml")).parse(text);
+				return y === null || y === undefined || Object.keys(y ?? {}).length === 0;
+			} catch {
+				return false;
+			}
+		})(),
+	);
 }
 
 // cleanup
 process.env.HOME = savedHome;
-if (savedKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = savedKey;
-if (savedCcs === undefined) delete process.env.CCS_API_KEY; else process.env.CCS_API_KEY = savedCcs;
+if (savedKey === undefined) delete process.env.OPENAI_API_KEY;
+else process.env.OPENAI_API_KEY = savedKey;
+if (savedCcs === undefined) delete process.env.CCS_API_KEY;
+else process.env.CCS_API_KEY = savedCcs;
 await rm(scratch, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

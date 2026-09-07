@@ -15,8 +15,7 @@ export type EvidenceAttestation = {
 };
 
 export type AttestationCheck =
-	| { ok: true; checked: number; matchedClaims: string[] }
-	| { ok: false; checked: number; matchedClaims: string[]; errors: string[] };
+	{ ok: true; checked: number; matchedClaims: string[] } | { ok: false; checked: number; matchedClaims: string[]; errors: string[] };
 
 const PASS_FAIL_CLAIM_RE = /(^|\n)\s*((Passed|Failed)\s*:[^\n]+)/gi;
 
@@ -69,9 +68,17 @@ export async function readTraceEvents(p: Paths): Promise<Record<string, any>[]> 
 	} catch {
 		return [];
 	}
-	return raw.split("\n").filter(Boolean).map((line) => {
-		try { return JSON.parse(line); } catch { return null; }
-	}).filter(Boolean);
+	return raw
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => {
+			try {
+				return JSON.parse(line);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 
 export function resolveAttestedEvent(events: Record<string, any>[], att: EvidenceAttestation) {
@@ -89,13 +96,21 @@ export function extractClaims(text: string): string[] {
 	return out;
 }
 
-export async function validateAttestations(p: Paths, opts: { note?: string; artifactText?: string; attestations?: EvidenceAttestation[] }): Promise<AttestationCheck> {
+export async function validateAttestations(
+	p: Paths,
+	opts: { note?: string; artifactText?: string; attestations?: EvidenceAttestation[] },
+): Promise<AttestationCheck> {
 	const combined = [opts.note || "", opts.artifactText || ""].filter(Boolean).join("\n\n");
 	const claims = extractClaims(combined);
 	const attestations = opts.attestations || [];
 	if (!claims.length) return { ok: true, checked: 0, matchedClaims: [] };
 	if (!attestations.length) {
-		return { ok: false, checked: 0, matchedClaims: [], errors: claims.map((claim) => `ATTESTATION_MISSING: claim "${claim}" has no evidence citation`) };
+		return {
+			ok: false,
+			checked: 0,
+			matchedClaims: [],
+			errors: claims.map((claim) => `ATTESTATION_MISSING: claim "${claim}" has no evidence citation`),
+		};
 	}
 
 	const events = await readTraceEvents(p);
@@ -147,7 +162,7 @@ export async function registerEvidenceHooks(pi: ExtensionAPI) {
 				toolCallId: event?.toolCallId || event?.callId || event?.id || null,
 				agentId: currentAgentId(),
 				isError: Boolean(event?.isError ?? event?.error ?? (event?.cls && event.cls !== "success")),
-				exitCode: typeof event?.exitCode === "number" ? event.exitCode : (typeof event?.code === "number" ? event.code : null),
+				exitCode: typeof event?.exitCode === "number" ? event.exitCode : typeof event?.code === "number" ? event.code : null,
 				cls: event?.cls || (event?.error ? "error" : "success"),
 			};
 			await mkdir(dirname(p.events), { recursive: true });
@@ -171,7 +186,11 @@ export async function writeBaselineCommit(pi: ExtensionAPI, tp: TaskPaths): Prom
 	}
 }
 
-export async function attachGitDiffStat(pi: ExtensionAPI, cwd: string, tp: TaskPaths): Promise<{ available: boolean; baseline?: string; stat?: string; note?: string }> {
+export async function attachGitDiffStat(
+	pi: ExtensionAPI,
+	cwd: string,
+	tp: TaskPaths,
+): Promise<{ available: boolean; baseline?: string; stat?: string; note?: string }> {
 	let baseline = "";
 	try {
 		baseline = (await readFile(join(tp.root, "baseline.txt"), "utf8")).trim();
@@ -181,7 +200,8 @@ export async function attachGitDiffStat(pi: ExtensionAPI, cwd: string, tp: TaskP
 	if (!baseline) return { available: false, baseline, note: "baseline_empty" };
 	try {
 		const r = await pi.exec("git", ["diff", "--stat", baseline], { timeout: 10_000 });
-		if (r.code !== 0) return { available: false, baseline, note: `git_diff_failed:${(r.stderr || r.stdout || "unknown").trim().slice(0, 200)}` };
+		if (r.code !== 0)
+			return { available: false, baseline, note: `git_diff_failed:${(r.stderr || r.stdout || "unknown").trim().slice(0, 200)}` };
 		const stat = (r.stdout || "").trim();
 		return { available: true, baseline, stat: stat || "(no diff)" };
 	} catch (err: any) {

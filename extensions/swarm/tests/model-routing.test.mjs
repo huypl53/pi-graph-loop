@@ -8,8 +8,16 @@
 // Run: node extensions/swarm/model-routing.test.mjs
 import { providerForModel, currentProvider } from "../index.ts";
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.error("  FAIL:", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) {
+		pass++;
+	} else {
+		fail++;
+		console.error("  FAIL:", name);
+	}
+};
 
 // Fast preset stays pinned.
 ok("fast model -> openai preset", providerForModel("gpt-5.4-mini") === "openai");
@@ -25,7 +33,15 @@ const savedCwd = process.cwd();
 process.chdir(await import("node:os").then((o) => o.tmpdir()));
 ok("unknown model (claude-...) has no forced provider", providerForModel("claude-sonnet-4") === undefined);
 ok("unknown model (glm-5.1 default) has no forced provider", providerForModel("glm-5.1") === undefined);
-ok("explicit env provider wins for unknown model", (() => { process.env.PI_SWARM_DEFAULT_PROVIDER = "acme"; const v = currentProvider("claude-sonnet-4"); delete process.env.PI_SWARM_DEFAULT_PROVIDER; return v === "acme"; })());
+ok(
+	"explicit env provider wins for unknown model",
+	(() => {
+		process.env.PI_SWARM_DEFAULT_PROVIDER = "acme";
+		const v = currentProvider("claude-sonnet-4");
+		delete process.env.PI_SWARM_DEFAULT_PROVIDER;
+		return v === "acme";
+	})(),
+);
 ok("currentProvider falls back to DEFAULT_PROVIDER at the final boundary", currentProvider("claude-sonnet-4") === "zai-coding-cn");
 process.chdir(savedCwd);
 if (savedModel) process.env.PI_SWARM_DEFAULT_MODEL = savedModel;

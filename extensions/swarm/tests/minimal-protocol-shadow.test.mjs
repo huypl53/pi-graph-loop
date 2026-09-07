@@ -25,18 +25,41 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), `swarm-minimal-protocol-shadow-${process.pid}-${Date.now()}`));
 await mkdir(join(scratch, ".pi"), { recursive: true });
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name);
+	}
+};
 
 // ---- scratch helpers ----
 async function readGlobalEvents() {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function readStateFile() {
 	const p = join(scratch, ".pi/swarm/swarm-state.json");
-	try { return JSON.parse(await readFile(p, "utf8")); } catch { return null; }
+	try {
+		return JSON.parse(await readFile(p, "utf8"));
+	} catch {
+		return null;
+	}
 }
 
 // ---- shared: load extension with a controllable identity ----
@@ -46,9 +69,15 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const commands = {};
 	const tools = {};
 	const pi = {
-		registerTool: (def) => { tools[def.name] = def; },
-		registerCommand: (name, def) => { commands[name] = def; },
-		on: (ev, fn) => { (handlers[ev] ||= []).push(fn); },
+		registerTool: (def) => {
+			tools[def.name] = def;
+		},
+		registerCommand: (name, def) => {
+			commands[name] = def;
+		},
+		on: (ev, fn) => {
+			(handlers[ev] ||= []).push(fn);
+		},
 		exec: async (cmd, args) => {
 			if (cmd === "tmux" && args?.[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
 			return { code: 1, stdout: "", stderr: "" };
@@ -75,7 +104,7 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const result = await tools.swarm_list_agents.execute("c1", {}, undefined, undefined, { cwd: scratch });
 	const t1 = Date.now();
 	ok("swarm_list_agents returns a result", typeof result?.content?.[0]?.text === "string");
-	ok("swarm_list_agents duration < 5s", (t1 - t0) < 5_000);
+	ok("swarm_list_agents duration < 5s", t1 - t0 < 5_000);
 
 	const events = await readGlobalEvents();
 	const toolInvoked = events.filter((e) => e.event === "tool.invoked" && e.tool === "swarm_list_agents");
@@ -102,8 +131,12 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	let thrown = null;
 	try {
 		// swarm_ack_message throws on unknown messageId
-		await tools.swarm_ack_message.execute("c2", { messageId: "msg-nonexistent", status: "seen" }, undefined, undefined, { cwd: scratch });
-	} catch (err) { thrown = err; }
+		await tools.swarm_ack_message.execute("c2", { messageId: "msg-nonexistent", status: "seen" }, undefined, undefined, {
+			cwd: scratch,
+		});
+	} catch (err) {
+		thrown = err;
+	}
 	ok("swarm_ack_message threw on unknown id", thrown instanceof Error);
 	ok("thrown error mentions unknown message id", String(thrown?.message || "").includes("Unknown message id"));
 
@@ -127,21 +160,86 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const msgId = "msg-shadow-1";
 	const beforeTs = new Date().toISOString();
 	await mkdir(join(scratch, ".pi/swarm/mailboxes"), { recursive: true });
-	await writeFile(join(scratch, ".pi/swarm/mailboxes/worker-a.jsonl"), JSON.stringify({
-		id: msgId, swarmId: "test", from: "root", to: "worker-a", subject: "hi",
-		priority: "normal", type: "swarm.message", schemaVersion: 1, createdAt: beforeTs,
-		body: "hello", requiresAck: true, headers: {},
-	}) + "\n", "utf8");
+	await writeFile(
+		join(scratch, ".pi/swarm/mailboxes/worker-a.jsonl"),
+		JSON.stringify({
+			id: msgId,
+			swarmId: "test",
+			from: "root",
+			to: "worker-a",
+			subject: "hi",
+			priority: "normal",
+			type: "swarm.message",
+			schemaVersion: 1,
+			createdAt: beforeTs,
+			body: "hello",
+			requiresAck: true,
+			headers: {},
+		}) + "\n",
+		"utf8",
+	);
 
 	// Seed a minimal state file with the matching record (no v2 fields).
 	const st = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "test",
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "test",
 		agents: {
-			"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
-			"worker-a": { id: "worker-a", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-a", tmuxTarget: "test:worker-a.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl", createdAt: beforeTs, updatedAt: beforeTs },
+			root: {
+				id: "root",
+				role: "root",
+				roleKind: "root",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 99,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "orch",
+				tmuxTarget: "test:orch.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/root.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
+			"worker-a": {
+				id: "worker-a",
+				role: "worker",
+				roleKind: "worker",
+				capabilities: [],
+				activeTaskIds: [],
+				maxConcurrentTasks: 1,
+				status: "running",
+				runtimeStatus: "idle",
+				health: "healthy",
+				tmuxSession: "test",
+				tmuxWindow: "worker-a",
+				tmuxTarget: "test:worker-a.0",
+				model: "glm-5.1",
+				provider: "zai-coding-cn",
+				cwd: scratch,
+				mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+			},
 		},
 		delivered: { "worker-a": [] },
-		messages: { [msgId]: { id: msgId, from: "root", to: "worker-a", status: "queued", createdAt: beforeTs, updatedAt: beforeTs, attempts: 0, requiresAck: true } },
+		messages: {
+			[msgId]: {
+				id: msgId,
+				from: "root",
+				to: "worker-a",
+				status: "queued",
+				createdAt: beforeTs,
+				updatedAt: beforeTs,
+				attempts: 0,
+				requiresAck: true,
+			},
+		},
 	};
 	await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(st, null, 2), "utf8");
 
@@ -178,7 +276,16 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	console.log("\n--- Scenario 4: deriveLifecycleFromTrigger pure helper ---");
 	const { deriveLifecycleFromTrigger } = await import(join(here, "..", "src/mailbox.ts"));
 
-	const baseRec = { id: "m", from: "o", to: "w", status: "queued", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", attempts: 0, requiresAck: true };
+	const baseRec = {
+		id: "m",
+		from: "o",
+		to: "w",
+		status: "queued",
+		createdAt: "2026-01-01T00:00:00Z",
+		updatedAt: "2026-01-01T00:00:00Z",
+		attempts: 0,
+		requiresAck: true,
+	};
 	const at = "2026-01-01T00:00:00Z";
 
 	const d1 = deriveLifecycleFromTrigger(baseRec, { kind: "mailbox_appended" }, at);
@@ -203,11 +310,20 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 
 	// Terminal reasons
 	const d6 = deriveLifecycleFromTrigger(baseRec, { kind: "deadline_exceeded", deadlineMs: 60_000 }, at);
-	ok("deadline_exceeded -> terminalAt with responseDeadlineMs source", d6.kind === "set" && d6.field === "terminalAt" && d6.kind === "set" && d6.source === "responseDeadlineMs");
+	ok(
+		"deadline_exceeded -> terminalAt with responseDeadlineMs source",
+		d6.kind === "set" && d6.field === "terminalAt" && d6.kind === "set" && d6.source === "responseDeadlineMs",
+	);
 	const d7 = deriveLifecycleFromTrigger(baseRec, { kind: "supersession", supersededBy: "new" }, at);
-	ok("supersession -> terminalAt with supersession source", d7.kind === "set" && d7.field === "terminalAt" && d7.kind === "set" && d7.source === "supersession");
+	ok(
+		"supersession -> terminalAt with supersession source",
+		d7.kind === "set" && d7.field === "terminalAt" && d7.kind === "set" && d7.source === "supersession",
+	);
 	const d8 = deriveLifecycleFromTrigger(baseRec, { kind: "ttl_expired" }, at);
-	ok("ttl_expired -> terminalAt with ttl_expired source", d8.kind === "set" && d8.field === "terminalAt" && d8.kind === "set" && d8.source === "ttl_expired");
+	ok(
+		"ttl_expired -> terminalAt with ttl_expired source",
+		d8.kind === "set" && d8.field === "terminalAt" && d8.kind === "set" && d8.source === "ttl_expired",
+	);
 }
 
 // ============================================================

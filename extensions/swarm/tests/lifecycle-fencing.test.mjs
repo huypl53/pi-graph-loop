@@ -33,8 +33,16 @@ const here = dirname(fileURLToPath(import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), `swarm-lifecycle-fencing-${process.pid}-${Date.now()}`));
 await mkdir(join(scratch, ".pi"), { recursive: true });
 
-let pass = 0, fail = 0;
-const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.error("  FAIL:", name); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond) => {
+	if (cond) {
+		pass++;
+	} else {
+		fail++;
+		console.error("  FAIL:", name);
+	}
+};
 
 // ---- scratch fixture helpers ----
 async function writeStateFile(state) {
@@ -43,40 +51,137 @@ async function writeStateFile(state) {
 }
 async function readStateFile() {
 	const p = join(scratch, ".pi/swarm/swarm-state.json");
-	try { return JSON.parse(await readFile(p, "utf8")); } catch { return null; }
+	try {
+		return JSON.parse(await readFile(p, "utf8"));
+	} catch {
+		return null;
+	}
 }
 async function readTaskFile(taskId) {
 	const p = join(scratch, `.pi/swarm/tasks/${taskId}/task.json`);
-	try { return JSON.parse(await readFile(p, "utf8")); } catch { return null; }
+	try {
+		return JSON.parse(await readFile(p, "utf8"));
+	} catch {
+		return null;
+	}
 }
 async function readEvents(taskId) {
 	const p = join(scratch, `.pi/swarm/tasks/${taskId}/events.jsonl`);
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function readGlobalEvents() {
 	const p = join(scratch, ".pi/swarm/traces/events.jsonl");
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function readMailbox(agentId) {
 	const p = join(scratch, `.pi/swarm/mailboxes/${agentId}.jsonl`);
 	const txt = await readFile(p, "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function traceHas(site, sinceMs, taskEvents) {
-	const events = taskEvents || await readGlobalEvents();
+	const events = taskEvents || (await readGlobalEvents());
 	return events.some((e) => e.event === "notification.stale.suppressed" && e.site === site && new Date(e.ts).getTime() >= sinceMs);
 }
 
 // ---- scratch fixture: minimal swarm-state ----
 const fixture = (overrides = {}) => ({
-	version: 1, swarmId: "test", cwd: scratch,
+	version: 1,
+	swarmId: "test",
+	cwd: scratch,
 	tmuxSession: "test",
 	agents: {
-		"root": { id: "root", role: "root", roleKind: "root", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "orch", tmuxTarget: "test:orch.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/root.jsonl", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-		"worker-a": { id: "worker-a", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-a", tmuxTarget: "test:worker-a.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-		"worker-b": { id: "worker-b", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "running", runtimeStatus: "idle", health: "healthy", tmuxSession: "test", tmuxWindow: "worker-b", tmuxTarget: "test:worker-b.0", model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: ".pi/swarm/mailboxes/worker-b.jsonl", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+		root: {
+			id: "root",
+			role: "root",
+			roleKind: "root",
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 99,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "test",
+			tmuxWindow: "orch",
+			tmuxTarget: "test:orch.0",
+			model: "glm-5.1",
+			provider: "zai-coding-cn",
+			cwd: scratch,
+			mailbox: ".pi/swarm/mailboxes/root.jsonl",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		},
+		"worker-a": {
+			id: "worker-a",
+			role: "worker",
+			roleKind: "worker",
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 1,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "test",
+			tmuxWindow: "worker-a",
+			tmuxTarget: "test:worker-a.0",
+			model: "glm-5.1",
+			provider: "zai-coding-cn",
+			cwd: scratch,
+			mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		},
+		"worker-b": {
+			id: "worker-b",
+			role: "worker",
+			roleKind: "worker",
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 1,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "test",
+			tmuxWindow: "worker-b",
+			tmuxTarget: "test:worker-b.0",
+			model: "glm-5.1",
+			provider: "zai-coding-cn",
+			cwd: scratch,
+			mailbox: ".pi/swarm/mailboxes/worker-b.jsonl",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		},
 	},
 	delivered: {},
 	messages: {},
@@ -95,11 +200,23 @@ async function loadExtension({ identity = "root", extraHandlers = {} } = {}) {
 	const sentMessages = [];
 	const setModelCalls = [];
 	const pi = {
-		registerTool: (def) => { tools[def.name] = def; },
-		registerCommand: (name, def) => { commands[name] = def; },
-		on: (ev, fn) => { (handlers[ev] ||= []).push(fn); Object.assign(handlers, extraHandlers); },
-		setModel: async (m) => { setModelCalls.push(`${m.provider}/${m.id}`); return true; },
-		sendMessage: (m, o) => { sentMessages.push({ m, o }); },
+		registerTool: (def) => {
+			tools[def.name] = def;
+		},
+		registerCommand: (name, def) => {
+			commands[name] = def;
+		},
+		on: (ev, fn) => {
+			(handlers[ev] ||= []).push(fn);
+			Object.assign(handlers, extraHandlers);
+		},
+		setModel: async (m) => {
+			setModelCalls.push(`${m.provider}/${m.id}`);
+			return true;
+		},
+		sendMessage: (m, o) => {
+			sentMessages.push({ m, o });
+		},
 		exec: async (cmd, args) => {
 			if (cmd === "tmux" && args[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
 			return { code: 1, stdout: "", stderr: "" };
@@ -111,24 +228,55 @@ async function loadExtension({ identity = "root", extraHandlers = {} } = {}) {
 
 // ---- shared: create a minimal task with one node ----
 const minimalTask = (taskId, nodeId, overrides = {}) => ({
-	version: 1, taskId, title: "test", goal: "test",
-	status: "in_progress", priority: "normal",
-	createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-	owner: "root", workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
-	start: nodeId, currentNodes: [nodeId],
+	version: 1,
+	taskId,
+	title: "test",
+	goal: "test",
+	status: "in_progress",
+	priority: "normal",
+	createdAt: new Date().toISOString(),
+	updatedAt: new Date().toISOString(),
+	owner: "root",
+	workflow: "feature-dev",
+	allowedFiles: [],
+	acceptanceCriteria: [],
+	validationCommands: [],
+	start: nodeId,
+	currentNodes: [nodeId],
 	sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 	nodes: {
 		[nodeId]: {
-			status: "assigned", role: "worker", dependsOn: [], readArtifacts: [], writeArtifacts: [],
-			messageIds: [], attempts: 1, maxAttempts: 3, assignee: "worker-a",
+			status: "assigned",
+			role: "worker",
+			dependsOn: [],
+			readArtifacts: [],
+			writeArtifacts: [],
+			messageIds: [],
+			attempts: 1,
+			maxAttempts: 3,
+			assignee: "worker-a",
 			assignmentMessageId: `msg-${nodeId}`,
 			activeAttemptId: `attempt-${nodeId}`,
-			attemptHistory: [{ attemptId: `attempt-${nodeId}`, attemptNumber: 1, assignee: "worker-a", assignmentMessageId: `msg-${nodeId}`, assignedAt: new Date().toISOString(), status: "active", lastActivityAt: new Date().toISOString() }],
+			attemptHistory: [
+				{
+					attemptId: `attempt-${nodeId}`,
+					attemptNumber: 1,
+					assignee: "worker-a",
+					assignmentMessageId: `msg-${nodeId}`,
+					assignedAt: new Date().toISOString(),
+					status: "active",
+					lastActivityAt: new Date().toISOString(),
+				},
+			],
 			lastActivityAt: new Date().toISOString(),
 			...overrides,
 		},
 	},
-	edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+	edges: [],
+	handoffs: [],
+	gates: {},
+	editLocks: {},
+	evidence: {},
 });
 
 async function seedTask(task) {
@@ -143,11 +291,18 @@ async function seedTask(task) {
 async function seedAssignmentMessage(st, node, taskId) {
 	const assignee = node.assignee || "worker-a";
 	st.messages[`msg-${node}`] = {
-		id: `msg-${node}`, from: "root", to: assignee, status: "injected",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		injectedAt: new Date().toISOString(), attempts: 1,
-		requiresAck: true, requiresResponse: true,
-		subject: `Task ${taskId} / node ${node} assigned`, conversationId: `task:${taskId}:${node}`,
+		id: `msg-${node}`,
+		from: "root",
+		to: assignee,
+		status: "injected",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		injectedAt: new Date().toISOString(),
+		attempts: 1,
+		requiresAck: true,
+		requiresResponse: true,
+		subject: `Task ${taskId} / node ${node} assigned`,
+		conversationId: `task:${taskId}:${node}`,
 		idempotencyKey: `assign:${taskId}:${node}:${assignee}:1`,
 	};
 }
@@ -191,7 +346,10 @@ async function seedAssignmentMessage(st, node, taskId) {
 	const site2Delivered = afterMailbox.filter((m) => m.subject && m.subject.includes("settled idle with open assignment")).length;
 	ok("within-grace site-2 notify IS delivered (false-positive guard)", site2Delivered === 1);
 	ok("within-grace site-2 notify IS delivered (false-positive guard)", site2Delivered === 1);
-	ok("no notification.stale.suppressed trace within grace", !afterEvents0.some((e) => e.event === "notification.stale.suppressed" && e.site === "agent_settled.open_assignment"));
+	ok(
+		"no notification.stale.suppressed trace within grace",
+		!afterEvents0.some((e) => e.event === "notification.stale.suppressed" && e.site === "agent_settled.open_assignment"),
+	);
 }
 
 {
@@ -219,12 +377,20 @@ async function seedAssignmentMessage(st, node, taskId) {
 	await handlers["agent_settled"][0]({}, ctx);
 	const afterEvents = await readGlobalEvents();
 	const afterMailbox = await readMailbox("root");
-	const suppressedTrace = afterEvents.find((e) => e.event === "notification.stale.suppressed" && e.site === "agent_settled.open_assignment" && e.nodeId === "implement");
+	const suppressedTrace = afterEvents.find(
+		(e) => e.event === "notification.stale.suppressed" && e.site === "agent_settled.open_assignment" && e.nodeId === "implement",
+	);
 	ok("settle suppression trace present for stopped agent", !!suppressedTrace);
-	ok("settle suppression reason is one of: agent_stopped|node_terminal|assignee_drift|task_closed|superseded", suppressedTrace && /agent_stopped|node_terminal|assignee_drift|task_closed|superseded/.test(suppressedTrace.reason || ""));
+	ok(
+		"settle suppression reason is one of: agent_stopped|node_terminal|assignee_drift|task_closed|superseded",
+		suppressedTrace && /agent_stopped|node_terminal|assignee_drift|task_closed|superseded/.test(suppressedTrace.reason || ""),
+	);
 	// Site 1 (response-missing) may still deliver a separate notify; the site-2 open-assignment
 	// notify is the focus of this scenario and must NOT be delivered.
-	ok("root mailbox did NOT receive site-2 stale notify", !afterMailbox.some((m) => m.subject && m.subject.includes("settled idle with open assignment")));
+	ok(
+		"root mailbox did NOT receive site-2 stale notify",
+		!afterMailbox.some((m) => m.subject && m.subject.includes("settled idle with open assignment")),
+	);
 
 	// node.json pointer integrity: no mutation
 	const nodeAfter = (await readTaskFile(taskId)).nodes.implement;
@@ -248,10 +414,16 @@ async function seedAssignmentMessage(st, node, taskId) {
 	st.agents["worker-a"].activeTaskIds = [taskId];
 	// Seed a superseded responseMissing rec
 	st.messages["sup-msg-1"] = {
-		id: "sup-msg-1", from: "root", to: "worker-a", status: "injected",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		injectedAt: new Date().toISOString(), attempts: 1,
-		requiresAck: true, requiresResponse: true,
+		id: "sup-msg-1",
+		from: "root",
+		to: "worker-a",
+		status: "injected",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		injectedAt: new Date().toISOString(),
+		attempts: 1,
+		requiresAck: true,
+		requiresResponse: true,
 		superseded: { at: new Date().toISOString(), by: "reassign", supersededBy: "msg-new" },
 		response: { status: "missing", missingAt: new Date().toISOString() },
 	};
@@ -264,7 +436,10 @@ async function seedAssignmentMessage(st, node, taskId) {
 	await handlers["agent_settled"][0]({}, ctx);
 	const afterEvents = await readGlobalEvents();
 	const afterMailbox = await readMailbox("root");
-	ok("site 1 suppression trace emitted", afterEvents.some((e) => e.event === "notification.stale.suppressed" && e.site === "agent_settled.response_missing"));
+	ok(
+		"site 1 suppression trace emitted",
+		afterEvents.some((e) => e.event === "notification.stale.suppressed" && e.site === "agent_settled.response_missing"),
+	);
 	ok("root mailbox did NOT receive stale notify (site 1)", afterMailbox.length === beforeMailbox.length);
 }
 
@@ -293,7 +468,10 @@ async function seedAssignmentMessage(st, node, taskId) {
 	await handlers["session_shutdown"][0]({}, ctx);
 	const afterEvents = await readGlobalEvents();
 	const afterMailbox = await readMailbox("root");
-	ok("session_shutdown suppression trace emitted", afterEvents.some((e) => e.event === "notification.stale.suppressed" && e.site === "session_shutdown.open_node"));
+	ok(
+		"session_shutdown suppression trace emitted",
+		afterEvents.some((e) => e.event === "notification.stale.suppressed" && e.site === "session_shutdown.open_node"),
+	);
 	ok("shutdown with terminal node does NOT send notify", afterMailbox.length === 0);
 }
 
@@ -311,16 +489,49 @@ async function seedAssignmentMessage(st, node, taskId) {
 	// the predicate's assignee_drift branch (worker-a !== node.assignee) does NOT fire (assignee
 	// matches), so the agent_stopped + age > grace branch is what suppresses the nudge.
 	const task = {
-		version: 1, taskId, title: "test", goal: "test",
-		status: "in_progress", priority: "normal",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-		owner: "root", workflow: "feature-dev", allowedFiles: [], acceptanceCriteria: [], validationCommands: [],
-		start: "plan", currentNodes: ["plan"],
+		version: 1,
+		taskId,
+		title: "test",
+		goal: "test",
+		status: "in_progress",
+		priority: "normal",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		owner: "root",
+		workflow: "feature-dev",
+		allowedFiles: [],
+		acceptanceCriteria: [],
+		validationCommands: [],
+		start: "plan",
+		currentNodes: ["plan"],
 		sharedContext: { summary: "", decisions: [], openQuestions: [], risks: [] },
 		nodes: {
-			plan: { status: "ready", role: "planner", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 1, activeAttemptId: "attempt-plan", attemptHistory: [{ attemptId: "attempt-plan", attemptNumber: 1, assignee: "worker-a", assignedAt: new Date(Date.now() - 5 * 60_000).toISOString(), status: "active" }] },
+			plan: {
+				status: "ready",
+				role: "planner",
+				dependsOn: [],
+				readArtifacts: [],
+				writeArtifacts: [],
+				messageIds: [],
+				attempts: 0,
+				maxAttempts: 1,
+				activeAttemptId: "attempt-plan",
+				attemptHistory: [
+					{
+						attemptId: "attempt-plan",
+						attemptNumber: 1,
+						assignee: "worker-a",
+						assignedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+						status: "active",
+					},
+				],
+			},
 		},
-		edges: [], handoffs: [], gates: {}, editLocks: {}, evidence: {},
+		edges: [],
+		handoffs: [],
+		gates: {},
+		editLocks: {},
+		evidence: {},
 	};
 	await seedTask(task);
 	const st = fixture();
@@ -329,7 +540,19 @@ async function seedAssignmentMessage(st, node, taskId) {
 	// Old assignment message so the predicate's agent_stopped + age>grace branch fires.
 	const oldMsg = new Date(Date.now() - 5 * 60_000).toISOString();
 	task.nodes.plan.assignmentMessageId = "msg-plan";
-	st.messages["msg-plan"] = { id: "msg-plan", from: "root", to: "worker-a", status: "injected", createdAt: oldMsg, updatedAt: oldMsg, injectedAt: oldMsg, attempts: 1, requiresAck: true, requiresResponse: true, idempotencyKey: "assign:task-fencing-4:plan:worker-a:1" };
+	st.messages["msg-plan"] = {
+		id: "msg-plan",
+		from: "root",
+		to: "worker-a",
+		status: "injected",
+		createdAt: oldMsg,
+		updatedAt: oldMsg,
+		injectedAt: oldMsg,
+		attempts: 1,
+		requiresAck: true,
+		requiresResponse: true,
+		idempotencyKey: "assign:task-fencing-4:plan:worker-a:1",
+	};
 	await writeStateFile(st);
 
 	// Seed the root leader lease so the pump's preflight passes (it must see the current
@@ -341,11 +564,21 @@ async function seedAssignmentMessage(st, node, taskId) {
 	process.env.PI_SWARM_IS_ROOT = "1";
 	const { handlers } = await loadExtension({ identity: "root" });
 	const sessionStart = handlers["session_start"][0];
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, hasUI: false, ui: { setStatus: () => {} }, model: { id: "glm-5.1", provider: "zai-coding-cn" } };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "glm-5.1", provider: "zai-coding-cn" },
+	};
 	await sessionStart({}, ctx);
 
 	const afterEvents = await readGlobalEvents();
-	ok("graph-advance stale nudge suppressed (trace present)", afterEvents.some((e) => e.event === "notification.stale.suppressed" && e.site === "reconcile.graph_advance_nudge"));
+	ok(
+		"graph-advance stale nudge suppressed (trace present)",
+		afterEvents.some((e) => e.event === "notification.stale.suppressed" && e.site === "reconcile.graph_advance_nudge"),
+	);
 }
 
 // ============================================================
@@ -363,10 +596,18 @@ async function seedAssignmentMessage(st, node, taskId) {
 	st.agents["worker-a"].activeTaskIds = [taskId];
 	const key = `task:${taskId}:agent:worker-a:nudge:settle-stale`;
 	st.messages[`msg-prev`] = {
-		id: "msg-prev", from: "root", to: "root", status: "injected",
-		createdAt: new Date(Date.now() - 10_000).toISOString(), updatedAt: new Date().toISOString(),
-		injectedAt: new Date().toISOString(), attempts: 1, requiresAck: false, requiresResponse: false,
-		subject: "settle-stale", idempotencyKey: key,
+		id: "msg-prev",
+		from: "root",
+		to: "root",
+		status: "injected",
+		createdAt: new Date(Date.now() - 10_000).toISOString(),
+		updatedAt: new Date().toISOString(),
+		injectedAt: new Date().toISOString(),
+		attempts: 1,
+		requiresAck: false,
+		requiresResponse: false,
+		subject: "settle-stale",
+		idempotencyKey: key,
 	};
 	st.delivered["root"] = ["msg-prev"];
 	await writeStateFile(st);
@@ -377,8 +618,14 @@ async function seedAssignmentMessage(st, node, taskId) {
 	await handlers["agent_settled"][0]({}, ctx);
 	const afterMailbox = await readMailbox("root");
 	const afterEvents = await readGlobalEvents();
-	ok("dedupe trace or suppression trace recorded", afterEvents.some((e) => e.event === "notification.stale.suppressed" || e.event === "task.stale.settled.notify_cooldown"));
-	ok("root mailbox did NOT receive a second settle-stale nudge", afterMailbox.filter((m) => m.subject === "agent worker-a settled idle with open assignment(s)").length === 0);
+	ok(
+		"dedupe trace or suppression trace recorded",
+		afterEvents.some((e) => e.event === "notification.stale.suppressed" || e.event === "task.stale.settled.notify_cooldown"),
+	);
+	ok(
+		"root mailbox did NOT receive a second settle-stale nudge",
+		afterMailbox.filter((m) => m.subject === "agent worker-a settled idle with open assignment(s)").length === 0,
+	);
 }
 
 // ============================================================
@@ -392,11 +639,68 @@ async function seedAssignmentMessage(st, node, taskId) {
 	const taskId = "task-fencing-6";
 	const planTask = minimalTask(taskId, "plan");
 	planTask.nodes = {
-		plan: { status: "done", role: "planner", dependsOn: [], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1, maxAttempts: 1, assignee: "worker-a", activeAttemptId: "a-plan", attemptHistory: [{ attemptId: "a-plan", attemptNumber: 1, assignee: "worker-a", assignedAt: new Date().toISOString(), status: "completed" }], lastActivityAt: new Date().toISOString() },
-		implement: { status: "assigned", role: "implementer", dependsOn: ["plan"], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 1, maxAttempts: 3, assignee: "worker-a", activeAttemptId: "a-impl", attemptHistory: [{ attemptId: "a-impl", attemptNumber: 1, assignee: "worker-a", assignedAt: new Date().toISOString(), status: "active" }], lastActivityAt: new Date().toISOString() },
-		test: { status: "pending", role: "tester", dependsOn: ["implement"], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 3 },
-		review: { status: "pending", role: "reviewer", dependsOn: ["test"], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, maxAttempts: 2 },
-		commit: { status: "pending", role: "root", dependsOn: ["review"], readArtifacts: [], writeArtifacts: [], messageIds: [], attempts: 0, terminal: true },
+		plan: {
+			status: "done",
+			role: "planner",
+			dependsOn: [],
+			readArtifacts: [],
+			writeArtifacts: [],
+			messageIds: [],
+			attempts: 1,
+			maxAttempts: 1,
+			assignee: "worker-a",
+			activeAttemptId: "a-plan",
+			attemptHistory: [
+				{ attemptId: "a-plan", attemptNumber: 1, assignee: "worker-a", assignedAt: new Date().toISOString(), status: "completed" },
+			],
+			lastActivityAt: new Date().toISOString(),
+		},
+		implement: {
+			status: "assigned",
+			role: "implementer",
+			dependsOn: ["plan"],
+			readArtifacts: [],
+			writeArtifacts: [],
+			messageIds: [],
+			attempts: 1,
+			maxAttempts: 3,
+			assignee: "worker-a",
+			activeAttemptId: "a-impl",
+			attemptHistory: [
+				{ attemptId: "a-impl", attemptNumber: 1, assignee: "worker-a", assignedAt: new Date().toISOString(), status: "active" },
+			],
+			lastActivityAt: new Date().toISOString(),
+		},
+		test: {
+			status: "pending",
+			role: "tester",
+			dependsOn: ["implement"],
+			readArtifacts: [],
+			writeArtifacts: [],
+			messageIds: [],
+			attempts: 0,
+			maxAttempts: 3,
+		},
+		review: {
+			status: "pending",
+			role: "reviewer",
+			dependsOn: ["test"],
+			readArtifacts: [],
+			writeArtifacts: [],
+			messageIds: [],
+			attempts: 0,
+			maxAttempts: 2,
+		},
+		commit: {
+			status: "pending",
+			role: "root",
+			dependsOn: ["review"],
+			readArtifacts: [],
+			writeArtifacts: [],
+			messageIds: [],
+			attempts: 0,
+			terminal: true,
+		},
 	};
 	planTask.edges = [
 		{ from: "plan", to: "implement", when: "planned" },
@@ -418,7 +722,13 @@ async function seedAssignmentMessage(st, node, taskId) {
 
 	const beforeMailbox = await readMailbox("root");
 	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true };
-	await update.execute("call", { taskId, nodeId: "implement", status: "done", outcome: "implemented", attemptId: "a-impl" }, undefined, undefined, ctx);
+	await update.execute(
+		"call",
+		{ taskId, nodeId: "implement", status: "done", outcome: "implemented", attemptId: "a-impl" },
+		undefined,
+		undefined,
+		ctx,
+	);
 	const afterMailbox = await readMailbox("root");
 	const afterTask = await readTaskFile(taskId);
 	const events = await readEvents(taskId);
@@ -457,8 +767,14 @@ async function seedAssignmentMessage(st, node, taskId) {
 	const afterTask = await readTaskFile(taskId);
 	const events = await readEvents(taskId);
 	ok("task cancelled", afterTask.status === "cancelled");
-	ok("cancellation notify delivered to active assignee", afterMailbox.some((m) => m.subject && m.subject.startsWith("Assignment cancelled:")));
-	ok("no false-positive suppression trace (cancel)", !events.some((e) => e.event === "notification.stale.suppressed" && e.site === "swarm_update_task.cancellation"));
+	ok(
+		"cancellation notify delivered to active assignee",
+		afterMailbox.some((m) => m.subject && m.subject.startsWith("Assignment cancelled:")),
+	);
+	ok(
+		"no false-positive suppression trace (cancel)",
+		!events.some((e) => e.event === "notification.stale.suppressed" && e.site === "swarm_update_task.cancellation"),
+	);
 }
 
 // ============================================================

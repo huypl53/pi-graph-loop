@@ -22,7 +22,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 process.env.PI_SWARM_ORPHAN_TIMEOUT_MS = "50";
 
 // Direct imports of the cores + types we exercise. Real handlers, real lock, real state.
-const { spawnAgent, stopAgent, restartAgent, fireOrphanWarning, armOrphanWatch, clearOrphanWatch, recentSpawnCount, isSameRootLeader } = await import(join(here, "..", "src", "agents.ts"));
+const { spawnAgent, stopAgent, restartAgent, fireOrphanWarning, armOrphanWatch, clearOrphanWatch, recentSpawnCount, isSameRootLeader } =
+	await import(join(here, "..", "src", "agents.ts"));
 const { enqueueAndDeliver } = await import(join(here, "..", "src", "mailbox.ts"));
 const { paths, withLock, readState, writeState } = await import(join(here, "..", "src", "state.ts"));
 
@@ -42,20 +43,35 @@ const pi = {
 			if (fmt === "#{pane_current_command}") return { code: 0, stdout: "node\n", stderr: "" };
 			return { code: 0, stdout: "%99\n", stderr: "" };
 		}
-		if (sub === "capture-pane") return { code: 0, stdout: "", stderr: "" };            // empty pane probe
-		if (sub === "send-keys") { sentKeys.push(args.slice(1).join(" ")); return { code: 0, stdout: "", stderr: "" }; }
+		if (sub === "capture-pane") return { code: 0, stdout: "", stderr: "" }; // empty pane probe
+		if (sub === "send-keys") {
+			sentKeys.push(args.slice(1).join(" "));
+			return { code: 0, stdout: "", stderr: "" };
+		}
 		if (sub === "kill-window" || sub === "kill-pane") return { code: 0, stdout: "", stderr: "" };
 		if (sub === "has-session") return { code: 0, stdout: "", stderr: "" };
 		if (sub === "new-window" || sub === "new-session") return { code: 0, stdout: "", stderr: "" };
-		if (sub === "list-panes") return { code: 0, stdout: "0\n", stderr: "" };           // for pane-current-command probes
+		if (sub === "list-panes") return { code: 0, stdout: "0\n", stderr: "" }; // for pane-current-command probes
 		if (sub === "list-windows") return { code: 0, stdout: "", stderr: "" };
 		return { code: 1, stdout: "", stderr: "unknown tmux subcommand: " + sub };
 	},
-	registerTool: () => {}, registerCommand: () => {}, on: () => {}, sendMessage: () => {},
+	registerTool: () => {},
+	registerCommand: () => {},
+	on: () => {},
+	sendMessage: () => {},
 };
 
-let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n);
+	}
+};
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -65,9 +81,16 @@ const TIMER_MARGIN_MS = 250;
 const readEvents = (p) => {
 	const file = join(p, ".pi", "swarm", "traces", "events.jsonl");
 	if (!existsSync(file)) return [];
-	return readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => {
-		try { return JSON.parse(l); } catch { return {}; }
-	});
+	return readFileSync(file, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return {};
+			}
+		});
 };
 const eventNames = (events, name) => events.filter((e) => e?.event === name);
 
@@ -110,10 +133,25 @@ console.log("\n[1] Happy path: spawn then send within window -> cleared, NO orph
 		const st = await readState(p, cwd);
 		// Pre-seed the root pseudo-agent (enqueueAndDeliver keys `from = currentAgentId()`).
 		st.agents["root"] ||= {
-			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
-			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
-			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
-			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+			id: "root",
+			role: "PM",
+			roleKind: "root",
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 99,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
 		};
 		const r = await spawnAgent(pi, cwd, p, st, { id: "happy-1", role: "Worker", initialPrompt: "go" });
 		await writeState(p, st);
@@ -170,17 +208,35 @@ console.log("\n[3] Cancel via assignment: spawn then deliver_message -> cleared,
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		st.agents["root"] ||= {
-			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
-			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
-			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
-			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+			id: "root",
+			role: "PM",
+			roleKind: "root",
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 99,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
 		};
 		await spawnAgent(pi, cwd, p, st, { id: "assign-1", role: "Worker", initialPrompt: "go" });
 		await writeState(p, st);
 	});
 	// Deliver an "assignment" message — the body is irrelevant for this test.
 	await enqueueAndDeliver(pi, cwd, p, { to: "assign-1", body: "TASK ASSIGNMENT: do X", clearReason: "swarm_assign_task" });
-	ok("assign-1 removed from recentSpawns after assignment message", recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
+	ok(
+		"assign-1 removed from recentSpawns after assignment message",
+		recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0,
+	);
 	await wait(TIMER_MARGIN_MS);
 	const events = readEvents(cwd);
 	ok("agent.spawn.orphan_watch_start trace present", eventNames(events, "agent.spawn.orphan_watch_start").length === 1);
@@ -199,11 +255,25 @@ console.log("\n[4] Reuse path: pre-existing agent + restart -> NO orphan_watch_s
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		st.agents["reuse-1"] = {
-			id: "reuse-1", role: "Worker", roleKind: "implementer", roleKindExplicit: true,
-			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1, status: "stopped", runtimeStatus: "stopped",
-			health: "unhealthy", tmuxSession: "x", tmuxWindow: "reuse-1", tmuxTarget: "x:reuse-1.0",
-			model: "m", provider: "p", cwd, mailbox: "x",
-			createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+			id: "reuse-1",
+			role: "Worker",
+			roleKind: "implementer",
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 1,
+			status: "stopped",
+			runtimeStatus: "stopped",
+			health: "unhealthy",
+			tmuxSession: "x",
+			tmuxWindow: "reuse-1",
+			tmuxTarget: "x:reuse-1.0",
+			model: "m",
+			provider: "p",
+			cwd,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
 		};
 		await writeState(p, st);
 	});
@@ -217,7 +287,10 @@ console.log("\n[4] Reuse path: pre-existing agent + restart -> NO orphan_watch_s
 	});
 	const events = readEvents(cwd);
 	ok("reuse-1 NOT armed in recentSpawns", recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
-	ok("NO new agent.spawn.orphan_watch_start trace from restart", eventNames(events, "agent.spawn.orphan_watch_start").length === startBefore);
+	ok(
+		"NO new agent.spawn.orphan_watch_start trace from restart",
+		eventNames(events, "agent.spawn.orphan_watch_start").length === startBefore,
+	);
 	await wait(TIMER_MARGIN_MS);
 	ok("NO agent.spawn.orphan_warning trace from restart", eventNames(events, "agent.spawn.orphan_warning").length === 0);
 	rmSync(cwd, { recursive: true, force: true });
@@ -259,10 +332,25 @@ console.log("\n[6] Race backstop: message exists at fire time -> orphan_resolved
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		st.agents["root"] ||= {
-			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
-			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
-			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
-			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+			id: "root",
+			role: "PM",
+			roleKind: "root",
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 99,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
 		};
 		await spawnAgent(pi, cwd, p, st, { id: "race-1", role: "Worker", initialPrompt: "go" });
 		spawnedEntry = st.recentSpawns?.[0];
@@ -291,10 +379,25 @@ console.log("\n[7] Preflight clear: spawn + same-root assign within grace window
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		st.agents["root"] ||= {
-			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
-			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
-			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
-			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+			id: "root",
+			role: "PM",
+			roleKind: "root",
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 99,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
 		};
 		await spawnAgent(pi, cwd, p, st, { id: "preflight-1", role: "Worker", initialPrompt: "go" });
 		await writeState(p, st);
@@ -308,30 +411,32 @@ console.log("\n[7] Preflight clear: spawn + same-root assign within grace window
 	// B2 fix: loose shape assertion (matches [7a]'s style). The arm-time fallback ISO
 	// string and the test setup fallback ISO string are different timestamps; we only
 	// assert the field exists and is a non-empty ISO string.
-	ok("entry stamped with spawnedBySessionStartedAt (ISO string, non-empty)",
+	ok(
+		"entry stamped with spawnedBySessionStartedAt (ISO string, non-empty)",
 		typeof entry?.spawnedBySessionStartedAt === "string" &&
-		entry.spawnedBySessionStartedAt.length > 0 &&
-		!Number.isNaN(Date.parse(entry.spawnedBySessionStartedAt)));
+			entry.spawnedBySessionStartedAt.length > 0 &&
+			!Number.isNaN(Date.parse(entry.spawnedBySessionStartedAt)),
+	);
 	// B3 fix: re-anchor callerLeader from the actual entry stamp so the helper's
 	// positive-direction assertion doesn't depend on env-var preset. This matches
 	// test [8]'s pattern of deriving the comparison tuple from the real stamped
 	// value rather than from the test-setup fallback ISO.
 	const callerLeader = { pid: process.pid, sessionStartedAt: entry?.spawnedBySessionStartedAt };
-	ok("isSameRootLeader returns true for matching pid+sessionStartedAt",
-		isSameRootLeader(entry, callerLeader) === true);
+	ok("isSameRootLeader returns true for matching pid+sessionStartedAt", isSameRootLeader(entry, callerLeader) === true);
 	// Drive the pre-clear site directly.
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		await clearOrphanWatch(p, st, "preflight-1", "swarm_assign_task", "preflight");
 		await writeState(p, st);
 	});
-	ok("preflight-1 removed from recentSpawns after pre-clear",
-		recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
+	ok("preflight-1 removed from recentSpawns after pre-clear", recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
 	await wait(TIMER_MARGIN_MS); // 250ms >> 50ms timer
 	const events = readEvents(cwd);
 	ok("orphan_watch_start trace present", eventNames(events, "agent.spawn.orphan_watch_start").length === 1);
-	ok("orphan_cleared trace present (by swarm_assign_task, reason preflight)",
-		eventNames(events, "agent.spawn.orphan_cleared").length === 1);
+	ok(
+		"orphan_cleared trace present (by swarm_assign_task, reason preflight)",
+		eventNames(events, "agent.spawn.orphan_cleared").length === 1,
+	);
 	const cleared = eventNames(events, "agent.spawn.orphan_cleared")[0];
 	ok("orphan_cleared.by === swarm_assign_task", cleared?.by === "swarm_assign_task");
 	ok("orphan_cleared.reason === preflight", cleared?.reason === "preflight");
@@ -349,10 +454,25 @@ console.log("\n[7a] Preflight clear: spawn as root's first tool call (leader was
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		st.agents["root"] ||= {
-			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
-			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
-			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
-			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+			id: "root",
+			role: "PM",
+			roleKind: "root",
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 99,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
 		};
 		await spawnAgent(pi, cwd, p, st, { id: "preflight-vacant-1", role: "Worker", initialPrompt: "go" });
 		await writeState(p, st);
@@ -362,26 +482,26 @@ console.log("\n[7a] Preflight clear: spawn as root's first tool call (leader was
 		const st = await readState(p, cwd);
 		return st.recentSpawns?.find((s) => s.agentId === "preflight-vacant-1");
 	});
-	ok("entry stamped with spawnedByPid=process.pid despite vacant leader (C1 fix)",
-		entry?.spawnedByPid === process.pid);
-	ok("entry stamped with spawnedBySessionStartedAt despite vacant leader",
-		typeof entry?.spawnedBySessionStartedAt === "string" &&
-		entry.spawnedBySessionStartedAt.length > 0);
-	ok("isSameRootLeader returns true (same process, no leader needed)",
-		isSameRootLeader(entry, { pid: process.pid, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT }) === true);
+	ok("entry stamped with spawnedByPid=process.pid despite vacant leader (C1 fix)", entry?.spawnedByPid === process.pid);
+	ok(
+		"entry stamped with spawnedBySessionStartedAt despite vacant leader",
+		typeof entry?.spawnedBySessionStartedAt === "string" && entry.spawnedBySessionStartedAt.length > 0,
+	);
+	ok(
+		"isSameRootLeader returns true (same process, no leader needed)",
+		isSameRootLeader(entry, { pid: process.pid, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT }) === true,
+	);
 	// Drive the pre-clear site.
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		await clearOrphanWatch(p, st, "preflight-vacant-1", "swarm_assign_task", "preflight");
 		await writeState(p, st);
 	});
-	ok("entry removed after pre-clear",
-		recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
+	ok("entry removed after pre-clear", recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
 	await wait(TIMER_MARGIN_MS);
 	const events = readEvents(cwd);
 	ok("orphan_watch_start trace present", eventNames(events, "agent.spawn.orphan_watch_start").length === 1);
-	ok("orphan_cleared trace present (reason preflight)",
-		eventNames(events, "agent.spawn.orphan_cleared").length === 1);
+	ok("orphan_cleared trace present (reason preflight)", eventNames(events, "agent.spawn.orphan_cleared").length === 1);
 	const cleared = eventNames(events, "agent.spawn.orphan_cleared")[0];
 	ok("orphan_cleared.reason === preflight", cleared?.reason === "preflight");
 	ok("NO orphan_warning trace", eventNames(events, "agent.spawn.orphan_warning").length === 0);
@@ -393,16 +513,31 @@ console.log("\n[8] Cross-root assign does NOT pre-clear");
 	const cwd = freshScratch("cross-orch");
 	const p = paths(cwd);
 	const foreignLeader = {
-		pid: 999_001,                                            // DIFFERENT pid (foreign root)
+		pid: 999_001, // DIFFERENT pid (foreign root)
 		sessionStartedAt: new Date().toISOString(),
 	};
 	await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		st.agents["root"] ||= {
-			id: "root", role: "PM", roleKind: "root", roleKindExplicit: true,
-			capabilities: [], activeTaskIds: [], maxConcurrentTasks: 99, status: "running", runtimeStatus: "idle",
-			health: "healthy", tmuxSession: "x", tmuxWindow: "unknown", tmuxTarget: "unknown", model: "m", provider: "p",
-			cwd, mailbox: "x", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+			id: "root",
+			role: "PM",
+			roleKind: "root",
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 99,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
 		};
 		await spawnAgent(pi, cwd, p, st, { id: "cross-orch-1", role: "Worker", initialPrompt: "go" });
 		await writeState(p, st);
@@ -417,26 +552,20 @@ console.log("\n[8] Cross-root assign does NOT pre-clear");
 		}
 		await writeState(p, st);
 	});
-	ok("cross-orch-1 armed in recentSpawns",
-		recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 1);
+	ok("cross-orch-1 armed in recentSpawns", recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 1);
 	const entry = await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		return st.recentSpawns.find((s) => s.agentId === "cross-orch-1");
 	});
 	const callerLeader = { pid: process.pid, sessionStartedAt: process.env.PI_SWARM_SESSION_STARTED_AT || undefined };
-	ok("isSameRootLeader returns false for foreign pid",
-		isSameRootLeader(entry, callerLeader) === false);
+	ok("isSameRootLeader returns false for foreign pid", isSameRootLeader(entry, callerLeader) === false);
 	// N1 strengthening: also verify the helper returns true when caller DOES match.
-	ok("isSameRootLeader returns true when caller matches the stamp",
-		isSameRootLeader(entry, foreignLeader) === true);
+	ok("isSameRootLeader returns true when caller matches the stamp", isSameRootLeader(entry, foreignLeader) === true);
 	await wait(TIMER_MARGIN_MS);
 	const events = readEvents(cwd);
-	ok("orphan_warning fires (foreign root did not pre-clear)",
-		eventNames(events, "agent.spawn.orphan_warning").length === 1);
-	ok("NO orphan_cleared trace (foreign root cannot clear)",
-		eventNames(events, "agent.spawn.orphan_cleared").length === 0);
-	ok("recentSpawns cleared after warning fired",
-		recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
+	ok("orphan_warning fires (foreign root did not pre-clear)", eventNames(events, "agent.spawn.orphan_warning").length === 1);
+	ok("NO orphan_cleared trace (foreign root cannot clear)", eventNames(events, "agent.spawn.orphan_cleared").length === 0);
+	ok("recentSpawns cleared after warning fired", recentSpawnCount(await withLock(p, async () => readState(p, cwd))) === 0);
 	rmSync(cwd, { recursive: true, force: true });
 }
 

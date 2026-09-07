@@ -18,8 +18,17 @@ const { agentHeartbeatGCLocked } = await import(join(here, "..", "src/reconcile.
 const { sweepTaskWorkersLocked } = await import(join(here, "..", "src/taskgraph.ts"));
 const { paths, withLock, readState, writeState } = await import(join(here, "..", "src/state.ts"));
 
-let pass = 0, fail = 0;
-const ok = (name, cond, info) => { if (cond) { pass++; console.log("  ok  ", name); } else { fail++; console.error("  FAIL", name, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, info) => {
+	if (cond) {
+		pass++;
+		console.log("  ok  ", name);
+	} else {
+		fail++;
+		console.error("  FAIL", name, info ?? "");
+	}
+};
 
 const scratch = await mkdtemp(join(tmpdir(), `swarm-graveyard-${process.pid}-${Date.now()}`));
 await mkdir(join(scratch, ".pi", "swarm"), { recursive: true });
@@ -32,7 +41,17 @@ async function readStateFile() {
 }
 async function readEvents() {
 	const txt = await readFile(join(scratch, ".pi/swarm/traces/events.jsonl"), "utf8").catch(() => "");
-	return txt.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+	return txt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean);
 }
 async function clearEvents() {
 	await mkdir(join(scratch, ".pi/swarm/traces"), { recursive: true });
@@ -42,15 +61,28 @@ async function clearEvents() {
 function makeAgent(id, overrides = {}) {
 	const now = new Date().toISOString();
 	return {
-		id, role: "worker", roleKind: "worker", capabilities: [],
-		activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		lastHeartbeatAt: now, lastSessionStartAt: now, lastAgentStartAt: now,
+		id,
+		role: "worker",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		lastHeartbeatAt: now,
+		lastSessionStartAt: now,
+		lastAgentStartAt: now,
 		pid: 1000,
-		tmuxSession: "s", tmuxWindow: id, tmuxTarget: `s:${id}.0`,
-		model: "m", provider: "p", cwd: scratch,
+		tmuxSession: "s",
+		tmuxWindow: id,
+		tmuxTarget: `s:${id}.0`,
+		model: "m",
+		provider: "p",
+		cwd: scratch,
 		mailbox: `.pi/swarm/mailboxes/${id}.jsonl`,
-		createdAt: now, updatedAt: now,
+		createdAt: now,
+		updatedAt: now,
 		...overrides,
 	};
 }
@@ -85,7 +117,9 @@ console.log("\n[G1] 177-stopped-agents graveyard: heartbeat GC + sweep preserves
 	// Seed 177 stopped agents with old lastShutdownAt — the R9 a3 graveyard shape.
 	for (let i = 0; i < 177; i++) {
 		agents[`graveyard-${i}`] = makeAgent(`graveyard-${i}`, {
-			status: "stopped", runtimeStatus: "stopped", health: "unhealthy",
+			status: "stopped",
+			runtimeStatus: "stopped",
+			health: "unhealthy",
 			lastShutdownAt: oldShutdown,
 			tmuxAlive: false,
 		});
@@ -93,16 +127,25 @@ console.log("\n[G1] 177-stopped-agents graveyard: heartbeat GC + sweep preserves
 	// 3 running workers with valid reuse leases — should survive the GC.
 	for (let i = 0; i < 3; i++) {
 		agents[`leased-${i}`] = makeAgent(`leased-${i}`, {
-			status: "running", runtimeStatus: "idle", tmuxAlive: true,
-			leaseKind: "reuse", leaseUntil: new Date(now + 3_600_000).toISOString(),
+			status: "running",
+			runtimeStatus: "idle",
+			tmuxAlive: true,
+			leaseKind: "reuse",
+			leaseUntil: new Date(now + 3_600_000).toISOString(),
 			leaseReason: "reuse across tasks",
 			tmuxTarget: `s:leased-${i}.0`,
 		});
 	}
 	const state = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "s",
-		agents, delivered: {}, messages: {},
-		createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "s",
+		agents,
+		delivered: {},
+		messages: {},
+		createdAt: new Date(now).toISOString(),
+		updatedAt: new Date(now).toISOString(),
 	};
 	await writeStateFile(state);
 
@@ -148,29 +191,42 @@ console.log("\n[G2] bounded-set property: GC + sweep keeps state.agents small (r
 	// Plus some dead-pane agents the GC WILL flip.
 	for (let i = 0; i < 50; i++) {
 		agents[`stopped-${i}`] = makeAgent(`stopped-${i}`, {
-			status: "stopped", runtimeStatus: "stopped", health: "unhealthy",
+			status: "stopped",
+			runtimeStatus: "stopped",
+			health: "unhealthy",
 			lastShutdownAt: new Date(now - 3_600_000).toISOString(),
 		});
 	}
 	for (let i = 0; i < 10; i++) {
 		agents[`deadpane-${i}`] = makeAgent(`deadpane-${i}`, {
-			status: "running", runtimeStatus: "idle", tmuxAlive: false,
+			status: "running",
+			runtimeStatus: "idle",
+			tmuxAlive: false,
 			lastHeartbeatAt: new Date(now - 3_600_000).toISOString(), // stale enough for the cheap gate
 			tmuxTarget: `s:deadpane-${i}.0`,
 		});
 	}
 	for (let i = 0; i < 2; i++) {
 		agents[`leased-${i}`] = makeAgent(`leased-${i}`, {
-			status: "running", runtimeStatus: "idle", tmuxAlive: true,
-			leaseKind: "reuse", leaseUntil: new Date(now + 3_600_000).toISOString(),
+			status: "running",
+			runtimeStatus: "idle",
+			tmuxAlive: true,
+			leaseKind: "reuse",
+			leaseUntil: new Date(now + 3_600_000).toISOString(),
 			leaseReason: "reuse",
 			tmuxTarget: `s:leased-${i}.0`,
 		});
 	}
 	const state = {
-		version: 1, swarmId: "test", cwd: scratch, tmuxSession: "s",
-		agents, delivered: {}, messages: {},
-		createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
+		version: 1,
+		swarmId: "test",
+		cwd: scratch,
+		tmuxSession: "s",
+		agents,
+		delivered: {},
+		messages: {},
+		createdAt: new Date(now).toISOString(),
+		updatedAt: new Date(now).toISOString(),
 	};
 	await writeStateFile(state);
 

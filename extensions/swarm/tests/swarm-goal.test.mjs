@@ -24,8 +24,12 @@ rmSync(scratch, { recursive: true, force: true });
 const tools = {};
 const commands = {};
 const pi = {
-	registerTool: (def) => { tools[def.name] = def; },
-	registerCommand: (name, def) => { commands[name] = def.handler; },
+	registerTool: (def) => {
+		tools[def.name] = def;
+	},
+	registerCommand: (name, def) => {
+		commands[name] = def.handler;
+	},
 	on: () => {},
 	sendMessage: () => {},
 	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
@@ -35,23 +39,50 @@ const { registerSwarmCommand } = await import(join(here, "..", "src", "command.t
 registerSwarmCommand(pi);
 
 const call = async (name, params, cwd = scratch) => {
-	const t = tools[name]; if (!t) throw new Error("no tool " + name);
+	const t = tools[name];
+	if (!t) throw new Error("no tool " + name);
 	return t.execute("call", params, undefined, undefined, { cwd });
 };
 const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
 const readSwarmState = () => JSON.parse(readFileSync(statePath, "utf8"));
 const writeSwarmState = (st) => writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
 
-let pass = 0, fail = 0;
-const ok = (n, c, info) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL", n, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c, info) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL", n, info ?? "");
+	}
+};
 const throws = async (n, p, matcher) => {
-	try { await p; fail++; console.error("  FAIL", n, "(did not throw)"); }
-	catch (err) { if (matcher && !matcher.test(String(err?.message || err))) { fail++; console.error("  FAIL", n, `(threw but did not match /${matcher}/: ${err?.message}`); } else { pass++; console.log("  ok  ", n); } }
+	try {
+		await p;
+		fail++;
+		console.error("  FAIL", n, "(did not throw)");
+	} catch (err) {
+		if (matcher && !matcher.test(String(err?.message || err))) {
+			fail++;
+			console.error("  FAIL", n, `(threw but did not match /${matcher}/: ${err?.message}`);
+		} else {
+			pass++;
+			console.log("  ok  ", n);
+		}
+	}
 };
 
 const AGENT_ID = process.env.PI_SWARM_AGENT_ID;
-const restoreAgentId = () => { if (AGENT_ID === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = AGENT_ID; };
-const setAgentId = (id) => { if (id === undefined) delete process.env.PI_SWARM_AGENT_ID; else process.env.PI_SWARM_AGENT_ID = id; };
+const restoreAgentId = () => {
+	if (AGENT_ID === undefined) delete process.env.PI_SWARM_AGENT_ID;
+	else process.env.PI_SWARM_AGENT_ID = AGENT_ID;
+};
+const setAgentId = (id) => {
+	if (id === undefined) delete process.env.PI_SWARM_AGENT_ID;
+	else process.env.PI_SWARM_AGENT_ID = id;
+};
 
 // First, seed an empty state so subsequent reads have a file to work with.
 {
@@ -106,7 +137,11 @@ console.log("\n[2] swarm_set_goal replaces existing goal (resets counter, clears
 	// replacement INHERITS the prior goal's nudgeIntervalMs (was: fell back to default 5s). This is the
 	// fix — pre-fix this let a single text-only replacement silently reset a tuned cadence and emit
 	// 3 nudges in 15s. See swarm-goal.test.mjs [14] for the new test coverage + regression matrix.
-	ok("existing interval INHERITS on text-only replace (Issue 85 bug #1)", after.nudgeIntervalMs === 25000, `actual=${after.nudgeIntervalMs}`);
+	ok(
+		"existing interval INHERITS on text-only replace (Issue 85 bug #1)",
+		after.nudgeIntervalMs === 25000,
+		`actual=${after.nudgeIntervalMs}`,
+	);
 	ok("goal.id is different from previous (replacement, not idempotency)", r.details.goalId !== st.goal.id);
 }
 
@@ -129,14 +164,31 @@ console.log("\n[5] authority gate: non-root swarm_set_goal throws ROOT_AUTHORITY
 	// write a worker agent record (otherwise readState has no worker to find — but the gate fires before state reads)
 	const st = readSwarmState();
 	st.agents["worker-1"] = {
-		id: "worker-1", role: "worker", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		tmuxSession: st.tmuxSession, tmuxWindow: "worker-1", tmuxTarget: "unknown",
-		model: "glm-5.1", provider: "zai-coding-cn", cwd: scratch, mailbox: "mailboxes/worker-1.jsonl",
-		createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+		id: "worker-1",
+		role: "worker",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: st.tmuxSession,
+		tmuxWindow: "worker-1",
+		tmuxTarget: "unknown",
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: scratch,
+		mailbox: "mailboxes/worker-1.jsonl",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
 	};
 	writeSwarmState(st);
-	await throws("worker swarm_set_goal throws ROOT_AUTHORITY_REQUIRED", call("swarm_set_goal", { text: "should fail", cwd: scratch }), /ROOT_AUTHORITY_REQUIRED/);
+	await throws(
+		"worker swarm_set_goal throws ROOT_AUTHORITY_REQUIRED",
+		call("swarm_set_goal", { text: "should fail", cwd: scratch }),
+		/ROOT_AUTHORITY_REQUIRED/,
+	);
 	ok("worker swarm_set_goal did not mutate state.goal", readSwarmState().goal.id === "my-explicit-goal");
 	setAgentId("root");
 }
@@ -174,7 +226,11 @@ console.log("\n[9] authority gate: non-root swarm_mark_goal_done throws");
 	// Set a goal first as root.
 	await call("swarm_set_goal", { text: "authority-mark-done-test", cwd: scratch });
 	setAgentId("worker-1");
-	await throws("worker swarm_mark_goal_done throws ROOT_AUTHORITY_REQUIRED", call("swarm_mark_goal_done", { cwd: scratch }), /ROOT_AUTHORITY_REQUIRED/);
+	await throws(
+		"worker swarm_mark_goal_done throws ROOT_AUTHORITY_REQUIRED",
+		call("swarm_mark_goal_done", { cwd: scratch }),
+		/ROOT_AUTHORITY_REQUIRED/,
+	);
 	ok("worker swarm_mark_goal_done did NOT mutate state", !!readSwarmState().goal);
 	setAgentId("root");
 	await call("swarm_mark_goal_done", { cwd: scratch }); // cleanup
@@ -210,7 +266,17 @@ console.log("\n[11] /swarm goal set -i parses human time and goal show/status su
 	process.env.PI_SWARM_AGENT_ID = "root";
 	process.env.PI_SWARM_IS_ROOT = "1";
 	const notifications = [];
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		ui: {
+			notify: (text) => {
+				notifications.push(text);
+			},
+		},
+		hasUI: true,
+	};
 	{
 		// a1 F1 regression: plain `goal set <text>` (no -i) must persist the resolver default (5s)
 		// and never hit an undefined fallback arm.
@@ -237,7 +303,17 @@ console.log("\n[12] /swarm goal set --interval alias and invalid values");
 	process.env.PI_SWARM_AGENT_ID = "root";
 	process.env.PI_SWARM_IS_ROOT = "1";
 	const notifications = [];
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		ui: {
+			notify: (text) => {
+				notifications.push(text);
+			},
+		},
+		hasUI: true,
+	};
 	await commands.swarm("goal set --interval 900000 alias test", ctx);
 	ok("long alias persists raw ms", readSwarmState().goal.nudgeIntervalMs === 900000);
 	await commands.swarm("goal done", ctx);
@@ -246,7 +322,12 @@ console.log("\n[12] /swarm goal set --interval alias and invalid values");
 	await commands.swarm("goal done", ctx);
 	notifications.length = 0;
 	await commands.swarm("goal set -i 0 bad", ctx);
-	ok("invalid zero interval rejected", /Usage: \/swarm goal set \[-i\|--interval <time>\]/.test(notifications.join("\n")) && /invalid interval/i.test(notifications.join("\n")), notifications.join("\n"));
+	ok(
+		"invalid zero interval rejected",
+		/Usage: \/swarm goal set \[-i\|--interval <time>\]/.test(notifications.join("\n")) &&
+			/invalid interval/i.test(notifications.join("\n")),
+		notifications.join("\n"),
+	);
 	notifications.length = 0;
 	await commands.swarm("goal set -i garbage bad", ctx);
 	ok("garbage interval rejected", /invalid interval/i.test(notifications.join("\n")), notifications.join("\n"));
@@ -257,7 +338,17 @@ console.log("\n[13] /swarm goal update preserves goalId and counters, and swarm_
 	process.env.PI_SWARM_AGENT_ID = "root";
 	process.env.PI_SWARM_IS_ROOT = "1";
 	const notifications = [];
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		ui: {
+			notify: (text) => {
+				notifications.push(text);
+			},
+		},
+		hasUI: true,
+	};
 	await commands.swarm("goal set -i 45s initial update test", ctx);
 	const seeded = readSwarmState().goal;
 	seeded.consecutiveNoResolveNudges = 4;
@@ -293,7 +384,17 @@ console.log("\n[14] swarm_set_goal inherits prior intervalMs on replace (Issue 8
 	process.env.PI_SWARM_AGENT_ID = "root";
 	process.env.PI_SWARM_IS_ROOT = "1";
 	const notifications = [];
-	const ctx = { cwd: scratch, mode: "tui", isIdle: () => true, ui: { notify: (text) => { notifications.push(text); } }, hasUI: true };
+	const ctx = {
+		cwd: scratch,
+		mode: "tui",
+		isIdle: () => true,
+		ui: {
+			notify: (text) => {
+				notifications.push(text);
+			},
+		},
+		hasUI: true,
+	};
 	// Clear any leftover goal from previous sections.
 	await commands.swarm("goal done", ctx);
 	notifications.length = 0;
@@ -304,7 +405,11 @@ console.log("\n[14] swarm_set_goal inherits prior intervalMs on replace (Issue 8
 
 	// 2. Replace via tool with text only (no intervalMs). MUST inherit 600_000.
 	await call("swarm_set_goal", { text: "Goal B", cwd: scratch });
-	ok("step2: tool replace without interval INHERITS prior 600_000ms", readSwarmState().goal.nudgeIntervalMs === 600_000, `actual=${readSwarmState().goal.nudgeIntervalMs}`);
+	ok(
+		"step2: tool replace without interval INHERITS prior 600_000ms",
+		readSwarmState().goal.nudgeIntervalMs === 600_000,
+		`actual=${readSwarmState().goal.nudgeIntervalMs}`,
+	);
 
 	// 3. Replace again with explicit interval. MUST override (no inheritance).
 	await call("swarm_set_goal", { text: "Goal C", intervalMs: 30_000, cwd: scratch });
@@ -314,7 +419,11 @@ console.log("\n[14] swarm_set_goal inherits prior intervalMs on replace (Issue 8
 	await commands.swarm("goal done", ctx);
 	await call("swarm_set_goal", { text: "Goal D", intervalMs: 600_000, cwd: scratch });
 	await commands.swarm("goal set Goal E", ctx); // command-path replace, no -i
-	ok("step4a: command replace without -i INHERITS prior 600_000ms", readSwarmState().goal.nudgeIntervalMs === 600_000, `actual=${readSwarmState().goal.nudgeIntervalMs}`);
+	ok(
+		"step4a: command replace without -i INHERITS prior 600_000ms",
+		readSwarmState().goal.nudgeIntervalMs === 600_000,
+		`actual=${readSwarmState().goal.nudgeIntervalMs}`,
+	);
 
 	// 5. Replace via /swarm goal set -i explicit. MUST override.
 	await commands.swarm("goal set -i 30s Goal F", ctx);
@@ -326,11 +435,23 @@ console.log("\n[14] swarm_set_goal inherits prior intervalMs on replace (Issue 8
 	await call("swarm_set_goal", { text: "Trace B", cwd: scratch }); // inherit
 	await call("swarm_set_goal", { text: "Trace C", intervalMs: 9000, cwd: scratch }); // override
 	const eventsTxt = readFileSync(join(scratch, ".pi", "swarm", "traces", "events.jsonl"), "utf8");
-	const allSets = eventsTxt.split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.event === "goal.set" && e.via === "tool");
+	const allSets = eventsTxt
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => JSON.parse(l))
+		.filter((e) => e.event === "goal.set" && e.via === "tool");
 	const inheritSet = allSets[allSets.length - 2]; // second-to-last: the inherit one (Trace B)
-	ok("step6a: goal.set trace on inherit carries inheritedIntervalMs: 600_000", inheritSet?.inheritedIntervalMs === 600_000, JSON.stringify(inheritSet));
+	ok(
+		"step6a: goal.set trace on inherit carries inheritedIntervalMs: 600_000",
+		inheritSet?.inheritedIntervalMs === 600_000,
+		JSON.stringify(inheritSet),
+	);
 	const overrideSet = allSets[allSets.length - 1]; // last: the override one (Trace C)
-	ok("step6b: goal.set trace on override carries inheritedIntervalMs: null", overrideSet?.inheritedIntervalMs === null, JSON.stringify(overrideSet));
+	ok(
+		"step6b: goal.set trace on override carries inheritedIntervalMs: null",
+		overrideSet?.inheritedIntervalMs === null,
+		JSON.stringify(overrideSet),
+	);
 
 	// 7. /swarm goal update (text change with no -i) keeps current interval unchanged (NOT a fresh set).
 	await commands.swarm("goal done", ctx);

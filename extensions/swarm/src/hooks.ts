@@ -4,14 +4,41 @@ import { join, dirname, relative, sep } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import type { MessageResponseStatus, Paths } from "./types.ts";
-import { SETTLE_NOTIFY_COOLDOWN_MS, SWARM_GUEST_ID, PUMP_SESSION_ID_CAP, NOTIFY_KEY_SETTLE_STALE, ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, formatNotifyKey } from "./constants.ts";
+import {
+	SETTLE_NOTIFY_COOLDOWN_MS,
+	SWARM_GUEST_ID,
+	PUMP_SESSION_ID_CAP,
+	NOTIFY_KEY_SETTLE_STALE,
+	ENGINE_MAX_RETRIES,
+	ENGINE_RETRY_WINDOW_MS,
+	formatNotifyKey,
+} from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isRootSession } from "./session.ts";
 import type { ModelSlot } from "./types.ts";
 import { classifyProviderError, scrubErrorIdentity, type EngineRetryIncident } from "./types.ts";
 import { pickSlot, recordProviderError, recordSlotSuccess, slotKey, validateSwarmSettings } from "./pool.ts";
-import { deliverMessageLocked, findIdempotentMessage, readMailbox, responseMissingRecords, unackedRequiresAckRecords, upsertMessageRecord } from "./mailbox.ts";
+import {
+	deliverMessageLocked,
+	findIdempotentMessage,
+	readMailbox,
+	responseMissingRecords,
+	unackedRequiresAckRecords,
+	upsertMessageRecord,
+} from "./mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
-import { ensureDirs, identityPath, mailboxPath, paths, readState, readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "./state.ts";
+import {
+	ensureDirs,
+	identityPath,
+	mailboxPath,
+	paths,
+	readState,
+	readTaskState,
+	taskPaths,
+	trace,
+	withLock,
+	writeState,
+	writeTaskState,
+} from "./state.ts";
 import { ensureRoot, heartbeatRootLeader, readRootLeader } from "./identity.ts";
 import { formatSwarmMessageContent, parseSystemDelivery } from "./delivery.ts";
 import { pumpRootMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
@@ -191,9 +218,15 @@ function armRootPumpWatchdog(ctx: any) {
 		// Clear the handle that fired this tick — we are about to schedule the next one.
 		rootMailboxTimer = undefined;
 		if (!rootPumpCtxFresh) return; // stop() or stale-ctx already disabled us
-		if (currentAgentId() !== "root") { rootPumpCtxFresh = false; return; }
+		if (currentAgentId() !== "root") {
+			rootPumpCtxFresh = false;
+			return;
+		}
 		const myCtx = rootPumpCtx;
-		if (!myCtx) { rootPumpCtxFresh = false; return; }
+		if (!myCtx) {
+			rootPumpCtxFresh = false;
+			return;
+		}
 		if (rootMailboxPumpRunning) {
 			// Re-arm even if a tick is already running (do not stall the chain).
 			rootMailboxTimer = setTimeout(tick, ROOT_PUMP_INTERVAL_MS);
@@ -215,17 +248,27 @@ function armRootPumpWatchdog(ctx: any) {
 			const code = String((err && err.code) || "");
 			const isStaleCtx = /stale after session/i.test(msg);
 			const isLeaderDenied = msg.startsWith("ROOT_LEADER_DENIED");
-			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) ||
-							  /EACCES|ENOSPC|EROFS/.test(msg);
+			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) || /EACCES|ENOSPC|EROFS/.test(msg);
 			if (isStaleCtx) {
 				stopRootPump();
-				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.root_pump_stale_stopped", { reason: "watchdog", error: msg }).catch(() => {});
+				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.root_pump_stale_stopped", { reason: "watchdog", error: msg }).catch(
+					() => {},
+				);
 			} else if (isLeaderDenied || isIoTransient) {
-				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.root_pump_transient", { reason: "watchdog", kind: isLeaderDenied ? "leader_denied" : "io", code, error: msg }).catch(() => {});
+				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.root_pump_transient", {
+					reason: "watchdog",
+					kind: isLeaderDenied ? "leader_denied" : "io",
+					code,
+					error: msg,
+				}).catch(() => {});
 				// keep the chain alive — schedule the next tick
 			} else {
 				stopRootPump();
-				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.root_pump_error", { reason: "watchdog", error: msg, stale: false }).catch(() => {});
+				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.root_pump_error", {
+					reason: "watchdog",
+					error: msg,
+					stale: false,
+				}).catch(() => {});
 			}
 		} finally {
 			rootMailboxPumpRunning = false;
@@ -250,7 +293,13 @@ export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, 
 	try {
 		if (existsSync(p.events) && statSync(p.events).size >= DEFAULT_TRACE_ROTATE_BYTES && !traceRotationInFlight) {
 			traceRotationInFlight = true;
-			void maybeRotateTraces(p, {}).catch((err: any) => trace(p, "trace.retention.rotate_error", { reason, error: String((err as Error)?.message || err) }).catch(() => {})).finally(() => { traceRotationInFlight = false; });
+			void maybeRotateTraces(p, {})
+				.catch((err: any) =>
+					trace(p, "trace.retention.rotate_error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}),
+				)
+				.finally(() => {
+					traceRotationInFlight = false;
+				});
 		}
 	} catch (err: any) {
 		await trace(p, "trace.retention.rotate_probe_error", { reason, error: String((err as Error)?.message || err) }).catch(() => {});
@@ -281,12 +330,15 @@ export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, 
 		const m = msgs.find((x) => x.id === result.ids[i]);
 		if (!m) continue;
 		// A requiresAck message is action-expected: trigger a real turn so the agent acts, not just sees.
-		pi.sendMessage({
-			customType: "swarm-message",
-			content: formatSwarmMessageContent(m),
-			display: true,
-			details: m,
-		}, i === 0 && idleAtStart ? { triggerTurn: true } : { deliverAs: "followUp" });
+		pi.sendMessage(
+			{
+				customType: "swarm-message",
+				content: formatSwarmMessageContent(m),
+				display: true,
+				details: m,
+			},
+			i === 0 && idleAtStart ? { triggerTurn: true } : { deliverAs: "followUp" },
+		);
 		delivered++;
 	}
 	await trace(p, "mailbox.agent_surface", { agentId, reason, count: delivered, ids: result.ids, idleAtStart });
@@ -352,8 +404,7 @@ export async function startRootPump(ctx: any, reason = "session_start") {
 			const code = String((err && err.code) || "");
 			const isStaleCtx = /stale after session/i.test(msg);
 			const isLeaderDenied = msg.startsWith("ROOT_LEADER_DENIED");
-			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) ||
-							  /EACCES|ENOSPC|EROFS/.test(msg);
+			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) || /EACCES|ENOSPC|EROFS/.test(msg);
 			if (isStaleCtx) {
 				// SAME ctx caused the throw; re-arming would busy-loop. The ONLY correct recovery is the
 				// next session_start (which fires per hooks.ts) with a fresh ctx. Stop and wait.
@@ -361,13 +412,20 @@ export async function startRootPump(ctx: any, reason = "session_start") {
 				await trace(p, "mailbox.root_pump_stale_stopped", { reason, error: msg }).catch(() => {});
 			} else if (isLeaderDenied || isIoTransient) {
 				// Don't stop the timer: the next watchdog tick retries. Trace for visibility.
-				await trace(p, "mailbox.root_pump_transient", { reason, kind: isLeaderDenied ? "leader_denied" : "io", code, error: msg }).catch(() => {});
+				await trace(p, "mailbox.root_pump_transient", {
+					reason,
+					kind: isLeaderDenied ? "leader_denied" : "io",
+					code,
+					error: msg,
+				}).catch(() => {});
 			} else {
 				// Unknown error class: stop (preserved safe default).
 				stopRootPump();
 				await trace(p, "mailbox.root_pump_error", { reason, error: msg, stale: false }).catch(() => {});
 			}
-		} finally { rootMailboxPumpRunning = false; }
+		} finally {
+			rootMailboxPumpRunning = false;
+		}
 	};
 	await run(reason);
 	if (ctx.mode === "tui") armRootPumpWatchdog(ctx);
@@ -397,7 +455,10 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		// never decays). Only "stop" counts — toolUse turns continue within the same agent loop and
 		// would over-credit; aborted/error are handled below.
 		if (msg.stopReason === "stop") {
-			const okSlot: ModelSlot = { model: String(msg.model || ctx.model?.id || ""), provider: String(msg.provider || ctx.model?.provider || "") || undefined };
+			const okSlot: ModelSlot = {
+				model: String(msg.model || ctx.model?.id || ""),
+				provider: String(msg.provider || ctx.model?.provider || "") || undefined,
+			};
 			if (okSlot.model) await recordSlotSuccess(p, okSlot).catch(() => {});
 			// Issue 17: a successful turn after a burst of engine retries means the engine RECOVERED.
 			// Clear any open incident for this agent so the next failure starts a fresh observation.
@@ -406,7 +467,11 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			if (engineRetryIncidents.has(agentId)) {
 				const incident = engineRetryIncidents.get(agentId);
 				engineRetryIncidents.delete(agentId);
-				await trace(p, "pool.engine_retry_recovered", { agentId, providerKey: incident?.providerKey, count: incident?.count ?? 0 }).catch(() => {});
+				await trace(p, "pool.engine_retry_recovered", {
+					agentId,
+					providerKey: incident?.providerKey,
+					count: incident?.count ?? 0,
+				}).catch(() => {});
 			}
 			return;
 		}
@@ -430,7 +495,10 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			await trace(p, "pool.swap_chain_capped", { agentId, count: chain.count, kind, error: errorText.slice(0, 120) }).catch(() => {});
 			return;
 		}
-		const currentSlot: ModelSlot = { model: String(msg.model || ctx.model?.id || ""), provider: String(msg.provider || ctx.model?.provider || "") || undefined };
+		const currentSlot: ModelSlot = {
+			model: String(msg.model || ctx.model?.id || ""),
+			provider: String(msg.provider || ctx.model?.provider || "") || undefined,
+		};
 		if (!currentSlot.model) return;
 		// === Issue 17: engine-retry gate ===
 		// The pi engine retries a failed provider request up to ENGINE_MAX_RETRIES times with
@@ -453,11 +521,13 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		const prevIncident = engineRetryIncidents.get(agentId);
 		let engineExhausted = false;
 		let incidentCount = 1;
-		if (prevIncident
-			&& prevIncident.providerKey === providerKey
-			&& prevIncident.kind === kind
-			&& prevIncident.errorMessage === scrubErr
-			&& (nowMs - prevIncident.lastSeenAt) <= ENGINE_RETRY_WINDOW_MS) {
+		if (
+			prevIncident &&
+			prevIncident.providerKey === providerKey &&
+			prevIncident.kind === kind &&
+			prevIncident.errorMessage === scrubErr &&
+			nowMs - prevIncident.lastSeenAt <= ENGINE_RETRY_WINDOW_MS
+		) {
 			prevIncident.count++;
 			prevIncident.lastSeenAt = nowMs;
 			incidentCount = prevIncident.count;
@@ -513,27 +583,49 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		// sharing the same model id (gpt-5.4-mini exists on several providers), landing on one with
 		// no API key and a swap_failed every error turn. A pool slot without a resolvable provider is
 		// a config error; trace it clearly instead of guessing.
-		const target = picked.slot.provider
-			? ctx.modelRegistry?.find?.(picked.slot.provider, picked.slot.model)
-			: undefined;
+		const target = picked.slot.provider ? ctx.modelRegistry?.find?.(picked.slot.provider, picked.slot.model) : undefined;
 		if (!target) {
-			await trace(p, "pool.swap_model_not_found", { agentId, slot: slotKey(picked.slot), reason: picked.reason, hint: picked.slot.provider ? "model not registered under the slot's provider" : "pool slot has no explicit provider; add one in settings.json modelPool" }).catch(() => {});
+			await trace(p, "pool.swap_model_not_found", {
+				agentId,
+				slot: slotKey(picked.slot),
+				reason: picked.reason,
+				hint: picked.slot.provider
+					? "model not registered under the slot's provider"
+					: "pool slot has no explicit provider; add one in settings.json modelPool",
+			}).catch(() => {});
 			return;
 		}
 		const okSwap = await pi.setModel(target).catch(() => false);
-		if (okSwap) { bumpSwapChain(agentId, nowMs); }
+		if (okSwap) {
+			bumpSwapChain(agentId, nowMs);
+		}
 		// Issue 22: record role-filter context on every auto-swap so dashboards can tell whether
 		// the swap honored the agent's roleKind constraint or fell back.
-		const swapTrace = { agentId, from: slotKey(currentSlot), to: slotKey(picked.slot), kind, reason: picked.reason, target: `${target.provider}/${target.id}`, roleKind: roleKind ?? null, rolesFilterMatched: picked.slot.roles === undefined || picked.slot.roles.length === 0 || (typeof roleKind === "string" && picked.slot.roles.includes(roleKind)) };
+		const swapTrace = {
+			agentId,
+			from: slotKey(currentSlot),
+			to: slotKey(picked.slot),
+			kind,
+			reason: picked.reason,
+			target: `${target.provider}/${target.id}`,
+			roleKind: roleKind ?? null,
+			rolesFilterMatched:
+				picked.slot.roles === undefined ||
+				picked.slot.roles.length === 0 ||
+				(typeof roleKind === "string" && picked.slot.roles.includes(roleKind)),
+		};
 		await trace(p, okSwap ? "pool.swap" : "pool.swap_failed", swapTrace).catch(() => {});
 		if (okSwap) {
 			// Tell the agent (and the transcript) what happened so it can retry the failed work
-		// knowing it now runs on a different model.
-			pi.sendMessage({
-				customType: "swarm-message",
-				content: `[PI-SWARM MODEL POOL] The previous turn failed with a ${kind} error from ${slotKey(currentSlot)} (${errorText.slice(0, 160)}). That slot was benched and this session was switched to ${slotKey(picked.slot)} in-place. Continue your current task — your context and mailbox are intact.`,
-				display: true,
-			}, ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" });
+			// knowing it now runs on a different model.
+			pi.sendMessage(
+				{
+					customType: "swarm-message",
+					content: `[PI-SWARM MODEL POOL] The previous turn failed with a ${kind} error from ${slotKey(currentSlot)} (${errorText.slice(0, 160)}). That slot was benched and this session was switched to ${slotKey(picked.slot)} in-place. Continue your current task — your context and mailbox are intact.`,
+					display: true,
+				},
+				ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" },
+			);
 		}
 	});
 
@@ -568,7 +660,9 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				idleState.lastEpochBusyAgents = ["root"];
 				delete idleState.allIdleSinceAt;
 				delete idleState.nextGoalNudgeAt;
-				await trace(p, "idle.epoch.reset", { reason: "root_busy", previousAllIdleSinceAt: prev, busyAgents: ["root"] }).catch(() => {});
+				await trace(p, "idle.epoch.reset", { reason: "root_busy", previousAllIdleSinceAt: prev, busyAgents: ["root"] }).catch(
+					() => {},
+				);
 				await writeState(p, st);
 			});
 		} catch (err: any) {
@@ -698,33 +792,53 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 					// sessions) the notify is skipped but the file write + flag stamp still happen, so a later
 					// TUI session_start correctly sees the flag set and stays quiet.
 					if (ctx.hasUI && result.notify) {
-						try { ctx.ui.notify(result.notify, "info"); } catch { /* notify is best-effort */ }
+						try {
+							ctx.ui.notify(result.notify, "info");
+						} catch {
+							/* notify is best-effort */
+						}
 					}
 				}
 			} catch (err: any) {
 				await trace(p, "pool.scaffold_error", { error: String((err as Error)?.message || err) }).catch(() => {});
 			}
-		// === Follow-up F3 (2026-09-05): launch-time pool health warning ===
-		// The PM launches a session whose spawn pool may be entirely dead (unresolvable models /
-		// missing credentials). Surfacing that NOW beats discovering it at the first spawn failure.
-		// Uses the live registry probe when available; without one, only structural checks run.
-		// Degrades silently (never blocks session_start); traced as pool.launch_health.
-		try {
-			const validation = validateSwarmSettings(ctx.cwd, { registryProbe: ctx.modelRegistry as any });
-			if (!validation.ok) {
-				const lines = [`Swarm pool config has ${validation.errors.length} issue(s) — /swarm pool validate for details:`];
-				for (const e of validation.errors.slice(0, 3)) lines.push(`  \u2717 ${e.field || "config"}: ${e.message}`);
-				if (validation.errors.length > 3) lines.push(`  … and ${validation.errors.length - 3} more`);
-				if (ctx.hasUI) { try { ctx.ui.notify(lines.join("\n"), "warning"); } catch { /* best-effort */ } }
-				await trace(p, "pool.launch_health", { ok: false, errors: validation.errors.length, warnings: validation.warnings.length }).catch(() => {});
-			} else if (validation.warnings.length && ctx.hasUI) {
-				// Advisory-only: surface the first warning (e.g. both_sources_present / swarm_yml_empty)
-				// once at launch so the operator knows which file is actually in effect.
-				const w = validation.warnings[0];
-				try { ctx.ui.notify(`Swarm pool: ${w.message}`, "warning"); } catch { /* best-effort */ }
-				await trace(p, "pool.launch_health", { ok: true, errors: 0, warnings: validation.warnings.length }).catch(() => {});
+			// === Follow-up F3 (2026-09-05): launch-time pool health warning ===
+			// The PM launches a session whose spawn pool may be entirely dead (unresolvable models /
+			// missing credentials). Surfacing that NOW beats discovering it at the first spawn failure.
+			// Uses the live registry probe when available; without one, only structural checks run.
+			// Degrades silently (never blocks session_start); traced as pool.launch_health.
+			try {
+				const validation = validateSwarmSettings(ctx.cwd, { registryProbe: ctx.modelRegistry as any });
+				if (!validation.ok) {
+					const lines = [`Swarm pool config has ${validation.errors.length} issue(s) — /swarm pool validate for details:`];
+					for (const e of validation.errors.slice(0, 3)) lines.push(`  \u2717 ${e.field || "config"}: ${e.message}`);
+					if (validation.errors.length > 3) lines.push(`  … and ${validation.errors.length - 3} more`);
+					if (ctx.hasUI) {
+						try {
+							ctx.ui.notify(lines.join("\n"), "warning");
+						} catch {
+							/* best-effort */
+						}
+					}
+					await trace(p, "pool.launch_health", {
+						ok: false,
+						errors: validation.errors.length,
+						warnings: validation.warnings.length,
+					}).catch(() => {});
+				} else if (validation.warnings.length && ctx.hasUI) {
+					// Advisory-only: surface the first warning (e.g. both_sources_present / swarm_yml_empty)
+					// once at launch so the operator knows which file is actually in effect.
+					const w = validation.warnings[0];
+					try {
+						ctx.ui.notify(`Swarm pool: ${w.message}`, "warning");
+					} catch {
+						/* best-effort */
+					}
+					await trace(p, "pool.launch_health", { ok: true, errors: 0, warnings: validation.warnings.length }).catch(() => {});
+				}
+			} catch {
+				/* launch-health check must never break session_start */
 			}
-		} catch { /* launch-health check must never break session_start */ }
 		}
 		const ts = now();
 		await withLock(p, async () => {
@@ -751,18 +865,36 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				} catch (err: any) {
 					// A non-leader root session_start must NOT crash the session; trace + skip the
 					// pump install (handled at startRootPump preflight below).
-					await trace(p, "session.root_denied", { agentId, callerPid: process.pid, error: String((err as Error)?.message || err) }).catch(() => {});
+					await trace(p, "session.root_denied", {
+						agentId,
+						callerPid: process.pid,
+						error: String((err as Error)?.message || err),
+					}).catch(() => {});
 				}
 				await writeState(p, st);
 			} else if (!st.agents[agentId]) {
 				st.agents[agentId] = {
-					id: agentId, role: "Externally started swarm agent", status: "running",
-					roleKind: inferRoleKind(agentId, "Externally started swarm agent"), capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-					runtimeStatus: "starting", health: "healthy",
-					lastSessionStartAt: ts, lastAgentStartAt: ts, pid: process.pid,
-					tmuxSession: st.tmuxSession, tmuxWindow: agentId, tmuxTarget: "unknown",
-					model: currentModel(), provider: currentProvider(), cwd: ctx.cwd,
-					mailbox: relative(ctx.cwd, mailboxPath(p, agentId)), createdAt: ts, updatedAt: ts,
+					id: agentId,
+					role: "Externally started swarm agent",
+					status: "running",
+					roleKind: inferRoleKind(agentId, "Externally started swarm agent"),
+					capabilities: [],
+					activeTaskIds: [],
+					maxConcurrentTasks: 1,
+					runtimeStatus: "starting",
+					health: "healthy",
+					lastSessionStartAt: ts,
+					lastAgentStartAt: ts,
+					pid: process.pid,
+					tmuxSession: st.tmuxSession,
+					tmuxWindow: agentId,
+					tmuxTarget: "unknown",
+					model: currentModel(),
+					provider: currentProvider(),
+					cwd: ctx.cwd,
+					mailbox: relative(ctx.cwd, mailboxPath(p, agentId)),
+					createdAt: ts,
+					updatedAt: ts,
 				};
 				await writeState(p, st);
 			} else if (st.agents[agentId]) {
@@ -774,7 +906,11 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				st.agents[agentId].pid = process.pid;
 				st.agents[agentId].updatedAt = ts;
 				await writeState(p, st);
-				await trace(p, "agent.status", { agentId, runtimeStatus: st.agents[agentId].runtimeStatus, health: st.agents[agentId].health });
+				await trace(p, "agent.status", {
+					agentId,
+					runtimeStatus: st.agents[agentId].runtimeStatus,
+					health: st.agents[agentId].health,
+				});
 			}
 		});
 		if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${agentId}`);
@@ -787,10 +923,16 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			// Mailbox is the source of truth; tmux injection stays as an opportunistic fast-path.
 			try {
 				await surfaceAgentPending(pi, ctx, p, agentId, "session_start");
-			// Re-check on settle: a message may have arrived (or a failed injection skipped) while the
-			// agent was busy; settling idle is the natural moment to catch up.
-			// (hook registered below; the surface here covers the startup gap)
-			} catch (err: any) { await trace(p, "agent.surface_error", { agentId, phase: "session_start", error: String((err as Error)?.message || err) }).catch(() => {}); }
+				// Re-check on settle: a message may have arrived (or a failed injection skipped) while the
+				// agent was busy; settling idle is the natural moment to catch up.
+				// (hook registered below; the surface here covers the startup gap)
+			} catch (err: any) {
+				await trace(p, "agent.surface_error", {
+					agentId,
+					phase: "session_start",
+					error: String((err as Error)?.message || err),
+				}).catch(() => {});
+			}
 		}
 	});
 
@@ -815,7 +957,6 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			systemPrompt: `${event.systemPrompt}\n\nPi Swarm identity: you are agent \`${agentId}\` (${agent.role}). Your durable role card is \`${identityRel}\`. Follow it as your agent-specific AGENT.md. Use swarm tools for peer coordination.`,
 		};
 	});
-
 
 	pi.on("agent_start", async (_event, ctx) => {
 		const agentId = currentAgentId();
@@ -859,7 +1000,9 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			return;
 		}
 		// Catch-up surface for workers: anything unacked that arrived (or failed injection) while busy.
-		try { await surfaceAgentPending(pi, ctx, paths(ctx.cwd), agentId, "agent_settled"); } catch {}
+		try {
+			await surfaceAgentPending(pi, ctx, paths(ctx.cwd), agentId, "agent_settled");
+		} catch {}
 		const p = paths(ctx.cwd);
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
@@ -880,14 +1023,29 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				// settling agent). Fence at emit time using durable message state — no pane liveness inference.
 				const liveMissing = missingResponses.filter((rec) => !rec.superseded && rec.to === agentId);
 				if (liveMissing.length === 0) {
-					await trace(p, "notification.stale.suppressed", { site: "agent_settled.response_missing", agentId, reason: "all_recs_superseded_or_drifted", dropped: missingResponses.map((m) => m.id) });
+					await trace(p, "notification.stale.suppressed", {
+						site: "agent_settled.response_missing",
+						agentId,
+						reason: "all_recs_superseded_or_drifted",
+						dropped: missingResponses.map((m) => m.id),
+					});
 				} else {
 					for (const rec of liveMissing) {
-						rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: "missing", missingAt: rec.response?.missingAt || ts, lastError: `response_missing: ${agentId} settled before sending a verified result` };
+						rec.response = {
+							...(rec.response || { status: "missing" as MessageResponseStatus }),
+							status: "missing",
+							missingAt: rec.response?.missingAt || ts,
+							lastError: `response_missing: ${agentId} settled before sending a verified result`,
+						};
 						rec.updatedAt = ts;
 					}
 					try {
-						await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "root", subject: `agent ${agentId} settled with missing response(s)`, body: `Agent ${agentId} settled while ${liveMissing.length} requiresResponse message(s) are still missing verified result messages: ${liveMissing.map((m) => m.id).join(", ")}. The agent is marked response_missing and is blocked from reuse until it sends replies and ack done with resultMessageId.`, requiresAck: false });
+						await deliverMessageLocked(pi, ctx.cwd, p, st, {
+							to: "root",
+							subject: `agent ${agentId} settled with missing response(s)`,
+							body: `Agent ${agentId} settled while ${liveMissing.length} requiresResponse message(s) are still missing verified result messages: ${liveMissing.map((m) => m.id).join(", ")}. The agent is marked response_missing and is blocked from reuse until it sends replies and ack done with resultMessageId.`,
+							requiresAck: false,
+						});
 						await trace(p, "message.response_missing.settled.notify", { agentId, messageIds: liveMissing.map((m) => m.id) });
 					} catch (err: any) {
 						await trace(p, "message.response_missing.notify_failed", { agentId, error: String(err?.message || err) });
@@ -904,7 +1062,9 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			// which is the worker in this hook context — the correct author for the notify.
 			const ackDebt = unackedRequiresAckRecords(st, agentId);
 			if (ackDebt.length) {
-				const sinceAckDebt = agent.lastAckDebtNotifyAt ? Date.now() - new Date(agent.lastAckDebtNotifyAt).getTime() : Number.POSITIVE_INFINITY;
+				const sinceAckDebt = agent.lastAckDebtNotifyAt
+					? Date.now() - new Date(agent.lastAckDebtNotifyAt).getTime()
+					: Number.POSITIVE_INFINITY;
 				if (sinceAckDebt > SETTLE_NOTIFY_COOLDOWN_MS) {
 					const sortedIds = [...ackDebt.map((r) => r.id)].sort();
 					const hash = createHash("sha1").update(sortedIds.join("|")).digest("hex").slice(0, 8);
@@ -936,15 +1096,22 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			// mutation. requiresAck=false (informational; root pump surfaces it). Done before
 			// writeState so the notify record persists atomically with the settle metadata.
 			if (agent.activeTaskIds.length) {
-				const sinceNotify = agent.lastSettleNotifyAt ? Date.now() - new Date(agent.lastSettleNotifyAt).getTime() : Number.POSITIVE_INFINITY;
+				const sinceNotify = agent.lastSettleNotifyAt
+					? Date.now() - new Date(agent.lastSettleNotifyAt).getTime()
+					: Number.POSITIVE_INFINITY;
 				if (sinceNotify > SETTLE_NOTIFY_COOLDOWN_MS) {
 					let list = agent.activeTaskIds.join(", ");
 					let openCount = agent.activeTaskIds.length;
 					let open: Awaited<ReturnType<typeof scanAgentOpenAssignments>> = [];
 					try {
 						open = await scanAgentOpenAssignments(p, st, agentId, agent.activeTaskIds);
-						if (open.length) { list = open.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", "); openCount = open.length; }
-					} catch { /* keep activeTaskIds fallback list */ }
+						if (open.length) {
+							list = open.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
+							openCount = open.length;
+						}
+					} catch {
+						/* keep activeTaskIds fallback list */
+					}
 					// Lifecycle-fencing (issue 9, site 2): per-node staleness check on every entry from
 					// scanAgentOpenAssignments. A node that has since become terminal / reassigned / closed
 					// must not produce a settle-stale notify. Per-(task,agent) dedupe key prevents repeated
@@ -953,12 +1120,24 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 					for (const entry of open) {
 						const staleCheck = checkStallNotificationStale(st, entry.task, entry.nodeId, agentId, Date.now());
 						if (staleCheck.stale) {
-							await trace(p, "notification.stale.suppressed", { site: "agent_settled.open_assignment", agentId, taskId: entry.task.taskId, nodeId: entry.nodeId, reason: staleCheck.reason, evidence: staleCheck.evidence });
+							await trace(p, "notification.stale.suppressed", {
+								site: "agent_settled.open_assignment",
+								agentId,
+								taskId: entry.task.taskId,
+								nodeId: entry.nodeId,
+								reason: staleCheck.reason,
+								evidence: staleCheck.evidence,
+							});
 							continue;
 						}
 						const key = formatNotifyKey(NOTIFY_KEY_SETTLE_STALE, { taskId: entry.task.taskId, agentId });
 						if (findIdempotentMessage(st, "root", "root", key)) {
-							await trace(p, "task.stale.settled.notify_cooldown", { agentId, taskId: entry.task.taskId, cooldownMs: SETTLE_NOTIFY_COOLDOWN_MS, key });
+							await trace(p, "task.stale.settled.notify_cooldown", {
+								agentId,
+								taskId: entry.task.taskId,
+								cooldownMs: SETTLE_NOTIFY_COOLDOWN_MS,
+								key,
+							});
 							continue;
 						}
 						liveOpen.push(entry);
@@ -966,13 +1145,23 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 					if (liveOpen.length === 0) {
 						// Every open entry is stale or deduped — do NOT send a settle-stale notify at all.
 						// No lastSettleNotifyAt stamp (so a real fresh open next settle is still allowed).
-						await trace(p, "notification.stale.suppressed", { site: "agent_settled.open_assignment", agentId, reason: "all_open_stale_or_deduped", scanned: open.length });
+						await trace(p, "notification.stale.suppressed", {
+							site: "agent_settled.open_assignment",
+							agentId,
+							reason: "all_open_stale_or_deduped",
+							scanned: open.length,
+						});
 					} else {
 						agent.lastSettleNotifyAt = ts;
 						const list2 = liveOpen.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
 						const openCount2 = liveOpen.length;
 						try {
-							await deliverMessageLocked(pi, ctx.cwd, p, st, { to: "root", subject: `agent ${agentId} settled idle with open assignment(s)`, body: `Agent ${agentId} settled (agent_settled) while still holding ${openCount2} open assignment(s): ${list2}. It may be idle or stalled; advance via swarm_next_nodes/swarm_update_task, reassign, or reconcile as needed.`, requiresAck: false });
+							await deliverMessageLocked(pi, ctx.cwd, p, st, {
+								to: "root",
+								subject: `agent ${agentId} settled idle with open assignment(s)`,
+								body: `Agent ${agentId} settled (agent_settled) while still holding ${openCount2} open assignment(s): ${list2}. It may be idle or stalled; advance via swarm_next_nodes/swarm_update_task, reassign, or reconcile as needed.`,
+								requiresAck: false,
+							});
 							await trace(p, "task.stale.settled.notify", { agentId, open: openCount2 });
 						} catch (err: any) {
 							await trace(p, "task.stale.settled.notify_failed", { agentId, error: String(err?.message || err) });
@@ -1040,7 +1229,11 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		// inner try/catch is wrapped in a test (C9) that asserts the durable side-effect; if the
 		// wrapped body throws, C9 fails loudly instead of silently no-opping.
 		{
-			const _ids = await withLock(p, async () => { const st = await readState(p, ctx.cwd); const a = st.agents[agentId]; return a?.activeTaskIds ?? []; });
+			const _ids = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const a = st.agents[agentId];
+				return a?.activeTaskIds ?? [];
+			});
 			for (const taskId of _ids) {
 				try {
 					const tp = taskPaths(p, taskId);
@@ -1052,7 +1245,9 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 						if (ensureNodeActivityStamp(task, nodeId, ts, agentId)) dirty = true;
 					}
 					if (dirty) await writeTaskState(tp, task).catch(() => {});
-				} catch { /* no progress stamp on this task; the agent may not be bound to it */ }
+				} catch {
+					/* no progress stamp on this task; the agent may not be bound to it */
+				}
 			}
 		}
 	});
@@ -1078,7 +1273,10 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			if (!agent) return;
 			// pid-guard: only the owning process may mark this agent stopped. A transient process sharing
 			// the agentId (e.g. `pi --mode print`) must not poison a live agent's record.
-			if (agent.pid && agent.pid !== process.pid) { await trace(p, "agent.shutdown.skip_pid_guard", { agentId, ownerPid: agent.pid, callerPid: process.pid }); return; }
+			if (agent.pid && agent.pid !== process.pid) {
+				await trace(p, "agent.shutdown.skip_pid_guard", { agentId, ownerPid: agent.pid, callerPid: process.pid });
+				return;
+			}
 			const ts = now();
 			agent.lastShutdownAt = ts;
 			agent.runtimeStatus = "stopped";
@@ -1098,27 +1296,50 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				for (const entry of open) {
 					const staleCheck = checkStallNotificationStale(st, entry.task, entry.nodeId, agentId, nowMs);
 					if (staleCheck.stale) {
-						await trace(p, "notification.stale.suppressed", { site: "session_shutdown.open_node", agentId, taskId: entry.task.taskId, nodeId: entry.nodeId, reason: staleCheck.reason, evidence: staleCheck.evidence });
+						await trace(p, "notification.stale.suppressed", {
+							site: "session_shutdown.open_node",
+							agentId,
+							taskId: entry.task.taskId,
+							nodeId: entry.nodeId,
+							reason: staleCheck.reason,
+							evidence: staleCheck.evidence,
+						});
 						continue;
 					}
 					liveOpen.push(entry);
 				}
-				for (const { task, tp, nodeId } of liveOpen) { task.nodes[nodeId].staleAt = ts; task.nodes[nodeId].lastActivityAt = ts; await writeTaskState(tp, task); }
+				for (const { task, tp, nodeId } of liveOpen) {
+					task.nodes[nodeId].staleAt = ts;
+					task.nodes[nodeId].lastActivityAt = ts;
+					await writeTaskState(tp, task);
+				}
 				if (liveOpen.length) {
-					await trace(p, "task.stale.shutdown", { agentId, open: liveOpen.map((o) => ({ taskId: o.task.taskId, nodeId: o.nodeId })) });
+					await trace(p, "task.stale.shutdown", {
+						agentId,
+						open: liveOpen.map((o) => ({ taskId: o.task.taskId, nodeId: o.nodeId })),
+					});
 					const list = liveOpen.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
 					// Nudge the reassignment authority: prefer each open node's assigner (replyTarget, from its
 					// latest `assign` handoff `by`) when registered and not this dying agent; else root
 					// (mailbox-only). Stamps node.lastActivityAt so the shutdown itself is recorded as activity.
 					const nudgeTargets = new Set<string>();
 					for (const { task, nodeId } of liveOpen) {
-						const assigner = [...task.handoffs].reverse().find((h: any) => h?.toNode === nodeId && h?.kind === "assign")?.by as string | undefined;
+						const assigner = [...task.handoffs].reverse().find((h: any) => h?.toNode === nodeId && h?.kind === "assign")?.by as
+							string | undefined;
 						if (assigner && assigner !== agentId && st.agents[assigner]) nudgeTargets.add(assigner);
 						else nudgeTargets.add("root");
 					}
 					for (const target of nudgeTargets) {
-						try { await deliverMessageLocked(pi, ctx.cwd, p, st, { to: target, subject: `agent ${agentId} shut down with open task node(s)`, body: `Agent ${agentId} shut down (session_shutdown) while still assigned ${liveOpen.length} non-terminal node(s): ${list}. Those nodes were marked stale (staleAt) and lastActivityAt stamped. Reassign via swarm_assign_task or reconcile as needed.`, requiresAck: false }); }
-						catch (err: any) { await trace(p, "task.stale.shutdown.nudge_failed", { agentId, target, error: String(err?.message || err) }); }
+						try {
+							await deliverMessageLocked(pi, ctx.cwd, p, st, {
+								to: target,
+								subject: `agent ${agentId} shut down with open task node(s)`,
+								body: `Agent ${agentId} shut down (session_shutdown) while still assigned ${liveOpen.length} non-terminal node(s): ${list}. Those nodes were marked stale (staleAt) and lastActivityAt stamped. Reassign via swarm_assign_task or reconcile as needed.`,
+								requiresAck: false,
+							});
+						} catch (err: any) {
+							await trace(p, "task.stale.shutdown.nudge_failed", { agentId, target, error: String(err?.message || err) });
+						}
 					}
 				}
 			}
@@ -1137,7 +1358,13 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			upsertMessageRecord(st, msg, "intercepted", { interceptedAt: now() });
 			await writeState(p, st);
 		});
-		await trace(p, "message.input_intercept", { id: msg.id, from: msg.from, to: msg.to, agentId: currentAgentId(), status: "intercepted" });
+		await trace(p, "message.input_intercept", {
+			id: msg.id,
+			from: msg.from,
+			to: msg.to,
+			agentId: currentAgentId(),
+			status: "intercepted",
+		});
 
 		const isHigh = msg.priority === "high";
 		const midTurn = !ctx.isIdle();
@@ -1160,7 +1387,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				// turn in the TUI sense, and rate-limiting would block legitimate nudges.
 				const self = me === "root" ? undefined : st.agents[me];
 				lastInterruptAt = self?.lastHighInterruptAt;
-				if (lastInterruptAt && (Date.now() - new Date(lastInterruptAt).getTime()) < WINDOW_MS) {
+				if (lastInterruptAt && Date.now() - new Date(lastInterruptAt).getTime() < WINDOW_MS) {
 					allowed = false;
 				} else if (self) {
 					self.lastHighInterruptAt = new Date().toISOString();
@@ -1171,17 +1398,25 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 
 			if (!allowed) {
 				await trace(p, "message.interrupt_suppressed", {
-					id: msg.id, from: msg.from, to: msg.to, agentId: me,
-					reason: "rate_limited", windowMs: WINDOW_MS, lastInterruptAt,
+					id: msg.id,
+					from: msg.from,
+					to: msg.to,
+					agentId: me,
+					reason: "rate_limited",
+					windowMs: WINDOW_MS,
+					lastInterruptAt,
 				}).catch(() => {});
 				// Still queue as followUp so the message is consumed at the next-turn boundary — just
 				// don't burn an extra interrupt budget on the second directive.
-				pi.sendMessage({
-					customType: "swarm-message",
-					content: formatSwarmMessageContent(msg),
-					display: true,
-					details: msg,
-				}, { triggerTurn: true, deliverAs: "followUp" });
+				pi.sendMessage(
+					{
+						customType: "swarm-message",
+						content: formatSwarmMessageContent(msg),
+						display: true,
+						details: msg,
+					},
+					{ triggerTurn: true, deliverAs: "followUp" },
+				);
 				return { action: "handled" };
 			}
 
@@ -1191,30 +1426,41 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				await ctx.abort();
 				interruptEffective = true;
 			} catch (err) {
-				await trace(p, "message.interrupt_failed", { id: msg.id, from: msg.from, to: msg.to, agentId: me, error: String((err as Error)?.message || err) }).catch(() => {});
+				await trace(p, "message.interrupt_failed", {
+					id: msg.id,
+					from: msg.from,
+					to: msg.to,
+					agentId: me,
+					error: String((err as Error)?.message || err),
+				}).catch(() => {});
 				// Graceful degrade: still queue the message as followUp so it lands at the next-turn
 				// boundary even if the abort itself failed (matches the manual-Escape fallback pattern).
 			}
 			if (interruptEffective) {
 				await trace(p, "message.interrupt_effective", { id: msg.id, from: msg.from, to: msg.to, agentId: me }).catch(() => {});
 			}
-			pi.sendMessage({
-				customType: "swarm-message",
-				content: formatSwarmMessageContent(msg),
-				display: true,
-				details: msg,
-			}, { triggerTurn: true, deliverAs: "followUp" });
+			pi.sendMessage(
+				{
+					customType: "swarm-message",
+					content: formatSwarmMessageContent(msg),
+					display: true,
+					details: msg,
+				},
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
 			return { action: "handled" };
 		}
 
 		// === Existing behavior (preserved verbatim) ===
-		pi.sendMessage({
-			customType: "swarm-message",
-			content: formatSwarmMessageContent(msg),
-			display: true,
-			details: msg,
-		}, { triggerTurn: true, deliverAs: ctx.isIdle() ? "steer" : "followUp" });
+		pi.sendMessage(
+			{
+				customType: "swarm-message",
+				content: formatSwarmMessageContent(msg),
+				display: true,
+				details: msg,
+			},
+			{ triggerTurn: true, deliverAs: ctx.isIdle() ? "steer" : "followUp" },
+		);
 		return { action: "handled" };
 	});
-
 }

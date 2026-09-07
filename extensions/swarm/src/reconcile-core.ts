@@ -15,30 +15,59 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Paths, ReconcileAction, SwarmState, TaskState } from "./types.ts";
-import { ACK_MISSING_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, REINJECT_AFTER_MS, TASK_NUDGE_MS, TASK_STALE_MS } from "./constants.ts";
+import {
+	ACK_MISSING_MS,
+	MAX_ATTEMPTS,
+	MAX_CONSECUTIVE_NUDGES_DEFAULT,
+	MAX_REINJECTS,
+	MAX_STATUS_TASKS,
+	REINJECT_AFTER_MS,
+	TASK_NUDGE_MS,
+	TASK_STALE_MS,
+} from "./constants.ts";
 import { ensureAgentDefaults, humanAge, now } from "./utils.ts";
 import { computeTaskStatus } from "./taskgraph.ts";
 import { claimRootLeader, ensureRoot, heartbeatRootLeader, requireRootAuthority } from "./identity.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { currentAgentId } from "./session.ts";
-import { deliver, deriveLifecycleFromTrigger, findIdempotentMessage, isResponseTrackingActive, readMailbox, upsertMessageRecord } from "./mailbox.ts";
+import {
+	deliver,
+	deriveLifecycleFromTrigger,
+	findIdempotentMessage,
+	isResponseTrackingActive,
+	readMailbox,
+	upsertMessageRecord,
+} from "./mailbox.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { deriveNodeAttention } from "./taskgraph.ts";
 import { pumpRootMailbox } from "./surface.ts";
 
-
-export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState, options: { dryRun?: boolean; mark?: boolean; nowMs: number }): Promise<ReconcileAction[]> {
+export async function reconcileTasks(
+	pi: ExtensionAPI,
+	p: Paths,
+	st: SwarmState,
+	options: { dryRun?: boolean; mark?: boolean; nowMs: number },
+): Promise<ReconcileAction[]> {
 	const actions: ReconcileAction[] = [];
 	if (!existsSync(p.tasksDir)) return actions;
 	let entries: string[] = [];
-	try { entries = await readdir(p.tasksDir); } catch { return actions; }
+	try {
+		entries = await readdir(p.tasksDir);
+	} catch {
+		return actions;
+	}
 	for (const entry of entries) {
 		const taskId = entry;
 		const tp = taskPaths(p, taskId);
 		if (!existsSync(tp.taskJson)) continue;
 		let task: TaskState;
-		try { task = await readTaskState(tp.taskJson); } catch { actions.push({ messageId: taskId, action: "task_skip", reason: `unreadable task.json for ${taskId}`, taskId }); continue; }
+		try {
+			task = await readTaskState(tp.taskJson);
+		} catch {
+			actions.push({ messageId: taskId, action: "task_skip", reason: `unreadable task.json for ${taskId}`, taskId });
+			continue;
+		}
 		let dirty = false;
 		const storedClosed = task.status === "done" || task.status === "failed" || task.status === "cancelled";
 		const derived = computeTaskStatus(task);
@@ -52,7 +81,12 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 				actions.push({ messageId: taskId, action: "task_status_repaired", reason: `stored ${prev} -> derived ${derived}`, taskId });
 				await traceTask(tp, "task.reconcile.repair", { taskId, prev, derived });
 			} else {
-				actions.push({ messageId: taskId, action: "task_status_drift", reason: `stored ${task.status} but nodes derive ${derived} (pass mark=true to repair)`, taskId });
+				actions.push({
+					messageId: taskId,
+					action: "task_status_drift",
+					reason: `stored ${task.status} but nodes derive ${derived} (pass mark=true to repair)`,
+					taskId,
+				});
 			}
 		}
 		// Only non-terminal tasks can have live stale/nudge signals.
@@ -63,12 +97,24 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 		for (const [nodeId, node] of Object.entries(task.nodes)) {
 			if (node.status !== "assigned" && node.status !== "in_progress") continue;
 			if (!node.activeAttemptId || !Array.isArray(node.attemptHistory)) {
-				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_ownership_legacy", reason: `active node ${nodeId} has no attempt ownership metadata (legacy task; first new assignment bootstraps the lease schema)`, taskId, nodeId });
+				actions.push({
+					messageId: `${taskId}/${nodeId}`,
+					action: "task_node_ownership_legacy",
+					reason: `active node ${nodeId} has no attempt ownership metadata (legacy task; first new assignment bootstraps the lease schema)`,
+					taskId,
+					nodeId,
+				});
 				continue;
 			}
 			const attempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
 			if (attempt && attempt.status === "active" && !attempt.scope) {
-				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_ownership_legacy", reason: `active attempt ${attempt.attemptId} has no stamped write scope (pre-policy lease; scope re-resolves live at preflight)`, taskId, nodeId });
+				actions.push({
+					messageId: `${taskId}/${nodeId}`,
+					action: "task_node_ownership_legacy",
+					reason: `active attempt ${attempt.attemptId} has no stamped write scope (pre-policy lease; scope re-resolves live at preflight)`,
+					taskId,
+					nodeId,
+				});
 			}
 		}
 		for (const [nodeId, node] of Object.entries(task.nodes)) {
@@ -78,8 +124,10 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 			const agent = node.assignee ? st.agents[node.assignee] : undefined;
 			if (agent) {
 				ensureAgentDefaults(agent);
-				if (agent.status === "stopped" || agent.health === "unhealthy") staleReasons.push(`assignee ${agent.id} ${agent.status}/${agent.health}`);
-				else if (agent.tmuxTarget && agent.tmuxTarget !== "unknown" && !(await isTmuxRunning(pi, agent.tmuxTarget))) staleReasons.push(`assignee ${agent.id} tmux pane not alive`);
+				if (agent.status === "stopped" || agent.health === "unhealthy")
+					staleReasons.push(`assignee ${agent.id} ${agent.status}/${agent.health}`);
+				else if (agent.tmuxTarget && agent.tmuxTarget !== "unknown" && !(await isTmuxRunning(pi, agent.tmuxTarget)))
+					staleReasons.push(`assignee ${agent.id} tmux pane not alive`);
 			} else if (node.assignee && node.assignee !== "root") {
 				staleReasons.push(`assignee ${node.assignee} missing from state`);
 			}
@@ -90,10 +138,17 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 			}
 			for (const msgId of node.messageIds || []) {
 				const rec = st.messages[msgId];
-				if (!rec) { staleReasons.push(`references missing message ${msgId}`); continue; }
+				if (!rec) {
+					staleReasons.push(`references missing message ${msgId}`);
+					continue;
+				}
 				if (rec.status === "dead_letter") staleReasons.push(`assignment message ${msgId} dead-lettered`);
 				else if (rec.requiresAck && !rec.ackedAt && !st.consumerReceipts?.root?.entries?.[msgId]) {
-					const sinceMs = Math.max(rec.injectedAt ? new Date(rec.injectedAt).getTime() : 0, rec.interceptedAt ? new Date(rec.interceptedAt).getTime() : 0, rec.createdAt ? new Date(rec.createdAt).getTime() : 0);
+					const sinceMs = Math.max(
+						rec.injectedAt ? new Date(rec.injectedAt).getTime() : 0,
+						rec.interceptedAt ? new Date(rec.interceptedAt).getTime() : 0,
+						rec.createdAt ? new Date(rec.createdAt).getTime() : 0,
+					);
 					if (options.nowMs - sinceMs > ACK_MISSING_MS) nudgeReasons.push(`assignment message ${msgId} ack_missing`);
 				}
 			}
@@ -102,16 +157,38 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 				// the pointer names the one explicit root surface that can.
 				const att = deriveNodeAttention(st, task, nodeId, options.nowMs);
 				if (att.workerReminderEligible) {
-					actions.push({ messageId: `${taskId}/${nodeId}`, action: "reminder_eligible", reason: `${att.evidence.join("; ")}; one bounded reminder may be sent via /swarm remind ${taskId} ${nodeId} (root-only, informational)`, taskId, nodeId });
+					actions.push({
+						messageId: `${taskId}/${nodeId}`,
+						action: "reminder_eligible",
+						reason: `${att.evidence.join("; ")}; one bounded reminder may be sent via /swarm remind ${taskId} ${nodeId} (root-only, informational)`,
+						taskId,
+						nodeId,
+					});
 				}
 				continue;
 			}
 			if (staleReasons.length) {
-				if (!options.dryRun && !node.staleAt) { node.staleAt = now(); dirty = true; await traceTask(tp, "task.stale.reconcile", { taskId, nodeId, assignee: node.assignee, reasons: staleReasons }); }
-				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_stale", reason: staleReasons.join("; "), taskId, nodeId });
+				if (!options.dryRun && !node.staleAt) {
+					node.staleAt = now();
+					dirty = true;
+					await traceTask(tp, "task.stale.reconcile", { taskId, nodeId, assignee: node.assignee, reasons: staleReasons });
+				}
+				actions.push({
+					messageId: `${taskId}/${nodeId}`,
+					action: "task_node_stale",
+					reason: staleReasons.join("; "),
+					taskId,
+					nodeId,
+				});
 			} else {
 				if (!options.dryRun) await traceTask(tp, "task.nudge", { taskId, nodeId, assignee: node.assignee, reasons: nudgeReasons });
-				actions.push({ messageId: `${taskId}/${nodeId}`, action: "task_node_nudge", reason: nudgeReasons.join("; "), taskId, nodeId });
+				actions.push({
+					messageId: `${taskId}/${nodeId}`,
+					action: "task_node_nudge",
+					reason: nudgeReasons.join("; "),
+					taskId,
+					nodeId,
+				});
 			}
 		}
 		if (!options.dryRun && dirty) await writeTaskState(tp, task);
@@ -119,7 +196,12 @@ export async function reconcileTasks(pi: ExtensionAPI, p: Paths, st: SwarmState,
 	return actions;
 }
 
-export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options: { agentId?: string; dryRun?: boolean; mark?: boolean; offset?: number }) {
+export async function reconcile(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	options: { agentId?: string; dryRun?: boolean; mark?: boolean; offset?: number },
+) {
 	const result = await withLock(p, async () => {
 		const st = await readState(p, cwd);
 		if (options.mark) requireRootAuthority(currentAgentId(), "swarm_reconcile(mark=true)");
@@ -132,21 +214,43 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 			if (isResponseTrackingActive(rec) && rec.response?.status !== "verified" && rec.response?.status !== "waived") {
 				const agent = st.agents[rec.to];
 				if (!options.dryRun) {
-					rec.response = { ...(rec.response || { status: "missing" as MessageResponseStatus }), status: rec.response?.status === "sent" ? "sent" : "missing", missingAt: rec.response?.missingAt || now(), lastError: `response_missing: awaiting verified result from ${rec.to}` };
+					rec.response = {
+						...(rec.response || { status: "missing" as MessageResponseStatus }),
+						status: rec.response?.status === "sent" ? "sent" : "missing",
+						missingAt: rec.response?.missingAt || now(),
+						lastError: `response_missing: awaiting verified result from ${rec.to}`,
+					};
 					rec.updatedAt = now();
-					if (agent && agent.runtimeStatus === "idle") { agent.runtimeStatus = "response_missing"; agent.updatedAt = now(); }
+					if (agent && agent.runtimeStatus === "idle") {
+						agent.runtimeStatus = "response_missing";
+						agent.updatedAt = now();
+					}
 				}
-				actions.push({ messageId: msgId, action: "response_missing", reason: `Message requires a verified response from ${rec.to}` });
+				actions.push({
+					messageId: msgId,
+					action: "response_missing",
+					reason: `Message requires a verified response from ${rec.to}`,
+				});
 				continue;
 			}
 			if (rec.status === "acked") continue;
 			if (targetAgentId && rec.to !== targetAgentId) continue;
-			if (rec.status !== "queued" && rec.status !== "failed" && rec.status !== "mailbox_delivered" && rec.status !== "injected" && rec.status !== "intercepted") continue;
+			if (
+				rec.status !== "queued" &&
+				rec.status !== "failed" &&
+				rec.status !== "mailbox_delivered" &&
+				rec.status !== "injected" &&
+				rec.status !== "intercepted"
+			)
+				continue;
 
 			const ageMs = nowMs - new Date(rec.createdAt).getTime();
 			const expired = rec.ttlMs !== undefined ? ageMs > rec.ttlMs : false;
 			const maxAttempts = rec.attempts >= MAX_ATTEMPTS;
-			const actionable = Boolean((rec.requiresAck && !rec.ackedAt) || (rec.requiresResponse && rec.response?.status !== "verified" && rec.response?.status !== "waived"));
+			const actionable = Boolean(
+				(rec.requiresAck && !rec.ackedAt) ||
+				(rec.requiresResponse && rec.response?.status !== "verified" && rec.response?.status !== "waived"),
+			);
 			const agent = st.agents[rec.to];
 			const hasTmuxPane = Boolean(agent?.tmuxTarget) && agent.tmuxTarget !== "unknown";
 			const agentRunning = agent?.status === "running" && hasTmuxPane ? await isTmuxRunning(pi, agent.tmuxTarget!) : false;
@@ -160,7 +264,13 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 			// NEVER dead-letters (proposal §C binding — the deadline sweep is a scheduler, not an
 			// enforcer); NEVER overwrites a pre-existing terminalAt. Runs INSIDE the same withLock
 			// the reconcile tick already holds — no nested lock.
-			if (!options.dryRun && typeof rec.responseDeadlineMs === "number" && rec.responseDeadlineMs > 0 && ageMs > rec.responseDeadlineMs && !rec.terminalAt) {
+			if (
+				!options.dryRun &&
+				typeof rec.responseDeadlineMs === "number" &&
+				rec.responseDeadlineMs > 0 &&
+				ageMs > rec.responseDeadlineMs &&
+				!rec.terminalAt
+			) {
 				if (PI_SWARM_MINIMAL_PROTOCOL === 1) {
 					const d = deriveLifecycleFromTrigger(rec, { kind: "deadline_exceeded", deadlineMs: rec.responseDeadlineMs });
 					if (d.kind === "set") {
@@ -170,18 +280,27 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 						rec.lifecycleSource = d.source;
 						rec.updatedAt = now();
 						await trace(p, TRACE_LIFECYCLE_DERIVED, {
-							messageId: msgId, from: rec.from, to: rec.to,
-							field: d.field, source: d.source, stage: d.stage,
-							deadlineMs: rec.responseDeadlineMs, ageMs,
-							gate: 1, reason: d.reason,
+							messageId: msgId,
+							from: rec.from,
+							to: rec.to,
+							field: d.field,
+							source: d.source,
+							stage: d.stage,
+							deadlineMs: rec.responseDeadlineMs,
+							ageMs,
+							gate: 1,
+							reason: d.reason,
 							via: "reconcile.deadline_sweep",
 						});
 						// Consumer-facing attention category (proposal §K.2): distinct from the
 						// per-message lifecycle trace so dashboards can subscribe to a category
 						// instead of parsing per-message traces.
 						await trace(p, TRACE_MESSAGE_ATTENTION_DERIVED, {
-							messageId: msgId, source: "responseDeadlineMs", gate: 1,
-							ts: now(), proposal: "§K.2",
+							messageId: msgId,
+							source: "responseDeadlineMs",
+							gate: 1,
+							ts: now(),
+							proposal: "§K.2",
 						}).catch(() => {});
 					}
 				} else {
@@ -203,15 +322,51 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 			}
 
 			if (expired && actionable && !maxAttempts) {
-				if (!options.dryRun) await trace(p, "reconcile.ttl.defer_actionable", { id: msgId, to: rec.to, ageMs, ttlMs: rec.ttlMs, requiresAck: rec.requiresAck, requiresResponse: rec.requiresResponse });
-				actions.push({ messageId: msgId, action: "ttl_stale", reason: `TTL expired but message is still actionable; awaiting explicit resolve from ${rec.to}` });
+				if (!options.dryRun)
+					await trace(p, "reconcile.ttl.defer_actionable", {
+						id: msgId,
+						to: rec.to,
+						ageMs,
+						ttlMs: rec.ttlMs,
+						requiresAck: rec.requiresAck,
+						requiresResponse: rec.requiresResponse,
+					});
+				actions.push({
+					messageId: msgId,
+					action: "ttl_stale",
+					reason: `TTL expired but message is still actionable; awaiting explicit resolve from ${rec.to}`,
+				});
 				continue;
 			}
 
 			if (expired || maxAttempts) {
 				if (!options.dryRun) {
-					upsertMessageRecord(st, { id: msgId, swarmId: st.swarmId, from: rec.from, to: rec.to, priority: "normal", type: "swarm.message" as const, schemaVersion: 1, createdAt: rec.createdAt, body: "", headers: {}, requiresAck: rec.requiresAck, ttlMs: rec.ttlMs }, "dead_letter", { failedAt: now(), lastError: expired ? "TTL expired" : "Max attempts exceeded" });
-					await trace(p, "reconcile.dead_letter", { id: msgId, to: rec.to, reason: expired ? "ttl_expired" : "max_attempts", attempts: rec.attempts, ageMs });
+					upsertMessageRecord(
+						st,
+						{
+							id: msgId,
+							swarmId: st.swarmId,
+							from: rec.from,
+							to: rec.to,
+							priority: "normal",
+							type: "swarm.message" as const,
+							schemaVersion: 1,
+							createdAt: rec.createdAt,
+							body: "",
+							headers: {},
+							requiresAck: rec.requiresAck,
+							ttlMs: rec.ttlMs,
+						},
+						"dead_letter",
+						{ failedAt: now(), lastError: expired ? "TTL expired" : "Max attempts exceeded" },
+					);
+					await trace(p, "reconcile.dead_letter", {
+						id: msgId,
+						to: rec.to,
+						reason: expired ? "ttl_expired" : "max_attempts",
+						attempts: rec.attempts,
+						ageMs,
+					});
 				}
 				actions.push({ messageId: msgId, action: "dead_letter", reason: expired ? "TTL expired" : "Max attempts exceeded" });
 				continue;
@@ -230,8 +385,17 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 							await trace(p, "reconcile.retry.ok", { id: msgId, to: rec.to, attempts: rec.attempts + 1 });
 							actions.push({ messageId: msgId, action: "retried", reason: "Agent running, injection successful" });
 						} else {
-							upsertMessageRecord(st, msg, "failed", { failedAt: now(), attempts: rec.attempts + 1, lastError: delivery?.reason || "Injection failed" });
-							await trace(p, "reconcile.retry.failed", { id: msgId, to: rec.to, attempts: rec.attempts + 1, error: delivery?.reason });
+							upsertMessageRecord(st, msg, "failed", {
+								failedAt: now(),
+								attempts: rec.attempts + 1,
+								lastError: delivery?.reason || "Injection failed",
+							});
+							await trace(p, "reconcile.retry.failed", {
+								id: msgId,
+								to: rec.to,
+								attempts: rec.attempts + 1,
+								error: delivery?.reason,
+							});
 							actions.push({ messageId: msgId, action: "retry_failed", reason: delivery?.reason || "Injection failed" });
 						}
 					} else {
@@ -249,10 +413,32 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 			if (isDeliveryFailureRetryable(rec) && !agentRunning) {
 				if (mailboxOnly) {
 					if (!options.dryRun) {
-						upsertMessageRecord(st, { id: msgId, swarmId: st.swarmId, from: rec.from, to: rec.to, priority: "normal", type: "swarm.message" as const, schemaVersion: 1, createdAt: rec.createdAt, body: "", headers: {}, requiresAck: rec.requiresAck, ttlMs: rec.ttlMs }, "mailbox_delivered", { lastError: undefined });
+						upsertMessageRecord(
+							st,
+							{
+								id: msgId,
+								swarmId: st.swarmId,
+								from: rec.from,
+								to: rec.to,
+								priority: "normal",
+								type: "swarm.message" as const,
+								schemaVersion: 1,
+								createdAt: rec.createdAt,
+								body: "",
+								headers: {},
+								requiresAck: rec.requiresAck,
+								ttlMs: rec.ttlMs,
+							},
+							"mailbox_delivered",
+							{ lastError: undefined },
+						);
 						await trace(p, "reconcile.mailbox_delivered", { id: msgId, to: rec.to, previousStatus: rec.status });
 					}
-					actions.push({ messageId: msgId, action: options.dryRun ? "would_mark_mailbox_delivered" : "mailbox_delivered", reason: `Recipient ${rec.to} is mailbox-only (no tmux pane); message awaits swarm_check_mailbox` });
+					actions.push({
+						messageId: msgId,
+						action: options.dryRun ? "would_mark_mailbox_delivered" : "mailbox_delivered",
+						reason: `Recipient ${rec.to} is mailbox-only (no tmux pane); message awaits swarm_check_mailbox`,
+					});
 				} else {
 					actions.push({ messageId: msgId, action: "pending", reason: "Recipient agent not running" });
 				}
@@ -279,16 +465,14 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 					// last delivery so an agent actively working isn't spammed. Delivery staleness keeps being
 					// surfaced as ack_missing either way; attempts are NOT bumped (dead-lettering stays TTL-driven).
 					const reinjects = rec.reinjects || 0;
-					const sinceLast = Math.max(
-						rec.lastReinjectAt ? new Date(rec.lastReinjectAt).getTime() : 0,
-						sinceMs,
-					);
+					const sinceLast = Math.max(rec.lastReinjectAt ? new Date(rec.lastReinjectAt).getTime() : 0, sinceMs);
 					const cooldownOk = nowMs - sinceLast > REINJECT_AFTER_MS;
 					let reinjected = false;
 					if (!options.dryRun && cooldownOk && reinjects < MAX_REINJECTS && !rec.superseded) {
 						const reinjectAgent = st.agents[rec.to];
 						const hasPane = Boolean(reinjectAgent?.tmuxTarget) && reinjectAgent!.tmuxTarget !== "unknown";
-						const alive = hasPane && reinjectAgent?.status === "running" ? await isTmuxRunning(pi, reinjectAgent!.tmuxTarget!) : false;
+						const alive =
+							hasPane && reinjectAgent?.status === "running" ? await isTmuxRunning(pi, reinjectAgent!.tmuxTarget!) : false;
 						const piLike = alive ? await isPanePiLike(pi, reinjectAgent!.tmuxTarget!) : { piLike: false, command: "" };
 						if (alive && piLike.piLike) {
 							const msg = await readMailbox(p, rec.to).then((msgs) => msgs.find((m) => m.id === msgId));
@@ -297,16 +481,37 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 								if (delivery?.delivered && !delivery.mailboxOnly) {
 									reinjected = true;
 									st.delivered[rec.to] = Array.from(new Set([...(st.delivered[rec.to] || []), msgId]));
-									upsertMessageRecord(st, msg, "injected", { injectedAt: now(), reinjects: reinjects + 1, lastReinjectAt: now() });
-									await trace(p, "reconcile.reinject.ok", { id: msgId, to: rec.to, reinjects: reinjects + 1, deliveredAge });
+									upsertMessageRecord(st, msg, "injected", {
+										injectedAt: now(),
+										reinjects: reinjects + 1,
+										lastReinjectAt: now(),
+									});
+									await trace(p, "reconcile.reinject.ok", {
+										id: msgId,
+										to: rec.to,
+										reinjects: reinjects + 1,
+										deliveredAge,
+									});
 								} else {
-									await trace(p, "reconcile.reinject.skip", { id: msgId, to: rec.to, reason: delivery?.reason || "no message" });
+									await trace(p, "reconcile.reinject.skip", {
+										id: msgId,
+										to: rec.to,
+										reason: delivery?.reason || "no message",
+									});
 								}
 							} else {
-								await trace(p, "reconcile.reinject.skip", { id: msgId, to: rec.to, reason: "Message not found in mailbox" });
+								await trace(p, "reconcile.reinject.skip", {
+									id: msgId,
+									to: rec.to,
+									reason: "Message not found in mailbox",
+								});
 							}
 						} else if (alive && !piLike.piLike) {
-							await trace(p, "reconcile.reinject.skip", { id: msgId, to: rec.to, reason: `pane alive but not pi (pane_current_command=${piLike.command || "?"})` });
+							await trace(p, "reconcile.reinject.skip", {
+								id: msgId,
+								to: rec.to,
+								reason: `pane alive but not pi (pane_current_command=${piLike.command || "?"})`,
+							});
 						}
 					}
 					if (!options.dryRun) {
@@ -318,13 +523,39 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 						// maxAttempts check; TTL still applies for eventual cleanup.
 						upsertMessageRecord(
 							st,
-							{ id: msgId, swarmId: st.swarmId, from: rec.from, to: rec.to, priority: "normal", type: "swarm.message" as const, schemaVersion: 1, createdAt: rec.createdAt, body: "", headers: {}, requiresAck: rec.requiresAck, ttlMs: rec.ttlMs },
+							{
+								id: msgId,
+								swarmId: st.swarmId,
+								from: rec.from,
+								to: rec.to,
+								priority: "normal",
+								type: "swarm.message" as const,
+								schemaVersion: 1,
+								createdAt: rec.createdAt,
+								body: "",
+								headers: {},
+								requiresAck: rec.requiresAck,
+								ttlMs: rec.ttlMs,
+							},
 							rec.status,
-							{ ackMissingAt: rec.ackMissingAt || now(), lastError: `ack_missing: delivered ${Math.round(deliveredAge / 1000)}s ago, no ack from ${rec.to}` },
+							{
+								ackMissingAt: rec.ackMissingAt || now(),
+								lastError: `ack_missing: delivered ${Math.round(deliveredAge / 1000)}s ago, no ack from ${rec.to}`,
+							},
 						);
-						await trace(p, "reconcile.ack_missing", { id: msgId, to: rec.to, deliveredAge, status: rec.status, requiresAck: rec.requiresAck });
+						await trace(p, "reconcile.ack_missing", {
+							id: msgId,
+							to: rec.to,
+							deliveredAge,
+							status: rec.status,
+							requiresAck: rec.requiresAck,
+						});
 					}
-					actions.push({ messageId: msgId, action: reinjected ? "reinjected" : "ack_missing", reason: `Delivered ${Math.round(deliveredAge / 1000)}s ago, no ack from ${rec.to}${reinjected ? ` (re-injected, ${reinjects + 1}/${MAX_REINJECTS})` : reinjects >= MAX_REINJECTS ? " (re-inject budget exhausted)" : ""}` });
+					actions.push({
+						messageId: msgId,
+						action: reinjected ? "reinjected" : "ack_missing",
+						reason: `Delivered ${Math.round(deliveredAge / 1000)}s ago, no ack from ${rec.to}${reinjected ? ` (re-injected, ${reinjects + 1}/${MAX_REINJECTS})` : reinjects >= MAX_REINJECTS ? " (re-inject budget exhausted)" : ""}`,
+					});
 				} else {
 					actions.push({ messageId: msgId, action: "awaiting_ack", reason: "Recently delivered, awaiting ack" });
 				}
@@ -361,4 +592,3 @@ export async function reconcile(pi: ExtensionAPI, cwd: string, p: Paths, options
 	await trace(p, "reconcile.complete", { agentId: options.agentId, dryRun: options.dryRun, mark: options.mark, result });
 	return result;
 }
-

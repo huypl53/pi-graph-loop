@@ -36,13 +36,20 @@ process.env.PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs, trace } = await import(join(here, "..", "src", "state.ts"));
-const { evaluateTaskGraphStallNudgeLocked, evaluateIdleGoalNudgeLocked, resolveTaskStallLocked } = await import(join(here, "..", "src", "reconcile.ts"));
+const { evaluateTaskGraphStallNudgeLocked, evaluateIdleGoalNudgeLocked, resolveTaskStallLocked } = await import(
+	join(here, "..", "src", "reconcile.ts")
+);
 const { ensureRoot } = await import(join(here, "..", "src", "identity.ts"));
-const { applyTaskStatus, computeReadyNodes, mintNodeAttempt, resolveNodeScope, computeTaskStatus } = await import(join(here, "..", "src", "taskgraph.ts"));
+const { applyTaskStatus, computeReadyNodes, mintNodeAttempt, resolveNodeScope, computeTaskStatus } = await import(
+	join(here, "..", "src", "taskgraph.ts")
+);
 
 const dir = await mkdtemp(join(tmpdir(), "task-liveness-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
-await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }));
+await writeFile(
+	join(dir, ".pi", "settings.json"),
+	JSON.stringify({ swarm: { defaultModel: "glm-5.1", defaultProvider: "zai-coding-cn" } }),
+);
 process.chdir(dir);
 const p = paths(dir);
 await ensureDirs(p);
@@ -53,12 +60,23 @@ const pi = {
 	registerCommand: () => {},
 	on: () => {},
 	setModel: async () => true,
-	sendMessage: (m, o) => { sentMessages.push({ m, o }); },
+	sendMessage: (m, o) => {
+		sentMessages.push({ m, o });
+	},
 	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 };
 
-let pass = 0, fail = 0;
-const ok = (n, c, info) => { if (c) { pass++; console.log("  ok  ", n); } else { fail++; console.error("  FAIL:", n, info ?? ""); } };
+let pass = 0,
+	fail = 0;
+const ok = (n, c, info) => {
+	if (c) {
+		pass++;
+		console.log("  ok  ", n);
+	} else {
+		fail++;
+		console.error("  FAIL:", n, info ?? "");
+	}
+};
 
 const SAVED_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
 const SAVED_ORCH = process.env.PI_SWARM_IS_ROOT;
@@ -74,8 +92,20 @@ process.on("exit", () => {
 async function readEventsFile() {
 	try {
 		const raw = await readFile(p.events, "utf8");
-		return raw.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-	} catch { return []; }
+		return raw
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.filter(Boolean);
+	} catch {
+		return [];
+	}
 }
 async function countEvents(name) {
 	const events = await readEventsFile();
@@ -87,11 +117,25 @@ async function setup({ taskId, withTask = true, ageMs = 0, allNodesDone = false 
 	ensureRoot(st, dir, p);
 	const ts = new Date().toISOString();
 	st.agents["worker-a"] = {
-		id: "worker-a", role: "worker-a role", roleKind: "worker", capabilities: [], activeTaskIds: [], maxConcurrentTasks: 1,
-		status: "running", runtimeStatus: "idle", health: "healthy",
-		tmuxSession: st.tmuxSession, tmuxWindow: "worker-a", tmuxTarget: "sess:worker-a.0",
-		model: "glm-5.1", provider: "zai-coding-cn", cwd: dir, mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
-		createdAt: ts, updatedAt: ts, lastHeartbeatAt: ts,
+		id: "worker-a",
+		role: "worker-a role",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: st.tmuxSession,
+		tmuxWindow: "worker-a",
+		tmuxTarget: "sess:worker-a.0",
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: dir,
+		mailbox: ".pi/swarm/mailboxes/worker-a.jsonl",
+		createdAt: ts,
+		updatedAt: ts,
+		lastHeartbeatAt: ts,
 	};
 	// Reset transient state so prior tests don't leak: clear stale task-stall counters (each test
 	// sets its own) and the goal nudge (case 12 sets it; other cases don't want it).
@@ -108,7 +152,9 @@ async function setup({ taskId, withTask = true, ageMs = 0, allNodesDone = false 
 			for (const entry of entries) {
 				await rm(join(tasksDir, entry), { recursive: true, force: true });
 			}
-		} catch { /* no tasksDir yet */ }
+		} catch {
+			/* no tasksDir yet */
+		}
 		await seedTask(taskId, { ageMs, allNodesDone });
 	}
 	await rm(p.events, { force: true });
@@ -239,7 +285,10 @@ console.log("\n[5] age > grace + all idle; first nudge emitted");
 	ok("counter=1 after first emit", slot?.consecutiveNoResolveNudges === 1);
 	ok("lastNudgeAt stamped", typeof slot?.lastNudgeAt === "string");
 	ok("notify key in trace", (await countEvents("task_stall.nudge_emitted")) >= 1);
-	ok("message persisted in mailbox", Boolean((await readFile(join(p.mailboxes, "root.jsonl"), "utf8").catch(() => "")).includes("graph-stall")));
+	ok(
+		"message persisted in mailbox",
+		Boolean((await readFile(join(p.mailboxes, "root.jsonl"), "utf8").catch(() => "")).includes("graph-stall")),
+	);
 }
 
 // =============================================================
@@ -271,7 +320,10 @@ console.log("\n[7] past MAX; back-off armed; no emit");
 	await setup({ taskId: "task-7", ageMs: 120_000 });
 	await resetMessages();
 	const t0 = Date.now();
-	for (let i = 0; i < 3; i++) { await tick(t0 + i * INTERVAL_MS); await resetMessages(); }
+	for (let i = 0; i < 3; i++) {
+		await tick(t0 + i * INTERVAL_MS);
+		await resetMessages();
+	}
 	let slot = await getStallState("task-7");
 	ok("counter=3 after 3 interval emissions", slot?.consecutiveNoResolveNudges === 3);
 	await resetMessages();
@@ -290,7 +342,10 @@ console.log("\n[8] back-off drain: interval decrements without emit");
 	await setup({ taskId: "task-8", ageMs: 120_000 });
 	await resetMessages();
 	const t0 = Date.now();
-	for (let i = 0; i < 3; i++) { await tick(t0 + i * INTERVAL_MS); await resetMessages(); }
+	for (let i = 0; i < 3; i++) {
+		await tick(t0 + i * INTERVAL_MS);
+		await resetMessages();
+	}
 	await resetMessages();
 	await tick(t0 + 3 * INTERVAL_MS); // enters back-off (max=3)
 	let slot = await getStallState("task-8");
@@ -317,7 +372,10 @@ console.log("\n[9] back-off exit gate (decrement to 0; no emit)");
 	await setup({ taskId: "task-9", ageMs: 120_000 });
 	await resetMessages();
 	const t0 = Date.now();
-	for (let i = 0; i < 3; i++) { await tick(t0 + i * INTERVAL_MS); await resetMessages(); }
+	for (let i = 0; i < 3; i++) {
+		await tick(t0 + i * INTERVAL_MS);
+		await resetMessages();
+	}
 	await resetMessages();
 	await tick(t0 + 3 * INTERVAL_MS); // enter back-off (2)
 	await resetMessages();
@@ -389,9 +447,16 @@ console.log("\n[12] goal set + task stalled -> goal fallback suppressed by actio
 	await resetMessages();
 	const goalResult = await evaluateIdleGoalNudgeLocked(pi, dir, p, await readState(p, dir), Date.now());
 	// Row R19 (Fix A, 2026-09-02): goal floor is unconditional — actionable graph work only defers
-// by one interval, then falls through to emit. Previously this asserted {emitted:false,
-// reason:"actionable_graph"} (full block). Now the floor is unconditional.
-ok("goal nudge deferred (not suppressed) — floor is unconditional", goalResult.emitted === false && (goalResult.reason === "idle_interval_pending" || goalResult.reason === "deferred_actionable_graph" || goalResult.reason === "actionable_graph"), `got ${goalResult.reason}/${goalResult.emitted}`);
+	// by one interval, then falls through to emit. Previously this asserted {emitted:false,
+	// reason:"actionable_graph"} (full block). Now the floor is unconditional.
+	ok(
+		"goal nudge deferred (not suppressed) — floor is unconditional",
+		goalResult.emitted === false &&
+			(goalResult.reason === "idle_interval_pending" ||
+				goalResult.reason === "deferred_actionable_graph" ||
+				goalResult.reason === "actionable_graph"),
+		`got ${goalResult.reason}/${goalResult.emitted}`,
+	);
 	const r = await tick();
 	ok("task-stall nudge still fires", r.emitted === true);
 	ok("task-stall trace emitted", (await countEvents("task_stall.nudge_emitted")) >= 1);
@@ -454,13 +519,19 @@ console.log("\n[14] terminal=true -> trace task_stall.nudge.resolved emitted");
 {
 	const mkNode = (status, assignee) => ({ status, assignee, attempts: 1, role: "worker" });
 	const task = {
-		taskId: "r112", title: "t", goal: "g", status: "in_progress",
+		taskId: "r112",
+		title: "t",
+		goal: "g",
+		status: "in_progress",
 		nodes: {
 			commit: mkNode("done", "root"),
 			test: mkNode("done", "r80-tester"),
 			implement: mkNode("assigned", "fs-implementer"),
 		},
-		edges: [ { from: "implement", to: "test" }, { from: "test", to: "commit" } ],
+		edges: [
+			{ from: "implement", to: "test" },
+			{ from: "test", to: "commit" },
+		],
 	};
 	ok("R11-2: done terminals + assigned re-armed node != done", computeTaskStatus(task) !== "done");
 	const closed = { ...task, nodes: { ...task.nodes, implement: mkNode("done", "fs-implementer") } };

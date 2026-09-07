@@ -41,9 +41,10 @@ export function formatSwarmMessageContent(msg: SwarmMessage) {
 	// hint stays so a Phase-2 ship never alters what legacy recipients see (Phase-1 contract
 	// preserved — the rendered body is byte-identical to Phase 1).
 	const showAckHint = PI_SWARM_MINIMAL_PROTOCOL === 0;
-	const ackLine = showAckHint && msg.requiresAck
-		? `\n\n[PI-SWARM ACK REQUIRED] This message requires acknowledgement. Call \`swarm_ack_message\` with messageId="${msg.id}" and status=\`seen\`|\`processing\`|\`done\`|\`failed\` (ack \`seen\`/\`processing\` now, then \`done\`/\`failed\` when complete). Unacked delivered messages are surfaced as ack_missing.`
-		: "";
+	const ackLine =
+		showAckHint && msg.requiresAck
+			? `\n\n[PI-SWARM ACK REQUIRED] This message requires acknowledgement. Call \`swarm_ack_message\` with messageId="${msg.id}" and status=\`seen\`|\`processing\`|\`done\`|\`failed\` (ack \`seen\`/\`processing\` now, then \`done\`/\`failed\` when complete). Unacked delivered messages are surfaced as ack_missing.`
+			: "";
 	return `[${stamp}] Inter-agent swarm message from ${msg.from} to ${msg.to}${msg.subject ? ` (${msg.subject})` : ""}:\n\n${msg.body}${ackLine}`;
 }
 
@@ -62,13 +63,25 @@ export function parseSystemDelivery(text: string): SwarmMessage | null {
 	if (body.startsWith("b64:")) {
 		try {
 			const msg = JSON.parse(Buffer.from(body.slice(4).trim(), "base64").toString("utf8")) as SwarmMessage;
-			return { ...msg, type: "swarm.message", schemaVersion: msg.schemaVersion || 1, requiresAck: msg.requiresAck ?? true, headers: msg.headers || {} };
+			return {
+				...msg,
+				type: "swarm.message",
+				schemaVersion: msg.schemaVersion || 1,
+				requiresAck: msg.requiresAck ?? true,
+				headers: msg.headers || {},
+			};
 		} catch {}
 	}
 	if (body.startsWith("{")) {
 		try {
 			const msg = JSON.parse(body) as SwarmMessage;
-			return { ...msg, type: "swarm.message", schemaVersion: msg.schemaVersion || 1, requiresAck: msg.requiresAck ?? true, headers: msg.headers || {} };
+			return {
+				...msg,
+				type: "swarm.message",
+				schemaVersion: msg.schemaVersion || 1,
+				requiresAck: msg.requiresAck ?? true,
+				headers: msg.headers || {},
+			};
 		} catch {}
 	}
 	const [headerPart, ...rest] = body.split(/\n\n/);

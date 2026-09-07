@@ -17,10 +17,14 @@ import { join } from "node:path";
 import { validateSwarmSettings, effectiveBenchMs, _clearQuotaResetCacheForTests } from "../src/pool.ts";
 import { parseQuotaResetMs } from "../src/pool.ts";
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, extra = "") => {
 	if (cond) pass++;
-	else { fail++; console.error("  FAIL:", name, extra); }
+	else {
+		fail++;
+		console.error("  FAIL:", name, extra);
+	}
 };
 
 // === Unit: parseQuotaResetMs pure parser ===
@@ -34,17 +38,21 @@ const ok = (name, cond, extra = "") => {
 		["500ms", 500],
 		["1h30m", 5_400_000],
 		["2h 15m 30s", 8_130_000],
-		["90S", 90_000],          // case-insensitive
-		["30 m", 1_800_000],      // whitespace tolerated
-		[7200000, 7_200_000],     // bare number back-compat
-		["7200000", 7_200_000],   // bare numeric string back-compat
+		["90S", 90_000], // case-insensitive
+		["30 m", 1_800_000], // whitespace tolerated
+		[7200000, 7_200_000], // bare number back-compat
+		["7200000", 7_200_000], // bare numeric string back-compat
 	];
 	for (const [input, expected] of cases) {
 		ok(`parse ${JSON.stringify(input)} = ${expected}`, parseQuotaResetMs(input) === expected, `got ${parseQuotaResetMs(input)}`);
 	}
 	const bad = ["", "abc", "30x", "m30", "1.5h", "-30m", "h", undefined, null];
 	for (const input of bad) {
-		ok(`parse ${JSON.stringify(input)} rejected (undefined)`, parseQuotaResetMs(input) === undefined, `got ${parseQuotaResetMs(input)}`);
+		ok(
+			`parse ${JSON.stringify(input)} rejected (undefined)`,
+			parseQuotaResetMs(input) === undefined,
+			`got ${parseQuotaResetMs(input)}`,
+		);
 	}
 }
 
@@ -53,23 +61,37 @@ const scratch = await mkdtemp(join(tmpdir(), "quota-dur-"));
 await mkdir(join(scratch, ".pi"), { recursive: true });
 const settingsPath = join(scratch, ".pi", "settings.json");
 
-await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [
-	{ model: "a", provider: "ccs", quotaResetMs: "30m" },   // valid duration
-	{ model: "b", provider: "ccs", quotaResetMs: 900000 },  // valid number (back-compat)
-	{ model: "c", provider: "ccs", quotaResetMs: "1h30m" }, // combined
-	{ model: "d", provider: "ccs", quotaResetMs: "30x" },   // bad unit
-	{ model: "e", provider: "ccs", quotaResetMs: "fast" },  // nonsense
-] } }));
+await writeFile(
+	settingsPath,
+	JSON.stringify({
+		swarm: {
+			modelPool: [
+				{ model: "a", provider: "ccs", quotaResetMs: "30m" }, // valid duration
+				{ model: "b", provider: "ccs", quotaResetMs: 900000 }, // valid number (back-compat)
+				{ model: "c", provider: "ccs", quotaResetMs: "1h30m" }, // combined
+				{ model: "d", provider: "ccs", quotaResetMs: "30x" }, // bad unit
+				{ model: "e", provider: "ccs", quotaResetMs: "fast" }, // nonsense
+			],
+		},
+	}),
+);
 {
 	const v = validateSwarmSettings(scratch);
 	const badFields = v.errors.filter((e) => e.kind === "slot_bad_quota_reset").map((e) => e.field);
-	ok("validate: duration strings accepted (no error for slots 0-2)",
-		!badFields.includes("modelPool[0].quotaResetMs") && !badFields.includes("modelPool[1].quotaResetMs") && !badFields.includes("modelPool[2].quotaResetMs"),
-		`bad=${JSON.stringify(badFields)}`);
+	ok(
+		"validate: duration strings accepted (no error for slots 0-2)",
+		!badFields.includes("modelPool[0].quotaResetMs") &&
+			!badFields.includes("modelPool[1].quotaResetMs") &&
+			!badFields.includes("modelPool[2].quotaResetMs"),
+		`bad=${JSON.stringify(badFields)}`,
+	);
 	ok("validate: bad unit flagged", badFields.includes("modelPool[3].quotaResetMs"));
 	ok("validate: nonsense flagged", badFields.includes("modelPool[4].quotaResetMs"));
-	ok("validate: error message mentions duration format", v.errors.some((e) => e.kind === "slot_bad_quota_reset" && /30m|2h|1d/.test(e.message)),
-		JSON.stringify(v.errors.filter((e) => e.kind === "slot_bad_quota_reset").map((e) => e.message)));
+	ok(
+		"validate: error message mentions duration format",
+		v.errors.some((e) => e.kind === "slot_bad_quota_reset" && /30m|2h|1d/.test(e.message)),
+		JSON.stringify(v.errors.filter((e) => e.kind === "slot_bad_quota_reset").map((e) => e.message)),
+	);
 }
 
 // === Rename (2026-09-05, user): `quotaReset` is the canonical field name ===
@@ -78,16 +100,30 @@ await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [
 	const scratch2 = await mkdtemp(join(tmpdir(), "quota-rename-"));
 	await mkdir(join(scratch2, ".pi"), { recursive: true });
 	const sp = join(scratch2, ".pi", "settings.json");
-	await writeFile(sp, JSON.stringify({ swarm: { modelPool: [
-		{ model: "new", provider: "ccs", quotaReset: "45m" },
-		{ model: "alias", provider: "ccs", quotaResetMs: 900000 },
-		{ model: "both", provider: "ccs", quotaReset: "1h", quotaResetMs: 60000 },
-		{ model: "bad", provider: "ccs", quotaReset: "18min" },
-	] } }));
+	await writeFile(
+		sp,
+		JSON.stringify({
+			swarm: {
+				modelPool: [
+					{ model: "new", provider: "ccs", quotaReset: "45m" },
+					{ model: "alias", provider: "ccs", quotaResetMs: 900000 },
+					{ model: "both", provider: "ccs", quotaReset: "1h", quotaResetMs: 60000 },
+					{ model: "bad", provider: "ccs", quotaReset: "18min" },
+				],
+			},
+		}),
+	);
 	const v = validateSwarmSettings(scratch2);
-	ok("rename: quotaReset duration accepted", !v.errors.some((e) => e.field === "modelPool[0].quotaReset"), JSON.stringify(v.errors.map((e) => e.field)));
+	ok(
+		"rename: quotaReset duration accepted",
+		!v.errors.some((e) => e.field === "modelPool[0].quotaReset"),
+		JSON.stringify(v.errors.map((e) => e.field)),
+	);
 	ok("rename: quotaResetMs alias still accepted", !v.errors.some((e) => e.field === "modelPool[1].quotaResetMs"));
-	ok("rename: bad quotaReset flagged", v.errors.some((e) => e.field === "modelPool[3].quotaReset"));
+	ok(
+		"rename: bad quotaReset flagged",
+		v.errors.some((e) => e.field === "modelPool[3].quotaReset"),
+	);
 
 	_clearQuotaResetCacheForTests();
 	const { readSwarmSettings } = await import("../src/session.ts");
@@ -100,7 +136,11 @@ await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [
 	ok("rename: bad quotaReset dropped (undefined)", get("bad") === undefined, `got ${get("bad")}`);
 
 	_clearQuotaResetCacheForTests();
-	const bench = effectiveBenchMs({ model: "new", provider: "ccs" }, { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 }, scratch2);
+	const bench = effectiveBenchMs(
+		{ model: "new", provider: "ccs" },
+		{ strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
+		scratch2,
+	);
 	ok("rename: bench floor honors quotaReset field", bench === 2_700_000, `got ${bench}`);
 	await rm(scratch2, { recursive: true, force: true });
 }
@@ -108,9 +148,7 @@ await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [
 // === Integration: bench floor honors duration strings from raw config ===
 {
 	_clearQuotaResetCacheForTests();
-	await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [
-		{ model: "a", provider: "ccs", quotaResetMs: "2h" },
-	] } }));
+	await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [{ model: "a", provider: "ccs", quotaResetMs: "2h" }] } }));
 	const rotation = { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 };
 	const bench = effectiveBenchMs({ model: "a", provider: "ccs" }, rotation, scratch);
 	ok("effectiveBenchMs: '2h' string floors bench at 7_200_000", bench === 7_200_000, `got ${bench}`);

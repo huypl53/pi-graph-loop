@@ -20,18 +20,91 @@ import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RootReceiptEntry, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
 import {
-  ACK_MISSING_MS, ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS, ARTIFACT_PROGRESS_GRACE_MS, ARTIFACT_PROGRESS_MAX_FILES, ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS, ARTIFACT_PROGRESS_NUDGE_CAP, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED, TRACE_ARTIFACT_PROGRESS_NUDGE, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LATE_RESULT_REJECTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED, TRACE_STALE_OPEN_SURFACED } from "./constants.ts";
+	ACK_MISSING_MS,
+	ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS,
+	ARTIFACT_PROGRESS_GRACE_MS,
+	ARTIFACT_PROGRESS_MAX_FILES,
+	ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS,
+	ARTIFACT_PROGRESS_NUDGE_CAP,
+	DEFAULT_AGENT_HEARTBEAT_STALE_MS,
+	DEFAULT_STALE_OPEN_THRESHOLD_MS,
+	formatNotifyKey,
+	GOAL_NUDGE_BACKOFF_TICKS,
+	GOAL_NUDGE_IDLE_INTERVAL_MS,
+	MAX_ATTEMPTS,
+	MAX_CONSECUTIVE_NUDGES_DEFAULT,
+	MAX_REINJECTS,
+	MAX_STATUS_TASKS,
+	MAX_TASK_STALL_NUDGES,
+	NOTIFY_DEFAULT_COOLDOWN_MS,
+	NOTIFY_DEFAULT_MAX_NUDGES,
+	NOTIFY_KEY_GOAL_IDLE_NUDGE,
+	NOTIFY_KEY_GRAPH_ADVANCE,
+	NOTIFY_KEY_INITIAL_READY,
+	NOTIFY_KEY_PUMP_BATCH_SUPPRESSED,
+	NOTIFY_KEY_TASK_GRAPH_STALL,
+	PI_SWARM_MINIMAL_PROTOCOL,
+	PUMP_RETRIGGER_DELAY_MS,
+	PUMP_RETRIGGER_MAX,
+	PUMP_SCAN_WINDOW,
+	PUMP_SESSION_ID_CAP,
+	PUMP_SESSION_TTL_MS,
+	PUMP_STUCK_DEFER_ESCALATE_MS,
+	REINJECT_AFTER_MS,
+	TASK_INITIAL_READY_GRACE_MS,
+	TASK_NUDGE_MS,
+	TASK_STALE_MS,
+	TASK_STALL_NUDGE_IDLE_INTERVAL_MS,
+	TERMINAL_NODE_STATUSES,
+	TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED,
+	TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED,
+	TRACE_AGENT_HEARTBEAT_GC_STALE,
+	TRACE_AGENT_HEARTBEAT_GC_STOPPED,
+	TRACE_AGENT_TMUX_LIVENESS_CORRECTION,
+	TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED,
+	TRACE_ARTIFACT_PROGRESS_NUDGE,
+	TRACE_GRAPH_ADVANCE_NUDGE_EMITTED,
+	TRACE_LATE_RESULT_REJECTED,
+	TRACE_LIFECYCLE_DERIVED,
+	TRACE_LIFECYCLE_DERIVED_SHADOW,
+	TRACE_MESSAGE_ATTENTION_DERIVED,
+	TRACE_STALE_OPEN_SURFACED,
+} from "./constants.ts";
 import { capMap, ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
-import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention, proxyMetricEmitLocked, staleOpenAssignmentScanLocked, staleOpenNudgeLocked } from "./taskgraph.ts";
+import {
+	computeReadyNodes,
+	computeTaskStatus,
+	checkStallNotificationStale,
+	deriveNodeAttention,
+	proxyMetricEmitLocked,
+	staleOpenAssignmentScanLocked,
+	staleOpenNudgeLocked,
+} from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
-import { deliver, deliverMessageLocked, deriveLifecycleFromTrigger, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
+import {
+	deliver,
+	deliverMessageLocked,
+	deriveLifecycleFromTrigger,
+	findIdempotentMessage,
+	isResponseTrackingActive,
+	readMailbox,
+	readMailboxCached,
+	upsertMessageRecord,
+} from "./mailbox.ts";
 import { claimRootLeader, ensureRoot, heartbeatRootLeader, readRootLeader, requireRootAuthority } from "./identity.ts";
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
-import { agentHeartbeatGCLocked, evaluateArtifactProgressNudgeLocked, evaluateSlotRecoveryLocked, evaluateTaskGraphStallNudgeLocked, reconcileGraphAdvanceLocked, reconcileInitialReadyLocked, sendGraphAdvanceNudgeLocked } from "./nudges/graph-advance.ts";
+import {
+	agentHeartbeatGCLocked,
+	evaluateArtifactProgressNudgeLocked,
+	evaluateSlotRecoveryLocked,
+	evaluateTaskGraphStallNudgeLocked,
+	reconcileGraphAdvanceLocked,
+	reconcileInitialReadyLocked,
+	sendGraphAdvanceNudgeLocked,
+} from "./nudges/graph-advance.ts";
 import { allEffectiveIdleAgents, evaluateIdleGoalNudgeLocked, updateIdleEpochLocked } from "./nudges/goal-epoch.ts";
-
 
 import { isStallNudgeEligibleTaskStatus, isTerminalOrAbandonedTaskStatus } from "./nudges/status-predicates.ts";
 
@@ -50,9 +123,6 @@ import { isStallNudgeEligibleTaskStatus, isTerminalOrAbandonedTaskStatus } from 
 // allEffectiveIdleAgents — the pump consults the live idle pool before stamping surfaces),
 // mailbox (for deliverMessageLocked), identity (for leader lease), tmux (for probe).
 
-
-
-
 export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task: TaskState): Promise<string[]> {
 	const warnings: string[] = [];
 	const nowMs = Date.now();
@@ -64,10 +134,13 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 			warnings.push(`node ${id} assigned to missing agent ${node.assignee}`);
 		} else if (agent) {
 			ensureAgentDefaults(agent);
-			if (agent.status === "stopped" || agent.health === "unhealthy") warnings.push(`node ${id} assignee ${agent.id} is ${agent.status}/${agent.health}`);
+			if (agent.status === "stopped" || agent.health === "unhealthy")
+				warnings.push(`node ${id} assignee ${agent.id} is ${agent.status}/${agent.health}`);
 			const expectedKind = inferRoleKind(node.assignee, node.role);
-			if (agent.roleKind !== expectedKind) warnings.push(`node ${id} role "${node.role}" expects ${expectedKind} but ${agent.id} is ${agent.roleKind}`);
-			if (agent.activeTaskIds.length >= agent.maxConcurrentTasks && !agent.activeTaskIds.includes(task.taskId)) warnings.push(`node ${id} assignee ${agent.id} at capacity (${agent.activeTaskIds.length}/${agent.maxConcurrentTasks})`);
+			if (agent.roleKind !== expectedKind)
+				warnings.push(`node ${id} role "${node.role}" expects ${expectedKind} but ${agent.id} is ${agent.roleKind}`);
+			if (agent.activeTaskIds.length >= agent.maxConcurrentTasks && !agent.activeTaskIds.includes(task.taskId))
+				warnings.push(`node ${id} assignee ${agent.id} at capacity (${agent.activeTaskIds.length}/${agent.maxConcurrentTasks})`);
 			if (agent.tmuxTarget && agent.tmuxTarget !== "unknown" && (node.status === "assigned" || node.status === "in_progress")) {
 				const alive = await isTmuxRunning(pi, agent.tmuxTarget);
 				if (!alive) warnings.push(`node ${id} assignee ${agent.id} tmux pane not alive`);
@@ -75,12 +148,17 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 		}
 		for (const msgId of node.messageIds || []) {
 			const rec = st.messages[msgId];
-			if (!rec) { warnings.push(`node ${id} references missing message ${msgId}`); continue; }
+			if (!rec) {
+				warnings.push(`node ${id} references missing message ${msgId}`);
+				continue;
+			}
 			if (rec.superseded) continue; // superseded assignments are waived; not current work
-			if (rec.status === "dead_letter") warnings.push(`node ${id} assignment/handoff message ${msgId} is dead-lettered (${rec.lastError || "unknown"})`);
+			if (rec.status === "dead_letter")
+				warnings.push(`node ${id} assignment/handoff message ${msgId} is dead-lettered (${rec.lastError || "unknown"})`);
 			if (rec.requiresAck && !rec.ackedAt) warnings.push(`node ${id} message ${msgId} requires ack but is ${rec.status}`);
 			// Assignment acked done but the node was never advanced past assigned/in_progress.
-			if (rec.lastAck?.status === "done" && (node.status === "assigned" || node.status === "in_progress")) warnings.push(`node ${id} message ${msgId} acked done but node is still ${node.status}`);
+			if (rec.lastAck?.status === "done" && (node.status === "assigned" || node.status === "in_progress"))
+				warnings.push(`node ${id} message ${msgId} acked done but node is still ${node.status}`);
 		}
 		if (node.status === "in_progress" && node.lastActivityAt) {
 			const age = nowMs - new Date(node.lastActivityAt).getTime();
@@ -88,7 +166,8 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 		}
 		// Terminal nodes must have released their advisory edit locks.
 		if (TERMINAL_NODE_STATUSES.has(node.status)) {
-			for (const [file, lock] of Object.entries(task.editLocks)) if (lock?.nodeId === id) warnings.push(`terminal node ${id} still holds editLock for ${file}`);
+			for (const [file, lock] of Object.entries(task.editLocks))
+				if (lock?.nodeId === id) warnings.push(`terminal node ${id} still holds editLock for ${file}`);
 		}
 	}
 	// Attention derivation (roadmap issue 5): durable, pane-free recovery classification per node.
@@ -96,18 +175,24 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 	for (const [id, node] of Object.entries(task.nodes)) {
 		const att = deriveNodeAttention(st, task, id, nowMs);
 		if (!att.workerReminderEligible) continue;
-		warnings.push(`attention: node ${id} → ${att.category} (assignee ${node.assignee || "?"}) — ${att.evidence.join("; ")} — root may send one bounded reminder via /swarm remind ${task.taskId} ${id}`);
+		warnings.push(
+			`attention: node ${id} → ${att.category} (assignee ${node.assignee || "?"}) — ${att.evidence.join("; ")} — root may send one bounded reminder via /swarm remind ${task.taskId} ${id}`,
+		);
 	}
 	if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
 		for (const agent of Object.values(st.agents)) {
 			ensureAgentDefaults(agent);
-			if (agent.activeTaskIds.includes(task.taskId)) warnings.push(`task ${task.taskId} is ${task.status} but still in ${agent.id}.activeTaskIds`);
+			if (agent.activeTaskIds.includes(task.taskId))
+				warnings.push(`task ${task.taskId} is ${task.status} but still in ${agent.id}.activeTaskIds`);
 		}
 	}
 	return warnings;
 }
 
-export function orchSession(st: SwarmState, nowMs: number): { ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string } | null {
+export function orchSession(
+	st: SwarmState,
+	nowMs: number,
+): { ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string } | null {
 	if (currentAgentId() !== "root") return null;
 	st.rootPumpSessions ||= {};
 	const key = String(process.pid);
@@ -137,7 +222,9 @@ export function orchSession(st: SwarmState, nowMs: number): { ids: string[]; tri
 // NOTIFY_DEFAULT_MAX_NUDGES sends per (taskId, nodeId) across the node's lifetime (the prior-scan now
 
 function ackRootNudgeLocked(st: SwarmState, key: string, nowMs: number, note: string): void {
-	const rec = findIdempotentMessage(st, "root", "root", key) || Object.values(st.messages || {}).find((r) => r.to === "root" && r.idempotencyKey === key);
+	const rec =
+		findIdempotentMessage(st, "root", "root", key) ||
+		Object.values(st.messages || {}).find((r) => r.to === "root" && r.idempotencyKey === key);
 	if (rec && rec.requiresAck && !rec.ackedAt) {
 		const at = new Date(nowMs).toISOString();
 		st.messages[rec.id] = { ...rec, status: "acked", ackedAt: at, updatedAt: at, lastAck: { by: "root", status: "done", note, at } };
@@ -198,7 +285,16 @@ function parseTaskNodeRef(conversationId: string | undefined): { taskId?: string
 // non-actionable for the one-time migration back-fill (the budget resets per session). Exported
 // for reuse by the migration back-fill block.
 export function isActionableRootMessage(
-	rec: { id: string; to: string; requiresAck?: boolean; status?: string; ackedAt?: string; superseded?: any; conversationId?: string; idempotencyKey?: string },
+	rec: {
+		id: string;
+		to: string;
+		requiresAck?: boolean;
+		status?: string;
+		ackedAt?: string;
+		superseded?: any;
+		conversationId?: string;
+		idempotencyKey?: string;
+	},
 	taskIndex: Record<string, TaskState>,
 	nowMs: number,
 	retriggerCounts: Record<string, number>,
@@ -221,11 +317,21 @@ export function isActionableRootMessage(
 				const task = taskIndex[taskNodeRef.taskId];
 				if (task) {
 					const tp = taskPaths(p, task.taskId);
-					traceTask(tp, TRACE_LATE_RESULT_REJECTED, { taskId: task.taskId, nodeId: taskNodeRef.nodeId, messageId: rec.id, supersededBy: rec.superseded?.supersededBy, reason: "rec_superseded" })
-						.catch((err: any) => {
-							// KR5: surface durable-write failure instead of silent swallow.
-							return trace(p, "swarm.rec_late_result_trace_failed", { taskId: task.taskId, nodeId: taskNodeRef.nodeId, messageId: rec.id, error: String(err?.message || err) });
+					traceTask(tp, TRACE_LATE_RESULT_REJECTED, {
+						taskId: task.taskId,
+						nodeId: taskNodeRef.nodeId,
+						messageId: rec.id,
+						supersededBy: rec.superseded?.supersededBy,
+						reason: "rec_superseded",
+					}).catch((err: any) => {
+						// KR5: surface durable-write failure instead of silent swallow.
+						return trace(p, "swarm.rec_late_result_trace_failed", {
+							taskId: task.taskId,
+							nodeId: taskNodeRef.nodeId,
+							messageId: rec.id,
+							error: String(err?.message || err),
 						});
+					});
 				}
 			}
 		}
@@ -281,8 +387,13 @@ export function isActionableRootMessage(
 		// (task,node) and stamped `superseded` on the prior one. The rec-level superseded flag
 		// catches this — but if a stale message was written before the supersede record (race),
 		// cross-check by finding the latest assign handoff for the node.
-		const lastAssign = [...(task.handoffs || [])].reverse().find(h => h.toNode === taskNodeRef.nodeId && h.kind === "assign");
-		if (lastAssign && rec.idempotencyKey && (lastAssign as any).idempotencyKey && (lastAssign as any).idempotencyKey !== rec.idempotencyKey) {
+		const lastAssign = [...(task.handoffs || [])].reverse().find((h) => h.toNode === taskNodeRef.nodeId && h.kind === "assign");
+		if (
+			lastAssign &&
+			rec.idempotencyKey &&
+			(lastAssign as any).idempotencyKey &&
+			(lastAssign as any).idempotencyKey !== rec.idempotencyKey
+		) {
 			return { ok: false, reason: "node_reassigned" };
 		}
 	}
@@ -369,7 +480,10 @@ export async function staleSurfaceReason(
 		// way R22's agent_busy leg did). Only the idle_epoch_advanced leg remains:
 		if (Number.isFinite(idleAnchorMs) && createdAt < idleAnchorMs) {
 			staleReason = "idle_epoch_advanced";
-			evidence = [`message_created_before_idle_epoch:${new Date(createdAt).toISOString()}`, `idle_epoch:${new Date(idleAnchorMs).toISOString()}`];
+			evidence = [
+				`message_created_before_idle_epoch:${new Date(createdAt).toISOString()}`,
+				`idle_epoch:${new Date(idleAnchorMs).toISOString()}`,
+			];
 		}
 	} else if (taskKey) {
 		const task = taskKey[1] ? taskIndex[taskKey[1]] : undefined;
@@ -412,7 +526,16 @@ export async function staleSurfaceReason(
 	return { stale: staleReason !== null, reason: staleReason, evidence };
 }
 
-function rootSurfaceGroupKey(rec: { id: string; from?: string; subject?: string; conversationId?: string; replyTo?: string; requiresAck?: boolean; requiresResponse?: boolean; idempotencyKey?: string }): string {
+function rootSurfaceGroupKey(rec: {
+	id: string;
+	from?: string;
+	subject?: string;
+	conversationId?: string;
+	replyTo?: string;
+	requiresAck?: boolean;
+	requiresResponse?: boolean;
+	idempotencyKey?: string;
+}): string {
 	const rawKey = String(rec.idempotencyKey || "");
 	if (rawKey) {
 		const normalized = rawKey
@@ -428,7 +551,10 @@ function rootSurfaceGroupKey(rec: { id: string; from?: string; subject?: string;
 	return `msg:${rec.id}`;
 }
 
-function compareSurfaceCandidates(a: { id: string; createdAt?: string; updatedAt?: string }, b: { id: string; createdAt?: string; updatedAt?: string }): number {
+function compareSurfaceCandidates(
+	a: { id: string; createdAt?: string; updatedAt?: string },
+	b: { id: string; createdAt?: string; updatedAt?: string },
+): number {
 	const aTs = new Date(a.updatedAt || a.createdAt || 0).getTime();
 	const bTs = new Date(b.updatedAt || b.createdAt || 0).getTime();
 	if (aTs !== bTs) return aTs - bTs;
@@ -481,10 +607,22 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 			if (leaderCheck.kind === "stale") {
 				const reclaimed = claimRootLeader(st, Date.now(), process.pid);
 				if (reclaimed.kind === "denied") {
-					await trace(p, "root.pump.denied", { reason, currentLeaderPid: reclaimed.currentLeader.pid, state: "claimed", callerPid: process.pid, heartbeatAgeMs: reclaimed.ageMs, reclaimedStale: true }).catch(() => {});
+					await trace(p, "root.pump.denied", {
+						reason,
+						currentLeaderPid: reclaimed.currentLeader.pid,
+						state: "claimed",
+						callerPid: process.pid,
+						heartbeatAgeMs: reclaimed.ageMs,
+						reclaimedStale: true,
+					}).catch(() => {});
 					return { toSurface: [] as SwarmMessage[], retriggered: 0 };
 				}
-				await trace(p, "root.pump.lease_reclaimed", { reason, previousPid: leaderCheck.leader.pid, staleForMs: Math.round(leaderCheck.ageMs), callerPid: process.pid }).catch(() => {});
+				await trace(p, "root.pump.lease_reclaimed", {
+					reason,
+					previousPid: leaderCheck.leader.pid,
+					staleForMs: Math.round(leaderCheck.ageMs),
+					callerPid: process.pid,
+				}).catch(() => {});
 			} else {
 				await trace(p, "root.pump.denied", {
 					reason,
@@ -519,8 +657,11 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 		// "stopped" for agents whose tmux pane is known-dead or freshly probed dead, so the next
 		// sweepTaskWorkersLocked / swarm_prune picks them up. Lease-valid (reuse) and paused
 		// agents are exempt. Idempotent across ticks.
-		try { await agentHeartbeatGCLocked(pi, ctx.cwd, p, st, nowMs); }
-		catch (err: any) { await trace(p, "agent.heartbeat_gc.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}); }
+		try {
+			await agentHeartbeatGCLocked(pi, ctx.cwd, p, st, nowMs);
+		} catch (err: any) {
+			await trace(p, "agent.heartbeat_gc.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {});
+		}
 		// === Issue 83a — stale-open assignment scan [R10-3 restart-required pump phase] ===
 		// Pump phase: `staleOpenAssignmentScanLocked` (called from `pumpRootMailbox`).
 		// Runs after heartbeat GC (so freshly-stopped agents are excluded by status) and before the
@@ -537,27 +678,46 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 			// root nudge (capped/cooled-down inside). Trace-only surfacing left the swarm
 			// idling for hours with staleOpen>0 and nobody told.
 			for (const n of r.surfacedNodes || []) {
-				try { await staleOpenNudgeLocked(pi, ctx.cwd, p, st, n.taskId, n.nodeId); }
-				catch { /* per-node best-effort; never kills the tick */ }
+				try {
+					await staleOpenNudgeLocked(pi, ctx.cwd, p, st, n.taskId, n.nodeId);
+				} catch {
+					/* per-node best-effort; never kills the tick */
+				}
 			}
+		} catch (err: any) {
+			await trace(p, "stale_open.scan.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {});
 		}
-		catch (err: any) { await trace(p, "stale_open.scan.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}); }
 		// === Issue 83c — proxy metric snapshot phase [restart-required pump phase] ===
 		// Read-only, cheap snapshot of hung-but-alive residuals + stale-open count + supersession
 		// churn. Bounded by PI_SWARM_PROXY_METRIC_INTERVAL_MS, and the snapshot is stored on
 		// SwarmState.proxyMetrics for `/swarm status` / `/swarm metrics` to surface.
-		try { await proxyMetricEmitLocked(p, st, nowMs); }
-		catch (err: any) { await trace(p, "proxy.metric_emit.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {}); }
+		try {
+			await proxyMetricEmitLocked(p, st, nowMs);
+		} catch (err: any) {
+			await trace(p, "proxy.metric_emit.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {});
+		}
 		// Mid-graph stall safety net: nudge the root to assign any ready-but-unassigned node in an
 		// in_progress task. The nudge is idempotent, so it is safe to run on every pump tick.
-		try { await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		try {
+			await reconcileGraphAdvanceLocked(pi, ctx.cwd, p, st, nowMs);
+		} catch (err: any) {
+			await trace(p, "graph.reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
 		// Fresh-task stall safety net: nudge the root when a start node is still ready + unassigned
 		// past the creation grace period. Also idempotent + read-only on task state.
-		try { await reconcileInitialReadyLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "task.initial_ready_reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		try {
+			await reconcileInitialReadyLocked(pi, ctx.cwd, p, st, nowMs);
+		} catch (err: any) {
+			await trace(p, "task.initial_ready_reconcile_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
 		// === Row 68: shared idle-epoch maintenance (once per tick, before both nudge evaluators) ===
 		// Anchors the busy→all-idle edge at swarm level so BOTH nudge families measure continuous idle
 		// from the same anchor regardless of evaluator call order or goal presence.
-		try { await updateIdleEpochLocked(p, st, nowMs); } catch (err: any) { await trace(p, "idle.epoch.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		try {
+			await updateIdleEpochLocked(p, st, nowMs);
+		} catch (err: any) {
+			await trace(p, "idle.epoch.error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
 		// === Issue 23: task-graph-state idle nudge (graph-first ordering) ===
 		// Evaluated BEFORE the goal fallback (row 68 plan §4): the graph nudge is the immediate priority
 		// when an unfinished graph has actionable unassigned work and all effective agents are idle; the
@@ -565,28 +725,46 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 		// suppresses on the other's condition, so a single cycle can never double-fire for the same
 		// idle state. Each is wrapped in try/catch (matches the existing reconcile-helper pattern) so a
 		// throw never kills the tick.
-		try { await evaluateTaskGraphStallNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "task_stall.nudge_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		try {
+			await evaluateTaskGraphStallNudgeLocked(pi, ctx.cwd, p, st, nowMs);
+		} catch (err: any) {
+			await trace(p, "task_stall.nudge_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
 		// === Issue 18: goal idle-streak nudge (goal fallback, runs after the graph path) ===
 		// When the root has set a goal, there is no actionable graph work, and every effective
 		// agent has been continuously idle for the full interval, emit the goal fallback nudge. Anti-loop
 		// counter + back-off handled inside the function.
-		try { await evaluateIdleGoalNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "goal.nudge.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		try {
+			await evaluateIdleGoalNudgeLocked(pi, ctx.cwd, p, st, nowMs);
+		} catch (err: any) {
+			await trace(p, "goal.nudge.error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
 		// === R20: artifact-progress self-nudge (Issue: settled idle with open assignment) ===
 		// Pump-tick phase. Fires an action-oriented nudge to the AGENT itself (not the root)
 		// when fs.stat detects a fresh write to a node's allowedFiles but the node is still open.
 		// Companion to the existing root-facing stale-open nudge (which targets the PM,
 		// not the worker). Wrapped in try/catch so a single tick failure never kills the pump.
-		try { await evaluateArtifactProgressNudgeLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "worker.artifact_progress_nudge_error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		try {
+			await evaluateArtifactProgressNudgeLocked(pi, ctx.cwd, p, st, nowMs);
+		} catch (err: any) {
+			await trace(p, "worker.artifact_progress_nudge_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
 		// === Issue 21: slot recovery scan ===
 		// When a slot's bench naturally expires AND lastBenchReason === "quota" AND the agent on
 		// that slot still has active task assignments, emit pool.slot_recovered. NO auto-resume;
 		// the root decides. Idempotent under tick storms via lastRecoveredAt dedupe.
-		try { await evaluateSlotRecoveryLocked(pi, ctx.cwd, p, st, nowMs); } catch (err: any) { await trace(p, "pool.slot_recovered.error", { error: String((err as Error)?.message || err) }).catch(() => {}); }
+		try {
+			await evaluateSlotRecoveryLocked(pi, ctx.cwd, p, st, nowMs);
+		} catch (err: any) {
+			await trace(p, "pool.slot_recovered.error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
 		const sess = orchSession(st, nowMs)!;
 		const surfaced = new Set(sess.ids);
 		const triggeredAt = { ...(sess.triggeredAt ?? {}) };
 		const retriggerCount = { ...(sess.retriggerCount ?? {}) };
-		const keepalive = () => { sess.lastAt = new Date(nowMs).toISOString(); };
+		const keepalive = () => {
+			sess.lastAt = new Date(nowMs).toISOString();
+		};
 		// Session-safe surfacing keying is unchanged (per-pid, not PI_SESSION_ID, so a validation run or a
 		// second root lane cannot starve this PM process). Recent window bounds work; acked messages
 		// (ackedAt = "recipient processed it") are skipped. We no longer pre-filter surfaced here: surfaced
@@ -605,9 +783,15 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 					for (const taskId of entries) {
 						const tp = taskPaths(p, taskId);
 						if (!existsSync(tp.taskJson)) continue;
-						try { taskIndex[taskId] = await readTaskState(tp.taskJson); } catch { /* skip unreadable */ }
+						try {
+							taskIndex[taskId] = await readTaskState(tp.taskJson);
+						} catch {
+							/* skip unreadable */
+						}
 					}
-				} catch { /* ignore readdir errors */ }
+				} catch {
+					/* ignore readdir errors */
+				}
 			}
 			const retriggerCounts = orchSession(st, nowMs)!.retriggerCount || {};
 			for (const rec of Object.values(st.messages)) {
@@ -643,46 +827,74 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 				for (const taskId of entries) {
 					const tp = taskPaths(p, taskId);
 					if (!existsSync(tp.taskJson)) continue;
-					try { taskIndex[taskId] = await readTaskState(tp.taskJson); } catch { /* skip unreadable */ }
+					try {
+						taskIndex[taskId] = await readTaskState(tp.taskJson);
+					} catch {
+						/* skip unreadable */
+					}
 				}
-			} catch { /* ignore readdir errors */ }
+			} catch {
+				/* ignore readdir errors */
+			}
 		}
 		const retriggerCounts = orchSession(st, nowMs)!.retriggerCount || {};
-		const windowMsgs = (await readMailboxCached(p, "root"))
-			.slice(-PUMP_SCAN_WINDOW)
-			.filter((m) => {
-				const rec = st.messages[m.id];
-				if (!rec) return false;
+		const windowMsgs = (await readMailboxCached(p, "root")).slice(-PUMP_SCAN_WINDOW).filter((m) => {
+			const rec = st.messages[m.id];
+			if (!rec) return false;
 
-				// Durable dedupe gate (binding C4): check consumerReceipts first, then legacy delivered ledger, then per-pid surfaced.
-				if (st.consumerReceipts?.root?.entries?.[m.id]) return false;
-				if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) return false;
-				if (surfaced.has(m.id)) return false; // per-pid surfaced (retrigger bound)
+			// Durable dedupe gate (binding C4): check consumerReceipts first, then legacy delivered ledger, then per-pid surfaced.
+			if (st.consumerReceipts?.root?.entries?.[m.id]) return false;
+			if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) return false;
+			if (surfaced.has(m.id)) return false; // per-pid surfaced (retrigger bound)
 
-				// Actionability predicate (binding C5): skip non-actionable messages and batch-count suppressions.
-				const v = isActionableRootMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ false, p);
-				return v.ok;
-			});
+			// Actionability predicate (binding C5): skip non-actionable messages and batch-count suppressions.
+			const v = isActionableRootMessage(rec, taskIndex, nowMs, retriggerCounts, /* strictForMigration */ false, p);
+			return v.ok;
+		});
 
 		// === Issue 11: Per-tick batch suppression trace (binding C6) ===
 		// Count all suppressed messages by reason before the BUSY check. Emit on EVERY tick including total===0.
 		const suppressedCounts: Record<string, number> = {
-			acked: 0, dead_letter: 0, superseded: 0, task_done: 0, task_failed: 0, task_cancelled: 0,
-			node_terminal: 0, node_reassigned: 0, task_missing: 0, node_missing: 0,
-			wrong_recipient: 0, retrigger_budget_exhausted: 0, informational_already_consumed: 0,
+			acked: 0,
+			dead_letter: 0,
+			superseded: 0,
+			task_done: 0,
+			task_failed: 0,
+			task_cancelled: 0,
+			node_terminal: 0,
+			node_reassigned: 0,
+			task_missing: 0,
+			node_missing: 0,
+			wrong_recipient: 0,
+			retrigger_budget_exhausted: 0,
+			informational_already_consumed: 0,
 		};
 		const allMsgs = (await readMailboxCached(p, "root")).slice(-PUMP_SCAN_WINDOW);
 		for (const m of allMsgs) {
 			const rec = st.messages[m.id];
 			if (!rec || rec.to !== "root") continue;
-			if (st.consumerReceipts?.root?.entries?.[m.id]) { suppressedCounts.informational_already_consumed++; continue; }
-			if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) { suppressedCounts.informational_already_consumed++; continue; }
+			if (st.consumerReceipts?.root?.entries?.[m.id]) {
+				suppressedCounts.informational_already_consumed++;
+				continue;
+			}
+			if (rec.requiresAck === false && (rec.surfacedAt || deliveredOrch.has(m.id))) {
+				suppressedCounts.informational_already_consumed++;
+				continue;
+			}
 			if (surfaced.has(m.id)) continue; // not suppressed - already surfaced this session
 			const v = isActionableRootMessage(rec, taskIndex, nowMs, retriggerCounts, false, p);
 			if (!v.ok) {
 				const key = v.reason === "retrigger_budget_exhausted" ? "retrigger_budget_exhausted" : v.reason;
 				suppressedCounts[key] = (suppressedCounts[key] || 0) + 1;
-				if (key === "node_reassigned" || key === "node_terminal" || key === "task_done" || key === "task_failed" || key === "task_cancelled" || key === "task_missing" || key === "node_missing") {
+				if (
+					key === "node_reassigned" ||
+					key === "node_terminal" ||
+					key === "task_done" ||
+					key === "task_failed" ||
+					key === "task_cancelled" ||
+					key === "task_missing" ||
+					key === "node_missing"
+				) {
 					await traceStaleSuppressedOnce(p, "root_pump.surface", {
 						messageId: m.id,
 						idempotencyKey: rec.idempotencyKey || m.idempotencyKey || null,
@@ -725,8 +937,12 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 			keepalive();
 			if (neverDisplayedBusy.length) {
 				await trace(p, "mailbox.root_pump_deferred", {
-					reason, queued: neverDisplayedBusy.length, oldestWaitMs: Math.round(oldestWaitMs),
-					thresholdMs: PUMP_STUCK_DEFER_ESCALATE_MS, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null,
+					reason,
+					queued: neverDisplayedBusy.length,
+					oldestWaitMs: Math.round(oldestWaitMs),
+					thresholdMs: PUMP_STUCK_DEFER_ESCALATE_MS,
+					cid: String(process.pid),
+					sid: process.env.PI_SESSION_ID ?? null,
 				});
 			}
 			await writeState(p, st);
@@ -735,8 +951,12 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 		const escalateStuck = !idleAtStart && oldestWaitMs >= PUMP_STUCK_DEFER_ESCALATE_MS;
 		if (escalateStuck) {
 			await trace(p, "mailbox.root_pump_stuck_escalated", {
-				reason, queued: neverDisplayedBusy.length, oldestWaitMs: Math.round(oldestWaitMs),
-				thresholdMs: PUMP_STUCK_DEFER_ESCALATE_MS, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null,
+				reason,
+				queued: neverDisplayedBusy.length,
+				oldestWaitMs: Math.round(oldestWaitMs),
+				thresholdMs: PUMP_STUCK_DEFER_ESCALATE_MS,
+				cid: String(process.pid),
+				sid: process.env.PI_SESSION_ID ?? null,
 			});
 		}
 
@@ -761,10 +981,13 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 		// Coalesce repeated backlog messages by logical surface key before the final send decision so a
 		// compacted / replaced session replays at most one freshest eligible notification per logical
 		// action.
-		const surfacePlan = [...surfaceCandidates].sort(compareSurfaceCandidates).reverse().map((msg) => {
-			const rec = st.messages[msg.id] || msg;
-			return { msg, rec, groupKey: rootSurfaceGroupKey(rec) };
-		});
+		const surfacePlan = [...surfaceCandidates]
+			.sort(compareSurfaceCandidates)
+			.reverse()
+			.map((msg) => {
+				const rec = st.messages[msg.id] || msg;
+				return { msg, rec, groupKey: rootSurfaceGroupKey(rec) };
+			});
 		const coalesced = new Map<string, { msg: SwarmMessage; dropped: string[] }>();
 		for (const item of surfacePlan) {
 			const v = await staleSurfaceReason(p, st, item.msg, taskIndex, nowMs);
@@ -802,7 +1025,7 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 				const idemForLiveness = String(recForBypass.idempotencyKey || (item.msg as any)?.idempotencyKey || "");
 				const idemMatch = idemForLiveness.match(/^task:([^:]+):(?:node:([^:]+):)?nudge:/);
 				let liveTaskId: string | null = idemMatch ? idemMatch[1] : null;
-				let liveNodeId: string | null = idemMatch ? (idemMatch[2] || null) : null;
+				let liveNodeId: string | null = idemMatch ? idemMatch[2] || null : null;
 				if (!liveTaskId) {
 					const convRef = parseTaskNodeRef(recForBypass.conversationId || (item.msg as any)?.conversationId);
 					if (convRef?.taskId) {
@@ -939,7 +1162,15 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 	});
 	const pending = result.toSurface;
 	if (!pending.length) {
-		if (ctx.mode === "tui") await trace(p, "mailbox.root_pump", { reason, count: 0, deferred: !idleAtStart ? 1 : 0, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart });
+		if (ctx.mode === "tui")
+			await trace(p, "mailbox.root_pump", {
+				reason,
+				count: 0,
+				deferred: !idleAtStart ? 1 : 0,
+				cid: String(process.pid),
+				sid: process.env.PI_SESSION_ID ?? null,
+				idleAtStart,
+			});
 		return { delivered: 0, ids: [] as string[] };
 	}
 	// Delivery is TUI-only (session-bound APIs: pi.sendMessage/ctx.isIdle). In print/rpc/json mode,
@@ -953,27 +1184,28 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 			// turn) instead of triggerTurn — the engine is NOT idle, so a queued turn would never fire.
 			const opts = result.escalatedStuck
 				? { triggerTurn: true, deliverAs: "steer" as const }
-				: (i === 0 ? { triggerTurn: true } : { deliverAs: "followUp" as const });
-			pi.sendMessage({
-				customType: "swarm-message",
-				content: formatSwarmMessageContent(msg),
-				display: true,
-				details: msg,
-			}, opts);
+				: i === 0
+					? { triggerTurn: true }
+					: { deliverAs: "followUp" as const };
+			pi.sendMessage(
+				{
+					customType: "swarm-message",
+					content: formatSwarmMessageContent(msg),
+					display: true,
+					details: msg,
+				},
+				opts,
+			);
 		}
 		// Global-consume informational PM traffic ONLY AFTER a real TUI surface succeeded. This avoids
 		// losing a message on stale-ctx/sendMessage failure while still preventing a later root
 		// process from replaying historical requiresAck:false notices that were already shown once.
-		const surfacedInfoIds = pending
-			.filter((m) => m.requiresAck === false)
-			.map((m) => m.id);
+		const surfacedInfoIds = pending.filter((m) => m.requiresAck === false).map((m) => m.id);
 		// === Issue 11: Write durable consumer receipt entries (binding C4 + C10) ===
 		// For action-expected messages, write a receipt entry so a reincarnated consumer knows it was
 		// surfaced. Bump revision immediately after write. For informational messages, the legacy delivered
 		// ledger remains authoritative (consumerReceipts only covers actionable).
-		const surfacedActionIds = pending
-			.filter((m) => m.requiresAck === true)
-			.map((m) => m.id);
+		const surfacedActionIds = pending.filter((m) => m.requiresAck === true).map((m) => m.id);
 		if (surfacedInfoIds.length || surfacedActionIds.length) {
 			await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
@@ -1000,7 +1232,7 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 							fingerprint: fingerprintMessage(rec),
 						};
 						bumped = true;
-						}
+					}
 					// Bump revision immediately after entries mutation (binding C10).
 					if (bumped) st.consumerReceipts!.root!.revision = (st.consumerReceipts!.root!.revision || 0) + 1;
 				}
@@ -1014,10 +1246,26 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 				await writeState(p, st);
 			});
 		}
-		await trace(p, "mailbox.root_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), retriggered: result.retriggered, informationalConsumed: surfacedInfoIds.length, cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, idleAtStart });
+		await trace(p, "mailbox.root_pump", {
+			reason,
+			count: pending.length,
+			ids: pending.map((m) => m.id),
+			retriggered: result.retriggered,
+			informationalConsumed: surfacedInfoIds.length,
+			cid: String(process.pid),
+			sid: process.env.PI_SESSION_ID ?? null,
+			idleAtStart,
+		});
 	} else {
 		// In non-TUI mode, still trace pump activity (without ctx.isIdle) for visibility.
-		await trace(p, "mailbox.root_pump", { reason, count: pending.length, ids: pending.map((m) => m.id), cid: String(process.pid), sid: process.env.PI_SESSION_ID ?? null, mode: ctx.mode });
+		await trace(p, "mailbox.root_pump", {
+			reason,
+			count: pending.length,
+			ids: pending.map((m) => m.id),
+			cid: String(process.pid),
+			sid: process.env.PI_SESSION_ID ?? null,
+			mode: ctx.mode,
+		});
 	}
 	return { delivered: pending.length, ids: pending.map((m) => m.id) };
 }

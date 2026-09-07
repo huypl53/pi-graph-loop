@@ -29,25 +29,22 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-const SCRATCH =
-	process.env.PI_CT_PROBE_SCRATCH ||
-	join(process.cwd(), ".pi", "ct-probe");
+const SCRATCH = process.env.PI_CT_PROBE_SCRATCH || join(process.cwd(), ".pi", "ct-probe");
 const PROBE = (process.env.PI_CT_PROBE || "CT3").toUpperCase();
 
 function writeProbeResult(probe: string, payload: Record<string, unknown>): void {
 	mkdirSync(SCRATCH, { recursive: true });
 	const file = join(SCRATCH, `${probe.toLowerCase()}-result.json`);
-	writeFileSync(
-		file,
-		`${JSON.stringify({ probe, ...payload, capturedAt: new Date().toISOString() }, null, 2)}\n`,
-		"utf8",
-	);
+	writeFileSync(file, `${JSON.stringify({ probe, ...payload, capturedAt: new Date().toISOString() }, null, 2)}\n`, "utf8");
 }
 
 // Probe tools must return { content: [{type:"text", text:string}], details? }
 // — that is the AgentToolResult shape pi's runtime expects. Returning a bare
 // string causes a getTextOutput() crash in tool-execution.js (verified).
-function toolResult(text: string, details?: Record<string, unknown>): {
+function toolResult(
+	text: string,
+	details?: Record<string, unknown>,
+): {
 	content: Array<{ type: "text"; text: string }>;
 	details?: Record<string, unknown>;
 } {
@@ -249,7 +246,8 @@ function CT5(pi: ExtensionAPI): void {
 
 function CT6(pi: ExtensionAPI): void {
 	pi.registerCommand("ct6_newsession_and_use_stale", {
-		description: "CT-6 probe — reads ctx.signal (pre baseline), captures ctx, awaits ctx.newSession(), then reads capturedCtx.signal (must throw 'This extension ctx is stale...').",
+		description:
+			"CT-6 probe — reads ctx.signal (pre baseline), captures ctx, awaits ctx.newSession(), then reads capturedCtx.signal (must throw 'This extension ctx is stale...').",
 		handler: async (_args, ctx) => {
 			// Pre-replacement baseline: read ctx.signal — must succeed (return undefined).
 			let preSignalValue: unknown = "<not read>";
@@ -334,9 +332,7 @@ function CT6(pi: ExtensionAPI): void {
 				postIsIdleThrewMatchesStalePattern,
 				postModelThrew,
 				postModelThrewMatchesStalePattern,
-				thrownMessageContainsStaleSubstring: postSignalThrew
-					? postSignalThrew.includes("This extension ctx is stale")
-					: false,
+				thrownMessageContainsStaleSubstring: postSignalThrew ? postSignalThrew.includes("This extension ctx is stale") : false,
 			});
 
 			return "CT-6 capture complete (probe result written)";
@@ -370,8 +366,7 @@ function CT7(pi: ExtensionAPI): void {
 		// followUp injected during a turn must be consumed (next agent_end + agent_settled)
 		// before agent_settled of the originating turn fires.
 		const agentSettledNotYetAtMidStream = idxAgentEnd >= 0 && (idxAgentSettled === -1 || idxAgentSettled < idxAgentEnd);
-		const agentSettledAfterFollowUp =
-			idxAgentSettled > -1 && idxFollowUpInjected > -1 && idxAgentSettled > idxFollowUpInjected;
+		const agentSettledAfterFollowUp = idxAgentSettled > -1 && idxFollowUpInjected > -1 && idxAgentSettled > idxFollowUpInjected;
 
 		writeProbeResult("CT7", {
 			agentEndEmittedCount,

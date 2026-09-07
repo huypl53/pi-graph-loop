@@ -3,8 +3,46 @@ import { existsSync, readFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type { GraphValidation, NodeClosureSummary, NodeInput, Paths, SwarmState, TaskEdge, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskPaths, TaskState, TaskStatus } from "./types.ts";
-import { ACK_MISSING_MS, ALLOWED_NODE_TRANSITIONS, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, NODE_ICON, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV, PI_SWARM_PROXY_METRIC_INTERVAL_MS, REMINDER_NO_PROGRESS_MS, SAFE_ID_RE, SETTLE_NOTIFY_COOLDOWN_MS, TASK_NUDGE_MS, TASK_STALE_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_TASK_SWEEP_PARKED, TRACE_AGENT_TASK_SWEEP_STOPPED, TRACE_POOL_DEPLETED_NUDGE, TRACE_PROXY_METRIC_EMIT, TRACE_STALE_OPEN_NUDGE_EMITTED, TRACE_STALE_OPEN_SURFACED, TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, TRACE_TASK_WORKERS_SWEPT } from "./constants.ts";
+import type {
+	GraphValidation,
+	NodeClosureSummary,
+	NodeInput,
+	Paths,
+	SwarmState,
+	TaskEdge,
+	TaskGate,
+	TaskGateStatus,
+	TaskNode,
+	TaskNodeStatus,
+	TaskPaths,
+	TaskState,
+	TaskStatus,
+} from "./types.ts";
+import {
+	ACK_MISSING_MS,
+	ALLOWED_NODE_TRANSITIONS,
+	DEFAULT_AGENT_HEARTBEAT_STALE_MS,
+	DEFAULT_STALE_OPEN_THRESHOLD_MS,
+	NODE_ICON,
+	NOTIFY_DEFAULT_COOLDOWN_MS,
+	NOTIFY_DEFAULT_MAX_NUDGES,
+	PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV,
+	PI_SWARM_PROXY_METRIC_INTERVAL_MS,
+	REMINDER_NO_PROGRESS_MS,
+	SAFE_ID_RE,
+	SETTLE_NOTIFY_COOLDOWN_MS,
+	TASK_NUDGE_MS,
+	TASK_STALE_MS,
+	TERMINAL_NODE_STATUSES,
+	TRACE_AGENT_TASK_SWEEP_PARKED,
+	TRACE_AGENT_TASK_SWEEP_STOPPED,
+	TRACE_POOL_DEPLETED_NUDGE,
+	TRACE_PROXY_METRIC_EMIT,
+	TRACE_STALE_OPEN_NUDGE_EMITTED,
+	TRACE_STALE_OPEN_SURFACED,
+	TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK,
+	TRACE_TASK_WORKERS_SWEPT,
+} from "./constants.ts";
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
 import { paths, readTaskState, taskPaths, trace, traceTask, writeState } from "./state.ts";
@@ -30,7 +68,9 @@ export function resolveNodeScope(task: TaskState, nodeId: string): EffectiveScop
 		const node = task.nodes[cur];
 		if (!node) return { unresolved: true, reason: `node ${cur} does not exist (inheritance chain from ${nodeId})` };
 		if (node.allowedFiles && node.allowedFiles.length) {
-			return source === "node-inherited" ? { source, sourceNodeId, files: [...node.allowedFiles] } : { source: "node-explicit", files: [...node.allowedFiles] };
+			return source === "node-inherited"
+				? { source, sourceNodeId, files: [...node.allowedFiles] }
+				: { source: "node-explicit", files: [...node.allowedFiles] };
 		}
 		if (node.allowedFilesFrom) {
 			if (seen.has(cur)) return { unresolved: true, reason: `allowedFilesFrom cycle at ${cur} in chain from ${nodeId}` };
@@ -86,10 +126,14 @@ function intraRegex(seg: string) {
 // normalizeScopePattern (null => caller treats as unknown).
 function segmentsOverlap(a: ScopeSegment[], i: number, b: ScopeSegment[], j: number): boolean | "unknown" {
 	if (i >= a.length && j >= b.length) return true;
-	const x = a[i], y = b[j];
+	const x = a[i],
+		y = b[j];
 	if (i >= a.length || j >= b.length) {
 		// one exhausted, the other not: only a trailing ** (zero-or-more, can end early) keeps them overlapping
-		if (i >= a.length) { if (y !== "**") return false; return segmentsOverlap(a, i, b, j + 1); }
+		if (i >= a.length) {
+			if (y !== "**") return false;
+			return segmentsOverlap(a, i, b, j + 1);
+		}
 		if (x !== "**") return false;
 		return segmentsOverlap(a, i + 1, b, j);
 	}
@@ -115,9 +159,11 @@ function segmentsOverlap(a: ScopeSegment[], i: number, b: ScopeSegment[], j: num
 		if (intraRegex(xs).test(ys) || intraRegex(ys).test(xs)) return segmentsOverlap(a, i + 1, b, j + 1);
 		return false;
 	}
-	if (xWild) { if (!intraRegex(xs).test(ys)) return false; }
-	else if (yWild) { if (!intraRegex(ys).test(xs)) return false; }
-	else if (xs !== ys) return false;
+	if (xWild) {
+		if (!intraRegex(xs).test(ys)) return false;
+	} else if (yWild) {
+		if (!intraRegex(ys).test(xs)) return false;
+	} else if (xs !== ys) return false;
 	return segmentsOverlap(a, i + 1, b, j + 1);
 }
 
@@ -129,8 +175,7 @@ export function scopePatternsOverlap(a: string, b: string): boolean | "unknown" 
 }
 
 export type ScopeRelation =
-	| { overlap: true; relation: "equal" | "glob-match" | "unknown-syntax" | "unresolved-inheritance" }
-	| { overlap: false };
+	{ overlap: true; relation: "equal" | "glob-match" | "unknown-syntax" | "unresolved-inheritance" } | { overlap: false };
 
 // Overlap between two effective scopes (file lists). Unresolved scope or any unknown-syntax pattern
 // conservatively reports overlap so preflight can never pass on ambiguity.
@@ -164,9 +209,7 @@ export function collectActiveLeases(task: TaskState): ActiveLease[] {
 		// only a genuinely held lease: the active attempt record exists and is status:"active"
 		const attempt = node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId);
 		if (!attempt || attempt.status !== "active") continue;
-		const scope = attempt.scope
-			? (attempt.scope as EffectiveScope)
-			: resolveNodeScope(task, nodeId);
+		const scope = attempt.scope ? (attempt.scope as EffectiveScope) : resolveNodeScope(task, nodeId);
 		out.push({ taskId: task.taskId, nodeId, assignee: attempt.assignee, attemptId: attempt.attemptId, scope });
 	}
 	return out;
@@ -182,12 +225,7 @@ const isoMs = (v?: string): number => (v ? new Date(v).getTime() || 0 : 0);
 // The no-progress anchor: the MOST RECENT of the durable activity timestamps. The assignedAt floor
 // guarantees a value; a reminder fires only when even the freshest evidence is stale.
 function reminderAnchorMs(msg: MessageRecord | undefined, node: TaskNode, attempt: any): number {
-	return Math.max(
-		isoMs(msg?.lastAck?.at),
-		isoMs(node.lastActivityAt),
-		isoMs(attempt?.lastActivityAt),
-		isoMs(attempt?.assignedAt),
-	);
+	return Math.max(isoMs(msg?.lastAck?.at), isoMs(node.lastActivityAt), isoMs(attempt?.lastActivityAt), isoMs(attempt?.assignedAt));
 }
 
 // Receipt/processing confirmation requires both durable receipt timestamp and a progress ACK on
@@ -218,9 +256,10 @@ export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: str
 	}
 
 	// Attempt + canonical assignment message (persisted sources only).
-	const attempt: any = node.activeAttemptId && Array.isArray(node.attemptHistory)
-		? node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId)
-		: undefined;
+	const attempt: any =
+		node.activeAttemptId && Array.isArray(node.attemptHistory)
+			? node.attemptHistory.find((a: any) => a.attemptId === node.activeAttemptId)
+			: undefined;
 	const msg: MessageRecord | undefined = node.assignmentMessageId ? st.messages[node.assignmentMessageId] : undefined;
 
 	// 2. Supersession guard: obsolete assignments are never actionable.
@@ -265,8 +304,15 @@ export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: str
 	}
 	// 6. Protocol problem: completion claimed but result unverified (worker acked done/failed without
 	// a verified response). An in-flight assignment acked seen/processing is work, not response debt.
-	if (msg && msg.requiresResponse && (msg.lastAck?.status === "done" || msg.lastAck?.status === "failed") && !(msg.response?.status === "verified" || msg.response?.status === "waived")) {
-		evidence.push(`response_missing: assignment ${msg.id} acked ${msg.lastAck!.status} but response is ${msg.response?.status || "missing"}`);
+	if (
+		msg &&
+		msg.requiresResponse &&
+		(msg.lastAck?.status === "done" || msg.lastAck?.status === "failed") &&
+		!(msg.response?.status === "verified" || msg.response?.status === "waived")
+	) {
+		evidence.push(
+			`response_missing: assignment ${msg.id} acked ${msg.lastAck!.status} but response is ${msg.response?.status || "missing"}`,
+		);
 		return { category: "response_missing", evidence, workerReminderEligible: false, rootDecision: true };
 	}
 
@@ -281,26 +327,47 @@ export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: str
 			const anchor = reminderAnchorMs(msg, node, attempt);
 			const age = nowMs - anchor;
 			if (reminder) {
-				evidence.push(`reminder_sent: ${reminder.messageId} at ${reminder.sentAt} (anchor ${reminder.noProgressSince}); one-per-attempt budget consumed`);
-				if (age > TASK_NUDGE_MS) evidence.push(`no_progress: anchor is ${Math.round(age / 60000)}m old (> ${Math.round(TASK_NUDGE_MS / 60000)}m TASK_NUDGE_MS)`);
+				evidence.push(
+					`reminder_sent: ${reminder.messageId} at ${reminder.sentAt} (anchor ${reminder.noProgressSince}); one-per-attempt budget consumed`,
+				);
+				if (age > TASK_NUDGE_MS)
+					evidence.push(
+						`no_progress: anchor is ${Math.round(age / 60000)}m old (> ${Math.round(TASK_NUDGE_MS / 60000)}m TASK_NUDGE_MS)`,
+					);
 				return { category: "reminder_sent", evidence, workerReminderEligible: false, rootDecision: age > TASK_STALE_MS };
 			}
 			if (receipt && age > REMINDER_NO_PROGRESS_MS) {
 				evidence.push(`receipt confirmed: lastAck ${msg!.lastAck!.status} at ${msg!.lastAck!.at}`);
-				evidence.push(`no_progress: anchor ${Math.round(age / 60000)}m ago (> ${Math.round(REMINDER_NO_PROGRESS_MS / 60000)}m REMINDER_NO_PROGRESS_MS)`);
+				evidence.push(
+					`no_progress: anchor ${Math.round(age / 60000)}m ago (> ${Math.round(REMINDER_NO_PROGRESS_MS / 60000)}m REMINDER_NO_PROGRESS_MS)`,
+				);
 				return { category: "reminder_eligible", evidence, workerReminderEligible: true, rootDecision: false };
 			}
 			if (receipt && age > TASK_NUDGE_MS) {
-				evidence.push(`no_progress: anchor ${Math.round(age / 60000)}m ago (> ${Math.round(TASK_NUDGE_MS / 60000)}m TASK_NUDGE_MS), receipt confirmed`);
+				evidence.push(
+					`no_progress: anchor ${Math.round(age / 60000)}m ago (> ${Math.round(TASK_NUDGE_MS / 60000)}m TASK_NUDGE_MS), receipt confirmed`,
+				);
 				return { category: "no_progress", evidence, workerReminderEligible: false, rootDecision: false };
 			}
-			if (!receipt) evidence.push(`receipt not confirmed: assignment ${msg!.id} status=${msg!.status} ackedAt=${msg!.ackedAt || "none"} lastAck=${msg!.lastAck?.status || "none"}`);
+			if (!receipt)
+				evidence.push(
+					`receipt not confirmed: assignment ${msg!.id} status=${msg!.status} ackedAt=${msg!.ackedAt || "none"} lastAck=${msg!.lastAck?.status || "none"}`,
+				);
 			else evidence.push(`receipt confirmed (${msg!.lastAck!.status}), within no-progress window`);
 			return { category: "none", evidence, workerReminderEligible: false, rootDecision: false };
 		}
 		// Legacy/open assignment without attempt metadata: readable, advisory staleness only.
-		const nodeAge = nowMs - Math.max(isoMs(node.lastActivityAt), isoMs(node.assignmentMessageId ? msg?.lastAck?.at : undefined), isoMs(attempt?.assignedAt));
-		if (nodeAge > TASK_NUDGE_MS) evidence.push(`no_progress: legacy/unfenced assignment, ~${Math.round(nodeAge / 60000)}m since last durable activity (no attempt metadata; reminder requires a fenced attempt)`);
+		const nodeAge =
+			nowMs -
+			Math.max(
+				isoMs(node.lastActivityAt),
+				isoMs(node.assignmentMessageId ? msg?.lastAck?.at : undefined),
+				isoMs(attempt?.assignedAt),
+			);
+		if (nodeAge > TASK_NUDGE_MS)
+			evidence.push(
+				`no_progress: legacy/unfenced assignment, ~${Math.round(nodeAge / 60000)}m since last durable activity (no attempt metadata; reminder requires a fenced attempt)`,
+			);
 		return { category: nodeAge > TASK_NUDGE_MS ? "no_progress" : "none", evidence, workerReminderEligible: false, rootDecision: false };
 	}
 
@@ -386,7 +453,9 @@ export function checkStallNotificationStale(
 				const assignedAt = lastAttempt.assignedAt ? new Date(lastAttempt.assignedAt).getTime() : 0;
 				const age = nowMs - assignedAt;
 				if (age > SETTLE_NOTIFY_COOLDOWN_MS) {
-					evidence.push(`orphaned_attempt_assignee_stopped: ${lastAttempt.assignee} ${prior.status}/${prior.health}, attempt age=${Math.round(age / 1000)}s > grace`);
+					evidence.push(
+						`orphaned_attempt_assignee_stopped: ${lastAttempt.assignee} ${prior.status}/${prior.health}, attempt age=${Math.round(age / 1000)}s > grace`,
+					);
 					return { stale: true, reason: "agent_stopped", evidence };
 				}
 			}
@@ -412,14 +481,19 @@ export function checkStallNotificationStale(
 	}
 	const agent = st.agents[agentId];
 	if (agent && (agent.status === "stopped" || agent.health === "unhealthy")) {
-		const assignmentAge = canonId && st.messages[canonId]?.createdAt
-			? nowMs - new Date(st.messages[canonId].createdAt).getTime()
-			: Number.POSITIVE_INFINITY;
+		const assignmentAge =
+			canonId && st.messages[canonId]?.createdAt
+				? nowMs - new Date(st.messages[canonId].createdAt).getTime()
+				: Number.POSITIVE_INFINITY;
 		if (assignmentAge > SETTLE_NOTIFY_COOLDOWN_MS) {
-			evidence.push(`agent_stopped: agent ${agentId} ${agent.status}/${agent.health}, assignment age=${Math.round(assignmentAge / 1000)}s > grace=${SETTLE_NOTIFY_COOLDOWN_MS}ms`);
+			evidence.push(
+				`agent_stopped: agent ${agentId} ${agent.status}/${agent.health}, assignment age=${Math.round(assignmentAge / 1000)}s > grace=${SETTLE_NOTIFY_COOLDOWN_MS}ms`,
+			);
 			return { stale: true, reason: "agent_stopped", evidence };
 		} else {
-			evidence.push(`agent_stopped_within_grace: assignment age=${Math.round(assignmentAge / 1000)}s < grace=${SETTLE_NOTIFY_COOLDOWN_MS}ms (fresh)`);
+			evidence.push(
+				`agent_stopped_within_grace: assignment age=${Math.round(assignmentAge / 1000)}s < grace=${SETTLE_NOTIFY_COOLDOWN_MS}ms (fresh)`,
+			);
 		}
 	}
 
@@ -449,23 +523,85 @@ export function checkClosureNotificationStale(
 	// (2) Reopened + reassigned to a different agent: the closure/cancel event no longer applies
 	// because the node has been re-opened and routed elsewhere.
 	if (node.status === "ready" && node.assignee && node.assignee !== triggeringAssignee) {
-		evidence.push(`reopened_reassigned: node ${nodeId} status=ready, assignee=${node.assignee} (was ${triggeringAssignee || "unassigned"})`);
+		evidence.push(
+			`reopened_reassigned: node ${nodeId} status=ready, assignee=${node.assignee} (was ${triggeringAssignee || "unassigned"})`,
+		);
 		return { stale: true, reason: "reopened_reassigned", evidence };
 	}
 
 	return { stale: false, reason: null, evidence };
 }
 
-export function buildDefaultGraph(allowedFiles: string[]): { start: string; nodes: Record<string, TaskNode>; edges: TaskEdge[]; gates: Record<string, TaskGate> } {
+export function buildDefaultGraph(allowedFiles: string[]): {
+	start: string;
+	nodes: Record<string, TaskNode>;
+	edges: TaskEdge[];
+	gates: Record<string, TaskGate>;
+} {
 	return {
 		start: "plan",
 		nodes: {
-			plan: { status: "ready", role: "planner", dependsOn: [], readArtifacts: [], writeArtifacts: ["artifacts/plan.md"], messageIds: [], attempts: 0, maxAttempts: 1 },
-			implement: { status: "pending", role: "implementer", dependsOn: ["plan"], allowedFiles, readArtifacts: ["artifacts/plan.md"], writeArtifacts: ["artifacts/implementation-report.md"], messageIds: [], attempts: 0, maxAttempts: 3 },
-			test: { status: "pending", role: "tester", dependsOn: ["implement"], readArtifacts: ["artifacts/implementation-report.md"], writeArtifacts: ["artifacts/test-report.md"], messageIds: [], attempts: 0, maxAttempts: 3 },
-			fix: { status: "pending", role: "implementer", dependsOn: ["test"], allowedFilesFrom: "implement", readArtifacts: ["artifacts/test-report.md"], writeArtifacts: ["artifacts/fix-report.md"], messageIds: [], attempts: 0, maxAttempts: 3 },
-			review: { status: "pending", role: "reviewer", dependsOn: ["test"], readArtifacts: ["artifacts/implementation-report.md", "artifacts/test-report.md"], writeArtifacts: ["artifacts/review.md"], messageIds: [], attempts: 0, maxAttempts: 2 },
-			commit: { status: "pending", role: "root", dependsOn: ["review"], writeArtifacts: ["artifacts/final-summary.md"], messageIds: [], attempts: 0, terminal: true },
+			plan: {
+				status: "ready",
+				role: "planner",
+				dependsOn: [],
+				readArtifacts: [],
+				writeArtifacts: ["artifacts/plan.md"],
+				messageIds: [],
+				attempts: 0,
+				maxAttempts: 1,
+			},
+			implement: {
+				status: "pending",
+				role: "implementer",
+				dependsOn: ["plan"],
+				allowedFiles,
+				readArtifacts: ["artifacts/plan.md"],
+				writeArtifacts: ["artifacts/implementation-report.md"],
+				messageIds: [],
+				attempts: 0,
+				maxAttempts: 3,
+			},
+			test: {
+				status: "pending",
+				role: "tester",
+				dependsOn: ["implement"],
+				readArtifacts: ["artifacts/implementation-report.md"],
+				writeArtifacts: ["artifacts/test-report.md"],
+				messageIds: [],
+				attempts: 0,
+				maxAttempts: 3,
+			},
+			fix: {
+				status: "pending",
+				role: "implementer",
+				dependsOn: ["test"],
+				allowedFilesFrom: "implement",
+				readArtifacts: ["artifacts/test-report.md"],
+				writeArtifacts: ["artifacts/fix-report.md"],
+				messageIds: [],
+				attempts: 0,
+				maxAttempts: 3,
+			},
+			review: {
+				status: "pending",
+				role: "reviewer",
+				dependsOn: ["test"],
+				readArtifacts: ["artifacts/implementation-report.md", "artifacts/test-report.md"],
+				writeArtifacts: ["artifacts/review.md"],
+				messageIds: [],
+				attempts: 0,
+				maxAttempts: 2,
+			},
+			commit: {
+				status: "pending",
+				role: "root",
+				dependsOn: ["review"],
+				writeArtifacts: ["artifacts/final-summary.md"],
+				messageIds: [],
+				attempts: 0,
+				terminal: true,
+			},
 		},
 		edges: [
 			{ from: "plan", to: "implement", when: "planned" },
@@ -495,21 +631,41 @@ function reworkEdgeKey(edge: TaskEdge) {
 	return `${edge.from}=>${edge.to}:${edge.when}:${edge.rework ? 1 : 0}`;
 }
 
-function sourceAttemptIdentity(task: TaskState, edge: TaskEdge): { attemptId: string; sourceStatus: TaskNodeStatus; sourceOutcome: string | null | undefined } | null {
+function sourceAttemptIdentity(
+	task: TaskState,
+	edge: TaskEdge,
+): { attemptId: string; sourceStatus: TaskNodeStatus; sourceOutcome: string | null | undefined } | null {
 	const from = task.nodes[edge.from];
 	if (!from) return null;
 	const latestAttemptId = from.activeAttemptId || from.attemptHistory?.[from.attemptHistory.length - 1]?.attemptId;
 	if (latestAttemptId) {
 		return { attemptId: latestAttemptId, sourceStatus: from.status, sourceOutcome: from.outcome };
 	}
-	return { attemptId: `legacy:${edge.from}:${from.status}:${from.outcome ?? ""}:${from.lastActivityAt ?? ""}`, sourceStatus: from.status, sourceOutcome: from.outcome };
+	return {
+		attemptId: `legacy:${edge.from}:${from.status}:${from.outcome ?? ""}:${from.lastActivityAt ?? ""}`,
+		sourceStatus: from.status,
+		sourceOutcome: from.outcome,
+	};
 }
 
 function hasConsumedRework(task: TaskState, edge: TaskEdge, sourceAttemptId: string, reopenedNodeId: string) {
-	return (task.reworkConsumption || []).some((record) => record.edgeKey === reworkEdgeKey(edge) && record.sourceNodeId === edge.from && record.sourceAttemptId === sourceAttemptId && record.reopenedNodeId === reopenedNodeId);
+	return (task.reworkConsumption || []).some(
+		(record) =>
+			record.edgeKey === reworkEdgeKey(edge) &&
+			record.sourceNodeId === edge.from &&
+			record.sourceAttemptId === sourceAttemptId &&
+			record.reopenedNodeId === reopenedNodeId,
+	);
 }
 
-function recordReworkConsumption(task: TaskState, edge: TaskEdge, reopenedNodeId: string, sourceAttemptId: string, sourceStatus: TaskNodeStatus, sourceOutcome: string | null | undefined) {
+function recordReworkConsumption(
+	task: TaskState,
+	edge: TaskEdge,
+	reopenedNodeId: string,
+	sourceAttemptId: string,
+	sourceStatus: TaskNodeStatus,
+	sourceOutcome: string | null | undefined,
+) {
 	task.reworkConsumption ||= [];
 	if (hasConsumedRework(task, edge, sourceAttemptId, reopenedNodeId)) return false;
 	task.reworkConsumption.push({
@@ -564,10 +720,17 @@ export function activateReworkNodes(task: TaskState, tp?: TaskPaths) {
 			}
 
 			const priorActiveAttemptId = target.activeAttemptId;
-			const priorAttempt = priorActiveAttemptId && target.attemptHistory
-				? target.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId)
-				: undefined;
-			if (priorAttempt && (priorAttempt.status === "active" || priorAttempt.status === "completed" || priorAttempt.status === "failed" || priorAttempt.status === "skipped")) {
+			const priorAttempt =
+				priorActiveAttemptId && target.attemptHistory
+					? target.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId)
+					: undefined;
+			if (
+				priorAttempt &&
+				(priorAttempt.status === "active" ||
+					priorAttempt.status === "completed" ||
+					priorAttempt.status === "failed" ||
+					priorAttempt.status === "skipped")
+			) {
 				priorAttempt.supersededAt ||= now();
 				priorAttempt.supersededBy = "<rework>";
 				if (priorAttempt.status === "active") {
@@ -591,7 +754,7 @@ export function activateReworkNodes(task: TaskState, tp?: TaskPaths) {
 			trace(paths(process.cwd()), TRACE_TASK_ATTEMPT_REOPENED_BY_REWORK, {
 				taskId: task.taskId,
 				nodeId: activation.to,
-				priorStatus: priorAttempt ? priorAttempt.status : (priorActiveAttemptId ? "unknown" : "done"),
+				priorStatus: priorAttempt ? priorAttempt.status : priorActiveAttemptId ? "unknown" : "done",
 				priorAttemptId: priorActiveAttemptId ?? null,
 				edgeKey: reworkEdgeKey(activation),
 				sourceNodeId: activation.from,
@@ -609,7 +772,13 @@ export function suppressPriorAttemptForForceReopen(node: TaskNode): { priorAttem
 	const priorActiveAttemptId = node.activeAttemptId;
 	if (priorActiveAttemptId && node.attemptHistory) {
 		const priorAttempt = node.attemptHistory.find((a: any) => a.attemptId === priorActiveAttemptId);
-		if (priorAttempt && (priorAttempt.status === "active" || priorAttempt.status === "completed" || priorAttempt.status === "failed" || priorAttempt.status === "skipped")) {
+		if (
+			priorAttempt &&
+			(priorAttempt.status === "active" ||
+				priorAttempt.status === "completed" ||
+				priorAttempt.status === "failed" ||
+				priorAttempt.status === "skipped")
+		) {
 			priorAttempt.status = "superseded";
 			priorAttempt.outcome = undefined;
 			priorAttempt.supersededAt ||= now();
@@ -632,7 +801,8 @@ export function computeReadyNodes(task: TaskState) {
 		incoming.set(edge.to, arr);
 	}
 	for (const [nodeId, node] of Object.entries(task.nodes)) {
-		if (node.status === "ready" || node.status === "assigned" || node.status === "in_progress" || node.status === "blocked") current.add(nodeId);
+		if (node.status === "ready" || node.status === "assigned" || node.status === "in_progress" || node.status === "blocked")
+			current.add(nodeId);
 		if (node.status !== "pending") continue;
 		const depsOk = (node.dependsOn || []).every((depId) => {
 			const dep = task.nodes[depId];
@@ -650,7 +820,11 @@ export function computeReadyNodes(task: TaskState) {
 		// A node whose dependsOn are all satisfied but which has no incoming branch edges is a linear
 		// AND-join: ready as soon as dependencies are done/skipped. Nodes WITH branch edges still require
 		// a satisfied edge (from done + outcome matches when), so outcome-based branching is preserved.
-		if (!edges.length) { ready.push(nodeId); current.add(nodeId); continue; }
+		if (!edges.length) {
+			ready.push(nodeId);
+			current.add(nodeId);
+			continue;
+		}
 		const edgeOk = edges.some((edge) => edgeMatchesActivation(task, edge));
 		if (edgeOk) {
 			ready.push(nodeId);
@@ -670,10 +844,18 @@ export function isGraphTerminalNode(task: TaskState, nodeId: string) {
 }
 
 export function buildTaskMarkdown(task: TaskState) {
-	const allowed = task.allowedFiles.length ? task.allowedFiles.map((file) => `- \
-\`${file}\``).join("\n") : "- None specified";
+	const allowed = task.allowedFiles.length
+		? task.allowedFiles
+				.map(
+					(file) => `- \
+\`${file}\``,
+				)
+				.join("\n")
+		: "- None specified";
 	const acceptance = task.acceptanceCriteria.length ? task.acceptanceCriteria.map((item) => `- ${item}`).join("\n") : "- None specified";
-	const validation = task.validationCommands.length ? task.validationCommands.map((cmd) => `\`\`\`bash\n${cmd}\n\`\`\``).join("\n\n") : "_None specified._";
+	const validation = task.validationCommands.length
+		? task.validationCommands.map((cmd) => `\`\`\`bash\n${cmd}\n\`\`\``).join("\n\n")
+		: "_None specified._";
 	const qualification = task.qualification
 		? `\n## Qualification Gate\n\n- Mode: \`${task.qualification.mode}\`\n- Status: \`${task.qualification.status}\`\n- Artifact: \`${task.qualification.artifact}\`\n`
 		: "";
@@ -683,7 +865,9 @@ export function buildTaskMarkdown(task: TaskState) {
 // ---- Task graph validation, printing, and graph synthesis helpers ----
 
 export function graphHasCycle(adj: Map<string, string[]>, nodes: Set<string>): boolean {
-	const WHITE = 0, GRAY = 1, BLACK = 2;
+	const WHITE = 0,
+		GRAY = 1,
+		BLACK = 2;
 	const color = new Map<string, number>();
 	for (const n of nodes) color.set(n, WHITE);
 	const dfs = (u: string): boolean => {
@@ -713,7 +897,8 @@ export function validateTaskGraph(task: TaskState): GraphValidation {
 	for (const edge of task.edges) incoming.set(edge.to, (incoming.get(edge.to) || 0) + 1);
 	for (const [id, node] of Object.entries(task.nodes)) {
 		for (const dep of node.dependsOn || []) if (!nodeIds.has(dep)) errors.push(`node ${id} dependsOn missing node: ${dep}`);
-		if (id !== task.start && (incoming.get(id) || 0) > 0 && !(node.dependsOn || []).length) errors.push(`node ${id} has incoming edge(s) but no dependsOn; non-root fan-in nodes must declare dependsOn`);
+		if (id !== task.start && (incoming.get(id) || 0) > 0 && !(node.dependsOn || []).length)
+			errors.push(`node ${id} has incoming edge(s) but no dependsOn; non-root fan-in nodes must declare dependsOn`);
 	}
 	for (const edge of task.edges) {
 		if (!nodeIds.has(edge.from)) errors.push(`edge from missing node: ${edge.from}`);
@@ -728,13 +913,18 @@ export function validateTaskGraph(task: TaskState): GraphValidation {
 		const next = new Set<string>();
 		for (const edge of task.edges) if (edge.from === cur && nodeIds.has(edge.to)) next.add(edge.to);
 		for (const [id, node] of Object.entries(task.nodes)) if ((node.dependsOn || []).includes(cur)) next.add(id);
-		for (const n of next) if (!reachable.has(n)) { reachable.add(n); queue.push(n); }
+		for (const n of next)
+			if (!reachable.has(n)) {
+				reachable.add(n);
+				queue.push(n);
+			}
 	}
 	for (const id of nodeIds) if (!reachable.has(id)) warnings.push(`node ${id} is not reachable from start ${task.start}`);
 
 	// A node also has an outgoing connection if another node depends on it (dependsOn is the reverse
 	// of the flow edge), so terminal detection stays correct for dependsOn-only custom graphs.
-	const hasOutgoing = (id: string) => task.edges.some((e) => e.from === id) || Object.values(task.nodes).some((n) => (n.dependsOn || []).includes(id));
+	const hasOutgoing = (id: string) =>
+		task.edges.some((e) => e.from === id) || Object.values(task.nodes).some((n) => (n.dependsOn || []).includes(id));
 	const terminals = Object.keys(task.nodes).filter((id) => task.nodes[id].terminal || !hasOutgoing(id));
 	if (!terminals.some((id) => reachable.has(id))) errors.push("no terminal node is reachable from start");
 
@@ -745,7 +935,8 @@ export function validateTaskGraph(task: TaskState): GraphValidation {
 		const key = `${edge.from}::${edge.when}`;
 		branchKeys.set(key, (branchKeys.get(key) || 0) + 1);
 	}
-	for (const [key, count] of branchKeys) if (count > 1) errors.push(`ambiguous branch: ${count} edges share from+when "${key}" without parallel=true`);
+	for (const [key, count] of branchKeys)
+		if (count > 1) errors.push(`ambiguous branch: ${count} edges share from+when "${key}" without parallel=true`);
 
 	// cycles allowed only when cycle-forming edges are marked rework
 	const nonReworkAdj = new Map<string, string[]>();
@@ -794,29 +985,48 @@ export function computeNodeClosureSummary(st: SwarmState, task: TaskState, nodeI
 	if (node.staleAt) blocking.push(`marked stale at ${node.staleAt}`);
 	if (agent) {
 		ensureAgentDefaults(agent);
-		if (agent.status === "stopped" || agent.health === "unhealthy") blocking.push(`assignee ${agent.id} is ${agent.status}/${agent.health}`);
+		if (agent.status === "stopped" || agent.health === "unhealthy")
+			blocking.push(`assignee ${agent.id} is ${agent.status}/${agent.health}`);
 	}
 	let assignmentAck: NodeClosureSummary["assignmentAck"] = null;
 	// Prefer the canonical (current, non-superseded) assignment message for the ack summary.
 	const canonId = node.assignmentMessageId;
 	if (canonId) {
 		const r = st.messages[canonId];
-		if (r && !r.superseded) assignmentAck = { messageId: canonId, status: r.status, acked: Boolean(r.ackedAt), ackStatus: r.lastAck?.status ?? null };
+		if (r && !r.superseded)
+			assignmentAck = { messageId: canonId, status: r.status, acked: Boolean(r.ackedAt), ackStatus: r.lastAck?.status ?? null };
 	}
 	for (const msgId of node.messageIds || []) {
 		const rec = st.messages[msgId];
-		if (!rec) { blocking.push(`references missing message ${msgId}`); continue; }
+		if (!rec) {
+			blocking.push(`references missing message ${msgId}`);
+			continue;
+		}
 		if (rec.superseded) continue; // superseded assignments are waived; excluded from closure blocking
-		if (!assignmentAck) assignmentAck = { messageId: msgId, status: rec.status, acked: Boolean(rec.ackedAt), ackStatus: rec.lastAck?.status ?? null };
+		if (!assignmentAck)
+			assignmentAck = { messageId: msgId, status: rec.status, acked: Boolean(rec.ackedAt), ackStatus: rec.lastAck?.status ?? null };
 		if (rec.status === "dead_letter") blocking.push(`message ${msgId} is dead-lettered (${rec.lastError || "unknown"})`);
 		if (rec.requiresAck && !rec.ackedAt) blocking.push(`assignment message ${msgId} not acknowledged`);
-		if (rec.lastAck?.status === "done" && verdict === "open") blocking.push(`message ${msgId} acked done but node is still ${node.status}`);
+		if (rec.lastAck?.status === "done" && verdict === "open")
+			blocking.push(`message ${msgId} acked done but node is still ${node.status}`);
 	}
 	const artifacts = (node.writeArtifacts || []).map((path) => ({ path, exists: existsSync(join(tp.root, path)) }));
 	for (const a of artifacts) if (verdict === "done" && !a.exists) blocking.push(`declared artifact ${a.path} missing`);
-	for (const [file, lock] of Object.entries(task.editLocks)) if (lock?.nodeId === nodeId && verdict !== "open") blocking.push(`holds editLock for ${file}`);
+	for (const [file, lock] of Object.entries(task.editLocks))
+		if (lock?.nodeId === nodeId && verdict !== "open") blocking.push(`holds editLock for ${file}`);
 	const evidence = [`task.md node "${nodeId}"`, ...artifacts.filter((a) => a.exists).map((a) => a.path)];
-	return { nodeId, role: node.role, assignee: node.assignee ?? null, status: node.status, closed: verdict !== "open", verdict, blocking, assignmentAck, artifacts, evidence };
+	return {
+		nodeId,
+		role: node.role,
+		assignee: node.assignee ?? null,
+		status: node.status,
+		closed: verdict !== "open",
+		verdict,
+		blocking,
+		assignmentAck,
+		artifacts,
+		evidence,
+	};
 }
 
 // Task-level closure roll-up: machine-state closure + open/stale assignments + blockers. `derived`
@@ -824,14 +1034,21 @@ export function computeNodeClosureSummary(st: SwarmState, task: TaskState, nodeI
 // the pane-free done-detector: closure is knowable from task.json + swarm state alone.
 export function computeTaskClosure(st: SwarmState, task: TaskState, tp: TaskPaths) {
 	const nodeClosure = Object.keys(task.nodes).map((id) => computeNodeClosureSummary(st, task, id, tp));
-	const openAssignments = nodeClosure.filter((n) => n.assignee && (n.status === "assigned" || n.status === "in_progress")).map((n) => ({ nodeId: n.nodeId, assignee: n.assignee as string, status: n.status }));
-	const staleReason = (n: NodeClosureSummary) => n.blocking.find((b) => b.includes("stale") || b.includes("stopped") || b.includes("unhealthy") || b.includes("dead-lettered"));
-	const staleAssignments = nodeClosure.filter((n) => n.assignee && staleReason(n)).map((n) => ({ nodeId: n.nodeId, assignee: n.assignee as string, reason: staleReason(n) || "stale" }));
+	const openAssignments = nodeClosure
+		.filter((n) => n.assignee && (n.status === "assigned" || n.status === "in_progress"))
+		.map((n) => ({ nodeId: n.nodeId, assignee: n.assignee as string, status: n.status }));
+	const staleReason = (n: NodeClosureSummary) =>
+		n.blocking.find((b) => b.includes("stale") || b.includes("stopped") || b.includes("unhealthy") || b.includes("dead-lettered"));
+	const staleAssignments = nodeClosure
+		.filter((n) => n.assignee && staleReason(n))
+		.map((n) => ({ nodeId: n.nodeId, assignee: n.assignee as string, reason: staleReason(n) || "stale" }));
 	const derived = computeTaskStatus(task);
 	const storedClosed = task.status === "done" || task.status === "failed" || task.status === "cancelled";
 	const blocking: string[] = [];
-	if (derived !== task.status && task.status !== "cancelled") blocking.push(`stored task.status=${task.status} but nodes derive ${derived}`);
-	if (!storedClosed && openAssignments.length === 0 && nodeClosure.some((n) => n.verdict === "open")) blocking.push("task open but no active assignments (stalled)");
+	if (derived !== task.status && task.status !== "cancelled")
+		blocking.push(`stored task.status=${task.status} but nodes derive ${derived}`);
+	if (!storedClosed && openAssignments.length === 0 && nodeClosure.some((n) => n.verdict === "open"))
+		blocking.push("task open but no active assignments (stalled)");
 	return {
 		taskId: task.taskId,
 		storedStatus: task.status,
@@ -847,7 +1064,12 @@ export function computeTaskClosure(st: SwarmState, task: TaskState, tp: TaskPath
 	};
 }
 
-export function printGraphText(task: TaskState, ready: string[], current: string[], artifactStatus?: Array<{ path: string; exists: boolean }>): string {
+export function printGraphText(
+	task: TaskState,
+	ready: string[],
+	current: string[],
+	artifactStatus?: Array<{ path: string; exists: boolean }>,
+): string {
 	const lines: string[] = [];
 	lines.push(`Task: ${task.taskId} — ${task.title}`);
 	lines.push(`Status: ${task.status}`);
@@ -875,15 +1097,19 @@ export function printGraphText(task: TaskState, ready: string[], current: string
 	const commitEvidence = readCommitEvidence(task);
 	if (commitEvidence) {
 		lines.push("");
-		lines.push(`Commit evidence: ${commitEvidence.status}${commitEvidence.reason ? ` (${commitEvidence.reason})` : ""}${commitEvidence.baseline ? ` baseline=${commitEvidence.baseline}` : ""}${commitEvidence.head ? ` head=${commitEvidence.head}` : ""}${commitEvidence.nodeId && commitEvidence.nodeId !== "commit" ? ` node=${commitEvidence.nodeId}` : ""}`);
+		lines.push(
+			`Commit evidence: ${commitEvidence.status}${commitEvidence.reason ? ` (${commitEvidence.reason})` : ""}${commitEvidence.baseline ? ` baseline=${commitEvidence.baseline}` : ""}${commitEvidence.head ? ` head=${commitEvidence.head}` : ""}${commitEvidence.nodeId && commitEvidence.nodeId !== "commit" ? ` node=${commitEvidence.nodeId}` : ""}`,
+		);
 	}
 	// Row 75 (fix): surface evidence for other commit-like terminal nodes (finalize, ship, ...)
 	// using the read-compat legacy `.commit` alias so roots don't have to query the task JSON.
-	for (const [nodeId, ev] of Object.entries(task.evidence as Record<string, any> || {})) {
+	for (const [nodeId, ev] of Object.entries((task.evidence as Record<string, any>) || {})) {
 		if (nodeId === "commit") continue;
 		if (!ev || typeof ev !== "object") continue;
 		lines.push("");
-		lines.push(`Commit evidence [${nodeId}]: ${ev.status}${ev.reason ? ` (${ev.reason})` : ""}${ev.baseline ? ` baseline=${ev.baseline}` : ""}${ev.head ? ` head=${ev.head}` : ""}`);
+		lines.push(
+			`Commit evidence [${nodeId}]: ${ev.status}${ev.reason ? ` (${ev.reason})` : ""}${ev.baseline ? ` baseline=${ev.baseline}` : ""}${ev.head ? ` head=${ev.head}` : ""}`,
+		);
 	}
 	lines.push("");
 	lines.push(`Ready: ${ready.length ? ready.join(", ") : "(none)"}`);
@@ -905,10 +1131,25 @@ export function printGraphMermaid(task: TaskState): string {
 
 export function graphJsonSummary(task: TaskState, ready: string[], current: string[]) {
 	return {
-		taskId: task.taskId, title: task.title, status: task.status, workflow: task.workflow, owner: task.owner,
-		start: task.start, current, ready,
-		nodes: Object.entries(task.nodes).map(([id, n]) => ({ id, role: n.role, status: n.status, assignee: n.assignee || null, outcome: n.outcome || null, terminal: Boolean(n.terminal), dependsOn: n.dependsOn })),
-		edges: task.edges, gates: task.gates,
+		taskId: task.taskId,
+		title: task.title,
+		status: task.status,
+		workflow: task.workflow,
+		owner: task.owner,
+		start: task.start,
+		current,
+		ready,
+		nodes: Object.entries(task.nodes).map(([id, n]) => ({
+			id,
+			role: n.role,
+			status: n.status,
+			assignee: n.assignee || null,
+			outcome: n.outcome || null,
+			terminal: Boolean(n.terminal),
+			dependsOn: n.dependsOn,
+		})),
+		edges: task.edges,
+		gates: task.gates,
 	};
 }
 
@@ -925,7 +1166,12 @@ export function isAllowedNodeTransition(from: TaskNodeStatus, to: TaskNodeStatus
 export function releaseNodeAssignment(st: SwarmState, task: TaskState, nodeId: string) {
 	const node = task.nodes[nodeId];
 	if (!node || !node.assignee) return;
-	const isTerminalish = node.status === "done" || node.status === "failed" || node.status === "blocked" || node.status === "skipped" || node.status === "cancelled";
+	const isTerminalish =
+		node.status === "done" ||
+		node.status === "failed" ||
+		node.status === "blocked" ||
+		node.status === "skipped" ||
+		node.status === "cancelled";
 	if (!isTerminalish) return;
 	const agent = st.agents[node.assignee];
 	if (agent) {
@@ -960,7 +1206,9 @@ export function isTaskOrNodeCancelled(task: TaskState, nodeId?: string): boolean
 export function computeTaskStatus(task: TaskState): TaskStatus {
 	const nodes = Object.values(task.nodes).filter((n) => n.status !== "cancelled");
 	if (nodes.some((n) => n.status === "failed")) return "failed";
-	const terminals = Object.keys(task.nodes).filter((id) => isGraphTerminalNode(task, id) && task.nodes[id].status !== "cancelled").map((id) => task.nodes[id]);
+	const terminals = Object.keys(task.nodes)
+		.filter((id) => isGraphTerminalNode(task, id) && task.nodes[id].status !== "cancelled")
+		.map((id) => task.nodes[id]);
 	// R11-2: `done` additionally requires that NO live assignment remains anywhere in the graph.
 	// Graph-terminal completion alone is insufficient when a sub-task cycle re-arms an earlier node
 	// (rework/reuse): a done terminal set + an assigned/in_progress/ready node must stay in_progress,
@@ -970,9 +1218,19 @@ export function computeTaskStatus(task: TaskState): TaskStatus {
 	// Task-level blocked: every active (non-terminal, non-pending) node is blocked => the task cannot
 	// make progress. Pure (derived from node states, not the possibly-stale task.currentNodes); resumable
 	// (a node leaving `blocked` returns the task to in_progress/done). Cancelled nodes are excluded.
-	const active = nodes.filter((n) => n.status === "ready" || n.status === "assigned" || n.status === "in_progress" || n.status === "blocked");
+	const active = nodes.filter(
+		(n) => n.status === "ready" || n.status === "assigned" || n.status === "in_progress" || n.status === "blocked",
+	);
 	if (active.length > 0 && active.every((n) => n.status === "blocked")) return "blocked";
-	const started = nodes.some((n) => n.status === "assigned" || n.status === "in_progress" || n.status === "blocked" || n.status === "done" || n.status === "failed" || n.status === "skipped");
+	const started = nodes.some(
+		(n) =>
+			n.status === "assigned" ||
+			n.status === "in_progress" ||
+			n.status === "blocked" ||
+			n.status === "done" ||
+			n.status === "failed" ||
+			n.status === "skipped",
+	);
 	return started ? "in_progress" : "ready";
 }
 
@@ -1005,12 +1263,10 @@ export function applyTaskStatus(task: TaskState): { changed: boolean; terminal: 
 // `isNewAttempt` callers should compute it before calling this helper (the helper inspects
 // `node` to decide, but the caller's prevStatus variable may be more up-to-date). The helper
 // uses its own prevStatus probe as a defensive fallback.
-export function mintNodeAttempt(args: {
-	node: TaskNode;
-	assignee: string;
-	candidateScope: EffectiveScope;
-	reason: "assign" | "claim";
-}): { attemptId: string; created: boolean } {
+export function mintNodeAttempt(args: { node: TaskNode; assignee: string; candidateScope: EffectiveScope; reason: "assign" | "claim" }): {
+	attemptId: string;
+	created: boolean;
+} {
 	const { node, assignee, candidateScope } = args;
 	const prevStatus = node.status;
 	// Detect same-active-assignment duplicates: same assignee + same node + active attempt + non-new
@@ -1020,7 +1276,9 @@ export function mintNodeAttempt(args: {
 		? node.attemptHistory?.find((a: any) => a.attemptId === node.activeAttemptId)
 		: undefined;
 	const sameActiveAssignment =
-		prevStatus !== "pending" && prevStatus !== "ready" && prevStatus !== "blocked" &&
+		prevStatus !== "pending" &&
+		prevStatus !== "ready" &&
+		prevStatus !== "blocked" &&
 		node.assignee === assignee &&
 		activeAttemptRecord &&
 		activeAttemptRecord.status === "active";
@@ -1054,7 +1312,9 @@ export function mintNodeAttempt(args: {
 		// this lease actually held. Unresolved inheritance is NOT stamped: absent scope makes later
 		// scans re-resolve live (which returns unresolved => conservatively overlapping), never a fake
 		// empty scope. Mirrors the canonical swarm_assign_task inline logic.
-		...("unresolved" in candidateScope ? {} : { scope: { source: candidateScope.source, sourceNodeId: candidateScope.sourceNodeId, files: candidateScope.files } }),
+		...("unresolved" in candidateScope
+			? {}
+			: { scope: { source: candidateScope.source, sourceNodeId: candidateScope.sourceNodeId, files: candidateScope.files } }),
 	};
 	node.attemptHistory = [...(node.attemptHistory || []), newAttempt];
 	node.activeAttemptId = attemptId;
@@ -1069,7 +1329,10 @@ function randomBytesLike(): string {
 
 // Remove a closed task from every agent's activeTaskIds (terminal bookkeeping cleanup).
 export function releaseTaskFromAllAgents(st: SwarmState, taskId: string) {
-	for (const a of Object.values(st.agents)) { ensureAgentDefaults(a); a.activeTaskIds = a.activeTaskIds.filter((t) => t !== taskId); }
+	for (const a of Object.values(st.agents)) {
+		ensureAgentDefaults(a);
+		a.activeTaskIds = a.activeTaskIds.filter((t) => t !== taskId);
+	}
 }
 
 // === Issue 26 — task-close worker sweep (auto-stop task-scoped workers) ===
@@ -1095,10 +1358,7 @@ export function releaseTaskFromAllAgents(st: SwarmState, taskId: string) {
 //
 // Returns the list of stopped agent ids so callers can include it in tool output; empty array
 // means "no eligible workers" (most common path: cross-task agents / paused / opt-out).
-export type SweepOutcome =
-	| "opt_out"
-	| "no_terminal"
-	| { stopped: string[]; skipped: { agentId: string; reason: string }[] };
+export type SweepOutcome = "opt_out" | "no_terminal" | { stopped: string[]; skipped: { agentId: string; reason: string }[] };
 
 export async function sweepTaskWorkersLocked(
 	pi: import("@earendil-works/pi-coding-agent").ExtensionAPI,
@@ -1138,7 +1398,13 @@ export async function sweepTaskWorkersLocked(
 	let task: TaskState | null = freshTask ?? null;
 	// Prefer the caller's in-memory snapshot (terminal close mutates nodes AFTER the last disk
 	// write in some paths — R11-2 guard must not read a stale graph). Fall back to disk read.
-	if (!task) { try { task = await readTaskState(tp.taskJson); } catch { /* missing/unreadable: skip graph check */ } }
+	if (!task) {
+		try {
+			task = await readTaskState(tp.taskJson);
+		} catch {
+			/* missing/unreadable: skip graph check */
+		}
+	}
 	const priorActiveByAgent = new Map<string, string[]>();
 	for (const agent of Object.values(st.agents)) {
 		ensureAgentDefaults(agent);
@@ -1166,11 +1432,20 @@ export async function sweepTaskWorkersLocked(
 	const stopped: string[] = [];
 	const skipped: { agentId: string; reason: string }[] = [];
 	for (const agent of Object.values(st.agents)) {
-		if (agent.id === "root") { skipped.push({ agentId: agent.id, reason: "root" }); continue; }
+		if (agent.id === "root") {
+			skipped.push({ agentId: agent.id, reason: "root" });
+			continue;
+		}
 		ensureAgentDefaults(agent);
-		if (agent.paused) { skipped.push({ agentId: agent.id, reason: "paused" }); continue; }
+		if (agent.paused) {
+			skipped.push({ agentId: agent.id, reason: "paused" });
+			continue;
+		}
 		// Already stopped — skip (idempotent re-invocation).
-		if (agent.status === "stopped") { skipped.push({ agentId: agent.id, reason: "already_stopped" }); continue; }
+		if (agent.status === "stopped") {
+			skipped.push({ agentId: agent.id, reason: "already_stopped" });
+			continue;
+		}
 		const priorActive = priorActiveByAgent.get(agent.id) || [];
 		const remainingAfterClose = priorActive.filter((t) => t !== taskId);
 		const wasInClosingTask = priorActive.includes(taskId);
@@ -1190,7 +1465,7 @@ export async function sweepTaskWorkersLocked(
 		// closing task's graph, whatever the roll-up derived. Re-armed sub-task cycles depend
 		// on this when a stale task.status=done is repaired by a later path (reconcile mark).
 		if (task) {
-		const stillAssigned = Object.values(task.nodes).some(
+			const stillAssigned = Object.values(task.nodes).some(
 				(n) => n.assignee === agent.id && (n.status === "assigned" || n.status === "in_progress"),
 			);
 			if (stillAssigned) {
@@ -1276,20 +1551,18 @@ export async function sweepTaskWorkersLocked(
 	// Idempotency: a re-invoked sweep sees stopped=[] and returns at the guard above without
 	// nudging. The threshold is "≥1 → 0" only, so any single close call emits at most one nudge.
 	try {
-		const liveNonRoot = Object.values(st.agents).filter(
-			(a) => a.id !== "root" && a.status !== "stopped" && !a.paused,
-		).length;
+		const liveNonRoot = Object.values(st.agents).filter((a) => a.id !== "root" && a.status !== "stopped" && !a.paused).length;
 		if (liveNonRoot === 0) {
 			const key = `pool_depleted:${taskId}`;
 			// Compute pre-sweep live count by adding back the just-stopped set (stopped[] includes
 			// both freshly-stopped agents and lease_parked agents; both were 'running' pre-sweep).
 			const stoppedSet = new Set(stopped);
-			const preSweepLive = Object.values(st.agents).filter(
-				(a) => a.id !== "root" && a.status !== "stopped" && !a.paused,
-			).length + (Array.from(stoppedSet).filter((id) => {
-				const ag = st.agents[id];
-				return ag && ag.id !== "root";
-			}).length);
+			const preSweepLive =
+				Object.values(st.agents).filter((a) => a.id !== "root" && a.status !== "stopped" && !a.paused).length +
+				Array.from(stoppedSet).filter((id) => {
+					const ag = st.agents[id];
+					return ag && ag.id !== "root";
+				}).length;
 			const stoppedForReport = Array.from(stoppedSet);
 			const p = paths(cwd);
 			await trace(p, TRACE_POOL_DEPLETED_NUDGE, {
@@ -1347,10 +1620,14 @@ R12 P0 contract: the sweep no longer force-kills shared-pool workers, but a task
 	return { stopped, skipped };
 }
 
-
 // Find non-terminal assigned/in_progress nodes still owned by an agent across its active tasks.
 // Used by session_shutdown to nudge/escalate instead of silently orphaning open assignments.
-export async function scanAgentOpenAssignments(p: Paths, st: SwarmState, agentId: string, taskIds: string[]): Promise<Array<{ task: TaskState; tp: TaskPaths; nodeId: string }>> {
+export async function scanAgentOpenAssignments(
+	p: Paths,
+	st: SwarmState,
+	agentId: string,
+	taskIds: string[],
+): Promise<Array<{ task: TaskState; tp: TaskPaths; nodeId: string }>> {
 	const out: Array<{ task: TaskState; tp: TaskPaths; nodeId: string }> = [];
 	for (const rawId of taskIds) {
 		const tp = taskPaths(p, safeId(rawId));
@@ -1368,8 +1645,8 @@ export async function scanAgentOpenAssignments(p: Paths, st: SwarmState, agentId
 			const canonId = node.assignmentMessageId;
 			if (canonId) {
 				const rec = st.messages[canonId];
-				if (!rec) continue;               // canonical message missing -> do not claim
-				if (rec.superseded) continue;     // superseded -> not current
+				if (!rec) continue; // canonical message missing -> do not claim
+				if (rec.superseded) continue; // superseded -> not current
 				if (rec.to !== agentId) continue; // canonical belongs to another agent
 			}
 			out.push({ task, tp, nodeId });
@@ -1402,22 +1679,37 @@ export function ensureNodeActivityStamp(task: TaskState, nodeId: string, tsIso: 
 // ~100 file reads per ~5 s tick (no interval gate yet; future PI_SWARM_STALE_OPEN_SCAN_INTERVAL_MS
 // is a follow-up). The scan is wrapped in `try { ... } catch { ... }` so a single tick failure
 // does not crash the pump; errors surface via the standard `trace()` events.
-export async function staleOpenAssignmentScanLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ surfaced: number; inspected: number; alreadySurfaced: number; surfacedNodes: Array<{ taskId: string; nodeId: string; assignee?: string }> }> {
+export async function staleOpenAssignmentScanLocked(
+	p: Paths,
+	st: SwarmState,
+	nowMs: number,
+): Promise<{
+	surfaced: number;
+	inspected: number;
+	alreadySurfaced: number;
+	surfacedNodes: Array<{ taskId: string; nodeId: string; assignee?: string }>;
+}> {
 	const thresholdMs = Number(process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ?? DEFAULT_STALE_OPEN_THRESHOLD_MS);
-	let surfaced = 0, inspected = 0, alreadySurfaced = 0;
+	let surfaced = 0,
+		inspected = 0,
+		alreadySurfaced = 0;
 	const surfacedNodes: Array<{ taskId: string; nodeId: string; assignee?: string }> = [];
 	// Discover tasks via the swarm's tasks dir.
 	let taskDirs: string[] = [];
 	try {
 		const { readdirSync } = await import("node:fs");
 		taskDirs = readdirSync(p.tasksDir).filter((d) => d.startsWith("task-"));
-	} catch { return { surfaced, inspected, alreadySurfaced, surfacedNodes }; }
+	} catch {
+		return { surfaced, inspected, alreadySurfaced, surfacedNodes };
+	}
 	for (const taskDir of taskDirs) {
 		const tp = taskPaths(p, taskDir);
 		let task: TaskState;
 		try {
 			task = await readTaskState(tp.taskJson);
-		} catch { continue; }
+		} catch {
+			continue;
+		}
 		let dirty = false;
 		for (const [nodeId, node] of Object.entries(task.nodes)) {
 			if (node.status !== "assigned" && node.status !== "in_progress") continue;
@@ -1488,12 +1780,20 @@ export async function staleOpenNudgeLocked(
 		const thresholdMs = Number(process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ?? DEFAULT_STALE_OPEN_THRESHOLD_MS);
 		const surfacedMs = n?.staleOpenSurfacedAt ? new Date(n.staleOpenSurfacedAt).getTime() : 0;
 		if (!surfacedMs || Date.now() - surfacedMs > thresholdMs) return false;
-	} catch { return false; }
-	const prior = Object.values(st.messages || {}).filter((r: any) => r.to === "root" && (r.idempotencyKey?.startsWith(keyPrefix) ?? false));
+	} catch {
+		return false;
+	}
+	const prior = Object.values(st.messages || {}).filter(
+		(r: any) => r.to === "root" && (r.idempotencyKey?.startsWith(keyPrefix) ?? false),
+	);
 	if (prior.length >= NOTIFY_DEFAULT_MAX_NUDGES) return false; // cap
 	const seq = prior.length + 1;
 	const key = formatNotifyKey(NOTIFY_KEY_STALE_OPEN, { taskId, nodeId, seq: String(seq) });
-	const lastSent = prior.map((r: any) => r.createdAt || "").sort().pop() || "";
+	const lastSent =
+		prior
+			.map((r: any) => r.createdAt || "")
+			.sort()
+			.pop() || "";
 	if (lastSent && Date.now() - new Date(lastSent).getTime() < NOTIFY_DEFAULT_COOLDOWN_MS) return false; // cooldown
 	if (findIdempotentMessage(st, "root", "root", key) && !prior.some((r: any) => r.ackedAt)) return false; // in-flight
 	try {
@@ -1512,7 +1812,13 @@ Act NOW in this turn:
 			requiresAck: true,
 			idempotencyKey: key,
 		});
-		await trace(p, TRACE_STALE_OPEN_NUDGE_EMITTED, { taskId, nodeId, seq, cap: NOTIFY_DEFAULT_MAX_NUDGES, cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS }).catch(() => {});
+		await trace(p, TRACE_STALE_OPEN_NUDGE_EMITTED, {
+			taskId,
+			nodeId,
+			seq,
+			cap: NOTIFY_DEFAULT_MAX_NUDGES,
+			cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS,
+		}).catch(() => {});
 		return true;
 	} catch (err: any) {
 		await trace(p, "stale_open.nudge_failed", { taskId, nodeId, seq, error: String((err as Error)?.message || err) }).catch(() => {});
@@ -1525,7 +1831,15 @@ Act NOW in this turn:
 // The pump calls this AFTER stale-open scanning and BEFORE nudges so the snapshot reflects
 // the current tick's repairs. Emission is bounded by PI_SWARM_PROXY_METRIC_INTERVAL_MS and
 // is idempotent within the interval: repeated calls only refresh the in-memory snapshot.
-export async function proxyMetricEmitLocked(p: Paths, st: SwarmState, nowMs: number): Promise<{ emitted: boolean; reason: string; metrics: { hungButAlive: number; staleOpen: number; supersessionChurn: number; lastEmitAt?: string } }> {
+export async function proxyMetricEmitLocked(
+	p: Paths,
+	st: SwarmState,
+	nowMs: number,
+): Promise<{
+	emitted: boolean;
+	reason: string;
+	metrics: { hungButAlive: number; staleOpen: number; supersessionChurn: number; lastEmitAt?: string };
+}> {
 	const intervalMs = Number(process.env.PI_SWARM_PROXY_METRIC_INTERVAL_MS ?? PI_SWARM_PROXY_METRIC_INTERVAL_MS);
 	const thresholdMs = Number(process.env.PI_SWARM_STALE_OPEN_THRESHOLD_MS ?? DEFAULT_STALE_OPEN_THRESHOLD_MS);
 	const heartbeatStaleMs = DEFAULT_AGENT_HEARTBEAT_STALE_MS;
@@ -1539,12 +1853,20 @@ export async function proxyMetricEmitLocked(p: Paths, st: SwarmState, nowMs: num
 	const hungCandidates = new Set<string>();
 	if (existsSync(p.tasksDir)) {
 		let taskDirs: string[] = [];
-		try { taskDirs = await readdir(p.tasksDir); } catch { taskDirs = []; }
+		try {
+			taskDirs = await readdir(p.tasksDir);
+		} catch {
+			taskDirs = [];
+		}
 		for (const taskDir of taskDirs) {
 			const tp = taskPaths(p, taskDir);
 			if (!existsSync(tp.taskJson)) continue;
 			let task: TaskState;
-			try { task = await readTaskState(tp.taskJson); } catch { continue; }
+			try {
+				task = await readTaskState(tp.taskJson);
+			} catch {
+				continue;
+			}
 			for (const node of Object.values(task.nodes)) {
 				if (!node || (node.status !== "assigned" && node.status !== "in_progress")) continue;
 				const lastProgressMs = node.lastProgressAt ? new Date(node.lastProgressAt).getTime() : 0;
@@ -1556,7 +1878,8 @@ export async function proxyMetricEmitLocked(p: Paths, st: SwarmState, nowMs: num
 					if (node.assignee) hungCandidates.add(node.assignee);
 				}
 				const windowStartMs = node.supersessionWindowStart ? new Date(node.supersessionWindowStart).getTime() : 0;
-				if (node.supersessionCount && windowStartMs && nowMs - windowStartMs <= intervalMs) supersessionChurn += node.supersessionCount;
+				if (node.supersessionCount && windowStartMs && nowMs - windowStartMs <= intervalMs)
+					supersessionChurn += node.supersessionCount;
 			}
 		}
 	}
@@ -1575,28 +1898,51 @@ export async function proxyMetricEmitLocked(p: Paths, st: SwarmState, nowMs: num
 	metrics.staleOpen = staleOpen;
 	metrics.supersessionChurn = supersessionChurn;
 	metrics.lastEmitAt = new Date(nowMs).toISOString();
-	await trace(p, TRACE_PROXY_METRIC_EMIT, { emitAt: metrics.lastEmitAt, hungButAlive, staleOpen, supersessionChurn, intervalMs, thresholdMs, heartbeatStaleMs }).catch(() => {});
+	await trace(p, TRACE_PROXY_METRIC_EMIT, {
+		emitAt: metrics.lastEmitAt,
+		hungButAlive,
+		staleOpen,
+		supersessionChurn,
+		intervalMs,
+		thresholdMs,
+		heartbeatStaleMs,
+	}).catch(() => {});
 	return { emitted: true, reason: "emitted", metrics: { ...metrics } };
 }
 
 // Apply gate updates { gateName: { status, by?, artifact? } }. `by` defaults to the acting agent.
-export function applyGateUpdates(task: TaskState, gateUpdates: Record<string, { status: TaskGateStatus; by?: string; artifact?: string | null }>, by: string) {
+export function applyGateUpdates(
+	task: TaskState,
+	gateUpdates: Record<string, { status: TaskGateStatus; by?: string; artifact?: string | null }>,
+	by: string,
+) {
 	const ts = now();
 	for (const [name, upd] of Object.entries(gateUpdates)) {
-		const prev = task.gates[name] || { status: "open" as TaskGateStatus, by: null as (string | null), artifact: null as (string | null) };
+		const prev = task.gates[name] || { status: "open" as TaskGateStatus, by: null as string | null, artifact: null as string | null };
 		task.gates[name] = { status: upd.status, by: upd.by || by, artifact: upd.artifact !== undefined ? upd.artifact : prev.artifact };
 	}
 	return ts;
 }
 
 // Append durable shared-context updates (decisions/risks/openQuestions get generated ids + by/at).
-export function applySharedContextUpdates(task: TaskState, upd: { summary?: string; decisions?: Array<{ text: string; severity?: string }>; risks?: Array<{ text: string; severity?: string }>; openQuestions?: Array<{ text: string }> }, by: string) {
+export function applySharedContextUpdates(
+	task: TaskState,
+	upd: {
+		summary?: string;
+		decisions?: Array<{ text: string; severity?: string }>;
+		risks?: Array<{ text: string; severity?: string }>;
+		openQuestions?: Array<{ text: string }>;
+	},
+	by: string,
+) {
 	const ts = now();
 	const ctx = task.sharedContext;
 	if (upd.summary) ctx.summary = upd.summary;
 	for (const d of upd.decisions || []) ctx.decisions.push({ id: `decision-${randomUUID().slice(0, 8)}`, by, at: ts, text: d.text });
-	for (const r of upd.risks || []) ctx.risks.push({ id: `risk-${randomUUID().slice(0, 8)}`, by, at: ts, severity: r.severity, text: r.text, status: "open" });
-	for (const q of upd.openQuestions || []) ctx.openQuestions.push({ id: `question-${randomUUID().slice(0, 8)}`, by, at: ts, text: q.text });
+	for (const r of upd.risks || [])
+		ctx.risks.push({ id: `risk-${randomUUID().slice(0, 8)}`, by, at: ts, severity: r.severity, text: r.text, status: "open" });
+	for (const q of upd.openQuestions || [])
+		ctx.openQuestions.push({ id: `question-${randomUUID().slice(0, 8)}`, by, at: ts, text: q.text });
 }
 
 function taskAbsoluteArtifactPath(taskId: string, artifact: string) {
@@ -1611,10 +1957,16 @@ function rewriteTaskArtifactRefs(taskId: string, text: string) {
 	// path. Without the optional prefix the regex would treat the leading `.` as the boundary
 	// character, leaving `./artifacts/...` untouched and letting agents write to project-root
 	// artifacts/ by following the note literally.
-	return text.replace(/(^|[^A-Za-z0-9._/-])(\.\/)?(artifacts\/[A-Za-z0-9._/-]+)/g, (_m, prefix: string, dotPrefix: string, rel: string) => `${prefix}${dotPrefix || ""}${taskAbsoluteArtifactPath(taskId, rel)}`);
+	return text.replace(
+		/(^|[^A-Za-z0-9._/-])(\.\/)?(artifacts\/[A-Za-z0-9._/-]+)/g,
+		(_m, prefix: string, dotPrefix: string, rel: string) => `${prefix}${dotPrefix || ""}${taskAbsoluteArtifactPath(taskId, rel)}`,
+	);
 }
 
-export async function resolveCommitNodeEvidence(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths) {
+export async function resolveCommitNodeEvidence(
+	pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> },
+	tp: TaskPaths,
+) {
 	let baseline = "";
 	try {
 		baseline = readFileSync(join(tp.root, "baseline.txt"), "utf8").trim();
@@ -1624,7 +1976,8 @@ export async function resolveCommitNodeEvidence(pi: { exec: (cmd: string, args: 
 	if (!baseline) return { verified: false as const, baseline, reason: "baseline_empty" as const };
 	try {
 		const r = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 5000 });
-		if (r.code !== 0) return { verified: false as const, baseline, reason: "git_unavailable" as const, head: (r.stdout || "").trim() || undefined };
+		if (r.code !== 0)
+			return { verified: false as const, baseline, reason: "git_unavailable" as const, head: (r.stdout || "").trim() || undefined };
 		const head = (r.stdout || "").trim();
 		if (!head) return { verified: false as const, baseline, reason: "head_empty" as const };
 		if (head === baseline) return { verified: false as const, baseline, head, reason: "head_matches_baseline" as const };
@@ -1649,7 +2002,11 @@ export function readCommitEvidence(task: TaskState) {
 	return undefined;
 }
 
-export async function autoCloseRootTerminalNodes(pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> }, tp: TaskPaths, task: TaskState) {
+export async function autoCloseRootTerminalNodes(
+	pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> },
+	tp: TaskPaths,
+	task: TaskState,
+) {
 	const closed: string[] = [];
 	for (;;) {
 		const { ready } = computeReadyNodes(task);
@@ -1668,7 +2025,14 @@ export async function autoCloseRootTerminalNodes(pi: { exec: (cmd: string, args:
 		const isCommitLike = inferRoleKind(candidate, node.role) === "root" && isGraphTerminalNode(task, candidate);
 		if (isCommitLike) {
 			const evidence = await resolveCommitNodeEvidence(pi, tp);
-			const record = { status: evidence.verified ? "verified" : "unverified", reason: evidence.reason, baseline: evidence.baseline, head: evidence.head, at: now(), nodeId: candidate };
+			const record = {
+				status: evidence.verified ? "verified" : "unverified",
+				reason: evidence.reason,
+				baseline: evidence.baseline,
+				head: evidence.head,
+				at: now(),
+				nodeId: candidate,
+			};
 			task.evidence[candidate] = record;
 			if (!evidence.verified) {
 				// Leave the node pending for the root to close deliberately after running git itself.
@@ -1689,10 +2053,17 @@ export function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget
 	lines.push(`You are assigned task ${task.taskId}, node ${nodeId} (${node.role}).`);
 	lines.push(`Read .pi/swarm/tasks/${task.taskId}/task.md and .pi/swarm/tasks/${task.taskId}/task.json, plus any prior artifacts below.`);
 	lines.push(`Reply to ${replyTarget} when done, blocked, or needing clarification.`);
-	const scope = node.allowedFiles && node.allowedFiles.length ? node.allowedFiles.join(", ") : node.allowedFilesFrom ? `(inherit scope from node ${node.allowedFilesFrom})` : "(none specified)";
+	const scope =
+		node.allowedFiles && node.allowedFiles.length
+			? node.allowedFiles.join(", ")
+			: node.allowedFilesFrom
+				? `(inherit scope from node ${node.allowedFilesFrom})`
+				: "(none specified)";
 	lines.push(`Scope: ${scope}`);
-	if (node.readArtifacts && node.readArtifacts.length) lines.push(`Read artifacts: ${node.readArtifacts.map((artifact) => taskAbsoluteArtifactPath(task.taskId, artifact)).join(", ")}`);
-	if (node.writeArtifacts && node.writeArtifacts.length) lines.push(`Write artifacts: ${node.writeArtifacts.map((artifact) => taskAbsoluteArtifactPath(task.taskId, artifact)).join(", ")}`);
+	if (node.readArtifacts && node.readArtifacts.length)
+		lines.push(`Read artifacts: ${node.readArtifacts.map((artifact) => taskAbsoluteArtifactPath(task.taskId, artifact)).join(", ")}`);
+	if (node.writeArtifacts && node.writeArtifacts.length)
+		lines.push(`Write artifacts: ${node.writeArtifacts.map((artifact) => taskAbsoluteArtifactPath(task.taskId, artifact)).join(", ")}`);
 	if (task.acceptanceCriteria.length) lines.push(`Acceptance: ${task.acceptanceCriteria.join("; ")}`);
 	// NEW: Include attempt token in assignment contract for fencing
 	if (attemptId) lines.push(`Attempt token: ${attemptId}`);
@@ -1700,13 +2071,21 @@ export function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget
 		const rewritten = rewriteTaskArtifactRefs(task.taskId, note);
 		lines.push(rewritten === note ? `Note: ${rewritten}` : `Note (rewritten to task-absolute artifact paths): ${rewritten}`);
 	}
-	lines.push(`When finished, call swarm_update_task with taskId=${task.taskId}, nodeId=${nodeId}, status=done (or failed/blocked) and an outcome. Ack this assignment message too.`);
+	lines.push(
+		`When finished, call swarm_update_task with taskId=${task.taskId}, nodeId=${nodeId}, status=done (or failed/blocked) and an outcome. Ack this assignment message too.`,
+	);
 	return lines.join("\n");
 }
 
 // Throw a structured, machine-readable corrective error and trace it as task.tool.invalid. Always
 // called BEFORE any state mutation so invalid calls leave task.json untouched (no partial writes).
-export async function failTaskTool(tp: TaskPaths | null, p: Paths, code: string, message: string, details: Record<string, unknown>): Promise<never> {
+export async function failTaskTool(
+	tp: TaskPaths | null,
+	p: Paths,
+	code: string,
+	message: string,
+	details: Record<string, unknown>,
+): Promise<never> {
 	const body = JSON.stringify({ ok: false, errorCode: code, message, ...details }, null, 2);
 	const traceData = { code, taskId: details.taskId, nodeId: details.nodeId, received: details.received };
 	if (tp) await traceTask(tp, "task.tool.invalid", traceData);
@@ -1718,7 +2097,15 @@ export async function failTaskTool(tp: TaskPaths | null, p: Paths, code: string,
 	throw err;
 }
 
-export function buildGraphFromInput(input: { nodes?: Record<string, NodeInput>; edges?: Array<{ from: string; to: string; when?: string; rework?: boolean; parallel?: boolean }>; start?: string; gates?: Record<string, TaskGate> }, allowedFiles: string[]): { start: string; nodes: Record<string, TaskNode>; edges: TaskEdge[]; gates: Record<string, TaskGate> } {
+export function buildGraphFromInput(
+	input: {
+		nodes?: Record<string, NodeInput>;
+		edges?: Array<{ from: string; to: string; when?: string; rework?: boolean; parallel?: boolean }>;
+		start?: string;
+		gates?: Record<string, TaskGate>;
+	},
+	allowedFiles: string[],
+): { start: string; nodes: Record<string, TaskNode>; edges: TaskEdge[]; gates: Record<string, TaskGate> } {
 	if (!input.nodes || !Object.keys(input.nodes).length) return buildDefaultGraph(allowedFiles);
 	const nodes: Record<string, TaskNode> = {};
 	for (const [rawId, raw] of Object.entries(input.nodes)) {
@@ -1747,7 +2134,13 @@ export function buildGraphFromInput(input: { nodes?: Record<string, NodeInput>; 
 	// edges as a linear AND-join (ready when deps are done), while explicit edges drive outcome-based
 	// branching. Synthesizing when:"done" edges here would force every custom graph to require an
 	// outcome:"done" on each dependency, which is only set by swarm_update_task in a later commit.
-	const edges: TaskEdge[] = (input.edges || []).map((e) => ({ from: safeId(e.from), to: safeId(e.to), when: e.when || "done", rework: e.rework, parallel: e.parallel }));
+	const edges: TaskEdge[] = (input.edges || []).map((e) => ({
+		from: safeId(e.from),
+		to: safeId(e.to),
+		when: e.when || "done",
+		rework: e.rework,
+		parallel: e.parallel,
+	}));
 	const gates = input.gates || {};
 	return { start, nodes, edges, gates };
 }
