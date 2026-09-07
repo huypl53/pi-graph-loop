@@ -52,3 +52,4 @@ Session.vim
 .pi/delegate/
 .worktrees
 .pi/swarm.yml
+.pi/validation/reconcile-offset/.pi

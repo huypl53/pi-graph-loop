@@ -425,6 +425,13 @@ export type SwarmIdleNudgeState = {
 	lastPoolEmptyEscalationAt?: string;
 	r23LastEpochAnchor?: string;
 	lastEpochBusyAgents?: string[];
+	// === R27 (2026-09-04): task-independent goal floor — check-streak debounce state ===
+	// goalIdleCheckCount accumulates one per consecutive all-idle sample spaced
+	// GOAL_IDLE_CHECK_INTERVAL_MS apart; a busy/vacuous/in-flight sample (or an emission)
+	// resets it to zero. goalIdleLastCheckAt enforces the check spacing — pump ticks
+	// closer than the check interval do NOT advance the streak.
+	goalIdleCheckCount?: number;
+	goalIdleLastCheckAt?: string;
 };
 
 // In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent

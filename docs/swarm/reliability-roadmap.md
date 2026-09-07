@@ -213,7 +213,7 @@ Mock at the provider streaming layer (not harness stubs) so pi/swarm run their r
 
 **Status:** open. **Priority:** P3.
 
-- F4: `GOAL_NUDGE_IDLE_INTERVAL_MS` constant dead-but-imported; resolver default (5s) diverges from its 60s — delete constant, document divergence with TASK_STALL variant.
+- F4: `GOAL_NUDGE_IDLE_INTERVAL_MS` constant dead-but-imported; resolver default (5s) diverges from its 60s — delete constant, document divergence with TASK_STALL variant. **RESOLVED-BY-DESIGN in R27 (2026-09-07):** the interval-anchor gate no longer exists (replaced by the check-streak debounce); `nudgeIntervalMs` / the env var are DORMANT. Deleting the constant + state-schema field remains open as a cleanup (F4-remnant).
 - F5: goal set/update never touch `idleState.nextGoalNudgeAt` — new/shrunk goal can inherit a far-future nudge slot from a deleted/long-interval goal.
 - F7: `-i 1` = 1ms → per-tick full idle/graph scan + state write; floor clamp (e.g. 1s).
 - a3: goal show lacks last-fire/next-due/why-suppressed for cadence debugging.
@@ -1314,3 +1314,44 @@ A second, related problem: the root repeatedly misread `swarm_agent_status`'s 12
 - The predicate exemption applies to the close-out shape regardless of whether `replyTo` points at an existing message. A result message with a stale `replyTo` (e.g., pointing at a superseded assignment) will still surface — bounded by the `acked` / `dead_letter` / `superseded` early-return paths and the `consumerReceipts` dedupe ledger, so it's at most once per recipient per pid.
 - A nudge that someone sloppily attaches `replyTo` to would also pass — but nudges are produced by the swarm, not user code, so this is bounded. If a future code path needs to attach `replyTo` to a non-result nudge, the predicate should be tightened to also check `idempotencyKey NOT MATCHING /^task:[^:]+:node:[^:]+:nudge:/`.
 
+
+### Row R27 — Goal idle floor must be task-state-independent with an N-consecutive-check debounce — P0 (FIXED 2026-09-07)
+
+**Incident class (user-specified semantics):** the goal idle-streak nudge consulted task state at THREE layers — emission (`active_task` suppression via `findAssignedOrInProgressTaskWork`), emission (R19 `deferred_actionable_graph` via `hasActionableGraphWork`), and surface (the R21 `liveGraphActionable` leg). Net effect: a live `in_progress` node assigned to an idle worker (the "settled on an open node" shape) silenced the goal floor FOREVER — the root never learned the swarm was stalled, regardless of how long the goal sat idle. The user mandate: the goal nudge must fire whenever NO swarm agent is running, **regardless of task state**, with a debounce to avoid noise.
+
+**Fix:**
+- Emission gates removed: the `active_task` scan and the R19 actionable-graph defer are deleted from `evaluateIdleGoalNudgeLocked` (along with their helper bodies `scanTaskDirsForActiveWork` / task-scan internals). Reason codes `active_task` and `deferred_actionable_graph` no longer exist.
+- Idle predicate = `runtimeStatus !== "idle"` OR an `activeTaskIds` pointer on an idle agent (`assignment_in_flight` folds in). Task.json is never read by the goal floor.
+- Debounce: the elapsed-interval anchor (`allIdleSinceAt` vs `GOAL_NUDGE_IDLE_INTERVAL_MS`, the F4-divergent 5s/60s mess) is REPLACED by a consecutive-check streak: `idleNudgeState.goalIdleCheckCount` / `goalIdleLastCheckAt`, sampled at most every `PI_SWARM_GOAL_IDLE_CHECK_INTERVAL_MS` (default 10000ms), emitting at `PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED` (default 3) consecutive idle samples. Any busy sample (busy edge in `updateIdleEpochLocked`) resets the streak. Post-emit the streak restarts at 0 (min spacing = one full streak).
+- Anti-loop layers kept: cap-3 (`PI_SWARM_MAX_NUDGES`) + `GOAL_NUDGE_BACKOFF_TICKS` backoff now counted in completed check-rounds; R23 cap-branch saturation reset intact; R16 resolve-by-real-action (text-only ack does NOT reset — verified again in the R27 tmux lane); vacuous-pool `no_live_workers` + escalation untouched; graph-stall nudge (Issue 23) untouched (coexistence accepted: a goal + stalled graph may emit both, different dedupe keys).
+- Surface gate: the goal-key branch of `staleSurfaceReason` drops the `liveGraphActionable` leg — only `idle_epoch_advanced` remains (surface-time revalidation must AGREE with emission-time gating, the R21/R22 principle extended to R27).
+- F4 resolved-by-design: `nudgeIntervalMs` / `PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS` are DORMANT (kept for state compatibility; no longer gate anything). Deleting the constant remains a separate cleanup.
+
+**Files touched:**
+- `extensions/swarm/src/nudges/goal-epoch.ts` — `evaluateIdleGoalNudgeLocked` rewritten around the streak counter; `resolveGoalIdleCheckIntervalMs()` / `resolveGoalIdleChecksRequired()` (env read per call); busy-edge streak reset in `updateIdleEpochLocked`; new trace `goal.idle_check`; emit payload now carries `checkIntervalMs` / `checksRequired`.
+- `extensions/swarm/src/types.ts` — `SwarmIdleNudgeState.goalIdleCheckCount?` / `goalIdleLastCheckAt?`.
+- `extensions/swarm/src/surface.ts` — goal-key surface branch agents-only (also fixed two PRE-EXISTING missing imports found by the lane: `checkStallNotificationStale` and `evaluateIdleGoalNudgeLocked` — at HEAD the real pump never successfully evaluated the goal nudge; see Row R27-B).
+- `extensions/swarm/tests/idle-nudge.test.mjs` — rewritten for streak semantics (151/0 incl. R23/R23B/R23C round-based rework).
+- `extensions/swarm/tests/r27-goal-task-independent-idle-nudge.test.mjs` — RED-first artifact + offline pump lane (9/9).
+- `extensions/swarm/tests/r27b-pump-import-guards.test.mjs` — guards for the two pre-existing import bugs (9/9).
+- `extensions/swarm/tests/r16-idle-goal-regression.test.mjs`, `r19-goal-graph-deadlock.test.mjs`, `r21-goal-surface-suppression.test.mjs` — re-spaced for streak timing; R19 sections now assert ZERO suppress/defer traces and goal emission on open-graph worlds.
+- `extensions/mock-llm/fixtures/r27-goal-task-independent.jsonl` + selftest registry 76→77 — Pattern-2 seeded world (open assigned node + idle worker + user goal) + scripted root turns (observe via `swarm_check_mailbox`, text-only ack).
+- `tmux-snapshots/r27-validation/` — full lane evidence (events.jsonl, pane capture, mock-llm transcripts).
+
+**Acceptance evidence:**
+- RED artifact: 9 failing assertions across S1–S7 scenarios observed pre-fix (`r27-goal-task-independent-idle-nudge.test.mjs` at RED stage).
+- tmux lane (`r27-val`, real pi TUI + mock-llm root): `goal.idle_check count:1→2→3` → `goal.idle_nudge` emitted ON the 3rd sample **while node `implement` was still `in_progress` and assigned** → surfaced via `mailbox.root_pump` (L3 `pi.sendMessage`) → transcript proves L4 (nudge body in the scripted turn's request preview) → text-only ack produced `goal.nudge.turn_no_resolve_action` (R16 semantics hold).
+- Suite: idle-nudge **151/0**, r16 **25/25**, r19 **23/23**, r21 **5/5**, r27 **9/9**, r27b **9/9**, task-liveness unchanged, mock-llm selftest **77 models PASS**; repo-wide failures = exactly the 13 pre-existing baseline files (verified identical on the HEAD baseline worktree).
+
+**Known corners (accepted, documented):**
+- Coexistence with the graph-stall nudge: goal set + unfinished graph with actionable unassigned nodes + all idle may emit BOTH (graph-stall is task-keyed, goal is goal-keyed). Pre-R27 the goal path deferred to the graph; R27 makes them independent by design (the user wants the goal floor unconditional).
+- `nudgeIntervalMs` still exists in state/tool schema but no longer gates cadence; `/swarm goal show` surfaces it as historical metadata. Cleanup tracked as F4-remnant.
+- An idle agent holding an `activeTaskIds` pointer suppresses the floor until the pointer releases (`assignment_in_flight`); a leaked pointer (never released) would hold the floor off — bounded by the stale-open sweep + reconcile advisories that flag such pointers.
+
+### Row R27-B — Pump-surface missing imports: goal nudge never fired from a real root pump at HEAD — P0 (FIXED 2026-09-07)
+
+**Incident:** found BY the R27 tmux lane (not caused by it). `src/surface.ts` referenced `checkStallNotificationStale` (surface revalidation of graph-advance keys) and `evaluateIdleGoalNudgeLocked` (the pump's goal tick) WITHOUT importing either. TypeScript transpile-only never flagged it; the unit suite never caught it because tests import evaluators directly (via the `reconcile.ts` barrel) rather than executing the pump. In any REAL root pi session the pump tick crashed with ReferenceError on every tick: `goal.nudge.error {"error":"evaluateIdleGoalNudgeLocked is not defined"}` and `staleSurfaceReason` threw `checkStallNotificationStale is not defined`. I.e. at HEAD, despite Issue 18 through R23B all being "FIXED", the goal nudge NEVER fired from a live root pump, and graph-advance-key surface revalidation crashed the surface loop.
+
+**Fix:** add the two imports to `src/surface.ts`; pin with `tests/r27b-pump-import-guards.test.mjs` (real-pump probe + `staleSurfaceReason` probe + static import check, 9/9). Verified pre-existing by replaying the probes against HEAD `surface.ts` in the baseline worktree (`/tmp/swarm-baseline`): identical crashes.
+
+**Lesson (extends the R10-1 discipline):** unit tests that call helpers through the barrel are NOT pump coverage. Any change touching pump-callable identifiers must have at least one guard that executes the pump path itself (or a static import-integrity check). The R27 lane pattern (seed world → real `pumpRootMailbox` → trace assertions) is now the template in `r27b-pump-import-guards.test.mjs`.

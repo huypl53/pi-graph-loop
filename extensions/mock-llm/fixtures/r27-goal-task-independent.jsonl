@@ -1,0 +1,20 @@
+# r27-goal-task-independent: R27. The goal idle floor is TASK-STATE-INDEPENDENT with an
+# N-consecutive-check debounce. Pre-R27 the exact live shape this fixture reproduces —
+# a LIVE in_progress task whose node is ASSIGNED to an IDLE worker with no activeTaskIds
+# pointer — silenced the goal floor forever (reason "active_task" every pump tick: the
+# worker settled on an open node, the root saw nothing for the whole session). Post-R27
+# the floor samples the all-idle predicate N times (PI_SWARM_GOAL_IDLE_CHECK_INTERVAL_MS
+# apart, default 10s; PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED samples, default 3) and emits.
+#
+# Pattern 2 (seeded world + single-actor script) per .agents/skills/mock-llm-scenarios/SKILL.md:
+# the launch script seeds the pre-R27 incident snapshot — worker-a runtimeStatus=idle,
+# activeTaskIds=[] (pointer already released), task.json node implement status=in_progress
+# assignee=worker-a, user goal set with consecutiveNoResolveNudges=0. The pump runs for real
+# on its 5s watchdog tick with PI_SWARM_GOAL_IDLE_CHECK_INTERVAL_MS=1000 +
+# PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED=3 so a full streak completes in ~3s of wall time.
+# The scripted root turn observes the surfaced nudge (swarm_check_mailbox), then closes
+# with a text-only acknowledgment (the R16 ack shape — the message id is runtime-generated
+# and cannot be scripted; the pump's own delivered-marking plus the next-session check
+# covers the lifecycle).
+{"name":"r27 observe task-independent nudge","events":[{"type":"text","delayMs":2600,"text":"The pump has had time to run three consecutive idle checks against the seeded world (idle worker sitting on an open assigned node, goal set). Reading the mailbox now to observe whether the task-independent goal nudge surfaced.","chunks":["The pump has had time to run ","three consecutive idle checks ","against the seeded world. ","Reading the mailbox now."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"r27-mb-1","arguments":{"pendingOnly":true,"limit":10}}]}
+{"name":"r27 acknowledge goal nudge","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Acknowledged: the goal nudge surfaced despite the open assigned task node — exactly the R27 semantics. I will assign work or propose clearing the goal as the operator's next move.","chunks":["Acknowledged: the goal nudge surfaced despite the open assigned task node — ","exactly the R27 semantics. ","I will assign work or clear the goal next."],"stopReason":"stop"}]}

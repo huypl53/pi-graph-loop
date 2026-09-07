@@ -180,12 +180,14 @@ const s1 = await staleSurfaceReason(p, s1State, s1Msg, { [s1Task.taskId]: JSON.p
 ok("S1 terminal orphan does not get actionable_graph suppression", s1.stale === false, JSON.stringify(s1));
 ok("C-R21-2 terminal orphan has zero notification.stale.suppressed traces", countEvents([], "notification.stale.suppressed") === 0, JSON.stringify(s1));
 
-// S2/S3: live actionable task still suppresses goal surface.
+// S2/S3: R27 (2026-09-04) — LIVE actionable task no longer suppresses the goal key at
+// surface time either (surface must agree with the task-state-independent emission gate;
+// same principle as R22's agent_busy removal). Only the idle_epoch_advanced leg remains.
 const { st: s2State, task: s2Task } = await seedState({ taskId: "task-r21-live", taskStatus: "in_progress", withMailbox: false });
 const s2Msg = { id: "msg-task-r21-live", idempotencyKey: `goal:${s2State.goal.id}:nudge:idle-streak:1`, createdAt: new Date().toISOString() };
 const s2 = await staleSurfaceReason(p, s2State, s2Msg, { [s2Task.taskId]: JSON.parse(await readFile(taskPaths(p, s2Task.taskId).taskJson, "utf8")) }, Date.now());
-ok("S2 live actionable task still suppresses goal nudge", s2.stale === true && s2.reason === "actionable_graph", JSON.stringify(s2));
-ok("S3 live actionable task suppression reason remains actionable_graph", s2.reason === "actionable_graph", JSON.stringify(s2));
+ok("S2 live actionable task no longer suppresses goal nudge (R27)", s2.stale === false, JSON.stringify(s2));
+ok("S3 goal-key surface suppression reason is null (no actionable_graph leg)", s2.stale === false && s2.reason === null, JSON.stringify(s2));
 
 // S4: taskKey branch unchanged — closed task still suppresses the nudge.
 const { st: s4State, task: s4Task } = await seedState({ taskId: "task-r21-taskkey", taskStatus: "done", withMailbox: false });

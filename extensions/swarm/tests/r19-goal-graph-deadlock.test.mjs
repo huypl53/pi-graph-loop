@@ -29,8 +29,14 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-process.env.PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS ||= "500";
-process.env.PI_SWARM_TASK_STALL_NUDGE_IDLE_INTERVAL_MS ||= "500";
+process.env.PI_SWARM_GOAL_IDLE_CHECK_INTERVAL_MS ||= "500";
+process.env.PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED ||= "3";
+// R27 (2026-09-04): the goal floor is TASK-STATE-INDEPENDENT. The R19 defer/suppress
+// machinery (hasActionableGraphWork, suppressed_by_actionable_graph,
+// deferred_by_actionable_graph) is REMOVED; this file now guards the R27 semantics
+// that replaced it: orphan rework nodes and LIVE actionable graphs no longer block or
+// defer the goal floor at all. Sections S1–S3 were re-purposed accordingly; S4–S6
+// (vacuous / busy / pointer-in-flight) are unchanged invariants.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { paths, readState, withLock, writeState, taskPaths, ensureDirs } = await import(join(here, "..", "src", "state.ts"));
@@ -311,10 +317,12 @@ console.log("\n=== R19-S2: orphan on LIVE in_progress task (C-live) ===");
 		ok("R19-S2: suppressed count >= 4 (RED-block)", suppressedCount >= 4);
 		ok("R19-S2: idle_nudge count === 0 (RED-block)", idleNudgeCount === 0);
 	} else {
-		// GREEN: LIVE task is still actionable — deferred fires (not blocked).
-		ok("R19-S2: suppressed count >= 1 (LIVE task still actionable)", suppressedCount >= 1, `got ${suppressedCount}`);
-		ok("R19-S2: deferred_count >= 1 (goal deferred not blocked)", deferredCount >= 1, `got ${deferredCount}`);
-		ok("R19-S2: goal.idle_nudge >= 1 (GREEN-floor-fires for LIVE task)", idleNudgeCount >= 1, `got ${idleNudgeCount}`);
+		// R27 (2026-09-04): LIVE actionable task no longer suppresses OR defers the goal
+		// floor — task state is invisible to the goal path. The floor fires on its own
+		// check-streak cadence with zero graph-gate traces.
+		ok("R19-S2: suppressed count === 0 (R27: task state invisible to goal path)", suppressedCount === 0, `got ${suppressedCount}`);
+		ok("R19-S2: deferred_count === 0 (R27: defer machinery removed)", deferredCount === 0, `got ${deferredCount}`);
+		ok("R19-S2: goal.idle_nudge >= 1 (R27: floor fires for LIVE task)", idleNudgeCount >= 1, `got ${idleNudgeCount}`);
 	}
 	await rm(dir, { recursive: true, force: true });
 }
@@ -328,8 +336,8 @@ console.log("\n=== R19-S3: LIVE actionable — no double-fire (C-no-double-fire)
 	await writeTask(p, task);
 	await writeFile(p.events, "");
 
-	// Run ticks 1-2 with LIVE task actionable (orphan fix still ready+unassigned)
-	const results1 = await runTicks(p, dir, 2, 500);
+	// Run ticks 1-3 with LIVE task actionable (orphan fix still ready+unassigned)
+	const results1 = await runTicks(p, dir, 3, 500);
 
 	// Close the orphan: assign the fix node
 	await withLock(p, async () => {
@@ -341,8 +349,8 @@ console.log("\n=== R19-S3: LIVE actionable — no double-fire (C-no-double-fire)
 		await writeFile(tp.taskJson, JSON.stringify(t, null, 2));
 	});
 
-	// Run 2 more ticks after orphan closed
-	const results2 = await runTicks(p, dir, 2, 500);
+	// Run 3 more ticks after orphan closed
+	const results2 = await runTicks(p, dir, 3, 500);
 
 	const idleNudgeCount = await countEvents(p, "goal.idle_nudge");
 	const suppressedCount = await countEvents(p, "goal.nudge.suppressed_by_actionable_graph");
@@ -362,10 +370,11 @@ console.log("\n=== R19-S3: LIVE actionable — no double-fire (C-no-double-fire)
 		// Phase1 shows suppressed; the fix was closed at assignment so phase2 falls through — that's OK for RED
 		ok("R19-S3: suppressed >= 2 (RED-full-block)", suppressedCount >= 2);
 	} else {
-		// GREEN: goal nudge does NOT double-fire while LIVE task has actionable work.
-		ok("R19-S3: deferred count >= 1 (GREEN-deferred)", deferredCount >= 1, `got ${deferredCount}`);
-		// Note: task.stall_nudge is 0 because test only calls evaluateIdleGoalNudgeLocked, not the
-		// stall evaluator. The no-double-fire invariant is maintained by Fix B LIVE-task preservation.
+		// R27 (2026-09-04): the graph/goal "never double-fire" contract is superseded — the
+		// goal floor is independent of graph state, so it fires while actionable work exists.
+		// (Co-existence with the graph-stall nudge family is accepted per user direction.)
+		ok("R19-S3: goal.idle_nudge >= 1 (R27: goal floor fires regardless of actionable work)", idleNudgeCount >= 1, `got ${idleNudgeCount}`);
+		ok("R19-S3: deferred count === 0 (R27: defer machinery removed)", deferredCount === 0, `got ${deferredCount}`);
 	}
 	await rm(dir, { recursive: true, force: true });
 }

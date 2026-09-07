@@ -84,7 +84,13 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-process.env.PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS ||= "5000";  // match live incident cadence
+process.env.PI_SWARM_GOAL_IDLE_CHECK_INTERVAL_MS ||= "500";
+process.env.PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED ||= "3";
+// R16 cadence note: the live incident interval env is kept for the seeded
+// `goal.nudgeIntervalMs` values only; the goal floor's timing now comes from the R27
+// check-streak debounce (3 checks x 500ms = 1.5s per round), which at the 5s tick
+// spacing used below yields one completed round per tick — same per-tick cadence the
+// interval gate produced.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, "..", "src");
@@ -385,7 +391,11 @@ console.log("\n[R16-S1] Config C1 — ack-with-text turn_end on settled-but-aliv
 			goalIntervalMs: 5000,
 		});
 		const { pi: pi2 } = makePiMock();
-		for (let i = 0; i < 4; i++) {
+		// R27: each nudge now needs a fresh 3-check streak. With check interval 500ms and
+		// ticks spaced 5s apart, every tick completes one full round — but after an EMISSION
+		// the streak resets, so an emission can occur on EVERY tick here (resolve clears the
+		// cap each turn). 12 ticks keeps the same coverage as the original 4.
+		for (let i = 0; i < 12; i++) {
 			const tickNowMs = startMs + (i + 1) * tickIntervalMs;
 			await pumpTick({ p: p2, scratch: s2Scratch, nowMs: tickNowMs, pi: pi2 });
 			// RESOLVE-ACTION turn (text + swarm tool_use block). Production hooks.ts

@@ -758,20 +758,36 @@ All recovery nudges share one semantic key space (`task:{taskId}:node:{nodeId}:n
 and the same dedupe/cooldown/cap contract. Every message tells the recipient the concrete next action
 (the exact tool call) plus an alternative path (cancel/inspect).
 
-### Goal idle-streak nudge (Issue 18)
+### Goal idle-streak nudge (Issue 18, redesigned R27)
 
 The root's durable goal plus an anti-loop nudge that fires when the swarm has nothing to do.
+
+> **R27 (2026-09-07): the goal floor is TASK-STATE-INDEPENDENT with an N-consecutive-check
+> debounce.** The idle predicate no longer consults task.json at all — a live `in_progress`
+> node assigned to an idle worker no longer silences the goal nudge (the pre-R27
+> `active_task` suppression and R19 `deferred_actionable_graph` gates are removed). The
+> elapsed-interval anchor (`allIdleSinceAt >= interval`) is replaced by a consecutive-check
+> streak: the pump samples the all-idle predicate every check interval and emits after N
+> consecutive idle samples. Any busy sample (an agent turns non-idle, or an idle agent
+> acquires an `activeTaskIds` pointer) resets the streak to 0.
 
 - **Set the goal**: `/swarm goal set [--interval <ms>] <text>` or `swarm_set_goal({ text, intervalMs? })`. The root-only
   tool/command stores `swarm-state.json.goal = { id, text, setAt, setBy, consecutiveNoResolveNudges, nudgeIntervalMs? }`.
   Setting a new goal replaces the old one, resets `consecutiveNoResolveNudges` to 0, and clears any
   back-off state (`backoffTicksRemaining`, `lastNudgeAt`, `lastResolvedAt`) so a new intent never
-  inherits the previous goal's counter. When `nudgeIntervalMs` is absent the pump falls back to
-  `PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS` (default 60s); when present, the durable per-goal value
-  controls the goal nudge cadence and is surfaced by `/swarm goal show` and `/swarm status`.
-- **Idle predicate** (every pump tick, inside the existing `withLock` in `pumpRootMailbox`):
-  every non-root agent must be `runtimeStatus: "idle"` AND zero task nodes may be in
-  `assigned` or `in_progress` status across `tasks/<taskId>/task.json`. If either fails, no nudge.
+  inherits the previous goal's counter. `nudgeIntervalMs` is retained for state compatibility but
+  is DORMANT as of R27 — cadence is governed by the check-streak knobs below (`/swarm goal show`
+  still surfaces it as historical metadata).- **Idle predicate** (every pump tick, inside the existing `withLock` in `pumpRootMailbox`):
+  every non-root agent must be `runtimeStatus: "idle"` AND carry no `activeTaskIds` pointer
+  (an idle agent holding an assignment pointer counts as "running" — `assignment_in_flight`).
+  **Task state is NOT consulted**: open `assigned`/`in_progress` nodes no longer gate the nudge.
+- **Check-streak debounce (R27)**: the pump samples the idle predicate at most once per
+  `PI_SWARM_GOAL_IDLE_CHECK_INTERVAL_MS` (default 10000ms) and increments
+  `idleNudgeState.goalIdleCheckCount`; at `PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED` (default 3)
+  consecutive idle samples the nudge emits and the streak resets. A busy sample at ANY point
+  resets the streak to 0. At the default 5s pump tick this means the first nudge lands
+  ~15–30s after the swarm goes quiet (vs the pre-R27 60s interval anchor), and repeated
+  nudges are spaced by a full fresh streak each.
 - **Anti-loop counter**: `consecutiveNoResolveNudges` resets to 0 on ANY root turn that ends
   `stopReason: "stop"` AND `role: "assistant"` — the act of ending a turn (vs staying silent) is the
   resolve signal. A `turn_end {error}` is intentionally NOT a resolve (tool/model failures are not
@@ -797,7 +813,12 @@ The root's durable goal plus an anti-loop nudge that fires when the swarm has no
   - `goal.set` — durable write of `st.goal` (from tool or command).
   - `goal.cleared` — `delete st.goal` (from tool or command).
   - `goal.idle_nudge` — successful nudge emit; payload includes `goalId`, `consecutiveCount`, `max`,
-    `idleAgents`, `key`, `customType: "goal.idle_nudge"`.
+    `idleAgents`, `key`, `customType: "goal.idle_nudge"`, plus the R27 streak fields
+    `checkIntervalMs` and `checksRequired`.
+  - `goal.idle_check` — **R27**: each eligible idle sample that increments the streak;
+    payload includes `goalId`, `count`, `required`, `checkIntervalMs`.
+  - REMOVED in R27: `goal.nudge.suppressed_by_active_task` and
+    `goal.nudge.deferred_actionable_graph` (the task-state gates no longer exist).
   - `goal.nudge.resolved` — `turn_end {stop}` reset of the counter; payload includes `goalId`,
     `nudges` (counter pre-reset), `hadBackoff`, `by: "turn_end"`.
   - `goal.nudge.backoff` — first tick after the counter reached `MAX`; payload includes `goalId`,
@@ -811,8 +832,12 @@ The root's durable goal plus an anti-loop nudge that fires when the swarm has no
   `ERR_ROOT_AUTHORITY_REQUIRED` for non-roots. The `/swarm goal` slash command adds
   an explicit `currentAgentId() !== "root"` notify (matches the `attention`/`remind`/`stop`
   /`release` pattern).
-- **No new public schema**: only the two declared tools + the two slash command subcommands. No
-  new event hooks, no new env knobs beyond `PI_SWARM_MAX_NUDGES`.
+- **Env knobs (R27)**: `PI_SWARM_GOAL_IDLE_CHECK_INTERVAL_MS` (default 10000) and
+  `PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED` (default 3) control the streak debounce; they are read
+  per evaluation (no restart needed) and traced in every `goal.idle_check`/`goal.idle_nudge` event.
+  The legacy `PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS` and `nudgeIntervalMs` are inert (see F4/R27).
+- **No new public schema beyond those env knobs**: only the two declared tools + the two slash
+  command subcommands. No new event hooks.
 
 ### Pipeline-stall nudge (Issue 23)
 
@@ -1671,3 +1696,64 @@ bash .pi/swarm/tasks/task-202609022235-r24-orchestrator-visible-surface-gap/arti
 - R24 task: `task-202609022235-r24-root-visible-surface-gap`. No related regressions: R13 P0 bypass + R13 P1 liveness gate (R13-ROOT-UNKNOWN-TARGET 24/24 PASS), R15 normal-priority surface (R15-NORMAL-ROOT-RESULT 15/15 PASS), R22 worker-busy surface rule (R22-REGRESSION 1/1 PASS), R23C storm guard (idle-nudge 145/0 PASS incl. R23/R23B/R23C sections), all preserved.
 - Known corner (documented, accepted): the predicate exemption applies to the close-out shape regardless of whether `replyTo` points at an existing message. A result message with a stale `replyTo` (e.g., pointing at a superseded assignment) will still surface — bounded by the `acked` / `dead_letter` / `superseded` early-return paths and the `consumerReceipts` dedupe ledger, so it's at most once per recipient.
 - New Pi-runtime boundary crossing counted: the live lane's real `pi.sendMessage` boundary call (`pumpRootRealSend`) at `mailbox.root_pump reason=session_start count=1 ids=["msg-r24-result-1"]` is the C-R24-1 boundary assertion. C-R24-2 (replay dedupe ≥0 subsequent watchdog ticks) and C-R24-3 (CONTROL nudge control suppressed in the driver — gate intact) round out the R10-1 boundary discipline. See `pi-runtime-contract.md §10 F16` row for the contract claim being corrected.
+
+## Operator: R27 task-independent goal floor + check-streak debounce (2026-09-07)
+
+**Symptom (pre-R27):** the root sets a goal; a worker settles idle while its node stays
+`in_progress`/`assigned` (the "settled on an open node" shape). The goal floor is silent
+FOREVER — every pump tick traces `goal.nudge.suppressed_by_active_task` (or
+`deferred_actionable_graph`), the operator never learns the swarm is stalled.
+
+**What changed:** the goal floor no longer reads task.json at all.
+
+- Emission: idle predicate = every non-root agent `runtimeStatus === "idle"` AND no
+  `activeTaskIds` pointer. Open assigned/in_progress nodes do NOT gate it.
+- Debounce: consecutive-check streak replaces the interval anchor. Samples at most every
+  `PI_SWARM_GOAL_IDLE_CHECK_INTERVAL_MS` (default 10000ms); emits at
+  `PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED` (default 3) consecutive idle samples; any busy
+  sample resets the streak; post-emit the streak restarts from 0.
+- Cap-3 + backoff (now counted in completed check-rounds), R23 cap-branch reset, R16
+  resolve-by-real-action, vacuous-pool `no_live_workers` + escalation: all unchanged.
+- Surface: the goal-key branch keeps only the `idle_epoch_advanced` leg (the
+  `liveGraphActionable` leg is gone — surface-time revalidation must AGREE with the
+  emission gate).
+
+**Field diagnosis:**
+
+```
+grep -E "goal\.(idle_check|idle_nudge)" .pi/swarm/traces/events.jsonl | tail
+# healthy R27: idle_check count climbing 1..N then goal.idle_nudge
+# even with: task.json node status=in_progress assignee=<idle worker>  ← the point
+```
+
+**Verify the env knobs:**
+
+```
+PI_SWARM_GOAL_IDLE_CHECK_INTERVAL_MS=1000 PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED=3 pi ...
+# lane evidence: tmux-snapshots/r27-validation/ (README.md documents the full L1→L4 chain)
+```
+
+**Known corners:**
+
+- A goal + a stalled graph (actionable unassigned node, all idle) may now emit BOTH the
+  graph-stall nudge and the goal nudge (different dedupe keys). Pre-R27 the goal deferred;
+  R27 makes them independent by design.
+- `nudgeIntervalMs` / `PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS` are dormant (F4
+  resolved-by-design; deleting the constant is a tracked cleanup).
+- An idle agent holding an `activeTaskIds` pointer suppresses the floor until the pointer
+  releases — a leaked pointer holds the floor off (bounded by stale-open sweep advisories).
+
+## Operator: R27-B pump never fired the goal nudge at HEAD — missing imports (2026-09-07)
+
+**Symptom (pre-R27-B, at HEAD):** in any REAL root pi session, every pump tick traced
+`goal.nudge.error {"error":"evaluateIdleGoalNudgeLocked is not defined"}` and the
+graph-advance-key surface revalidation threw `checkStallNotificationStale is not defined`.
+Net: despite Issues 18–R23B being "FIXED", the goal nudge NEVER fired from a live root
+pump. Unit tests stayed green because they import evaluators via the `reconcile.ts`
+barrel, never executing the pump's own call sites in `surface.ts`.
+
+**Fix:** the two imports were added to `src/surface.ts`; pinned by
+`tests/r27b-pump-import-guards.test.mjs` (real-pump probe + `staleSurfaceReason` probe +
+static import check). **Contract rule (pi-runtime-contract §10 F19):** any change touching
+pump-callable identifiers must ship a guard that executes the pump path itself or a
+static import-integrity check.

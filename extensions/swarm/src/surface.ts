@@ -22,7 +22,7 @@ import type { RootReceiptEntry, Paths, SwarmMessage, SwarmState, TaskState } fro
 import {
   ACK_MISSING_MS, ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS, ARTIFACT_PROGRESS_GRACE_MS, ARTIFACT_PROGRESS_MAX_FILES, ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS, ARTIFACT_PROGRESS_NUDGE_CAP, DEFAULT_AGENT_HEARTBEAT_STALE_MS, DEFAULT_STALE_OPEN_THRESHOLD_MS, formatNotifyKey, GOAL_NUDGE_BACKOFF_TICKS, GOAL_NUDGE_IDLE_INTERVAL_MS, MAX_ATTEMPTS, MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_REINJECTS, MAX_STATUS_TASKS, MAX_TASK_STALL_NUDGES, NOTIFY_DEFAULT_COOLDOWN_MS, NOTIFY_DEFAULT_MAX_NUDGES, NOTIFY_KEY_GOAL_IDLE_NUDGE, NOTIFY_KEY_GRAPH_ADVANCE, NOTIFY_KEY_INITIAL_READY, NOTIFY_KEY_PUMP_BATCH_SUPPRESSED, NOTIFY_KEY_TASK_GRAPH_STALL, PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_DELAY_MS, PUMP_RETRIGGER_MAX, PUMP_SCAN_WINDOW, PUMP_SESSION_ID_CAP, PUMP_SESSION_TTL_MS, PUMP_STUCK_DEFER_ESCALATE_MS, REINJECT_AFTER_MS, TASK_INITIAL_READY_GRACE_MS, TASK_NUDGE_MS, TASK_STALE_MS, TASK_STALL_NUDGE_IDLE_INTERVAL_MS, TERMINAL_NODE_STATUSES, TRACE_AGENT_HEARTBEAT_GC_EXPIRED_PARK_FLIPPED, TRACE_AGENT_HEARTBEAT_GC_PROBE_THROTTLED, TRACE_AGENT_HEARTBEAT_GC_STALE, TRACE_AGENT_HEARTBEAT_GC_STOPPED, TRACE_AGENT_TMUX_LIVENESS_CORRECTION, TRACE_ARTIFACT_PROGRESS_CAP_EXCEEDED, TRACE_ARTIFACT_PROGRESS_NUDGE, TRACE_GRAPH_ADVANCE_NUDGE_EMITTED, TRACE_LATE_RESULT_REJECTED, TRACE_LIFECYCLE_DERIVED, TRACE_LIFECYCLE_DERIVED_SHADOW, TRACE_MESSAGE_ATTENTION_DERIVED, TRACE_STALE_OPEN_SURFACED } from "./constants.ts";
 import { capMap, ensureAgentDefaults, inferRoleKind, now } from "./utils.ts";
-import { computeReadyNodes, computeTaskStatus, deriveNodeAttention, proxyMetricEmitLocked, staleOpenAssignmentScanLocked, staleOpenNudgeLocked } from "./taskgraph.ts";
+import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale, deriveNodeAttention, proxyMetricEmitLocked, staleOpenAssignmentScanLocked, staleOpenNudgeLocked } from "./taskgraph.ts";
 import { currentAgentId } from "./session.ts";
 import { deliver, deliverMessageLocked, deriveLifecycleFromTrigger, findIdempotentMessage, isResponseTrackingActive, readMailbox, readMailboxCached, upsertMessageRecord } from "./mailbox.ts";
 import { claimRootLeader, ensureRoot, heartbeatRootLeader, readRootLeader, requireRootAuthority } from "./identity.ts";
@@ -30,7 +30,7 @@ import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./deliver
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { agentHeartbeatGCLocked, evaluateArtifactProgressNudgeLocked, evaluateSlotRecoveryLocked, evaluateTaskGraphStallNudgeLocked, reconcileGraphAdvanceLocked, reconcileInitialReadyLocked, sendGraphAdvanceNudgeLocked } from "./nudges/graph-advance.ts";
-import { allEffectiveIdleAgents, updateIdleEpochLocked } from "./nudges/goal-epoch.ts";
+import { allEffectiveIdleAgents, evaluateIdleGoalNudgeLocked, updateIdleEpochLocked } from "./nudges/goal-epoch.ts";
 
 
 import { isStallNudgeEligibleTaskStatus, isTerminalOrAbandonedTaskStatus } from "./nudges/status-predicates.ts";
@@ -333,25 +333,13 @@ export async function staleSurfaceReason(
 	nowMs: number,
 ): Promise<{ stale: boolean; reason: string | null; evidence: string[] }> {
 	const liveIdle = allEffectiveIdleAgents(st, nowMs).allIdle;
-	// Row 68 fix (AC1): goal-nudge surface suppression must also see fresh (status="ready")
-	// actionable graphs, or a goal nudge fires instead of the graph nudge pre-first-assign.
-	const liveGraphActionable = Object.values(taskIndex).some((task) => {
-		if (!isStallNudgeEligibleTaskStatus(task.status)) return false;
-		// Goal-surface suppression must ignore terminal/abandoned tasks so orphan
-		// rework nodes on failed/cancelled/blocked graphs do not permanently
-		// silence the goal floor at surface time. LIVE tasks still count below.
-		if (isTerminalOrAbandonedTaskStatus(task.status)) return false;
-		const cr = computeReadyNodes(task);
-		const actionable = new Set([
-			...cr.ready,
-			...cr.current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
-		]);
-		for (const nodeId of actionable) {
-			const node = task.nodes[nodeId];
-			if (node && !node.assignee && !TERMINAL_NODE_STATUSES.has(node.status)) return true;
-		}
-		return false;
-	});
+	// R27 (2026-09-04): the goal-key surface branch no longer consults task state. Emission
+	// (evaluateIdleGoalNudgeLocked) is task-state-independent — an open actionable graph after
+	// emission is the nudge's own requested action pending, not message staleness (same
+	// R21/R22 principle: surface-time revalidation must AGREE with emission-time gating).
+	// The legs that can make the MESSAGE itself false remain:
+	//   - idle-epoch advanced past creation (the busy→idle edge after emission anchors a
+	//     NEW epoch — this is the anti-immortality guard that bounds nudge lifetime).
 	const idleAnchorMs = st.idleNudgeState?.allIdleSinceAt ? new Date(st.idleNudgeState.allIdleSinceAt).getTime() : NaN;
 	const rec = st.messages[msg.id] || msg;
 	const key = String(rec.idempotencyKey || msg.idempotencyKey || "");
@@ -374,16 +362,12 @@ export async function staleSurfaceReason(
 		// pi.sendMessage at the boundary, while consecutiveNoResolveNudges burned to
 		// max+backoff on messages the root LLM never saw. R21 principle: surface
 		// revalidation must AGREE with emission-time gating, never contradict it.
-		// The legs that can make the MESSAGE itself false remain:
-		//   - LIVE actionable graph work (R21 C-R21-3 preserved);
-		//   - idle-epoch advanced past creation (the busy→idle edge after emission anchors a
-		//     NEW epoch — this is the anti-immortality guard that bounds nudge lifetime).
-		// The R10 anti-storm gate is unaffected: it lives at EMISSION time
-		// (goal.nudge.suppressed_by_active_task in evaluateIdleGoalNudgeLocked).
-		if (liveGraphActionable) {
-			staleReason = "actionable_graph";
-			evidence = ["actionable-graph-work-present"];
-		} else if (Number.isFinite(idleAnchorMs) && createdAt < idleAnchorMs) {
+		// === R27 (2026-09-04) — the actionable_graph leg is REMOVED for goal keys. ===
+		// Emission no longer consults task state, so neither may the surface gate
+		// (the R21 liveGraphActionable leg — kept through R25 — contradicts the new
+		// emission gate and would starve every task-independent goal nudge the same
+		// way R22's agent_busy leg did). Only the idle_epoch_advanced leg remains:
+		if (Number.isFinite(idleAnchorMs) && createdAt < idleAnchorMs) {
 			staleReason = "idle_epoch_advanced";
 			evidence = [`message_created_before_idle_epoch:${new Date(createdAt).toISOString()}`, `idle_epoch:${new Date(idleAnchorMs).toISOString()}`];
 		}

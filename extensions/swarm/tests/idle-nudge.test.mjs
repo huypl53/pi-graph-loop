@@ -17,7 +17,11 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-process.env.PI_SWARM_GOAL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
+// R27 (2026-09-04): the goal floor now uses the check-streak debounce (3 x 1s by default
+// here) instead of the interval-anchor gate, and no longer consults task state. The
+// task-stall family keeps its own interval env.
+process.env.PI_SWARM_GOAL_IDLE_CHECK_INTERVAL_MS ||= "1000";
+process.env.PI_SWARM_GOAL_IDLE_CHECKS_REQUIRED ||= "3";
 process.env.PI_SWARM_TASK_STALL_NUDGE_IDLE_INTERVAL_MS ||= "1000";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -176,62 +180,75 @@ async function getGoalState() {
 }
 
 // =============================================================
-// A. Goal waits for the full continuous idle interval
+// A. Goal waits for the full N-consecutive idle-check streak (R27)
 // =============================================================
-console.log("\n[A] goal waits for continuous all-idle interval");
+console.log("\n[A] goal waits for N consecutive idle checks");
 {
 	await setup();
 	const t0 = Date.now();
 	let r = await tickGoal(t0);
-	ok("first tick starts idle epoch", r.emitted === false && r.reason === "idle_interval_pending");
+	ok("first check starts idle epoch", r.emitted === false && r.reason === "idle_interval_pending");
 	let st = await getGoalState();
 	ok("allIdleSinceAt stamped", typeof st.idle?.allIdleSinceAt === "string");
+	ok("first check counted (R27 streak=1)", st.idle?.goalIdleCheckCount === 1);
 	r = await tickGoal(t0 + 999);
-	ok("before interval no emit", r.emitted === false && r.reason === "idle_interval_pending");
+	ok("before check interval no new sample", r.emitted === false && r.reason === "idle_interval_pending");
 	r = await tickGoal(t0 + 1000);
-	ok("after interval emits", r.emitted === true && r.reason === "emitted");
+	ok("second check still pending (streak=2 < 3)", r.emitted === false && r.reason === "idle_interval_pending");
+	r = await tickGoal(t0 + 2000);
+	ok("third consecutive check emits (R27)", r.emitted === true && r.reason === "emitted");
 	st = await getGoalState();
 	ok("lastGoalNudgeAt stamped", typeof st.idle?.lastGoalNudgeAt === "string");
-	ok("nextGoalNudgeAt scheduled", typeof st.idle?.nextGoalNudgeAt === "string");
+	ok("streak consumed on emission", (st.idle?.goalIdleCheckCount ?? 0) === 0);
 }
 
 // =============================================================
-// B. Goal nudges are interval-spaced, not pump-tick-spaced
+// B. Goal nudges are streak-spaced, not pump-tick-spaced (R27)
 // =============================================================
-console.log("\n[B] goal nudges are interval-spaced");
+console.log("\n[B] goal nudges need a fresh full streak after each emission");
 {
 	await setup();
 	const t0 = Date.now();
+	await tickGoal(t0);
 	await tickGoal(t0 + 1000);
-	let r = await tickGoal(t0 + 1500);
-	ok("subsequent 5s-ish tick does not re-emit", r.emitted === false && r.reason === "idle_interval_pending");
-	r = await tickGoal(t0 + 2000);
-	ok("next full interval emits again", r.emitted === true && r.reason === "emitted");
+	await tickGoal(t0 + 2000); // emits; streak reset to 0
+	let r = await tickGoal(t0 + 2500);
+	ok("pump tick inside the check interval does not sample", r.emitted === false && r.reason === "idle_interval_pending");
+	r = await tickGoal(t0 + 3000);
+	ok("first fresh check does not re-emit (streak=1)", r.emitted === false && r.reason === "idle_interval_pending");
+	r = await tickGoal(t0 + 4000);
+	ok("second fresh check still pending (streak=2)", r.emitted === false && r.reason === "idle_interval_pending");
+	r = await tickGoal(t0 + 5000);
+	ok("third fresh check emits again (fresh streak)", r.emitted === true && r.reason === "emitted");
 	const st = await getGoalState();
 	ok("counter advanced on actual emissions", st.goal.consecutiveNoResolveNudges >= 1);
 	ok("one goal message persisted", Object.values(st.messages).filter((m) => m.idempotencyKey?.startsWith(`goal:${st.goal.id}:nudge:idle-streak`)).length >= 1);
 }
 
 // =============================================================
-// C. Goal-specific interval overrides env/default interval
+// C. Check-interval spacing is env-governed; nudgeIntervalMs is dormant (R27)
 // =============================================================
-console.log("\n[C] goal-specific interval overrides env/default interval");
+console.log("\n[C] check spacing is env-governed (nudgeIntervalMs dormant)");
 {
 	await setup();
 	const t0 = Date.now();
+	// nudgeIntervalMs is no longer consulted by the goal floor (R27); it stays durable on
+	// the goal record for /swarm status display + Issue-85 inheritance.
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
 		st.goal.nudgeIntervalMs = 2500;
 		await writeState(p, st);
 	});
 	let r = await tickGoal(t0);
-	ok("first tick starts idle epoch with override", r.emitted === false && r.reason === "idle_interval_pending");
-	r = await tickGoal(t0 + 2499);
-	ok("override interval still suppresses at t-1", r.emitted === false && r.reason === "idle_interval_pending");
-	r = await tickGoal(t0 + 2500);
-	ok("override interval emits at exact boundary", r.emitted === true && r.reason === "emitted");
+	ok("first check pending", r.emitted === false && r.reason === "idle_interval_pending");
+	r = await tickGoal(t0 + 999);
+	ok("inside check interval: no sample", r.emitted === false && r.reason === "idle_interval_pending");
+	r = await tickGoal(t0 + 1000);
+	ok("second check pending (streak=2)", r.emitted === false && r.reason === "idle_interval_pending");
+	r = await tickGoal(t0 + 2000);
+	ok("third check emits regardless of nudgeIntervalMs", r.emitted === true && r.reason === "emitted");
 	const st = await getGoalState();
-	ok("durable interval remains on goal", st.goal.nudgeIntervalMs === 2500);
+	ok("durable interval remains on goal (display/inherit only)", st.goal.nudgeIntervalMs === 2500);
 }
 
 // =============================================================
@@ -276,27 +293,26 @@ console.log("\n[D] busy agent resets idle epoch; ghosts ignored");
 	ok("ghosts excluded: epoch re-starts (busy worker restored)", r.emitted === false && r.reason === "idle_interval_pending");
 	st = await getGoalState();
 	ok("epoch re-stamped despite ghost records", typeof st.idle?.allIdleSinceAt === "string");
+	ok("busy edge reset the R27 check streak", (st.idle?.goalIdleCheckCount ?? 0) <= 1);
 	r = await tickGoal(t0 + 2200);
-	ok("goal fires after interval once ghosts present", r.emitted === true && r.reason === "emitted");
+	r = await tickGoal(t0 + 3200);
+	r = await tickGoal(t0 + 4200);
+	ok("goal fires after a fresh full streak once ghosts present", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
 }
 
 // =============================================================
-// E. Graph nudge wins over goal fallback
+// E. Graph-stall family unchanged; goal floor is task-state-independent (R27)
 // =============================================================
-console.log("\n[E] graph nudge wins over goal fallback");
+console.log("\n[E] graph nudge still fires; goal floor ignores the graph (R27)");
 {
 	await setup({ taskId: "task-graph", ageMs: 120_000, withTask: true });
 	const t0 = Date.now();
 	const graphResult = await tickGraph(t0);
 	ok("graph nudge emits", graphResult.emitted === true && graphResult.reason === "emitted");
 	const goalResult = await tickGoal(t0 + 1000);
-	// Row R19 (Fix A, 2026-09-02): goal floor is unconditional — actionable graph work only defers
-// by one interval, then falls through to emit. The evaluator still fires suppressed_by_actionable_graph
-// trace (for LIVE tasks), but does NOT return {emitted:false, reason:"actionable_graph"}.
-// The new behavior: deferred + interval_pending, not full block.
-ok("goal fallback is deferred (not blocked) by actionable graph", goalResult.emitted === false && (goalResult.reason === "idle_interval_pending" || goalResult.reason === "deferred_actionable_graph" || goalResult.reason === "actionable_graph"), `got ${goalResult.reason}/${goalResult.emitted}`);
+	ok("goal check pending on its own streak cadence (no graph defer)", goalResult.emitted === false && goalResult.reason === "idle_interval_pending", `got ${goalResult.reason}/${goalResult.emitted}`);
 	ok("graph nudge trace emitted", (await countEvents("task_stall.nudge_emitted")) === 1);
-	ok("goal suppression trace emitted", (await countEvents("goal.nudge.suppressed_by_actionable_graph")) >= 1);
+	ok("zero goal graph-gate traces (R27: removed)", (await countEvents("goal.nudge.suppressed_by_actionable_graph")) === 0 && (await countEvents("goal.nudge.deferred_by_actionable_graph")) === 0);
 }
 
 // =============================================================
@@ -358,17 +374,19 @@ console.log("\n[F] deferred stale nudges are suppressed at surface time");
 }
 
 // =============================================================
-// F. Graph/goal never double-fire for the same idle condition
+// F. Graph/goal coexistence (R27): both families may fire — by design
 // =============================================================
-console.log("\n[F] graph and goal do not double-fire in the same idle condition");
+console.log("\n[F] graph and goal coexist (goal floor independent of graph)");
 {
 	await setup({ taskId: "task-double", ageMs: 120_000, withTask: true });
 	const t0 = Date.now();
 	const graphResult = await tickGraph(t0);
 	ok("graph nudge emitted", graphResult.emitted === true);
 	const goalResult = await tickGoal(t0 + 1000);
-	// Row R19 (Fix A): goal floor is unconditional — actionable graph work defers but does not block.
-ok("goal fallback deferred (not blocked) — no double-fire", goalResult.emitted === false && (goalResult.reason === "idle_interval_pending" || goalResult.reason === "deferred_actionable_graph" || goalResult.reason === "actionable_graph"), `got ${goalResult.reason}/${goalResult.emitted}`);
+	ok("goal checks accumulate on their own cadence (no defer)", goalResult.emitted === false && goalResult.reason === "idle_interval_pending", `got ${goalResult.reason}/${goalResult.emitted}`);
+	const goalResult2 = await tickGoal(t0 + 2000);
+	const goalResult3 = await tickGoal(t0 + 3000);
+	ok("goal floor fires once its streak completes (coexistence accepted)", goalResult3.emitted === true && goalResult3.reason === "emitted", `got ${goalResult3.reason}/${goalResult3.emitted}`);
 }
 
 // =============================================================
@@ -428,19 +446,20 @@ console.log("\n[I] fresh status=ready task with actionable plan -> graph nudge, 
 	const graphResult = await tickGraph(t0);
 	ok("graph nudge fires for fresh ready task", graphResult.emitted === true && graphResult.reason === "emitted");
 	const goalResult = await tickGoal(t0 + 1000);
-	// Row R19 (Fix A): goal floor is unconditional — deferred, not suppressed.
-ok("goal evaluator deferred (not suppressed) for fresh ready task", goalResult.emitted === false && (goalResult.reason === "idle_interval_pending" || goalResult.reason === "deferred_actionable_graph" || goalResult.reason === "actionable_graph"), `got ${goalResult.reason}/${goalResult.emitted}`);
-	// With Fix A the goal nudge may fire (deferred by one interval then emit). The fresh task
-	// is LIVE (status=ready, actionable=true) so the goal IS deferred. No message before the
-	// deferred interval elapses.
-	const msgs = Object.values((await getGoalState()).messages).filter((m) => m.idempotencyKey?.includes(":nudge:idle-streak:") && new Date(m.createdAt).getTime() >= t0);
-	ok("no goal nudge message emitted during this section (deferred, not blocked)", msgs.length === 0, `got ${msgs.length} messages`);
+	// R27: the goal floor is task-state-independent — a fresh ready task neither suppresses
+	// nor defers it; the goal fires on its own streak cadence.
+	ok("goal evaluator on its own cadence (no defer for fresh ready task)", goalResult.emitted === false && goalResult.reason === "idle_interval_pending", `got ${goalResult.reason}/${goalResult.emitted}`);
+	await tickGoal(t0 + 2000);
+	let goalResult3 = await tickGoal(t0 + 3000);
+	ok("third check emits despite fresh ready task (R27)", goalResult3.emitted === true && goalResult3.reason === "emitted", `got ${goalResult3.reason}/${goalResult3.emitted}`);
 }
 
 // =============================================================
-// J. Assigned / in_progress task work suppresses the goal fallback
+// J. Assignment pointer (post-assign pre-pickup) suppresses the goal floor
+//    R27: task.json assigned/in_progress alone NO LONGER suppresses — only the
+//    in-memory activeTaskIds pointer (the "about to run" window) does.
 // =============================================================
-console.log("\n[J] assigned/in_progress task work suppresses goal fallback");
+console.log("\n[J] assignment pointer suppresses goal fallback (task.json alone does not)");
 {
 	await setup({ taskId: "task-active-work", ageMs: 120_000, withTask: true, taskStatus: "in_progress" });
 	const tp = taskPaths(p, "task-active-work");
@@ -456,18 +475,16 @@ console.log("\n[J] assigned/in_progress task work suppresses goal fallback");
 	});
 	const t0 = Date.now();
 	const goalResult = await tickGoal(t0);
-	// Issue 85 (task-202608310905, bug #2): the assignment-pointer fast path now fires BEFORE the
-	// throttled task-dir scan, so the reason is `assignment_in_flight` (more diagnostic than the
-	// generic `active_task`). The downstream task-dir scan is still the fallback for missing-pointer
-	// cases (section K below).
-	ok("goal evaluator suppresses when task node is assigned/in_progress (via assignment pointer)", goalResult.emitted === false && goalResult.reason === "assignment_in_flight", JSON.stringify(goalResult));
+	// Issue 85 bug #2 shape preserved under R27: an idle agent carrying an activeTaskIds
+	// pointer is "about to run" — the goal floor holds with assignment_in_flight.
+	ok("goal evaluator suppresses when an idle agent carries an assignment pointer", goalResult.emitted === false && goalResult.reason === "assignment_in_flight", JSON.stringify(goalResult));
 	ok("assignment-in-flight suppression trace emitted", (await countEvents("goal.nudge.suppressed_by_assignment_in_flight")) >= 1);
 }
 
 // =============================================================
-// K. Missing activeTaskIds pointer still suppresses via bounded fallback scan
+// K. Task.json assigned/in_progress WITHOUT any agent pointer no longer holds the goal (R27)
 // =============================================================
-console.log("\n[K] missing activeTaskIds pointer still suppresses goal fallback");
+console.log("\n[K] task.json-only assigned node does NOT suppress the goal floor (R27)");
 {
 	await setup({ taskId: "task-missing-pointer", ageMs: 120_000, withTask: true, taskStatus: "in_progress" });
 	const tp = taskPaths(p, "task-missing-pointer");
@@ -482,71 +499,58 @@ console.log("\n[K] missing activeTaskIds pointer still suppresses goal fallback"
 		await writeState(p, st);
 	});
 	const t0 = Date.now();
-	const goalResult = await tickGoal(t0);
-	ok("goal evaluator suppresses when pointer is missing but task.json still shows assigned/in_progress", goalResult.emitted === false && goalResult.reason === "active_task", JSON.stringify(goalResult));
-	ok("fallback scan trace emitted", (await countEvents("goal.nudge.suppressed_by_active_task")) >= 1);
+	let goalResult = await tickGoal(t0);
+	ok("check 1 pending (no active_task suppression — scan removed)", goalResult.emitted === false && goalResult.reason === "idle_interval_pending", JSON.stringify(goalResult));
+	goalResult = await tickGoal(t0 + 1000);
+	goalResult = await tickGoal(t0 + 2000);
+	ok("goal floor EMITS despite task.json assigned/in_progress + no pointer (R27 core)", goalResult.emitted === true && goalResult.reason === "emitted", JSON.stringify(goalResult));
+	ok("zero active_task suppression traces (scan removed)", (await countEvents("goal.nudge.suppressed_by_active_task")) === 0);
 }
 
 // =============================================================
-// K. Round-2+3 self-heal: stale nextGoalNudgeAt under a changed interval,
-//    and the post-resolve anchor must be max(idle-epoch, last-emit) + interval
+// K. (R27) The interval-anchor schedule machinery is GONE — a stale legacy
+//    nextGoalNudgeAt on disk must be inert; the check-streak governs timing.
 // =============================================================
-console.log("\n[K] schedule self-heal clamps stale boundaries to the CURRENT interval");
+console.log("\n[K] stale legacy nextGoalNudgeAt is inert under the check-streak (R27)");
 {
 	await setup();
 	const t0 = Date.now();
-	// Simulate the live bug: interval was 1h when the schedule was anchored; user later set 30s
-	// via a path that did NOT re-anchor (pre-fix state on disk). epoch + old interval = far future.
+	// Pre-R27 live shape: a stale far-future nextGoalNudgeAt + old nudgeIntervalMs on disk.
+	// Under R27 neither field is consulted — the floor fires on the streak cadence alone.
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
 		ensureRoot(st, dir, p);
 		st.goal = { id: "g-k1", text: "K1 stale schedule", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
-		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 3_600_000).toISOString(), nextGoalNudgeAt: new Date(t0 - 1_800_000).toISOString() }; // wait — stale is FUTURE under 1h
-		// stale boundary from the OLD 1h interval: epoch (t0-1h) + 1h = t0 + 0? Use epoch far past + old interval => boundary in the FUTURE
-		st.idleNudgeState.nextGoalNudgeAt = new Date(t0 + 3_300_000).toISOString(); // ~55min out (old 1h schedule)
+		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 3_600_000).toISOString(), nextGoalNudgeAt: new Date(t0 + 3_300_000).toISOString() };
 		await writeState(p, st);
 	});
-	// Correct expectation under 30s interval: eligible at epoch+30s = t0-59.5min (long past).
-	// The clamp must pull the future boundary DOWN to max(epoch,last-emit)+30s -> emit NOW.
 	let r = await tickGoal(t0);
-	ok("stale future boundary (old interval) is clamped and nudge fires immediately", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
-	let st = await getGoalState();
-	const afterEmit = new Date(st.idle.nextGoalNudgeAt).getTime();
-	ok("post-emit schedule = last-emit + current interval", Math.abs(afterEmit - (t0 + 30_000)) < 5, `${st.idle.nextGoalNudgeAt}`);
-	ok("schedule_reanchored trace emitted", (await countEvents("goal.nudge.schedule_reanchored")) >= 1);
+	ok("check 1 pending (stale nextGoalNudgeAt ignored)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	await tickGoal(t0 + 1000);
+	r = await tickGoal(t0 + 2000);
+	ok("check 3 emits despite the stale far-future boundary (R27)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	ok("schedule_reanchored trace never fires (machinery removed)", (await countEvents("goal.nudge.schedule_reanchored")) === 0);
 }
 
-console.log("\n[L] after a resolve, next nudge waits the full interval from the LAST EMISSION, not the idle epoch");
+console.log("\n[L] (R27) post-emission spacing is streak-based; legacy lastGoalNudgeAt is inert");
 {
 	await setup();
 	const t0 = Date.now();
+	// Pre-R27 shape: 45min-old epoch + recent lastGoalNudgeAt. The v2 clamp anchored at
+	// last-emit + interval; under R27 neither matters — a fresh 3-check streak is required
+	// regardless of how old the idle epoch is.
 	await withLock(p, async () => {
 		const st = await readState(p, dir);
 		ensureRoot(st, dir, p);
 		st.goal = { id: "g-l1", text: "L1 post-resolve spacing", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
-		// Live bug shape: epoch is 45min old; a resolve just cleared the counter; the v1 clamp
-		// computed epoch+30s = far past => re-fired EVERY tick. v2 must anchor at last-emit.
-		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 2_700_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 5_000).toISOString(), nextGoalNudgeAt: new Date(t0 - 4_999).toISOString() };
+		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 2_700_000).toISOString(), lastGoalNudgeAt: new Date(t0 - 5_000).toISOString() };
 		await writeState(p, st);
 	});
-	// boundary should clamp to last-emit(t0-5s)+30s = t0+25s => NOT eligible yet
-	let r = await tickGoal(t0 + 24_000);
-	ok("not eligible before last-emit + interval", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
-	r = await tickGoal(t0 + 25_000);
-	ok("eligible at last-emit + interval (no immediate re-fire)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
-	// And with no prior emission at all, anchor = idle epoch (original Row 68 semantics preserved)
-	await setup();
-	await withLock(p, async () => {
-		const st = await readState(p, dir);
-		ensureRoot(st, dir, p);
-		st.goal = { id: "g-l2", text: "L2 epoch anchor", setAt: new Date(t0 - 3_600_000).toISOString(), setBy: "root", consecutiveNoResolveNudges: 0, nudgeSeq: 0, nudgeIntervalMs: 30_000 };
-		st.idleNudgeState = { allIdleSinceAt: new Date(t0 - 20_000).toISOString() };
-		await writeState(p, st);
-	});
-	r = await tickGoal(t0 + 25_000);
-	ok("epoch-anchored: emits once epoch + interval reached", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
-	r = await tickGoal(t0 + 26_000);
-	ok("epoch-anchored: no immediate re-fire after emit", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	let r = await tickGoal(t0);
+	ok("check 1 pending (no immediate fire off the old epoch)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	await tickGoal(t0 + 1000);
+	r = await tickGoal(t0 + 2000);
+	ok("check 3 emits — spacing is streak-based, not last-emit-anchored (R27)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
 }
 
 // =============================================================
@@ -698,12 +702,14 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 	const t0 = Date.now();
 
 	// ---- Emit 3 goal nudges through the REAL production path while all-idle holds.
-	// Interval env = 1000ms (file header), so ticks at +1000/+2000/+3000 each emit.
-	await tickGoal(t0); // starts the idle epoch (allIdleSinceAt = t0)
-	const e1 = await tickGoal(t0 + 1000);
+	// R27 cadence: check interval 1000ms x 3 required — a streak completes every 3 samples,
+	// so ticks at +1000..+3000 emit nudge 1, +4000..+6000 emit nudge 2, +7000..+9000 emit 3.
+	await tickGoal(t0); // starts the idle epoch (allIdleSinceAt = t0) — sample 1
+	await tickGoal(t0 + 1000); // sample 2
+	const e1 = await tickGoal(t0 + 2000); // sample 3 → EMITS nudge 1
 	ok("R22 emission: nudge 1 emitted under the all-idle gate", e1.emitted === true && e1.reason === "emitted", JSON.stringify(e1));
-	await tickGoal(t0 + 2000);
-	await tickGoal(t0 + 3000);
+	await tickGoal(t0 + 3000); await tickGoal(t0 + 4000); await tickGoal(t0 + 5000); // nudge 2
+	await tickGoal(t0 + 6000); await tickGoal(t0 + 7000); await tickGoal(t0 + 8000); // nudge 3
 	let st = await getGoalState();
 	const goalMsgs = Object.values(st.messages)
 		.filter((m) => m.idempotencyKey?.startsWith(`goal:${st.goal.id}:nudge:idle-streak`))
@@ -743,15 +749,24 @@ console.log("\n[R22] goal nudges starve at surface when a worker turns busy afte
 	const vC2 = await staleSurfaceReason(p, st, oldGoalMsg, {}, t0 + 5000);
 	ok("R22-C2 epoch-advanced goal nudge stays stale (immortality guard kept)", vC2.stale === true && vC2.reason === "idle_epoch_advanced", JSON.stringify(vC2));
 
-	// ---- Control C3: LIVE actionable graph still suppresses goal keys (C-R21-3 kept).
-	// Synthetic in-memory taskIndex only — the disk stays clean for S2's pump.
+	// ---- Control C3 (R27): LIVE actionable graph NO LONGER suppresses goal keys — the
+	// surface gate must agree with the task-state-independent emission gate. Synthetic
+	// in-memory taskIndex only — the disk stays clean for S2's pump. Re-anchor the epoch
+	// to t0 first so the message (createdAt ~t0+2000) postdates it — the C2 control above
+	// advanced the anchor past every emitted message.
+	await withLock(p, async () => {
+		const s = await readState(p, dir);
+		s.idleNudgeState = { ...(s.idleNudgeState || {}), allIdleSinceAt: new Date(t0).toISOString() };
+		await writeState(p, s);
+	});
+	st = await getGoalState();
 	const vC3 = await staleSurfaceReason(p, st, goalMsgs[0], {
 		"task-r22-ctl-live": {
 			taskId: "task-r22-ctl-live", status: "in_progress", start: "a", edges: [], handoffs: [],
 			nodes: { a: { status: "ready", assignee: undefined, dependsOn: [] } },
 		},
 	}, t0 + 5100);
-	ok("R22-C3 live actionable graph still suppresses goal nudge", vC3.stale === true && vC3.reason === "actionable_graph", JSON.stringify(vC3));
+	ok("R22-C3 live actionable graph does NOT suppress goal nudge (R27)", vC3.stale === false, JSON.stringify(vC3));
 
 	// ---- Control C1: taskKey graph-stall nudges keep the busy suppression (fix is
 	// goal-key-scoped; synthetic assigned node + busy worker). Reproduces section F
@@ -864,14 +879,19 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		s.messages["msg-r23-legacy-3"] = { id: "msg-r23-legacy-3", from: "root", to: "root", status: "mailbox_delivered", createdAt: new Date(t0 - 120_000).toISOString(), updatedAt: new Date(t0 - 120_000).toISOString(), requiresAck: true, requiresResponse: false, subject: "legacy", body: "legacy", idempotencyKey: `goal:${gid}:nudge:idle-streak:3` };
 		await writeState(p, s);
 	});
-	let r = await tickR23(t0);
-	ok("R23-G1a within-saturation tick1 still backoff.skip (cap preserved)", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
-	r = await tickR23(t0 + 60_000);
-	ok("R23-G1b within-saturation tick2 still backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	// R27: each completed round = 3 samples at the 1s check interval.
+	const roundR23 = async (base) => {
+		await tickR23(base); await tickR23(base + 1_000);
+		return await tickR23(base + 2_000);
+	};
+	let r = await roundR23(t0);
+	ok("R23-G1a within-saturation round1 still backoff.skip (cap preserved)", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	r = await roundR23(t0 + 10_000);
+	ok("R23-G1b within-saturation round2 still backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
 	let st = await getGoalState();
 	ok("R23-G1c counter still MAX after the drain ticks", st.goal.consecutiveNoResolveNudges === 3, `count=${st.goal.consecutiveNoResolveNudges}`);
-	r = await tickR23(t0 + 120_000);
-	ok("R23-G2 tick3 emits the fresh nudge (reset engaged at cap)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	r = await roundR23(t0 + 20_000);
+	ok("R23-G2 round3 emits the fresh nudge (reset engaged at cap)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
 	st = await getGoalState();
 	ok("R23-G2 counter reset then advanced to 1 (not MAX)", st.goal.consecutiveNoResolveNudges === 1, `count=${st.goal.consecutiveNoResolveNudges}`);
 	ok("R23-G2 nudgeSeq advanced to 4", st.goal.nudgeSeq === 4, `seq=${st.goal.nudgeSeq}`);
@@ -885,10 +905,10 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	const legacy3 = st.messages["msg-r23-legacy-3"];
 	const vLegacy = await staleSurfaceReason(p, st, legacy3, {}, t0 + 125_000);
 	ok("R23-C5 legacy message still idle_epoch_advanced-stale post-fix", vLegacy.stale === true && vLegacy.reason === "idle_epoch_advanced", JSON.stringify(vLegacy));
-	const stAfterEmit = await getGoalState();
-	const intervalR23 = stAfterEmit.idle?.nextGoalNudgeAt ? (new Date(stAfterEmit.idle.nextGoalNudgeAt).getTime() - (t0 + 120_000)) : 1_000;
-	r = await tickR23(t0 + 120_000 + Math.max(1, Math.floor(intervalR23 / 2)));
-	ok("R23-G3 next tick inside the interval is pending (reset fired once; no storm)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
+	// R23-G3: a mid-streak probe (inside the 1s check interval) is pending — the reset
+	// fired once and a fresh 3-sample streak is required before any further emission.
+	r = await tickR23(t0 + 22_000 + 500);
+	ok("R23-G3 mid-streak probe is pending (reset fired once; no storm)", r.emitted === false && r.reason === "idle_interval_pending", JSON.stringify(r));
 	st = await getGoalState();
 	ok("R23-G3 counter still 1 and nudgeSeq still 4 after the pending tick", st.goal.consecutiveNoResolveNudges === 1 && st.goal.nudgeSeq === 4, JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, s: st.goal.nudgeSeq }));
 
@@ -937,12 +957,13 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		s.idleNudgeState = { allIdleSinceAt: new Date(t7 - 120_000).toISOString(), lastGoalNudgeAt: new Date(t7 - 30_000).toISOString(), goalConsecutiveNoResolveNudges: 3, goalBackoffTicksRemaining: 2 };
 		await writeState(p, s);
 	});
-	r = await tickGoal(t7);
-	ok("R23-G7 same-epoch tick1 backoff.skip", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
-	r = await tickGoal(t7 + 60_000);
-	ok("R23-G7 same-epoch tick2 backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
-	r = await tickGoal(t7 + 120_000);
-	ok("R23-G7 same-epoch tick3 max_nudges re-arm (no reset within one epoch)", r.emitted === false && r.reason === "max_nudges", JSON.stringify(r));
+	const roundG7 = async (base) => { await tickGoal(base); await tickGoal(base + 1_000); return await tickGoal(base + 2_000); };
+	r = await roundG7(t7);
+	ok("R23-G7 same-epoch round1 backoff.skip", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	r = await roundG7(t7 + 10_000);
+	ok("R23-G7 same-epoch round2 backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	r = await roundG7(t7 + 20_000);
+	ok("R23-G7 same-epoch round3 max_nudges re-arm (no reset within one epoch)", r.emitted === false && r.reason === "max_nudges", JSON.stringify(r));
 	st = await getGoalState();
 	ok("R23-G7 counter still MAX + backoff re-armed (no storm)", st.goal.consecutiveNoResolveNudges === 3 && st.goal.backoffTicksRemaining === 2, JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, b: st.goal.backoffTicksRemaining }));
 	ok("R23-G7 no saturation_reset trace in the same-epoch window", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 0);
@@ -970,15 +991,16 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		s.idleNudgeState.r23LastEpochAnchor = s.idleNudgeState.allIdleSinceAt;
 		await writeState(p, s);
 	});
-	r = await tickGoal(t8); // first eligible: backoff 2→1
-	ok("R23-G2b first eligible tick after the anchor stamps: backoff drain 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	const roundG2b = async (base) => { await tickGoal(base); await tickGoal(base + 1_000); return await tickGoal(base + 2_000); };
+	r = await roundG2b(t8); // first eligible round: backoff 2→1
+	ok("R23-G2b first eligible round after the anchor stamps: backoff drain 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
 	st = await getGoalState();
 	ok("R23-G2b counter preserved at MAX on this tick (no reset — edge site is gone)", st.goal.consecutiveNoResolveNudges === 3 && st.goal.backoffTicksRemaining === 1, JSON.stringify({ c: st.goal.consecutiveNoResolveNudges, b: st.goal.backoffTicksRemaining }));
 	ok("R23-G2b NO saturation_reset trace yet", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 0);
-	r = await tickGoal(t8 + 60_000); // backoff 1→0
-	ok("R23-G2b second eligible tick backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
-	r = await tickGoal(t8 + 120_000); // cap-branch reset + emits seq=4
-	ok("R23-G2b third eligible tick: cap-branch reset + emits seq=4", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	r = await roundG2b(t8 + 10_000); // backoff 1→0
+	ok("R23-G2b second eligible round backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	r = await roundG2b(t8 + 20_000); // cap-branch reset + emits seq=4
+	ok("R23-G2b third eligible round: cap-branch reset + emits seq=4", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
 	st = await getGoalState();
 	ok("R23-G2b counter reset then advanced to 1", st.goal.consecutiveNoResolveNudges === 1, `count=${st.goal.consecutiveNoResolveNudges}`);
 	ok("R23-G2b exactly ONE saturation_reset trace (no storm)", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 1);
@@ -998,20 +1020,22 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		s.idleNudgeState.r23LastEpochAnchor = s.idleNudgeState.allIdleSinceAt;
 		await writeState(p, s);
 	});
+	const roundB = async (base) => { await tickGoal(base); await tickGoal(base + 1_000); return await tickGoal(base + 2_000); };
 	// drain backoff: 2→1
-	r = await tickGoal(tR23B);
-	ok("R23B-1 first eligible: backoff drain 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
+	r = await roundB(tR23B);
+	ok("R23B-1 first eligible round: backoff drain 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
 	// drain backoff: 1→0
-	r = await tickGoal(tR23B + 60_000);
-	ok("R23B-2 second eligible: backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
+	r = await roundB(tR23B + 10_000);
+	ok("R23B-2 second eligible round: backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
 	// cap-branch reset + emit seq=4 (the legitimate R23 re-arm)
-	r = await tickGoal(tR23B + 120_000);
+	r = await roundB(tR23B + 20_000);
 	ok("R23B-3 cap-branch reset + emits seq=4", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
-	// counter climbs 1→2→3=MAX (the post-reset burst)
-	r = await tickGoal(tR23B + 180_000);
-	ok("R23B-4 tick4 emits seq=5 (counter 1→2)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
-	r = await tickGoal(tR23B + 240_000);
-	ok("R23B-5 tick5 emits seq=6 (counter 2→3=MAX)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	// counter climbs 1→2→3=MAX (the post-reset burst). R27: each emission needs a fresh
+	// 3-sample streak (check interval 1s → 3s per burst member).
+	r = await roundB(tR23B + 30_000);
+	ok("R23B-4 next streak emits seq=5 (counter 1→2)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
+	r = await roundB(tR23B + 40_000);
+	ok("R23B-5 next streak emits seq=6 (counter 2→3=MAX)", r.emitted === true && r.reason === "emitted", JSON.stringify(r));
 	// The legitimate R23 burst is complete. Counter at MAX, backoff drained. Now we drive
 	// ≥2 ROOT-turn churn edges (the live storm source — `agent_settled` fires at
 	// every root turn boundary, briefly marking the root busy/idle). The
@@ -1032,7 +1056,7 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		await writeState(p, s);
 	});
 	r = await tickGoal(tR23B + 360_000); // root idle edge: new anchor stamped, mint clears memo, cap branch breaker rejects
-	ok("R23B-6 churn1 idle: NO reset (storm guard — worker-breaker rejects root-only)", r.emitted === false && (r.reason === "idle_interval_pending" || r.reason === "backoff"), JSON.stringify(r));
+	ok("R23B-6 churn1 idle: NO reset (storm guard — worker-breaker rejects root-only)", r.emitted === false && (r.reason === "idle_interval_pending" || r.reason === "backoff" || r.reason === "max_nudges" || r.reason === "backoff_just_exhausted"), JSON.stringify(r));
 	// churn cycle 2
 	await withLock(p, async () => {
 		const s = await readState(p, dir);
@@ -1047,9 +1071,12 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	});
 	r = await tickGoal(tR23B + 480_000);
 	ok("R23B-7 churn2 idle: NO reset (storm guard holds)", r.emitted === false && (r.reason === "idle_interval_pending" || r.reason === "max_nudges" || r.reason === "backoff"), JSON.stringify(r));
-	// one eligible tick past the churn — backoff arms, counter preserved
-	r = await tickGoal(tR23B + 540_000);
-	ok("R23B-8 post-churn eligible: cap engages (max_nudges / backoff armed)", r.emitted === false && (r.reason === "max_nudges" || r.reason === "backoff"), JSON.stringify(r));
+	// one eligible round past the churn — backoff arms, counter preserved.
+	// (The churn2 idle tick at +480_000 already consumed a sample; two more spaced
+	// samples complete the round: +481_000, +482_000.)
+	await tickGoal(tR23B + 481_000);
+	r = await tickGoal(tR23B + 482_000);
+	ok("R23B-8 post-churn eligible round: cap engages (max_nudges / backoff armed)", r.emitted === false && (r.reason === "max_nudges" || r.reason === "backoff"), JSON.stringify(r));
 	ok("R23B-9 exactly ONE saturation_reset trace across the entire run (storm eliminated)", (await countEvents("goal.nudge.saturation_reset_on_epoch")) === 1);
 	st = await getGoalState();
 	ok("R23B-10 nudgeSeq bounded to 6 (no runaway seq 7+)", st.goal.nudgeSeq === 6, `seq=${st.goal.nudgeSeq}`);
@@ -1077,9 +1104,10 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		await writeState(p, s);
 	});
 	// drain backoff (mirrors tester-turnstart-probe.mjs Phase 1)
-	r = await tickGoal(tR23C);
+	const roundC = async (base) => { await tickGoal(base); await tickGoal(base + 1_000); return await tickGoal(base + 2_000); };
+	r = await roundC(tR23C);
 	ok("R23C-1 drain1: backoff 2→1", r.emitted === false && r.reason === "backoff", JSON.stringify(r));
-	r = await tickGoal(tR23C + 60_000);
+	r = await roundC(tR23C + 10_000);
 	ok("R23C-2 drain2: backoff_just_exhausted", r.emitted === false && r.reason === "backoff_just_exhausted", JSON.stringify(r));
 	// orbit helper — exercises the REAL hooks.ts turn_start handler (R23C proof: removing the
 	// root-provenance stamp in hooks.ts must make this test RED). We register a minimal
@@ -1098,12 +1126,13 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 		// Real hooks.ts handler requires a ctx-shaped argument. Mirrors the inline state the
 		// handler reads (it only uses ctx.cwd for paths + readState/writeState/lock).
 		await realTurnStart({ type: "turn_start", cwd: dir }, { cwd: dir });
-		await tickGoal(nowMs); // mint tick
-		return await tickGoal(nowMs + 60_000); // eval tick
+		await tickGoal(nowMs); // mint tick (sample 1)
+		await tickGoal(nowMs + 1_000); // sample 2
+		return await tickGoal(nowMs + 2_000); // sample 3 → a completed round if cap allows
 	}
 	let r23cEmissions = 0;
 	for (let i = 1; i <= 5; i++) {
-		const orbitBase = tR23C + 120_000 + (i - 1) * 120_000;
+		const orbitBase = tR23C + 120_000 + (i - 1) * 10_000;
 		const orbitResult = await turnStartOrbit(orbitBase);
 		if (!orbitResult) continue;
 		if (orbitResult.emitted) r23cEmissions++;
