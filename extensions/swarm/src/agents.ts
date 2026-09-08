@@ -24,6 +24,7 @@ import { childPiArgs, currentAgentId, currentModel, currentProvider } from "./se
 import { pickSlot, poolStatus, preflightSpawn, formatPreflightError } from "./pool.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, shellQuote, sleep } from "./utils.ts";
 import { identityPath, mailboxPath, paths, readState, trace, withLock, writeState } from "./state.ts";
+import { logSwarmError, expected, traceLogged } from "./errorlog.ts";
 import { identityPrompt, writeEffectiveIdentity } from "./identity.ts";
 import { responseMissingRecords, unackedRequiresAckRecords, deliverMessageLocked } from "./mailbox.ts";
 
@@ -103,7 +104,7 @@ export function armOrphanWatch(p: Paths, st: SwarmState, agentId: string, ts: st
 	st.recentSpawns = Array.isArray(st.recentSpawns) ? st.recentSpawns : [];
 	st.recentSpawns.push(entry);
 	const timer = setTimeout(() => {
-		fireOrphanWarning(p, agentId, entry).catch(() => {});
+		fireOrphanWarning(p, agentId, entry).catch((err) => logSwarmError(p, "agents", "fireOrphanWarning.failed", err));
 	}, ORPHAN_SPAWN_WARNING_TIMEOUT_MS);
 	// Don't keep the Node event loop alive solely for orphan watches; the timer is best-effort and
 	// the persistent entry in state is the source of truth across restarts.
@@ -188,7 +189,10 @@ export async function mailboxKickoffPrompt(p: Paths, st: SwarmState, id: string)
 			)
 			.join("\n");
 		return `\n\n[PI-SWARM MAILBOX PENDING]\nYour mailbox has ${pending.length} undelivered/unacked message(s). Read them NOW with swarm_check_mailbox (they may contain work or approvals sent while you were down/restarting) and ack/handle per protocol. Recent:\n${lines}\n[/PI-SWARM MAILBOX PENDING]`;
-	} catch {
+	} catch (err) {
+		// Failure here degrades to "no pending banner" — i.e. the operator/agent sees nothing. That
+		// silences exactly the messages this banner exists to surface. Log durably.
+		await logSwarmError(process.cwd(), "agents", "pending_banner_read_failed", err);
 		return "";
 	}
 }
@@ -481,7 +485,10 @@ export async function registerAgent(
 	if (tmuxAlive) {
 		try {
 			probeFile = await capturePane(pi, p, id, target, "register-probe");
-		} catch {
+		} catch (err) {
+			// Probe capture failure means the piRunning heuristic silently degrades to false; worth
+			// one durable line (pane may already be dead — often benign, but diagnosable).
+			await logSwarmError(p, "agents", "register.probe_capture_failed", err, { agentId: id, target });
 			probeFile = null;
 		}
 		if (probeFile) {
@@ -489,8 +496,13 @@ export async function registerAgent(
 				const txt = await readFile(probeFile, "utf8");
 				// Heuristic: look for common pi TUI / swarm markers. Best-effort, never gating.
 				piRunning = /\bswarm:|PI[-_ ]?SWARM|\bpi\b.*[\$>#]|\bYou are\b|identity/i.test(txt);
-			} catch {
-				/* ignore */
+			} catch (err: any) {
+				// ENOENT: pane died between capture and read (expected race). Otherwise log.
+				if (err?.code !== "ENOENT") {
+					await logSwarmError(p, "agents", "register.probe_read_failed", err, { agentId: id, probeFile });
+				} else {
+					expected("probe_file_race_enoent");
+				}
 			}
 		}
 	}
@@ -574,8 +586,10 @@ export async function killAgentPane(pi: ExtensionAPI, p: Paths, agent: SwarmAgen
 	try {
 		await tmux(pi, ["kill-window", "-t", winTarget], 5_000);
 		return { killed: true, method: "kill-window" };
-	} catch {
-		/* shared window or already gone — try the pane only */
+	} catch (err: any) {
+		// Expected: shared window (other panes alive) or already gone — the pane-only kill below is
+		// the designed fallback, not an error path.
+		expected("kill_window_fallback_to_pane");
 	}
 	try {
 		await tmux(pi, ["kill-pane", "-t", agent.tmuxTarget], 5_000);
@@ -608,7 +622,9 @@ export async function stopAgent(
 	// cannot fire mid-stop and emit a stale orphan_warning trace for an agent being intentionally
 	// terminated. clearOrphanWatch is a no-op when the agent has no entry (e.g. reuse path).
 	const ts = now();
-	await clearOrphanWatch(p, state, agentId, "swarm_stop_agent").catch(() => {});
+	await clearOrphanWatch(p, state, agentId, "swarm_stop_agent").catch((err) =>
+		logSwarmError(p, "agents", "clearOrphanWatch.failed", err),
+	);
 	// R25 — PM ack-debt notify BEFORE pane kill (best-effort, must never block a stop). Mirror the
 	// hooks.ts settle branch: per-agent cooldown (`lastAckDebtNotifyAt`) + idempotency key from
 	// sorted unacked ids so re-stops within the cooldown are silently deduped. The agent record
@@ -944,9 +960,11 @@ export async function findReusableAgent(
 			excludeTaskId: opts.excludeTaskId || null,
 			counts: kinds,
 			recommended: matches[0]?.agentId || null,
-		}).catch(() => {});
-	} catch {
-		/* trace is informational; never fail reuse on it */
+		}).catch((err: any) => logSwarmError(p, "agents", "reuse.trace_failed", err));
+	} catch (err) {
+		// Trace is informational and must never fail reuse — but the write failure is now visible
+		// in errors.jsonl instead of vanishing. (p lives inside the try; re-derive from st.cwd.)
+		await logSwarmError(st.cwd, "agents", "reuse.trace_failed", err);
 	}
 	return { matches, recommended: matches[0]?.agentId };
 }

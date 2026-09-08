@@ -24,6 +24,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { parse as parseYaml } from "yaml";
+import { logSwarmError } from "./errorlog.ts";
 
 export type SwarmConfigSource = "extensions.swarm" | "swarm" | "swarm.yml";
 
@@ -55,9 +56,12 @@ export function readSwarmRawConfig(cwd: string): {
 	if (existsSync(settingsFile)) {
 		try {
 			raw = JSON.parse(readFileSync(settingsFile, "utf8")) as Record<string, any>;
-		} catch {
+		} catch (err) {
 			corrupt.push("settings.json");
 			raw = null;
+			// Corrupt config is REPORTED to callers (validate path) — but the raw-read path also
+			// silently falls back to defaults. Leave one durable line per discovery.
+			void logSwarmError(cwd, "config", "settings.parse_failed", err, { file: settingsFile });
 		}
 	}
 	if (raw) {
@@ -74,9 +78,10 @@ export function readSwarmRawConfig(cwd: string): {
 	let yml: Record<string, any> | null = null;
 	try {
 		yml = readSwarmYml(cwd);
-	} catch {
+	} catch (err) {
 		corrupt.push("swarm.yml");
 		yml = null;
+		void logSwarmError(cwd, "config", "swarm_yml.parse_failed", err);
 	}
 	if (yml && Object.keys(yml).length) return { cfg: yml, source: "swarm.yml", corrupt };
 

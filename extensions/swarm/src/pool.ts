@@ -20,6 +20,7 @@ import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
 import { currentModel, currentProvider, readSwarmSettings } from "./session.ts";
 import { readSwarmRawConfig, readSwarmYml, swarmYmlPath, type SwarmConfigSource } from "./config.ts";
 import { atomicWriteFile, trace } from "./state.ts";
+import { expected, logSwarmError, traceLogged } from "./errorlog.ts";
 
 // Credential probe for preflightSpawn (3b): does this provider have a usable API key?
 // Mirrors pi's own lookup order: ~/.pi/agent/auth.json entries, then the conventional
@@ -34,8 +35,12 @@ function missingProviderCredential(provider: string): string | undefined {
 			if (entry && typeof entry === "object" && entry.type === "api_key" && String(entry.key || entry.apiKey || "").trim())
 				return undefined;
 		}
-	} catch {
-		/* missing/unreadable auth.json falls through to env check */
+	} catch (err: any) {
+		// Expected branches: no HOME or auth.json absent. A CORRUPT/unreadable auth.json silently
+		// flipping the gate to env-fallback deserves a durable line.
+		if (err?.code !== "ENOENT") {
+			void logSwarmError(process.cwd(), "pool", "auth_key.read_failed", err);
+		}
 	}
 	const envKey = provider.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 	if (process.env[`${envKey}_API_KEY`] || process.env[`${envKey}_APIKEY`]) return undefined;
@@ -112,8 +117,10 @@ function readQuotaResetMsFor(cwd: string, key: string): number {
 					}
 				}
 			}
-		} catch {
-			/* ignore — empty cache */
+		} catch (err) {
+			// Quota cache is best-effort — but a corrupt cache silently zeroing quota resets would
+			// starve slots that are actually cooled down. Log it (sync context: fire-and-forget).
+			void logSwarmError(process.cwd(), "pool", "quota_cache.read_failed", err);
 		}
 	}
 	return m.get(key) ?? 0;
@@ -169,7 +176,10 @@ export async function withPoolLock<T>(p: Paths, fn: () => Promise<T>): Promise<T
 			try {
 				const s = await stat(lock);
 				if (Date.now() - s.mtimeMs > 60_000) await rm(lock, { recursive: true, force: true });
-			} catch {}
+			} catch (err) {
+				// Lost the stale-lock stat/rm race to a competing acquirer — expected contention path.
+				await logSwarmError(undefined, "pool", "lock.stale_cleanup_skip", err, { lock, expected: expected("stale-lock race") });
+			}
 			if (Date.now() - started > 120_000) throw new Error(`Timed out acquiring pool lock: ${lock}`);
 			await sleep(50);
 		}
@@ -189,7 +199,10 @@ export async function readPoolHealth(p: Paths): Promise<PoolHealthState> {
 		st.slots ||= {};
 		st.rrCursor = typeof st.rrCursor === "number" ? st.rrCursor : 0;
 		return st;
-	} catch {
+	} catch (err) {
+		// existsSync passed, so a read/parse failure means the pool-health file is corrupt or
+		// unreadable — reset-to-empty is the designed recovery, but it must be visible.
+		await logSwarmError(p, "pool", "health.read_failed", err, { file });
 		return { slots: {} };
 	}
 }
@@ -570,7 +583,7 @@ export async function pickSlot(
 					cursor = (cursor + 1) % eligible.length;
 				}
 				h.rrCursor = cursor + 1;
-				await writePoolHealth(p, h).catch(() => {});
+				await writePoolHealth(p, h).catch((err) => logSwarmError(p, "pool", "writePoolHealth.failed", err));
 				const { slot, index } = eligible[cursor];
 				return { slot, index, fromPool: true, reason: `round-robin(${cursor})` };
 			}

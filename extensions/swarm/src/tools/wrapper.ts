@@ -13,6 +13,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { PI_SWARM_MINIMAL_PROTOCOL, TRACE_TOOL_INVOKED } from "../constants.ts";
 import { paths, trace } from "../state.ts";
 import { currentAgentId } from "../session.ts";
+import { logSwarmError } from "../errorlog.ts";
 
 export type ToolInvocationClass = "success" | "error" | "thrown";
 
@@ -46,8 +47,11 @@ export async function wrapSwarmToolInvocation<T>(
 				errClass,
 				durationMs,
 			});
-		} catch {
-			// Telemetry is best-effort; never propagate a trace failure.
+		} catch (err) {
+			// Telemetry is best-effort; never propagate a trace failure — but record it. The §G
+			// telemetry census depends on tool.invoked lines; a silent gap here would hide
+			// systematic trace-write breakage (e.g. EACCES on traces/events.jsonl).
+			await logSwarmError(cwd, "wrapper", "telemetry.tool_invoked_failed", err, { tool: toolName });
 		}
 	}
 }

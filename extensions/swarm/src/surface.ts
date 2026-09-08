@@ -95,6 +95,7 @@ import { claimRootLeader, ensureRoot, heartbeatRootLeader, readRootLeader, requi
 import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
+import { logSwarmError, traceLogged } from "./errorlog.ts";
 import {
 	agentHeartbeatGCLocked,
 	evaluateArtifactProgressNudgeLocked,
@@ -680,8 +681,10 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 			for (const n of r.surfacedNodes || []) {
 				try {
 					await staleOpenNudgeLocked(pi, ctx.cwd, p, st, n.taskId, n.nodeId);
-				} catch {
-					/* per-node best-effort; never kills the tick */
+				} catch (err) {
+					// Per-node best-effort (never kills the tick) — but a nudge that persistently fails
+					// means surfaced nodes never reach the root. Make it durable.
+					await logSwarmError(p, "surface", "stale_open.nudge_failed", err, { taskId: n.taskId, nodeId: n.nodeId });
 				}
 			}
 		} catch (err: any) {
@@ -785,12 +788,16 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 						if (!existsSync(tp.taskJson)) continue;
 						try {
 							taskIndex[taskId] = await readTaskState(tp.taskJson);
-						} catch {
-							/* skip unreadable */
+						} catch (err: any) {
+							if (err?.code !== "ENOENT") {
+								await logSwarmError(p, "surface", "task_index.unreadable", err, { taskId });
+							}
 						}
 					}
-				} catch {
-					/* ignore readdir errors */
+				} catch (err: any) {
+					if (err?.code !== "ENOENT") {
+						await logSwarmError(p, "surface", "task_index.readdir_failed", err);
+					}
 				}
 			}
 			const retriggerCounts = orchSession(st, nowMs)!.retriggerCount || {};
@@ -829,12 +836,16 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 					if (!existsSync(tp.taskJson)) continue;
 					try {
 						taskIndex[taskId] = await readTaskState(tp.taskJson);
-					} catch {
-						/* skip unreadable */
+					} catch (err: any) {
+						if (err?.code !== "ENOENT") {
+							await logSwarmError(p, "surface", "task_index.unreadable", err, { taskId });
+						}
 					}
 				}
-			} catch {
-				/* ignore readdir errors */
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") {
+					await logSwarmError(p, "surface", "task_index.readdir_failed", err);
+				}
 			}
 		}
 		const retriggerCounts = orchSession(st, nowMs)!.retriggerCount || {};

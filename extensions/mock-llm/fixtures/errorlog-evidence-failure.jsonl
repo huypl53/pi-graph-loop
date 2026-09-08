@@ -1,0 +1,25 @@
+# errorlog-evidence-failure — no-silent-swallow mandate E2E scenario (2026-09-08).
+#
+# Validates that a best-effort evidence trace write failure inside registerEvidenceHooks
+# (extensions/swarm/src/trace.ts) is NOT silently swallowed: the catch routes the error into
+# the durable internal-error log (.pi/swarm/traces/errors.jsonl, event=internal.error,
+# op=evidence.append_failed, code=EISDIR) while still never blocking the tool execution.
+#
+# The deterministic reproduction of the failure is seeded by the lane harness BEFORE the lane
+# starts (mock-llm-scenarios skill pattern 2: seeded world + single-actor script):
+#   mkdir .pi/swarm/traces/events.jsonl   (a DIRECTORY where the appendFile expects a file)
+# so every tool_execution_end evidence append fails with EISDIR while the sibling errors.jsonl
+# append still succeeds. Three scripted `read` tool calls fire the evidence hook three times,
+# so the lane asserts >=3 internal.error records. The unit-level red/green assertions for the
+# same bug live in extensions/swarm/tests/errorlog.test.mjs.
+#
+# Model id = errorlog-evidence-failure. Lane form:
+#   PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1 \
+#   pi -e ./extensions/swarm -e ./extensions/mock-llm --provider mock-llm \
+#      --model errorlog-evidence-failure -p 'probe' \
+#      # with cwd seeded: .pi/swarm/traces/events.jsonl as a directory
+#
+# Three turns: 2 toolcalls + 1 toolcall + terminal stop. Total runtime <1s.
+{"name":"errorlog turn 0 two toolcalls","events":[{"type":"toolcall","name":"read","id":"call-1","arguments":{"path":"package.json"}},{"type":"toolcall","name":"read","id":"call-2","arguments":{"path":"README.md"}},{"type":"text","delayMs":5,"text":"ERRORLOG turn 0: each read tool call above fired tool_execution_end; with events.jsonl seeded as a directory each evidence append failed with EISDIR and must have landed in .pi/swarm/traces/errors.jsonl as internal.error/op=evidence.append_failed instead of vanishing."}]}
+{"name":"errorlog turn 1 one more toolcall","events":[{"type":"toolcall","name":"read","id":"call-3","arguments":{"path":"docs/index.md"}},{"type":"text","delayMs":5,"text":"ERRORLOG turn 1: one more evidence failure recorded. errors.jsonl now holds the full census of previously-invisible swarm internals."}]}
+{"name":"errorlog turn 2 final-stop","stopReason":"stop","events":[{"type":"stop","delayMs":5,"reason":"stop"}]}

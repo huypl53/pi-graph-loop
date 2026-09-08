@@ -21,6 +21,7 @@ import { MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_STATUS_TASKS } from "./constants.ts
 import { ensureAgentDefaults, humanAge, safeId } from "./utils.ts";
 import { computeReadyNodes } from "./taskgraph.ts";
 import { readTaskState } from "./state.ts";
+import { logSwarmError } from "./errorlog.ts";
 import { resolveGoalNudgeIntervalMs } from "./nudges/goal-epoch.ts";
 import { taskPaths } from "./state.ts";
 
@@ -61,7 +62,10 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 		let entries: string[] = [];
 		try {
 			entries = await readdir(p.tasksDir);
-		} catch {
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") {
+				await logSwarmError(p, "tasks-index", "status.readdir_failed", err);
+			}
 			entries = [];
 		}
 		// Read all (bounded), then surface non-terminal tasks first so the operator sees live work.
@@ -74,8 +78,10 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 			try {
 				const task = await readTaskState(tp.taskJson);
 				read.push({ task, pm: pmStatus(task) });
-			} catch {
-				/* skip unreadable */
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") {
+					await logSwarmError(p, "tasks-index", "status.task_unreadable", err, { taskId: entry });
+				}
 			}
 		}
 		read.sort(
@@ -153,7 +159,10 @@ export async function listTasksIndexed(p: Paths): Promise<IndexedTask[]> {
 	let entries: string[] = [];
 	try {
 		entries = await readdir(p.tasksDir);
-	} catch {
+	} catch (err: any) {
+		if (err?.code !== "ENOENT") {
+			await logSwarmError(p, "tasks-index", "list.readdir_failed", err);
+		}
 		return [];
 	}
 	const out: IndexedTask[] = [];
@@ -164,7 +173,10 @@ export async function listTasksIndexed(p: Paths): Promise<IndexedTask[]> {
 		let task: TaskState;
 		try {
 			task = await readTaskState(tp.taskJson);
-		} catch {
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") {
+				await logSwarmError(p, "tasks-index", "list.task_unreadable", err, { taskId: entry });
+			}
 			continue;
 		}
 		const { ready, current } = computeReadyNodes(task);

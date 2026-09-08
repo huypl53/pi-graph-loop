@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { SwarmMessage } from "./types.ts";
 import { PI_SWARM_MINIMAL_PROTOCOL, SYSTEM_END, SYSTEM_START } from "./constants.ts";
 import { currentAgentId } from "./session.ts";
+import { logSwarmError } from "./errorlog.ts";
 import { deliver } from "./mailbox.ts";
 import { now } from "./utils.ts";
 import { reconcile } from "./reconcile.ts";
@@ -70,7 +71,12 @@ export function parseSystemDelivery(text: string): SwarmMessage | null {
 				requiresAck: msg.requiresAck ?? true,
 				headers: msg.headers || {},
 			};
-		} catch {}
+		} catch (err) {
+			// A b64 payload that fails to parse is either corruption in transit or a non-swarm
+			// message that happens to contain the markers — either way the message is silently
+			// DROPPED unless someone logs it. Fire-and-forget (sync parser).
+			void logSwarmError(process.cwd(), "delivery", "parse.b64_failed", err, { bodyLen: body.length });
+		}
 	}
 	if (body.startsWith("{")) {
 		try {
@@ -82,7 +88,9 @@ export function parseSystemDelivery(text: string): SwarmMessage | null {
 				requiresAck: msg.requiresAck ?? true,
 				headers: msg.headers || {},
 			};
-		} catch {}
+		} catch (err) {
+			void logSwarmError(process.cwd(), "delivery", "parse.json_failed", err, { bodyLen: body.length });
+		}
 	}
 	const [headerPart, ...rest] = body.split(/\n\n/);
 	const headers: Record<string, string> = {};

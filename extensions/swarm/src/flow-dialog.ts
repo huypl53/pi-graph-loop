@@ -3,8 +3,10 @@ import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from
 import { existsSync, readFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { expected } from "./errorlog.ts";
 import { readRecentEvents } from "./observability.ts";
 import { readState, readTaskState, taskPaths } from "./state.ts";
+import { logSwarmError } from "./errorlog.ts";
 import { computeReadyNodes, computeTaskClosure, hasOutgoingTaskEdge } from "./taskgraph.ts";
 import type { Paths, SwarmAgent, SwarmState, TaskPaths, TaskState } from "./types.ts";
 import { humanAge, now } from "./utils.ts";
@@ -370,7 +372,10 @@ function readMailboxLine(p: Paths, agentId: string, messageId: string): { subjec
 			}
 		}
 		return null;
-	} catch {
+	} catch (err) {
+		// Mailbox preview is cosmetic in the flow picker, but an unreadable mailbox the operator
+		// is actively looking at is diagnosable. Fire-and-forget (sync context).
+		void logSwarmError(p, "flow-dialog", "mailbox_preview.read_failed", err);
 		return null;
 	}
 }
@@ -691,7 +696,10 @@ async function listTaskSummaries(p: Paths): Promise<PickerEntry[]> {
 	let dirs: string[] = [];
 	try {
 		dirs = await readdir(p.tasksDir);
-	} catch {
+	} catch (err: any) {
+		if (err?.code !== "ENOENT") {
+			await logSwarmError(p, "flow-dialog", "picker.readdir_failed", err);
+		}
 		return out;
 	}
 	for (const dir of dirs.sort()) {
@@ -708,8 +716,10 @@ async function listTaskSummaries(p: Paths): Promise<PickerEntry[]> {
 				attentionCount: 0,
 				priority: 4,
 			});
-		} catch {
-			/* ignore */
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") {
+				await logSwarmError(p, "flow-dialog", "picker.task_unreadable", err, { taskId: dir });
+			}
 		}
 	}
 	out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.taskId.localeCompare(b.taskId));
@@ -1062,7 +1072,9 @@ async function buildPickerEntries(p: Paths, cwd: string): Promise<PickerEntry[]>
 								? 3
 								: 4;
 			out.push({ ...item, attentionCount: attention.length, priority: rank });
-		} catch {
+		} catch (err: any) {
+			// Fall back to the lowest priority but keep the failure diagnosable.
+			await logSwarmError(p, "flow-dialog", "attention.task_unreadable", err, { taskId: item.taskId });
 			out.push({ ...item, attentionCount: 0, priority: 4 });
 		}
 	}
@@ -1681,7 +1693,10 @@ export class FlowDialog implements Component {
 				const cmd = `/swarm task ${this.opts.task.taskId}`;
 				try {
 					this.tui.requestRender();
-				} catch {}
+				} catch {
+					// TUI already disposed (post-close render request) — expected teardown race, marked not swallowed.
+					expected("tui_disposed");
+				}
 				this.theme?.notify?.(`copy: ${cmd}`);
 			}
 			return;
@@ -2295,7 +2310,10 @@ export async function pickFlowTask(ctx: any, cwd: string, p: Paths): Promise<{ t
 	if (ctx.mode !== "tui" || !ctx.hasUI) {
 		try {
 			ctx.ui.notify("/swarm flow requires interactive (TUI) mode for the picker; falling back to text task listing.", "info");
-		} catch {}
+		} catch {
+			// notify is best-effort UI sugar; record (as expected) when the surface is gone.
+			expected("ui unavailable");
+		}
 		return undefined;
 	}
 	try {
@@ -2303,7 +2321,10 @@ export async function pickFlowTask(ctx: any, cwd: string, p: Paths): Promise<{ t
 		if (!entries.length) {
 			try {
 				ctx.ui.notify("No tasks found — create one with swarm_create_task or /swarm graph.", "info");
-			} catch {}
+			} catch {
+				// notify is best-effort UI sugar; record (as expected) when the surface is gone.
+				expected("ui unavailable");
+			}
 			return undefined;
 		}
 		const picked = await new Promise<string | undefined>((resolve) => {
@@ -2319,7 +2340,10 @@ export async function pickFlowTask(ctx: any, cwd: string, p: Paths): Promise<{ t
 				.catch((err: any) => {
 					try {
 						ctx.ui.notify(`/swarm flow picker failed: ${String((err && err.message) || err)}`, "warning");
-					} catch {}
+					} catch {
+						// notify is best-effort UI sugar; record (as expected) when the surface is gone.
+						expected("ui unavailable");
+					}
 					resolve(undefined);
 				});
 		});
@@ -2329,7 +2353,10 @@ export async function pickFlowTask(ctx: any, cwd: string, p: Paths): Promise<{ t
 	} catch (err: any) {
 		try {
 			ctx.ui.notify(`/swarm flow picker failed: ${String((err && err.message) || err)}`, "warning");
-		} catch {}
+		} catch {
+			// notify is best-effort UI sugar; record (as expected) when the surface is gone.
+			expected("ui unavailable");
+		}
 		return undefined;
 	}
 }
@@ -2338,7 +2365,10 @@ export async function openFlowPicker(ctx: any, cwd: string, p: Paths): Promise<v
 	if (ctx.mode !== "tui" || !ctx.hasUI) {
 		try {
 			ctx.ui.notify("/swarm flow requires interactive (TUI) mode for the picker; falling back to text task listing.", "info");
-		} catch {}
+		} catch {
+			// notify is best-effort UI sugar; record (as expected) when the surface is gone.
+			expected("ui unavailable");
+		}
 		return;
 	}
 	try {
@@ -2356,7 +2386,10 @@ export async function openFlowPicker(ctx: any, cwd: string, p: Paths): Promise<v
 				.catch((err: any) => {
 					try {
 						ctx.ui.notify(`/swarm flow picker failed: ${String((err && err.message) || err)}`, "warning");
-					} catch {}
+					} catch {
+						// notify is best-effort UI sugar; record (as expected) when the surface is gone.
+						expected("ui unavailable");
+					}
 					resolve(undefined);
 				});
 		});
@@ -2367,7 +2400,10 @@ export async function openFlowPicker(ctx: any, cwd: string, p: Paths): Promise<v
 	} catch (err: any) {
 		try {
 			ctx.ui.notify(`/swarm flow picker failed: ${String((err && err.message) || err)}`, "warning");
-		} catch {}
+		} catch {
+			// notify is best-effort UI sugar; record (as expected) when the surface is gone.
+			expected("ui unavailable");
+		}
 	}
 }
 
@@ -2382,7 +2418,10 @@ export async function openFlowDialog(
 	if (ctx.mode !== "tui" || !ctx.hasUI) {
 		try {
 			ctx.ui.notify("/swarm flow: dialog requires interactive (TUI) mode", "info");
-		} catch {}
+		} catch {
+			// notify is best-effort UI sugar; record (as expected) when the surface is gone.
+			expected("ui unavailable");
+		}
 		return;
 	}
 	try {
@@ -2395,6 +2434,9 @@ export async function openFlowDialog(
 	} catch (err: any) {
 		try {
 			ctx.ui.notify(`/swarm flow dialog failed: ${String((err && err.message) || err)}`, "warning");
-		} catch {}
+		} catch {
+			// notify is best-effort UI sugar; record (as expected) when the surface is gone.
+			expected("ui unavailable");
+		}
 	}
 }

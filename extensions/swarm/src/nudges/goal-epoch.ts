@@ -35,6 +35,14 @@ import { tmux } from "../tmux.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale } from "../taskgraph.ts";
 import { deliverMessageLocked, findIdempotentMessage, readMailbox } from "../mailbox.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "../state.ts";
+import { logSwarmError } from "../errorlog.ts";
+
+// Goal-epoch is tick code: trace() failures were swallowed by `.catch(() => {})`. Route the
+// rejection into the durable internal-error log instead of losing it.
+const traceLogged = (p2: Paths, event: string, data: Record<string, unknown>): Promise<void> =>
+	trace(p2, event, data).catch((err: unknown) =>
+		logSwarmError(p2, "goal-epoch", "trace_failed", err, { traceEvent: event }),
+	) as Promise<void>;
 const AGENT_HEARTBEAT_STALE_MS = Number(process.env.PI_SWARM_AGENT_HEARTBEAT_STALE_MS ?? 10 * 60_000);
 
 import { currentAgentId } from "../session.ts";
@@ -170,12 +178,12 @@ export async function updateIdleEpochLocked(
 			// next fresh-epoch evaluator distinguish worker-busy breaks from root-driven
 			// ones without a second scan over `st.agents`.
 			const busyAgents = idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id);
-			await trace(p, "idle.epoch.reset", {
+			await traceLogged(p, "idle.epoch.reset", {
 				reason: "agent_busy",
 				busyAgents,
 				previousAllIdleSinceAt: idleState.allIdleSinceAt ?? null,
 				stallSlotsReset,
-			}).catch(() => {});
+			});
 			idleState.lastEpochBusyAgents = busyAgents;
 		}
 		delete idleState.allIdleSinceAt;
@@ -244,7 +252,7 @@ export async function updateIdleEpochLocked(
 		// reset; root-turn churn anchors are also rejected by the worker-breaker
 		// guard above. Probe evidence: tester-memo-probe.{mjs,out.txt}.
 		delete (idleState as { r23LastEpochAnchor?: string }).r23LastEpochAnchor;
-		await trace(p, "idle.epoch.started", { allIdleSinceAt: idleState.allIdleSinceAt, idleAgents: idleAgents.length }).catch(() => {});
+		await traceLogged(p, "idle.epoch.started", { allIdleSinceAt: idleState.allIdleSinceAt, idleAgents: idleAgents.length });
 	}
 	return { allIdle, idleAgents, vacuous };
 }
@@ -322,7 +330,7 @@ export async function evaluateIdleGoalNudgeLocked(
 		const idleStateVac: SwarmIdleNudgeState = (st.idleNudgeState ||= {});
 		const wasVacuous = idleStateVac.lastWasVacuous === true;
 		if (!wasVacuous) {
-			await trace(p, "goal.nudge.held_no_live_workers", { goalId: goal.id, effectiveAgentCount: 0 }).catch(() => {});
+			await traceLogged(p, "goal.nudge.held_no_live_workers", { goalId: goal.id, effectiveAgentCount: 0 });
 		}
 		idleStateVac.lastWasVacuous = true;
 		// R14 Fix C (2026-09-02): bounded, durable, high-priority root recovery
@@ -345,13 +353,13 @@ export async function evaluateIdleGoalNudgeLocked(
 						const ageSec = Number.isFinite(hb) ? Math.round((nowMs - hb) / 1000) : null;
 						return { id: a.id, tmuxAlive: a.tmuxAlive ?? null, runtimeStatus: a.runtimeStatus, heartbeatAgeSec: ageSec };
 					});
-				await trace(p, "goal.escalation.pool_empty", {
+				await traceLogged(p, "goal.escalation.pool_empty", {
 					goalId: goal.id,
 					origin: goal.origin,
 					effectiveAgentCount: 0,
 					poolDiag,
 					cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS,
-				}).catch(() => {});
+				});
 				idleStateVac.lastPoolEmptyEscalationAt = new Date(nowMs).toISOString();
 				// === R16 Fix C (2026-09-02): action-oriented nudge body ===
 				// Replace the generic diagnostic dump with condition-specific next-action hints
@@ -427,11 +435,11 @@ export async function evaluateIdleGoalNudgeLocked(
 		// are present (with or without pointers), the diagnostic is the generic `agent_busy`.
 		const pointerAssignee = idleAgents.find((a) => a.runtimeStatus === "idle" && (a.activeTaskIds?.length ?? 0) > 0);
 		if (pointerAssignee) {
-			await trace(p, "goal.nudge.suppressed_by_assignment_in_flight", {
+			await traceLogged(p, "goal.nudge.suppressed_by_assignment_in_flight", {
 				goalId: goal.id,
 				assignee: pointerAssignee.id,
 				taskIds: pointerAssignee.activeTaskIds,
-			}).catch(() => {});
+			});
 			return { emitted: false, reason: "assignment_in_flight" };
 		}
 		return { emitted: false, reason: "agent_busy" };
@@ -461,12 +469,12 @@ export async function evaluateIdleGoalNudgeLocked(
 	}
 	idleState.goalIdleLastCheckAt = new Date(nowMs).toISOString();
 	idleState.goalIdleCheckCount = (idleState.goalIdleCheckCount ?? 0) + 1;
-	await trace(p, "goal.idle_check", {
+	await traceLogged(p, "goal.idle_check", {
 		goalId: goal.id,
 		count: idleState.goalIdleCheckCount,
 		required: checksRequired,
 		checkIntervalMs,
-	}).catch(() => {});
+	});
 	if (idleState.goalIdleCheckCount < checksRequired) {
 		return { emitted: false, reason: "idle_interval_pending" };
 	}
@@ -481,10 +489,10 @@ export async function evaluateIdleGoalNudgeLocked(
 		goal.backoffTicksRemaining -= 1;
 		idleState.goalBackoffTicksRemaining = goal.backoffTicksRemaining;
 		if (goal.backoffTicksRemaining === 0) {
-			await trace(p, "goal.nudge.backoff.exhausted", { goalId: goal.id, by: 1 }).catch(() => {});
+			await traceLogged(p, "goal.nudge.backoff.exhausted", { goalId: goal.id, by: 1 });
 			return { emitted: false, reason: "backoff_just_exhausted" };
 		}
-		await trace(p, "goal.nudge.backoff.skip", { goalId: goal.id, remaining: goal.backoffTicksRemaining }).catch(() => {});
+		await traceLogged(p, "goal.nudge.backoff.skip", { goalId: goal.id, remaining: goal.backoffTicksRemaining });
 		return { emitted: false, reason: "backoff" };
 	}
 
@@ -545,7 +553,7 @@ export async function evaluateIdleGoalNudgeLocked(
 		const breakerAgents = idleState.lastEpochBusyAgents;
 		const workerCaused = !breakerAgents || breakerAgents.some((id) => id !== "root");
 		if (anchorIsFreshR23 && notYetAppliedR23 && workerCaused) {
-			await trace(p, "goal.nudge.saturation_reset_on_epoch", {
+			await traceLogged(p, "goal.nudge.saturation_reset_on_epoch", {
 				goalId: goal.id,
 				consecutiveNoResolveNudges: goal.consecutiveNoResolveNudges,
 				backoffTicksRemaining: goal.backoffTicksRemaining ?? null,
@@ -554,7 +562,7 @@ export async function evaluateIdleGoalNudgeLocked(
 				lastEpochBusyAgents: breakerAgents ?? null,
 				by: "R23B",
 				site: "cap_branch",
-			}).catch(() => {});
+			});
 			goal.consecutiveNoResolveNudges = 0;
 			delete goal.backoffTicksRemaining;
 			goal.lastResolvedAt = new Date(nowMs).toISOString();
@@ -568,12 +576,12 @@ export async function evaluateIdleGoalNudgeLocked(
 			if (!goal.backoffTicksRemaining) {
 				goal.backoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
 				idleState.goalBackoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
-				await trace(p, "goal.nudge.backoff", {
+				await traceLogged(p, "goal.nudge.backoff", {
 					goalId: goal.id,
 					nudges: goal.consecutiveNoResolveNudges,
 					max: MAX_CONSECUTIVE_NUDGES_DEFAULT,
 					backoffTicks: GOAL_NUDGE_BACKOFF_TICKS,
-				}).catch(() => {});
+				});
 			}
 			return { emitted: false, reason: "max_nudges" };
 		}

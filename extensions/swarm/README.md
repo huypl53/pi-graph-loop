@@ -16,6 +16,7 @@ src/types.ts         type/interface definitions
 src/constants.ts     module-level constants
 src/utils.ts         pure helpers (now, safeId, inferRoleKind, ...)
 src/state.ts         paths + state/lock/trace/JSON/JSONL file IO
+src/errorlog.ts      durable internal-error log (.pi/swarm/traces/errors.jsonl); logSwarmError/traceLogged — no silent catches
 src/taskgraph.ts     graph algorithms, status/closure/transitions, rendering
 src/observability.ts read-only text flow snapshot renderer for `/swarm flow`
 src/flow-dialog.ts   interactive TUI picker/dialog for `/swarm flow`

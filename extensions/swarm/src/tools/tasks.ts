@@ -85,6 +85,7 @@ import {
 	writeState,
 	writeTaskState,
 } from "../state.ts";
+import { logSwarmError, traceLogged } from "../errorlog.ts";
 import { attachGitDiffStat, registerEvidenceHooks, validateAttestations, writeBaselineCommit } from "../trace.ts";
 import { ensureRoot, heartbeatRootLeader, isRootAuthority, requireRootAuthority } from "../identity.ts";
 import { findReusableAgent, spawnAgent, clearOrphanWatch, isSameRootLeader } from "../agents.ts";
@@ -210,6 +211,7 @@ async function stampCloseEvidenceIfMissing(
 	nodeId: string,
 	attestationReport?: Awaited<ReturnType<typeof validateAttestations>>,
 	diffStat?: Awaited<ReturnType<typeof attachGitDiffStat>>,
+	cwd?: string,
 ) {
 	const existing = task.evidence[nodeId];
 	if (existing && typeof existing === "object") return existing;
@@ -217,7 +219,7 @@ async function stampCloseEvidenceIfMissing(
 	if (!node) return undefined;
 	let record: Record<string, unknown>;
 	if (inferRoleKind(nodeId, node.role) === "root" && isGraphTerminalNode(task, nodeId)) {
-		const evidence = await resolveCommitNodeEvidence(pi, tp);
+		const evidence = await resolveCommitNodeEvidence(pi, tp, cwd);
 		record = {
 			status: evidence.verified ? "verified" : "unverified",
 			reason: evidence.reason,
@@ -372,8 +374,8 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						let createTaskStatusChange = applyTaskStatus(task); // engine-enforced closure: a fresh task derives `ready`
 						await mkdir(tp.root, { recursive: true });
 						await mkdir(tp.artifacts, { recursive: true });
-						await writeBaselineCommit(pi, tp);
-						const autoClosed = await autoCloseRootTerminalNodes(pi, tp, task);
+						await writeBaselineCommit(pi, tp, ctx.cwd);
+						const autoClosed = await autoCloseRootTerminalNodes(pi, tp, task, ctx.cwd);
 						if (autoClosed.closed.length) {
 							createTaskStatusChange = applyTaskStatus(task);
 							task.currentNodes = computeReadyNodes(task).current;
@@ -941,14 +943,24 @@ export function registerTasksTools(pi: ExtensionAPI) {
 							let entries: string[] = [];
 							try {
 								entries = await readdir(p.tasksDir);
-							} catch {}
+							} catch (err: any) {
+								if (err?.code !== "ENOENT") {
+									await logSwarmError(p, "tasks", "lease_conflict.readdir_failed", err, {
+										taskId,
+										nodeId: params.nodeId,
+									});
+								}
+							}
 							outer: for (const entry of entries) {
 								const otherTp = taskPaths(p, entry);
 								if (!existsSync(otherTp.taskJson)) continue;
 								let other: TaskState;
 								try {
 									other = await readTaskState(otherTp.taskJson);
-								} catch {
+								} catch (err: any) {
+									if (err?.code !== "ENOENT") {
+										await logSwarmError(p, "tasks", "lease_conflict.task_unreadable", err, { taskId: entry });
+									}
 									continue;
 								}
 								for (const lease of collectActiveLeases(other)) {
@@ -2161,7 +2173,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 								}
 							}
 						}
-						const autoClosed = await autoCloseRootTerminalNodes(pi, tp, task);
+						const autoClosed = await autoCloseRootTerminalNodes(pi, tp, task, ctx.cwd);
 						for (const nodeId of autoClosed.closed) releaseNodeAssignment(st, task, nodeId);
 						if (autoClosed.closed.length) taskStatusChange = applyTaskStatus(task);
 						if (taskStatusChange.terminal) {
@@ -2178,7 +2190,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 						const isNodeClosing =
 							newStatus === "done" || newStatus === "failed" || newStatus === "blocked" || newStatus === "cancelled";
 						if (isNodeClosing || taskStatusChange.terminal) {
-							await stampCloseEvidenceIfMissing(pi, tp, task, params.nodeId, attestationReport);
+							await stampCloseEvidenceIfMissing(pi, tp, task, params.nodeId, attestationReport, undefined, ctx.cwd);
 						}
 						const nextReady = computeReadyNodes(task);
 						task.currentNodes = nextReady.current;

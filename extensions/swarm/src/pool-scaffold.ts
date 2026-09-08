@@ -28,6 +28,7 @@ import {
 	POOL_SCAFFOLD_YML_PLACEHOLDER,
 } from "./constants.ts";
 import { atomicWriteFile, paths as statePaths, trace } from "./state.ts";
+import { logSwarmError, traceLogged } from "./errorlog.ts";
 import { readJsonSafe } from "./utils.ts";
 import { readSwarmYml, swarmYmlPath } from "./config.ts";
 
@@ -131,7 +132,10 @@ export async function ensurePoolScaffold(cwd: string, opts: { alreadyNotified?: 
 		let ymlCorrupt = false;
 		try {
 			yml = readSwarmYml(cwd);
-		} catch {
+		} catch (err) {
+			// Already traced as pool.scaffold_skipped_yml_unparseable below; keep a durable error
+			// line with the underlying parse failure too.
+			await logSwarmError(p, "pool-scaffold", "scaffold_yml.parse_failed", err);
 			ymlCorrupt = true;
 		}
 		if (ymlCorrupt) {

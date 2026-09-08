@@ -15,6 +15,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { listTasksIndexed } from "./reconcile.ts";
 import { paths, readState } from "./state.ts";
 import { safeId } from "./utils.ts";
+import { logSwarmError } from "./errorlog.ts";
 import type { Paths } from "./types.ts";
 
 const SUBCOMMANDS: { name: string; description: string }[] = [
@@ -316,7 +317,9 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 			default:
 				return [];
 		}
-	} catch {
+	} catch (err) {
+		// Completion returning null just disables suggestions; the failure behind it is diagnosable.
+		void logSwarmError(lastCwd, "completion", "suggest.failed", err, { argumentPrefix: argumentPrefix.slice(0, 120) });
 		return null;
 	}
 }
@@ -354,7 +357,11 @@ export async function swarmScopedArgumentCompletions(commandName: string, argume
 			...item,
 			value: mapScopedValue(entry, item.value),
 		}));
-	} catch {
+	} catch (err) {
+		void logSwarmError(lastCwd, "completion", "scoped_suggest.failed", err, {
+			commandName,
+			argumentPrefix: argumentPrefix.slice(0, 120),
+		});
 		return null;
 	}
 }

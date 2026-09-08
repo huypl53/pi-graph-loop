@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { capturePane, isTmuxRunning, tmux } from "../tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "../session.ts";
 import { ensureDirs, identityPath, paths, readState, taskPaths, readTaskState, trace, withLock, writeState } from "../state.ts";
+import { logSwarmError } from "../errorlog.ts";
 import { classifyGoalClearAuthority, GOAL_ORIGIN_ROOT, GOAL_ORIGIN_VALUES } from "../goals.ts";
 import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
@@ -762,8 +763,10 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 							if (existsSync(tp.taskJson)) {
 								try {
 									status = (await readTaskState(tp.taskJson)).status;
-								} catch {
-									/* unknown */
+								} catch (err) {
+									// "unknown" is the designed fallback, but reading an EXISTING task.json and
+									// failing is the corrupt-task symptom — log it durably.
+									await logSwarmError(p, "agents", "stop.task_status_read_failed", err, { taskId: tid });
 								}
 							}
 							const terminal = status === "done" || status === "failed" || status === "cancelled" || status === "unknown";

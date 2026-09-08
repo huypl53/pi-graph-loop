@@ -39,6 +39,7 @@ import {
 	writeState,
 	writeTaskState,
 } from "./state.ts";
+import { logSwarmError, traceLogged } from "./errorlog.ts";
 import { ensureRoot, heartbeatRootLeader, readRootLeader } from "./identity.ts";
 import { formatSwarmMessageContent, parseSystemDelivery } from "./delivery.ts";
 import { pumpRootMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
@@ -459,7 +460,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				model: String(msg.model || ctx.model?.id || ""),
 				provider: String(msg.provider || ctx.model?.provider || "") || undefined,
 			};
-			if (okSlot.model) await recordSlotSuccess(p, okSlot).catch(() => {});
+			if (okSlot.model) await recordSlotSuccess(p, okSlot).catch((err) => logSwarmError(p, "hooks", "recordSlotSuccess.failed", err));
 			// Issue 17: a successful turn after a burst of engine retries means the engine RECOVERED.
 			// Clear any open incident for this agent so the next failure starts a fresh observation.
 			// Without this, a stale incident would survive and the next error turn_end would miscount
@@ -562,7 +563,9 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		// dashboards can distinguish "engine retried and recovered" from "engine gave up".
 		engineRetryIncidents.delete(agentId);
 		await trace(p, "pool.engine_retry_exhausted", { agentId, providerKey, kind, count: incidentCount }).catch(() => {});
-		await recordProviderError(p, currentSlot, kind, errorText).catch(() => {});
+		await recordProviderError(p, currentSlot, kind, errorText).catch((err) =>
+			logSwarmError(p, "hooks", "recordProviderError.failed", err),
+		);
 		// Issue 22 roles-filter: read the agent's roleKind from state under lock so a mid-life
 		// setAgentRole change is observed on the next swap (no caching layer).
 		const roleKind = await withLock(p, async () => {
@@ -1002,7 +1005,11 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		// Catch-up surface for workers: anything unacked that arrived (or failed injection) while busy.
 		try {
 			await surfaceAgentPending(pi, ctx, paths(ctx.cwd), agentId, "agent_settled");
-		} catch {}
+		} catch (err) {
+			// A failed catch-up surface would silently strand unacked work until the next settle — make
+			// it visible in the durable error log without breaking the settle flow.
+			await logSwarmError(ctx?.cwd, "hooks", "settle.surface_pending_failed", err, { agentId });
+		}
 		const p = paths(ctx.cwd);
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
@@ -1109,8 +1116,10 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 							list = open.map((o) => `${o.task.taskId}/${o.nodeId}`).join(", ");
 							openCount = open.length;
 						}
-					} catch {
-						/* keep activeTaskIds fallback list */
+					} catch (err) {
+						// Keep the activeTaskIds fallback list, but the scan failure itself is diagnosable
+						// signal (why could open assignments not be enumerated?) — log it durably.
+						await logSwarmError(p, "hooks", "settle.scan_open_assignments_failed", err, { agentId });
 					}
 					// Lifecycle-fencing (issue 9, site 2): per-node staleness check on every entry from
 					// scanAgentOpenAssignments. A node that has since become terminal / reassigned / closed
@@ -1244,9 +1253,11 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 					for (const nodeId of Object.keys(task.nodes)) {
 						if (ensureNodeActivityStamp(task, nodeId, ts, agentId)) dirty = true;
 					}
-					if (dirty) await writeTaskState(tp, task).catch(() => {});
-				} catch {
-					/* no progress stamp on this task; the agent may not be bound to it */
+					if (dirty) await writeTaskState(tp, task).catch((err) => logSwarmError(tp, "hooks", "writeTaskState.failed", err));
+				} catch (err) {
+					// The stamp is advisory (the agent may legitimately not be bound to the task), but an
+					// unreadable task.json on an EXISTING file is the corrupt-task symptom — surface it.
+					await logSwarmError(p, "hooks", "progress.stamp_failed", err, { agentId, taskId });
 				}
 			}
 		}

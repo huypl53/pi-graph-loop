@@ -21,6 +21,7 @@ import {
 	TRACE_REPLY_REJECTED_SUPERSEDED,
 } from "./constants.ts";
 import { appendJsonl, mailboxPath, readState, readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "./state.ts";
+import { logSwarmError, traceLogged } from "./errorlog.ts";
 import { buildSystemDelivery } from "./delivery.ts";
 import { capturePane, isPanePiLike, sendToPane, tmux } from "./tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
@@ -151,7 +152,9 @@ export async function readMailboxSince(
 	let size = 0;
 	try {
 		size = (await stat(file)).size;
-	} catch {
+	} catch (err: any) {
+		// existsSync passed but stat failed — a real IO anomaly (EACCES/race), not plain absence.
+		await logSwarmError(p, "mailbox", "read_since.stat_failed", err, { agentId, file });
 		return { messages: [], offset: 0, truncated: false };
 	}
 	if (size < offset || offset <= 0) {
@@ -451,6 +454,7 @@ export async function deliverMessageLocked(
 	// below, the recipient's pane sees the assignment message but task.json still has assignee=null.
 	// The 24.a claim branch self-heals this on the recipient's first swarm_update_task call.
 	let assignmentAutoStamped = false;
+	const msgId = m.id;
 	if (params.conversationId && params.subject && params.subject.startsWith("Task ") && params.subject.includes(" assigned")) {
 		const m = params.conversationId.match(/^task:([a-z0-9_-]+):([a-z0-9_-]+)$/);
 		if (m) {
@@ -491,8 +495,11 @@ export async function deliverMessageLocked(
 							});
 						}
 					}
-				} catch {
-					/* best-effort; auto-stamp is observability, never blocks delivery */
+				} catch (err) {
+					// Best-effort: the auto-stamp is observability and never blocks delivery — but if the
+					// task write fails (EACCES/corrupt), assignment stamps silently stop happening, which
+					// corrupts downstream staleness/liveness signals. Make the failure durable.
+					await logSwarmError(p, "mailbox", "deliver.assignment_autostamp_failed", err, { messageId: msgId, taskId, nodeId, to });
 				}
 			}
 		}
@@ -676,8 +683,10 @@ export async function deliverMessageLocked(
 		try {
 			const { clearOrphanWatch } = await import("./agents.ts");
 			await clearOrphanWatch(p, st, m.to, params.clearReason ?? "swarm_send_message");
-		} catch {
-			/* best-effort; never fail delivery on a watchdog bookkeeping error */
+		} catch (err) {
+			// Best-effort: never fail delivery on watchdog bookkeeping — but a recurring failure would
+			// leave orphan-watches armed and spam spawn warnings. Log it.
+			await logSwarmError(p, "mailbox", "deliver.clear_orphan_watch_failed", err, { messageId: m.id, to: m.to });
 		}
 	}
 	return { msg: m, delivery };

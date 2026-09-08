@@ -5,6 +5,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { currentAgentId } from "./session.ts";
 import type { Paths, TaskPaths } from "./types.ts";
 import { now } from "./utils.ts";
+import { expected, logSwarmError } from "./errorlog.ts";
 import { paths, trace } from "./state.ts";
 
 export type EvidenceAttestation = {
@@ -65,7 +66,12 @@ export async function readTraceEvents(p: Paths): Promise<Record<string, any>[]> 
 	let raw = "";
 	try {
 		raw = await readFile(p.events, "utf8");
-	} catch {
+	} catch (err: any) {
+		if (err?.code !== "ENOENT") {
+			// A traces file that exists but cannot be read (EISDIR/EACCES) silently empties every
+			// attestation check built on it — record why instead of vanishing.
+			await logSwarmError(p, "trace", "evidence.read_failed", err, { file: p.events });
+		}
 		return [];
 	}
 	return raw
@@ -154,11 +160,13 @@ export async function registerEvidenceHooks(pi: ExtensionAPI) {
 		try {
 			if (!ctx?.cwd) return;
 			const p = paths(ctx.cwd);
+			const tool = String(event?.toolName || event?.tool || event?.name || event?.tool_id || "unknown");
+			const eid = event?.eid || event?.eventId || evidenceId();
 			const record = {
 				ts: typeof event?.ts === "string" ? event.ts : now(),
 				event: "tool.executed",
-				eid: event?.eid || event?.eventId || evidenceId(),
-				tool: event?.toolName || event?.tool || event?.name || event?.tool_id || "unknown",
+				eid,
+				tool,
 				toolCallId: event?.toolCallId || event?.callId || event?.id || null,
 				agentId: currentAgentId(),
 				isError: Boolean(event?.isError ?? event?.error ?? (event?.cls && event.cls !== "success")),
@@ -167,21 +175,40 @@ export async function registerEvidenceHooks(pi: ExtensionAPI) {
 			};
 			await mkdir(dirname(p.events), { recursive: true });
 			await appendFile(p.events, `${JSON.stringify(record)}\n`, "utf8");
-		} catch {
-			// best-effort evidence tracing; never block tool execution.
+		} catch (err) {
+			// Evidence tracing is best-effort and must never block tool execution — but the failure
+			// itself must be visible. Route it into the durable internal-error log
+			// (.pi/swarm/traces/errors.jsonl) instead of swallowing it. Logged via cwd (not Paths) so
+			// a traces-dir failure can never take out the logger itself.
+			await logSwarmError(ctx?.cwd || undefined, "trace", "evidence.append_failed", err, {
+				tool: String(event?.toolName || event?.tool || event?.name || event?.tool_id || "unknown"),
+			});
 		}
 	});
 }
 
-export async function writeBaselineCommit(pi: ExtensionAPI, tp: TaskPaths): Promise<{ available: boolean; baseline?: string }> {
+export async function writeBaselineCommit(
+	pi: ExtensionAPI,
+	tp: TaskPaths,
+	cwd?: string,
+): Promise<{ available: boolean; baseline?: string }> {
 	try {
 		const r = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 5000 });
-		if (r.code !== 0) return { available: false };
+		if (r.code !== 0) {
+			await logSwarmError(cwd || tp.root, "trace", "baseline.git_exec_failed", new Error(`git rev-parse exited ${r.code}`), {
+				stderr: String(r.stderr || "").slice(0, 300),
+			});
+			return { available: false };
+		}
 		const head = (r.stdout || "").trim();
-		if (!head) return { available: false };
+		if (!head) {
+			await logSwarmError(cwd || tp.root, "trace", "baseline.git_empty_head", new Error("git rev-parse returned empty HEAD"));
+			return { available: false };
+		}
 		await writeFile(join(tp.root, "baseline.txt"), `${head}\n`, "utf8");
 		return { available: true, baseline: head };
-	} catch {
+	} catch (err) {
+		await logSwarmError(cwd || tp.root, "trace", "baseline.git_exec_failed", err);
 		return { available: false };
 	}
 }
@@ -195,6 +222,8 @@ export async function attachGitDiffStat(
 	try {
 		baseline = (await readFile(join(tp.root, "baseline.txt"), "utf8")).trim();
 	} catch {
+		// Expected absence is a legitimate branch (baseline not captured yet), not an anomaly.
+		expected("baseline.txt_absent_is_a_branch");
 		return { available: false, note: "baseline_missing" };
 	}
 	if (!baseline) return { available: false, baseline, note: "baseline_empty" };

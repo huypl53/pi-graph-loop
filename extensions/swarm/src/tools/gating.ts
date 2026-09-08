@@ -25,6 +25,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ROOT_TOOL_ALLOWLIST, PI_SWARM_MINIMAL_PROTOCOL, SWARM_GUEST_ID, WORKER_TOOL_ALLOWLIST } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
+import { logSwarmError } from "../errorlog.ts";
 
 export const SWARM_TOOL_PREFIX = "swarm_";
 
@@ -75,7 +76,10 @@ export function applySwarmToolGating(pi: ExtensionAPI): void {
 	let active: string[];
 	try {
 		active = Array.from((getActive.call(pi) as string[]) || []);
-	} catch {
+	} catch (err) {
+		// Defensive against partial/mocked pi objects (expected in unit harnesses) — but a REAL
+		// runtime failure here would silently leave guests with swarm tools. Log it.
+		void logSwarmError(undefined, "gating", "active_tools_read_failed", err);
 		return;
 	}
 	const swarm = new Set(swarmToolNames(pi));
@@ -111,7 +115,9 @@ export function applySwarmToolGating(pi: ExtensionAPI): void {
 	if (sameSet(new Set(active), next)) return; // nothing to do
 	try {
 		setActive.call(pi, [...next]);
-	} catch {
-		/* gating is advisory; never fail a session/command on it */
+	} catch (err) {
+		// Gating is advisory and must never fail a session/command — but a failed setActive means
+		// the tier allow-list silently stops being enforced. Log it.
+		void logSwarmError(undefined, "gating", "active_tools_apply_failed", err);
 	}
 }

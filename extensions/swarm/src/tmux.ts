@@ -12,6 +12,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { join, dirname, relative, sep } from "node:path";
 import type { Paths } from "./types.ts";
 import { safeId, sleep } from "./utils.ts";
+import { logSwarmError } from "./errorlog.ts";
 
 export async function tmux(pi: ExtensionAPI, args: string[], timeout = 10_000) {
 	const result = await pi.exec("tmux", args, { timeout });
@@ -87,8 +88,10 @@ export async function isPanePiLike(pi: ExtensionAPI, target: string): Promise<{ 
 		const command = out.trim();
 		if (command && !PI_COMMANDS.has(command)) return { piLike: false, command };
 		return { piLike: true, command };
-	} catch {
-		// Unresolvable target: isTmuxRunning already gates liveness; fail-open here.
+	} catch (err) {
+		// Unresolvable target: isTmuxRunning already gates liveness; fail-open here — but the
+		// failure (dead pane mid-check) is worth a durable line at the default cwd.
+		await logSwarmError(process.cwd(), "tmux", "is_pane_pi_like.failed", err, { target });
 		return { piLike: true, command: "" };
 	}
 }
@@ -119,7 +122,9 @@ export async function currentPaneTarget(
 		const paneId = parts[3];
 		if (!session || !paneId) return null;
 		return { target: `${session}:${window}.${pane}`, paneId, session, window, pane };
-	} catch {
+	} catch (err) {
+		// Not under tmux / detached: expected in headless lanes — log only as durable breadcrumb.
+		await logSwarmError(process.cwd(), "tmux", "current_pane_target.failed", err);
 		return null;
 	}
 }
@@ -159,7 +164,9 @@ export async function listAllPanes(pi: ExtensionAPI): Promise<TmuxPaneInfo[]> {
 	let out: string;
 	try {
 		out = await tmux(pi, ["list-panes", "-a", "-F", fmt], 5_000);
-	} catch {
+	} catch (err) {
+		// tmux unavailable / no server: expected in headless environments — durable breadcrumb.
+		await logSwarmError(process.cwd(), "tmux", "list_all_panes.failed", err);
 		return [];
 	}
 	const cur = await currentPaneTarget(pi);

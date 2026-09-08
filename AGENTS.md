@@ -21,6 +21,16 @@ pi --model gpt-5.4-mini --provider openai
 - if a bug cannot be reproduced deterministically, state so explicitly in the plan artifact and name the closest deterministic proxy (seeded state, synthetic clock) — never skip straight to fixing
 - applies to live incidents too: reconstruct the failing state (seed it), observe the wrong behavior, then fix — a fix for an unreproduced bug is a hypothesis, not a fix
 
+## no silent error swallowing (user mandate 2026-09-08)
+- FORBIDDEN in extensions/swarm (and all project packages): empty catch blocks (`catch {}` / `catch { /* comment only */ }`) and promise-swallowing `.catch(() => {})` / `.catch(() => undefined)` that discard the error
+- every caught error MUST be durably recorded via `logSwarmError(...)` (extensions/swarm/src/errorlog.ts → `.pi/swarm/traces/errors.jsonl`) or routed through `traceLogged(...)` for best-effort trace writes — never vanish into stderr-only console noise or nothing at all
+- genuinely-expected failures (ENOENT probes, optional-feature absence) may be compacted: log them once with the `expected(reason)` marker, or guard with an explicit `err.code === "ENOENT"`-style branch that documents why silence is correct
+- errorlog.ts itself is self-silent by contract (never throw, never recurse); do not "fix" that
+- trace() and traceTask() (extensions/swarm/src/state.ts) implement the choke point: on append failure they logSwarmError(...) FIRST, then rethrow. Existing `.catch(() => {})` safety nets at trace()/traceTask() call sites are therefore non-hiding no-ops — the failure is already durable in errors.jsonl before the net runs. Do not rely on this for NEW code: new non-trace async calls must catch and route to logSwarmError explicitly
+- genuinely new trace-shaped fire-and-forget should still prefer `traceLogged(trace, p, source, p, event, data)` over a bare `.catch(() => {})` net
+- review/CI check: `grep -rnE "catch\s*\{\s*\}" extensions/swarm/src` must return zero (excluding errorlog.ts internals); every remaining `.catch(() => ...)` must sit on a `trace()`/`traceTask()` call (choke-point-protected) or carry an explicit `logSwarmError`/`expected()` in its handler; new silent-swallow sites elsewhere are review-blocking
+- new swarm surface area must not invent alternate error sinks; route internal failures through errorlog.ts so `.pi/swarm/traces/errors.jsonl` stays the single durable internal-error census
+
 ## swarm feature coding: mock-LLM fixtures are compulsory
 - every swarm feature change (new feature, fix, or behavior modification in extensions/swarm/) must ship a mock-llm fixture/scenario exercising the changed behavior end-to-end before it can be considered done
 - the fixture replays the agent-side of the interaction deterministically (extensions/mock-llm/fixtures/*.jsonl — one JSONL line per scripted turn; model id = fixture filename stem); validation lanes run `pi --provider mock-llm --model <scenario> -e ./extensions/mock-llm -e ./extensions/swarm`

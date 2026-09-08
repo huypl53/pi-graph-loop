@@ -46,8 +46,28 @@ deregister the current pane from its role: `/swarm deregister here` (pane stays 
 .pi/swarm/tasks/<task-id>/task.json
 .pi/swarm/tasks/<task-id>/artifacts/
 .pi/swarm/traces/events.jsonl
+.pi/swarm/traces/errors.jsonl
 .pi/swarm/traces/tmux/*.txt
 ```
+
+### The internal-error log (errors.jsonl)
+
+`.pi/swarm/traces/errors.jsonl` is the durable census of swarm-internal failures that used to be
+silently swallowed (empty `catch {}` / `.catch(() => {})` sites). Every best-effort write that
+fails — evidence traces, state saves, tmux captures, mailbox appends — lands here as an
+`internal.error` record (`ts`, `source`, `op`, `error`, `code`, `agentId`, plus op-specific
+`extra` fields). Failures classified as expected (e.g. `ENOENT` probes) are marked with
+`expected: <reason>`. Read it with:
+
+```bash
+tail -50 .pi/swarm/traces/errors.jsonl | jq -r '"\(.source)/\(.op) [\(.code // "-")]"' | sort | uniq -c
+```
+
+It is budget-capped (`PI_SWARM_ERRORLOG_MAX_ENTRIES`, default 2000; `0` disables logging) so a
+poisoned state dir cannot grow it unbounded. Errors are recorded WITHOUT blocking the calling
+tool/hook: logging is best-effort, self-silent, and never throws. New swarm code must route
+captured errors through `logSwarmError()` / `traceLogged()` from `extensions/swarm/src/errorlog.ts`
+— silent swallowing is forbidden (see AGENTS.md, "no silent error swallowing").
 
 ## Common operating tasks
 

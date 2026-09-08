@@ -26,6 +26,7 @@ import type {
 } from "./types.ts";
 import { EXT, LOCK_STALE_MS, STATE_VERSION } from "./constants.ts";
 import { ensureAgentDefaults, isSafeRelativePath, normalizeTaskNode, now, projectSlug, safeId, sleep } from "./utils.ts";
+import { expected, logSwarmError } from "./errorlog.ts";
 import { tmux } from "./tmux.ts";
 
 export function paths(cwd: string): Paths {
@@ -84,7 +85,13 @@ export async function withLock<T>(p: Paths, fn: () => Promise<T>): Promise<T> {
 			try {
 				const s = await stat(p.lock);
 				if (Date.now() - s.mtimeMs > LOCK_STALE_MS) await rm(p.lock, { recursive: true, force: true });
-			} catch {}
+			} catch (err: any) {
+				// Expected: ENOENT means the lock vanished (holder released) — that is the normal race,
+				// not an anomaly. Anything else (EACCES/EBUSY) is worth one durable line.
+				if (err?.code !== "ENOENT") {
+					await logSwarmError(p, "state", "lock.stat_stale", err, { lock: p.lock });
+				}
+			}
 			if (Date.now() - started > LOCK_STALE_MS * 2) throw new Error(`Timed out acquiring swarm lock: ${p.lock}`);
 			await sleep(80);
 		}
@@ -122,8 +129,13 @@ export function defaultState(cwd: string): SwarmState {
 async function backupCorruptFile(file: string): Promise<void> {
 	try {
 		await rename(file, `${file}.corrupt.bak`);
-	} catch {
-		/* best-effort; the caller's error message already references the .bak path */
+	} catch (err: any) {
+		// Best-effort: the caller's error message already references the .bak path — but if the
+		// rename itself fails (EACCES/EBUSY/EROFS) the corrupt file will be re-parsed forever.
+		// Leave one durable line so the loop is visible in .pi/swarm/traces/errors.jsonl.
+		if (err?.code !== "ENOENT") {
+			await logSwarmError(process.cwd(), "state", "corrupt_backup.rename_failed", err, { file });
+		}
 	}
 }
 
@@ -230,11 +242,14 @@ async function backupBeforeWrite(file: string, backupsDir: string): Promise<void
 			try {
 				await rm(join(backupsDir, old), { force: true });
 			} catch {
-				/* best-effort */
+				/* per-file best-effort pruning; expected EACCES/ENOENT races, not actionable */
+				expected("backup_prune_per_file_race");
 			}
 		}
-	} catch {
-		/* best-effort; backup must never block the write */
+	} catch (err) {
+		// The write itself is still attempted (backup must never block it), but a systemic backup
+		// failure (e.g. backups dir unwritable) would otherwise be invisible forever.
+		await logSwarmError(process.cwd(), "state", "backup.before_write_failed", err, { file });
 	}
 }
 
@@ -288,7 +303,13 @@ export async function writeTaskState(tp: TaskPaths, task: TaskState) {
 }
 
 export async function traceTask(tp: TaskPaths, event: string, data: Record<string, unknown> = {}) {
-	await appendJsonl(tp.events, { ts: now(), event, ...data });
+	try {
+		await appendJsonl(tp.events, { ts: now(), event, ...data });
+	} catch (err) {
+		// Same contract as trace(): record durably, then rethrow (see trace() above).
+		await logSwarmError(tp, "state", "trace.append_failed", err, { traceEvent: event, taskScoped: true });
+		throw err;
+	}
 }
 
 export async function readTaskByRef(
@@ -308,19 +329,35 @@ export async function readTaskByRef(
 }
 
 export async function trace(p: Paths, event: string, data: Record<string, unknown> = {}) {
-	await appendJsonl(p.events, { ts: now(), event, ...data });
+	try {
+		await appendJsonl(p.events, { ts: now(), event, ...data });
+	} catch (err) {
+		// No-silent-swallow mandate (AGENTS.md 2026-09-08): a failed trace append is an internal
+		// failure, not noise. Record it durably, then rethrow so per-call `.catch(() => {})`
+		// safety nets at call sites stay no-ops WITHOUT hiding anything — the failure is already
+		// in errors.jsonl by the time they run.
+		await logSwarmError(p, "state", "trace.append_failed", err, { traceEvent: event });
+		throw err;
+	}
 }
 
 export async function captureGitCommit(pi: ExtensionAPI): Promise<{ available: boolean; baseCommit?: string; headCommit?: string }> {
 	try {
 		const r = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 5000 });
-		if (r.code !== 0) return { available: false };
+		if (r.code !== 0) {
+			await logSwarmError(process.cwd(), "state", "git.rev_parse_failed", new Error(`git rev-parse exited ${r.code}`));
+			return { available: false };
+		}
 		const head = (r.stdout || "").trim();
-		if (!head) return { available: false };
+		if (!head) {
+			await logSwarmError(process.cwd(), "state", "git.rev_parse_failed", new Error("git rev-parse returned empty HEAD"));
+			return { available: false };
+		}
 		// A single snapshot is intentionally NOT treated as proof of a change. A code/config-changing
 		// run still needs a .patch/.diff ref unless callers later provide distinct base/head commits.
 		return { available: true, baseCommit: head, headCommit: head };
-	} catch {
+	} catch (err) {
+		await logSwarmError(process.cwd(), "state", "git.rev_parse_failed", err);
 		return { available: false };
 	}
 }
@@ -339,7 +376,8 @@ export async function captureEvidenceDigests(cwd: string, refs: string[]): Promi
 			const data = await readFile(await resolveEvidencePath(cwd, ref));
 			out.push({ ref, sha256: createHash("sha256").update(data).digest("hex"), size: data.byteLength });
 		} catch {
-			/* existence/boundary is enforced by the promotion gate, not run recording */
+			// Expected: existence/boundary is enforced by the promotion gate, not run recording.
+			expected("evidence_digest_absent_at_record_time");
 		}
 	}
 	return out;
@@ -349,7 +387,12 @@ export async function readJsonlRecords<T = any>(file: string): Promise<T[]> {
 	let raw: string;
 	try {
 		raw = await readFile(file, "utf8");
-	} catch {
+	} catch (err: any) {
+		// ENOENT is the expected cold-start branch (no traces yet). Any other read failure on the
+		// trace files would silently zero out history (rotation/audit read blank) — make it visible.
+		if (err?.code !== "ENOENT") {
+			await logSwarmError(process.cwd(), "state", "jsonl.read_failed", err, { file });
+		}
 		return [];
 	}
 	const out: T[] = [];
@@ -359,7 +402,8 @@ export async function readJsonlRecords<T = any>(file: string): Promise<T[]> {
 		try {
 			out.push(JSON.parse(t) as T);
 		} catch {
-			/* malformed records are ignored by legacy readers */
+			// Expected: malformed/legacy lines are tolerated by design (readers keep only valid rows).
+			expected("jsonl_malformed_line_tolerated");
 		}
 	}
 	return out;
@@ -424,7 +468,8 @@ export async function verifyEvidenceDigests(cwd: string, refs: string[], digests
 			if (current !== recorded.sha256 || data.byteLength !== recorded.size)
 				reasons.push(`evidence ref changed after run recording: ${ref}`);
 		} catch {
-			/* checkEvidenceRefs reports missing/unreadable */
+			// Expected: checkEvidenceRefs reports missing/unreadable itself.
+			expected("evidence_ref_recheck_delegates_to_checker");
 		}
 	}
 	return reasons;

@@ -29,6 +29,7 @@ import { ensureAgentDefaults, humanAge, now } from "./utils.ts";
 import { computeTaskStatus } from "./taskgraph.ts";
 import { claimRootLeader, ensureRoot, heartbeatRootLeader, requireRootAuthority } from "./identity.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
+import { logSwarmError, traceLogged } from "./errorlog.ts";
 import { currentAgentId } from "./session.ts";
 import {
 	deliver,
@@ -54,7 +55,11 @@ export async function reconcileTasks(
 	let entries: string[] = [];
 	try {
 		entries = await readdir(p.tasksDir);
-	} catch {
+	} catch (err: any) {
+		// ENOENT: fresh project (expected). Anything else hides why reconcile went blind.
+		if (err?.code !== "ENOENT") {
+			await logSwarmError(p, "reconcile", "scan.readdir_failed", err);
+		}
 		return actions;
 	}
 	for (const entry of entries) {
@@ -64,7 +69,10 @@ export async function reconcileTasks(
 		let task: TaskState;
 		try {
 			task = await readTaskState(tp.taskJson);
-		} catch {
+		} catch (err) {
+			// Already surfaced as a task_skip reconcile action, but a corrupt task.json looping
+			// across every reconcile tick deserves a durable error line too.
+			await logSwarmError(p, "reconcile", "scan.task_unreadable", err, { taskId });
 			actions.push({ messageId: taskId, action: "task_skip", reason: `unreadable task.json for ${taskId}`, taskId });
 			continue;
 		}

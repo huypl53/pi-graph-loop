@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomUUID } from "node:crypto";
+import { logSwarmError } from "./errorlog.ts";
 import {
 	buildSwarmStatusSummary,
 	listTasksIndexed,
@@ -1655,7 +1656,10 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						if (existsSync(tp.taskJson)) {
 							try {
 								status = (await readTaskState(tp.taskJson)).status;
-							} catch {}
+							} catch (err) {
+								// Unreadable task.json on a task still listed in activeTaskIds hides real state — record it.
+								await logSwarmError(ctx.cwd, "command", "task.status_read_failed", err, { taskId: tid });
+							}
 						}
 						const terminal = status === "done" || status === "failed" || status === "cancelled" || status === "unknown";
 						if (terminal || flags.force) {

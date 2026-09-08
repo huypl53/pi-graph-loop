@@ -10,6 +10,7 @@ import { pipeline } from "node:stream/promises";
 import type { Paths, SwarmState } from "../types.ts";
 import { DEFAULT_TRACE_KEEP_GENERATIONS, DEFAULT_TRACE_RETENTION_MS, DEFAULT_TRACE_ROTATE_BYTES } from "../constants.ts";
 import { paths, readState, trace } from "../state.ts";
+import { expected, logSwarmError, traceLogged } from "../errorlog.ts";
 import { readCommitEvidence } from "../taskgraph.ts";
 import { textResult } from "../utils.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
@@ -241,7 +242,10 @@ export async function readAuditEvents(p: Paths, opts: AuditEventFilter & { gener
 			for (const g of rollup?.generations || []) {
 				if (g?.file) files.push(String(g.file).endsWith(".gz") ? String(g.file) : join(p.traces, basename(g.file)));
 			}
-		} catch {}
+		} catch (err) {
+			// Corrupt rollup index must not kill the audit — but it must not be invisible either.
+			await logSwarmError(p, "audit", "rollup.index_read_failed", err, { rollupPath: join(p.traces, "events.rollup.json") });
+		}
 	}
 	let scanned = 0;
 	const rows: any[] = [];
@@ -349,7 +353,10 @@ export async function checkInvariants(p: Paths, st: SwarmState) {
 		if (!task && existsSync(file)) {
 			try {
 				task = JSON.parse(await readFile(file, "utf8"));
-			} catch {
+			} catch (err) {
+				// The invariant scan silently skipping an unreadable task would under-report INV2/INV3
+				// violations — the audit must say why a task was skipped.
+				await logSwarmError(p, "audit", "invariants.task_unreadable", err, { taskId });
 				task = undefined;
 			}
 		}
@@ -404,7 +411,13 @@ function pruneTmuxCaptures(p: Paths, retentionMs: number) {
 						await rm(full, { force: true });
 						pruned++;
 					}
-				} catch {}
+				} catch (err) {
+					// Capture vanished mid-scan — expected, but only if ENOENT; anything else hides breakage.
+					await logSwarmError(undefined, "audit", "tmux_capture_prune_skip", err, {
+						file: full,
+						expected: expected("capture vanished mid-scan"),
+					});
+				}
 			}
 			return pruned;
 		})
@@ -472,7 +485,12 @@ export async function maybeRotateTraces(p: Paths, opts: { retentionMs?: number; 
 					generations: Array.isArray(previous.generations) ? [...previous.generations] : [],
 				};
 			}
-		} catch {}
+		} catch (err) {
+			// Unreadable previous rollup loses dedup/accumulation continuity — record why it reset.
+			await logSwarmError(undefined, "audit", "rollup.previous_read_failed", err, {
+				rollupPath: join(p.traces, "events.rollup.json"),
+			});
+		}
 	}
 	rollup.generations.push({
 		file: outFile,
@@ -489,7 +507,9 @@ export async function maybeRotateTraces(p: Paths, opts: { retentionMs?: number; 
 	for (const old of existing.slice(0, Math.max(0, existing.length - keepGenerations))) {
 		try {
 			await rm(join(p.traces, `events.${old}.gz`), { force: true });
-		} catch {}
+		} catch (err) {
+			await logSwarmError(undefined, "audit", "generation_rm_failed", err, { file: join(p.traces, `events.${old}.gz`) });
+		}
 	}
 	const pruned = await pruneTmuxCaptures(p, retentionMs);
 	if (pruned) await trace(p, "trace.retention.tmux_pruned", { count: pruned, retentionMs }).catch(() => {});

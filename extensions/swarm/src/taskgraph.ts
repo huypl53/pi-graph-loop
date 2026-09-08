@@ -1,7 +1,7 @@
 // === swarm/taskgraph.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { existsSync, readFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { join, dirname, relative, sep } from "node:path";
+import { basename, join, dirname, relative, sep } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type {
 	GraphValidation,
@@ -46,6 +46,7 @@ import {
 import type { AttentionCategory, MessageRecord, NodeAttention, ReminderRecord, SwarmAgent } from "./types.ts";
 import { ensureAgentDefaults, inferRoleKind, isSafeRelativePath, normalizeTaskNode, now, safeId } from "./utils.ts";
 import { paths, readTaskState, taskPaths, trace, traceTask, writeState } from "./state.ts";
+import { logSwarmError, expected, traceLogged } from "./errorlog.ts";
 import { stopAgent } from "./agents.ts";
 
 // ---- File-scope ownership: effective scope resolution + conservative overlap predicate ----
@@ -1401,8 +1402,12 @@ export async function sweepTaskWorkersLocked(
 	if (!task) {
 		try {
 			task = await readTaskState(tp.taskJson);
-		} catch {
-			/* missing/unreadable: skip graph check */
+		} catch (err) {
+			// Missing task.json on a fresh task is the normal cold path; only the UNREADABLE case
+			// hides a real problem from the R11-2 guard — surface that one.
+			if ((err as any)?.code !== "ENOENT") {
+				await logSwarmError(cwd ? paths(cwd) : process.cwd(), "taskgraph", "closure.task_unreadable", err, { taskId });
+			}
 		}
 	}
 	const priorActiveByAgent = new Map<string, string[]>();
@@ -1699,7 +1704,9 @@ export async function staleOpenAssignmentScanLocked(
 	try {
 		const { readdirSync } = await import("node:fs");
 		taskDirs = readdirSync(p.tasksDir).filter((d) => d.startsWith("task-"));
-	} catch {
+	} catch (err) {
+		// tasksDir disappearing mid-run would silently zero the whole stale-open scan — surface it.
+		await logSwarmError(p, "taskgraph", "stale_open.readdir_failed", err);
 		return { surfaced, inspected, alreadySurfaced, surfacedNodes };
 	}
 	for (const taskDir of taskDirs) {
@@ -1707,7 +1714,10 @@ export async function staleOpenAssignmentScanLocked(
 		let task: TaskState;
 		try {
 			task = await readTaskState(tp.taskJson);
-		} catch {
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") {
+				await logSwarmError(p, "taskgraph", "stale_open.task_unreadable", err, { taskDir });
+			}
 			continue;
 		}
 		let dirty = false;
@@ -1749,7 +1759,7 @@ export async function staleOpenAssignmentScanLocked(
 		}
 		if (dirty) {
 			const { writeTaskState } = await import("./state.ts");
-			await writeTaskState(tp, task).catch(() => {});
+			await writeTaskState(tp, task).catch((err) => logSwarmError(tp, "taskgraph", "writeTaskState.failed", err));
 		}
 	}
 	return { surfaced, inspected, alreadySurfaced, surfacedNodes };
@@ -1855,7 +1865,11 @@ export async function proxyMetricEmitLocked(
 		let taskDirs: string[] = [];
 		try {
 			taskDirs = await readdir(p.tasksDir);
-		} catch {
+		} catch (err: any) {
+			// ENOENT: fresh project, nothing to scan (expected). Anything else is diagnosable.
+			if (err?.code !== "ENOENT") {
+				await logSwarmError(p, "taskgraph", "liveness.readdir_failed", err);
+			}
 			taskDirs = [];
 		}
 		for (const taskDir of taskDirs) {
@@ -1864,7 +1878,10 @@ export async function proxyMetricEmitLocked(
 			let task: TaskState;
 			try {
 				task = await readTaskState(tp.taskJson);
-			} catch {
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") {
+					await logSwarmError(p, "taskgraph", "liveness.task_unreadable", err, { taskDir });
+				}
 				continue;
 			}
 			for (const node of Object.values(task.nodes)) {
@@ -1966,23 +1983,37 @@ function rewriteTaskArtifactRefs(taskId: string, text: string) {
 export async function resolveCommitNodeEvidence(
 	pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> },
 	tp: TaskPaths,
+	cwd?: string,
 ) {
 	let baseline = "";
 	try {
 		baseline = readFileSync(join(tp.root, "baseline.txt"), "utf8").trim();
 	} catch {
+		// Expected branch: baseline not captured (task created before baseline writes existed).
+		expected("baseline_absent_promotion_gate_reports");
 		return { verified: false as const, reason: "baseline_missing" as const };
 	}
 	if (!baseline) return { verified: false as const, baseline, reason: "baseline_empty" as const };
 	try {
 		const r = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 5000 });
-		if (r.code !== 0)
+		if (r.code !== 0) {
+			await logSwarmError(
+				cwd || process.cwd(),
+				"taskgraph",
+				"evidence.git_exec_failed",
+				new Error(`git rev-parse exited ${r.code}`),
+				{
+					taskId: basename(tp.root),
+				},
+			);
 			return { verified: false as const, baseline, reason: "git_unavailable" as const, head: (r.stdout || "").trim() || undefined };
+		}
 		const head = (r.stdout || "").trim();
 		if (!head) return { verified: false as const, baseline, reason: "head_empty" as const };
 		if (head === baseline) return { verified: false as const, baseline, head, reason: "head_matches_baseline" as const };
 		return { verified: true as const, baseline, head };
 	} catch (err: any) {
+		await logSwarmError(cwd || process.cwd(), "taskgraph", "evidence.git_exec_failed", err, { taskId: basename(tp.root) });
 		return { verified: false as const, baseline, reason: `git_error:${String(err?.message || err)}` as const };
 	}
 }
@@ -2006,6 +2037,7 @@ export async function autoCloseRootTerminalNodes(
 	pi: { exec: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number; stdout?: string; stderr?: string }> },
 	tp: TaskPaths,
 	task: TaskState,
+	cwd?: string,
 ) {
 	const closed: string[] = [];
 	for (;;) {
@@ -2024,7 +2056,7 @@ export async function autoCloseRootTerminalNodes(
 		// the legacy `.commit` surface reads through the per-node key for back-compat.
 		const isCommitLike = inferRoleKind(candidate, node.role) === "root" && isGraphTerminalNode(task, candidate);
 		if (isCommitLike) {
-			const evidence = await resolveCommitNodeEvidence(pi, tp);
+			const evidence = await resolveCommitNodeEvidence(pi, tp, cwd);
 			const record = {
 				status: evidence.verified ? "verified" : "unverified",
 				reason: evidence.reason,

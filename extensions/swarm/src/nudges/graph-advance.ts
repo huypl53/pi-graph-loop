@@ -59,6 +59,7 @@ import {
 import { deliverMessageLocked, findIdempotentMessage } from "../mailbox.ts";
 import { isTmuxRunning } from "../tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "../state.ts";
+import { logSwarmError, traceLogged } from "../errorlog.ts";
 import { readPoolHealth, slotKey, withPoolLock, writePoolHealth } from "../pool.ts";
 import { isStallNudgeEligibleTaskStatus } from "./status-predicates.ts";
 import { updateIdleEpochLocked } from "./goal-epoch.ts";
@@ -160,7 +161,10 @@ export async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string,
 	let entries: string[] = [];
 	try {
 		entries = await readdir(p.tasksDir);
-	} catch {
+	} catch (err: any) {
+		if (err?.code !== "ENOENT") {
+			await logSwarmError(p, "graph-advance", "advance.readdir_failed", err);
+		}
 		return;
 	}
 	for (const taskId of entries) {
@@ -169,7 +173,10 @@ export async function reconcileGraphAdvanceLocked(pi: ExtensionAPI, cwd: string,
 		let task: TaskState;
 		try {
 			task = await readTaskState(tp.taskJson);
-		} catch {
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") {
+				await logSwarmError(p, "graph-advance", "advance.task_unreadable", err, { taskId });
+			}
 			continue;
 		}
 		// Only drive active graphs. Done/blocked tasks have no ready work to assign.
@@ -228,7 +235,10 @@ export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string,
 	let entries: string[] = [];
 	try {
 		entries = await readdir(p.tasksDir);
-	} catch {
+	} catch (err: any) {
+		if (err?.code !== "ENOENT") {
+			await logSwarmError(p, "graph-advance", "initial_ready.readdir_failed", err);
+		}
 		return;
 	}
 	for (const taskId of entries) {
@@ -237,7 +247,10 @@ export async function reconcileInitialReadyLocked(pi: ExtensionAPI, cwd: string,
 		let task: TaskState;
 		try {
 			task = await readTaskState(tp.taskJson);
-		} catch {
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") {
+				await logSwarmError(p, "graph-advance", "initial_ready.task_unreadable", err, { taskId });
+			}
 			continue;
 		}
 		// Only act on tasks that have never progressed past the very first node. `in_progress` is handled
@@ -344,12 +357,17 @@ export async function evaluateTaskGraphStallNudgeLocked(
 				// Row 68 fix (AC1): include fresh status="ready" tasks (created, never assigned) —
 				// non-terminal candidates only; the per-node actionable filter below still gates.
 				if (isStallNudgeEligibleTaskStatus(t.status)) tasks.push({ task: t, tp });
-			} catch {
-				/* skip unreadable */
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") {
+					await logSwarmError(p, "graph-advance", "stall.task_unreadable", err, { taskId });
+				}
 			}
 		}
-	} catch {
-		/* unreadable tasksDir === no active tasks */
+	} catch (err: any) {
+		/* unreadable tasksDir === no active tasks (designed skip); ENOENT is the expected flavor */
+		if (err?.code !== "ENOENT") {
+			await logSwarmError(p, "graph-advance", "stall.readdir_failed", err);
+		}
 	}
 	if (!tasks.length) return { emitted: false, reason: "no_active_task" };
 
@@ -560,7 +578,10 @@ export async function evaluateArtifactProgressNudgeLocked(
 	let taskDirs: string[] = [];
 	try {
 		taskDirs = await readdir(p.tasksDir);
-	} catch {
+	} catch (err: any) {
+		if (err?.code !== "ENOENT") {
+			await logSwarmError(p, "graph-advance", "artifact_progress.readdir_failed", err);
+		}
 		return { inspected, nudged, escalated, scannedFiles };
 	}
 	const dirtyTaskPaths = new Set<TaskPaths>();
@@ -571,7 +592,10 @@ export async function evaluateArtifactProgressNudgeLocked(
 		let task: TaskState;
 		try {
 			task = await readTaskState(tp.taskJson);
-		} catch {
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") {
+				await logSwarmError(p, "graph-advance", "artifact_progress.task_unreadable", err, { taskDir });
+			}
 			continue;
 		}
 		tpToTask.set(tp, task);
@@ -604,8 +628,11 @@ export async function evaluateArtifactProgressNudgeLocked(
 						maxMtimeMs = mt;
 						contributingFile = rel;
 					}
-				} catch {
-					/* file not on disk yet (worker hasn't created it) — skip */
+				} catch (err: any) {
+					/* file not on disk yet (worker hasn't created it) — expected branch */
+					if (err?.code !== "ENOENT") {
+						await logSwarmError(p, "graph-advance", "artifact_progress.stat_failed", err, { rel });
+					}
 				}
 			}
 			if (!contributingFile) continue;
@@ -654,8 +681,14 @@ export async function evaluateArtifactProgressNudgeLocked(
 							requiresResponse: false,
 							idempotencyKey: `r20:cap:${task.taskId}:${nodeId}`,
 						});
-					} catch {
-						/* escalation is informational; never throw out of the tick */
+					} catch (err) {
+						/* escalation is informational; never throw out of the tick — but a persistently
+						   failing CAP escalation means nobody ever hears that a worker is ignoring
+						   nudges. Log it. */
+						await logSwarmError(p, "graph-advance", "artifact_progress.cap_escalation_failed", err, {
+							taskId: task.taskId,
+							nodeId,
+						});
 					}
 					node.artifactProgressNudgeAt = new Date(nowMs).toISOString();
 					node.artifactProgressCapSurfaced = true;
@@ -736,12 +769,14 @@ export async function evaluateArtifactProgressNudgeLocked(
 	for (const tp of Array.from(dirtyTaskPaths)) {
 		try {
 			await writeTaskState(tp, tpToTask.get(tp)!);
-		} catch {
-			/* best-effort */
+		} catch (err) {
+			// Losing a nudge-timestamp write re-triggers the nudge next tick (visible); losing it
+			// SILENTLY would also hide systemic write failures. Log it.
+			await logSwarmError(p, "graph-advance", "artifact_progress.persist_failed", err, { taskRoot: tp.root });
 		}
 	}
 	if (nudged || escalated || inspected) {
-		await writeState(p, st).catch(() => {});
+		await writeState(p, st).catch((err) => logSwarmError(p, "nudges.graph-advance", "writeState.failed", err));
 	}
 	return { inspected, nudged, escalated, scannedFiles };
 }
@@ -1016,7 +1051,7 @@ export async function evaluateSlotRecoveryLocked(
 			health.lastRecoveredAt = new Date(nowMs).toISOString();
 			dirty = true;
 		}
-		if (dirty) await writePoolHealth(p, h).catch(() => {});
+		if (dirty) await writePoolHealth(p, h).catch((err) => logSwarmError(p, "nudges.graph-advance", "writePoolHealth.failed", err));
 	});
 
 	for (const ev of emitted) {
