@@ -2,6 +2,7 @@
 
 export {
 	resolveGoalNudgeIntervalMs,
+	resolveGoalMaxNudges,
 	updateIdleEpochLocked,
 	evaluateIdleGoalNudgeLocked,
 	agentIsEffectivelyAlive,

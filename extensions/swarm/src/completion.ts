@@ -45,7 +45,7 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{
 		name: "goal",
 		description:
-			"show | set [-i <time>] <text> | update [-i <time>] [<text>] | done [<goalId>] (show read-only; set/update/done root-only; -i accepts ms/s/m/h)",
+			"show | set [-i <time>] [-n <count>] <text> | update [-i <time>] [-n <count>] [<text>] | nudges [<count>] | done [<goalId>]",
 	},
 	{ name: "trace", description: "Show trace file path" },
 	{ name: "capture", description: "Capture an agent's tmux pane: <id>" },
@@ -90,7 +90,7 @@ const SCOPED_COMMANDS: Record<string, { name: string; description: string; canon
 };
 
 const GRAPH_FORMATS = ["text", "mermaid", "json"];
-const GOAL_SUBS = ["show", "set", "update", "done"];
+const GOAL_SUBS = ["show", "set", "update", "nudges", "max-nudges", "done"];
 const PROTOCOL_SUBS = ["migrate"];
 const RUNTIME_FLAGS = ["runtime", "--runtime", "-r"];
 const ROLE_KINDS = ["root", "planner", "reviewer", "auditor", "tester", "implementer", "worker", "observer"];

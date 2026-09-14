@@ -10,6 +10,7 @@ import {
 	listTasksIndexed,
 	renderTasksIndexedList,
 	resolveGoalNudgeIntervalMs,
+	resolveGoalMaxNudges,
 	resolveTaskArg,
 	runtimeTaskWarnings,
 } from "./reconcile.ts";
@@ -188,11 +189,22 @@ function parseFlags(tokens: string[]): {
 		else if (t === "--provider") out.provider = tokens[++i];
 		else if (t === "--caps") out.caps = tokens[++i];
 		else if (t === "--interval" || t === "-i") out.interval = tokens[++i];
+		else if (t === "--max-nudges" || t === "--nudges" || t === "-n") out.nudges = tokens[++i];
 		else if (t === "--origin") out.origin = tokens[++i];
 		else if (t === "--set-by-scope") out["set-by-scope"] = tokens[++i];
 		else out.rest.push(t);
 	}
 	return out;
+}
+
+function parseGoalMaxNudges(raw: string): { ok: true; count: number } | { ok: false; error: string } {
+	const input = String(raw || "").trim();
+	if (!input) return { ok: false, error: "missing nudges count" };
+	const count = Number(input);
+	if (!Number.isInteger(count) || (count <= 0 && count !== -1)) {
+		return { ok: false, error: `invalid nudges count "${raw}" (must be positive integer, or -1 for infinite)` };
+	}
+	return { ok: true, count };
 }
 
 function parseGoalSetInterval(raw: string): { ok: true; ms: number } | { ok: false; error: string } {
@@ -210,7 +222,7 @@ function parseGoalSetInterval(raw: string): { ok: true; ms: number } | { ok: fal
 	return { ok: true, ms: Math.floor(ms) };
 }
 const SWARM_COMMAND_DESCRIPTION =
-	"Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (root-only: durable recovery attention report) | remind <task-id> <node-id> (root-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | deregister <here|id> [--force] [--purge] (self-service exit from a role; pane stays alive; other-agent id root-only) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | lease <id> [--reuse|--park] [--until <iso>] [--reason <text>] [--clear] (root-only) | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set [-i|--interval <time>] <text> | goal update [-i|--interval <time>] [<text>] | goal done [<goalId>] (show read-only; set/update/done root-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
+	"Manage pi swarm agents: init | list | status (rollup) | tasks (indexed list w/ age) | graph [<#|task-id> [text|mermaid|json]] — no-arg lists tasks | task <#|task-id> [runtime] | next <#|task-id> (ready nodes + suggested agent) | attention [<#|task-id>] (root-only: durable recovery attention report) | remind <task-id> <node-id> (root-only: send the one bounded worker reminder) | flow <#|task-id> [--events N] (read-only observatory snapshot) | validate <#|task-id> [runtime] | spawn <id> [role] | register <here|tmux-target> <id> [role...] (adopt a pane; 'here' = current pane) | deregister <here|id> [--force] [--purge] (self-service exit from a role; pane stays alive; other-agent id root-only) | panes (list tmux targets) | stop <id> [--force] [--no-kill] | restart <id> | role <id> <role...> [--kind …] [--caps a,b] | pause <id> | resume <id> | lease <id> [--reuse|--park] [--until <iso>] [--reason <text>] [--clear] (root-only) | sendkey <id> <keys...> [--literal] [--enter] | attach <id> | release <id> [<task-id>] [--force] | mailbox reset <id> --yes | send <to> <message> | goal [show] | goal set [-i <time>] [-n <count>] <text> | goal update [-i <time>] [-n <count>] [<text>] | goal nudges [<count>] | goal done [<goalId>] (show read-only; set/update/done root-only) | trace | capture <id> | identity reload <id> [note] | identity show <id> | pool [list|show|validate|help|preview-preflight|rotate] | pool cooldown <slot> <ms> | pool clear <slot>";
 
 // Pure helpers for /swarm pool show|help|validate rendering. `classificationShape` reconciles the
 // on-disk shape with the validation result so the show line never reports a stale `source`.
@@ -2087,14 +2099,61 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const age = Math.round((Date.now() - Date.parse(g.setAt)) / 60000);
 					const backoff = g.backoffTicksRemaining ? `, backoff ${g.backoffTicksRemaining} tick(s)` : "";
 					const lastNudge = g.lastNudgeAt ? `, last nudge ${g.lastNudgeAt}` : "";
+					const maxDisplay = g.maxNudges === -1 ? "∞ (infinite)" : `${resolveGoalMaxNudges(g.maxNudges)}`;
 					ctx.ui.notify(
 						`Goal ${g.id}
   text: ${g.text}
   set: ${g.setAt} by ${g.setBy} (${age} min ago)
   nudge interval: ${resolveGoalNudgeIntervalMs(g.nudgeIntervalMs)}ms${g.nudgeIntervalMs ? ` (durable override ${g.nudgeIntervalMs}ms)` : " (default)"}
-  idle-streak nudges: ${g.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}${lastNudge}${backoff}`,
+  idle-streak nudges: ${g.consecutiveNoResolveNudges}/${maxDisplay}${lastNudge}${backoff}`,
 						"info",
 					);
+					return;
+				}
+				if (sub === "nudges" || sub === "max-nudges") {
+					const arg = rest[0];
+					if (!arg) {
+						const s = await readState(p, ctx.cwd);
+						if (!s.goal) {
+							ctx.ui.notify("No active swarm goal.", "info");
+							return;
+						}
+						const maxDisplay = s.goal.maxNudges === -1 ? "infinite (-1)" : `${resolveGoalMaxNudges(s.goal.maxNudges)}`;
+						ctx.ui.notify(`Goal ${s.goal.id} max nudges: ${maxDisplay}`, "info");
+						return;
+					}
+					const parsed = parseGoalMaxNudges(arg);
+					if (!parsed.ok) {
+						ctx.ui.notify(`Usage: /swarm goal nudges <count> (${parsed.error})`, "warning");
+						return;
+					}
+					const count = parsed.count;
+					const stU = await withLock(p, async () => {
+						const s = await readState(p, ctx.cwd);
+						if (!s.goal) return { noop: true, updated: false };
+						s.goal.maxNudges = count;
+						if (count === -1 || count > s.goal.consecutiveNoResolveNudges) {
+							delete s.goal.backoffTicksRemaining;
+							const idle = (s.idleNudgeState ||= {});
+							delete idle.goalBackoffTicksRemaining;
+						}
+						await trace(p, "goal.updated", {
+							goalId: s.goal.id,
+							via: "command(nudges)",
+							updatedText: false,
+							updatedInterval: false,
+							updatedMaxNudges: true,
+							maxNudges: count,
+						});
+						await writeState(p, s);
+						return { updated: true, goal: s.goal };
+					});
+					if (stU.noop) {
+						ctx.ui.notify("No active swarm goal to update.", "info");
+						return;
+					}
+					const maxStr = count === -1 ? "infinite (-1)" : `${count}`;
+					ctx.ui.notify(`Goal ${stU.goal!.id} max nudges updated to ${maxStr}.`, "info");
 					return;
 				}
 				if (sub === "set" || sub === "update") {
@@ -2104,6 +2163,9 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					const rawInterval = flags.interval !== undefined ? String(flags.interval).trim() : "";
 					const hasInterval = rawInterval.length > 0;
 					const parsedInterval = hasInterval ? parseGoalSetInterval(rawInterval) : null;
+					const rawNudges = flags.nudges !== undefined ? String(flags.nudges).trim() : "";
+					const hasNudges = rawNudges.length > 0;
+					const parsedNudges = hasNudges ? parseGoalMaxNudges(rawNudges) : null;
 					// Issue 81: --origin flag validates against the allowed origin set.
 					const requestedOrigin = flags.origin ? String(flags.origin).trim() : undefined;
 					if (requestedOrigin !== undefined && !GOAL_ORIGIN_VALUES.has(requestedOrigin as any)) {
@@ -2119,17 +2181,25 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						);
 						return;
 					}
+					if (hasNudges && !parsedNudges?.ok) {
+						ctx.ui.notify(
+							`Usage: /swarm goal ${isUpdate ? "update" : "set"} [-n|--max-nudges <count>] (${parsedNudges?.error})`,
+							"warning",
+						);
+						return;
+					}
+					const maxNudges = hasNudges ? parsedNudges!.count : undefined;
 					if (!isUpdate && !text) {
-						// UX (user-reported): "/swarm goal set -i 30s" with no text. When a goal already
-						// exists and an interval was given, treat it as an interval-only update instead
-						// of erroring — the user's intent (change the cadence) is unambiguous. Without
-						// an interval (bare "goal set") or with no existing goal, the usage warning stays.
-						if (hasInterval && parsedInterval?.ok) {
-							const setMs = parsedInterval.ms;
+						// UX (user-reported): "/swarm goal set -i 30s" or "-n -1" with no text. When a goal already
+						// exists and an interval or nudges was given, treat it as an update instead
+						// of erroring — the user's intent is unambiguous.
+						if ((hasInterval && parsedInterval?.ok) || (hasNudges && parsedNudges?.ok)) {
+							const setMs = hasInterval ? parsedInterval!.ms : undefined;
+							const setNudges = hasNudges ? parsedNudges!.count : undefined;
 							const stU = await withLock(p, async () => {
 								const s = await readState(p, ctx.cwd);
 								if (!s.goal) return { noop: true, updated: false };
-								if (s.goal.nudgeIntervalMs !== setMs) {
+								if (setMs !== undefined && s.goal.nudgeIntervalMs !== setMs) {
 									s.goal.nudgeIntervalMs = setMs;
 									// Re-anchor under the same min-only policy as the update path below.
 									const idle = (s.idleNudgeState ||= {});
@@ -2138,31 +2208,41 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 										? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), anchor + setMs)).toISOString()
 										: new Date(anchor + setMs).toISOString();
 								}
+								if (setNudges !== undefined && s.goal.maxNudges !== setNudges) {
+									s.goal.maxNudges = setNudges;
+									if (setNudges === -1 || setNudges > s.goal.consecutiveNoResolveNudges) {
+										delete s.goal.backoffTicksRemaining;
+										const idle = (s.idleNudgeState ||= {});
+										delete idle.goalBackoffTicksRemaining;
+									}
+								}
 								await trace(p, "goal.updated", {
 									goalId: s.goal.id,
 									via: "command(set-as-update)",
 									updatedText: false,
-									updatedInterval: true,
+									updatedInterval: setMs !== undefined,
+									updatedMaxNudges: setNudges !== undefined,
+									maxNudges: s.goal.maxNudges,
 								});
 								await writeState(p, s);
 								return { updated: true, goal: s.goal };
 							});
 							if (stU.updated) {
 								ctx.ui.notify(
-									`Goal ${stU.goal!.id} interval updated to ${setMs}ms (set with no text treated as interval update).`,
+									`Goal ${stU.goal!.id} updated${setMs !== undefined ? ` interval=${setMs}ms` : ""}${setNudges !== undefined ? ` maxNudges=${setNudges === -1 ? "infinite (-1)" : setNudges}` : ""}.`,
 									"info",
 								);
 								return;
 							}
 						}
 						ctx.ui.notify(
-							"Usage: /swarm goal set [-i|--interval <time>] <text> (interval-only change on an existing goal: use 'update')",
+							"Usage: /swarm goal set [-i|--interval <time>] [-n|--max-nudges <count>] <text> (interval/nudges change on an existing goal: use 'update' or 'goal nudges')",
 							"warning",
 						);
 						return;
 					}
-					if (isUpdate && !text && !hasInterval) {
-						ctx.ui.notify("Usage: /swarm goal update [-i|--interval <time>] [<text>]", "warning");
+					if (isUpdate && !text && !hasInterval && !hasNudges) {
+						ctx.ui.notify("Usage: /swarm goal update [-i|--interval <time>] [-n|--max-nudges <count>] [<text>]", "warning");
 						return;
 					}
 					// Issue 85 (task-202608310905, bug #1): only resolve a default intervalMs up-front when
@@ -2191,6 +2271,14 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 									? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), fresh)).toISOString()
 									: new Date(fresh).toISOString();
 							}
+							if (maxNudges !== undefined && s.goal.maxNudges !== maxNudges) {
+								s.goal.maxNudges = maxNudges;
+								if (maxNudges === -1 || maxNudges > s.goal.consecutiveNoResolveNudges) {
+									delete s.goal.backoffTicksRemaining;
+									const idle = (s.idleNudgeState ||= {});
+									delete idle.goalBackoffTicksRemaining;
+								}
+							}
 							// Issue 81: allow origin/setByScope update on the update path.
 							if (requestedOrigin !== undefined) s.goal.origin = newOrigin;
 							if (requestedSetByScope !== undefined) s.goal.setByScope = requestedSetByScope;
@@ -2199,6 +2287,8 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 								via: "command",
 								updatedText: Boolean(text),
 								updatedInterval: intervalMs !== undefined,
+								updatedMaxNudges: maxNudges !== undefined,
+								maxNudges: s.goal.maxNudges,
 								origin: s.goal.origin,
 								setByScope: s.goal.setByScope,
 							});
@@ -2244,6 +2334,8 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						// goal to inherit from.
 						const inheritedIntervalMs = !hasInterval ? s.goal?.nudgeIntervalMs : undefined;
 						const resolvedIntervalMs = intervalMs ?? inheritedIntervalMs ?? resolveGoalNudgeIntervalMs();
+						const inheritedMaxNudges = !hasNudges ? s.goal?.maxNudges : undefined;
+						const resolvedMaxNudges = maxNudges !== undefined ? maxNudges : inheritedMaxNudges;
 						s.goal = {
 							id: goalId,
 							text,
@@ -2254,6 +2346,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							consecutiveNoResolveNudges: 0,
 							nudgeSeq: previousId === goalId ? (s.goal?.nudgeSeq ?? 0) : 0,
 							nudgeIntervalMs: resolvedIntervalMs,
+							maxNudges: resolvedMaxNudges,
 						};
 						delete s.goal.lastNudgeAt;
 						delete s.goal.lastResolvedAt;
@@ -2264,7 +2357,9 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 							via: "command",
 							length: text.length,
 							nudgeIntervalMs: s.goal.nudgeIntervalMs,
+							maxNudges: s.goal.maxNudges,
 							inheritedIntervalMs: inheritedIntervalMs ?? null,
+							inheritedMaxNudges: inheritedMaxNudges ?? null,
 							origin: newOrigin,
 							setByScope: requestedSetByScope,
 						});
@@ -2284,13 +2379,13 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					}
 					if (isUpdate) {
 						ctx.ui.notify(
-							`Goal updated: ${st.goal.id} — "${st.goal.text.slice(0, 80)}${st.goal.text.length > 80 ? "…" : ""}"${st.goal.nudgeIntervalMs ? ` (nudge interval ${st.goal.nudgeIntervalMs}ms)` : ""}`,
+							`Goal updated: ${st.goal.id} — "${st.goal.text.slice(0, 80)}${st.goal.text.length > 80 ? "…" : ""}"${st.goal.nudgeIntervalMs ? ` (nudge interval ${st.goal.nudgeIntervalMs}ms)` : ""}${st.goal.maxNudges !== undefined ? ` (max nudges: ${st.goal.maxNudges === -1 ? "infinite (-1)" : st.goal.maxNudges})` : ""}`,
 							"info",
 						);
 						return;
 					}
 					ctx.ui.notify(
-						`Goal set: ${st.goalId} — "${st.goal.text.slice(0, 80)}${st.goal.text.length > 80 ? "…" : ""}"${st.goal.nudgeIntervalMs ? ` (nudge interval ${st.goal.nudgeIntervalMs}ms)` : ""}`,
+						`Goal set: ${st.goalId} — "${st.goal.text.slice(0, 80)}${st.goal.text.length > 80 ? "…" : ""}"${st.goal.nudgeIntervalMs ? ` (nudge interval ${st.goal.nudgeIntervalMs}ms)` : ""}${st.goal.maxNudges !== undefined ? ` (max nudges: ${st.goal.maxNudges === -1 ? "infinite (-1)" : st.goal.maxNudges})` : ""}`,
 						"info",
 					);
 					return;

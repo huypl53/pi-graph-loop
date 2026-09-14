@@ -59,6 +59,17 @@ export function resolveGoalNudgeIntervalMs(nudgeIntervalMs?: number | null): num
 	return 5_000;
 }
 
+export function resolveGoalMaxNudges(maxNudges?: number | null): number {
+	if (maxNudges === -1) return -1;
+	if (typeof maxNudges === "number" && Number.isInteger(maxNudges) && maxNudges > 0) return maxNudges;
+	const raw = process.env.PI_SWARM_MAX_NUDGES;
+	if (raw !== undefined && String(raw).trim() !== "") {
+		const env = Number(raw);
+		if (Number.isInteger(env) && (env > 0 || env === -1)) return env;
+	}
+	return MAX_CONSECUTIVE_NUDGES_DEFAULT;
+}
+
 // === R27 (2026-09-04): task-independent goal floor — check-streak debounce resolvers ===
 // The goal nudge no longer consults task state OR a single interval-anchor. Instead the pump
 // samples the all-idle predicate once per GOAL_IDLE_CHECK_INTERVAL_MS; after
@@ -483,21 +494,29 @@ export async function evaluateIdleGoalNudgeLocked(
 	// consecutive nudges are spaced >= checksRequired x checkIntervalMs.
 	idleState.goalIdleCheckCount = 0;
 
+	const effectiveMaxNudges = resolveGoalMaxNudges(goal.maxNudges);
+	const isInfinite = effectiveMaxNudges === -1;
+
 	// Back-off accounting is round-based: each COMPLETED check-round consumes one back-off
 	// slot. This keeps pump tick rate from affecting the cadence (R27: rounds, not intervals).
 	if (goal.backoffTicksRemaining && goal.backoffTicksRemaining > 0) {
-		goal.backoffTicksRemaining -= 1;
-		idleState.goalBackoffTicksRemaining = goal.backoffTicksRemaining;
-		if (goal.backoffTicksRemaining === 0) {
-			await traceLogged(p, "goal.nudge.backoff.exhausted", { goalId: goal.id, by: 1 });
-			return { emitted: false, reason: "backoff_just_exhausted" };
+		if (isInfinite) {
+			delete goal.backoffTicksRemaining;
+			delete idleState.goalBackoffTicksRemaining;
+		} else {
+			goal.backoffTicksRemaining -= 1;
+			idleState.goalBackoffTicksRemaining = goal.backoffTicksRemaining;
+			if (goal.backoffTicksRemaining === 0) {
+				await traceLogged(p, "goal.nudge.backoff.exhausted", { goalId: goal.id, by: 1 });
+				return { emitted: false, reason: "backoff_just_exhausted" };
+			}
+			await traceLogged(p, "goal.nudge.backoff.skip", { goalId: goal.id, remaining: goal.backoffTicksRemaining });
+			return { emitted: false, reason: "backoff" };
 		}
-		await traceLogged(p, "goal.nudge.backoff.skip", { goalId: goal.id, remaining: goal.backoffTicksRemaining });
-		return { emitted: false, reason: "backoff" };
 	}
 
 	// Already at cap? Arm back-off on the first *check-round opportunity* after max emissions.
-	if (goal.consecutiveNoResolveNudges >= MAX_CONSECUTIVE_NUDGES_DEFAULT) {
+	if (!isInfinite && goal.consecutiveNoResolveNudges >= effectiveMaxNudges) {
 		// === R23 (2026-09-02) — post-saturation fresh-epoch re-arm (cap branch) ===
 		// When the current all-idle anchor POSTDATES the last goal emission, the prior epoch's
 		// nudges are already invalidated at surface time (`idle_epoch_advanced`, R21) and no
@@ -579,7 +598,7 @@ export async function evaluateIdleGoalNudgeLocked(
 				await traceLogged(p, "goal.nudge.backoff", {
 					goalId: goal.id,
 					nudges: goal.consecutiveNoResolveNudges,
-					max: MAX_CONSECUTIVE_NUDGES_DEFAULT,
+					max: effectiveMaxNudges,
 					backoffTicks: GOAL_NUDGE_BACKOFF_TICKS,
 				});
 			}
@@ -610,10 +629,11 @@ export async function evaluateIdleGoalNudgeLocked(
 	const idleCount = idleAgents.length;
 	const nudgeNumber = goal.consecutiveNoResolveNudges + 1;
 	const subject = `Idle streak: goal "${subjectText}" has no active work`;
+	const maxText = isInfinite ? "∞ (infinite, stops only when marked done)" : `${effectiveMaxNudges} before back-off`;
 	const body =
 		`Goal ${goal.id} was set ${sinceSec}s ago: "${bodyText}".\n\n` +
 		`All ${idleCount} non-root agent(s) have been idle for ${checksRequired} consecutive checks (${Math.round(checkIntervalMs / 1000)}s apart), independent of task state.\n\n` +
-		`This is nudge ${nudgeNumber} of ${MAX_CONSECUTIVE_NUDGES_DEFAULT} before back-off.\n\n` +
+		`This is nudge ${nudgeNumber} of ${maxText}.\n\n` +
 		`Action: either spawn / assign work to advance the goal, or mark it done:\n` +
 		`  swarm_mark_goal_done(goalId="${goal.id}")\n\n` +
 		`(Any reply you produce — including a plain /swarm status, a tool call, or an explanation — is treated as a "resolve": the consecutive counter resets and the back-off clears. Only a silent ignore keeps the counter climbing.)`;
@@ -637,7 +657,7 @@ export async function evaluateIdleGoalNudgeLocked(
 		text: bodyText,
 		setAt: goal.setAt,
 		consecutiveCount: goal.consecutiveNoResolveNudges,
-		max: MAX_CONSECUTIVE_NUDGES_DEFAULT,
+		max: effectiveMaxNudges,
 		sinceSetMs,
 		idleAgents: idleCount,
 		customType: "goal.idle_nudge",

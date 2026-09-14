@@ -21,8 +21,7 @@ import { MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_STATUS_TASKS } from "./constants.ts
 import { ensureAgentDefaults, humanAge, safeId } from "./utils.ts";
 import { computeReadyNodes } from "./taskgraph.ts";
 import { readTaskState } from "./state.ts";
-import { logSwarmError } from "./errorlog.ts";
-import { resolveGoalNudgeIntervalMs } from "./nudges/goal-epoch.ts";
+import { resolveGoalNudgeIntervalMs, resolveGoalMaxNudges } from "./nudges/goal-epoch.ts";
 import { taskPaths } from "./state.ts";
 
 // PM-facing swarm rollup for `/swarm status`. Bounded: scans up to MAX_STATUS_TASKS task.json
@@ -126,7 +125,7 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 		}; staleNodes=${staleNodes}; ackMissing=${ackMissing}`,
 		`proxy metrics: hungButAlive=${proxy.hungButAlive} staleOpen=${proxy.staleOpen} supersessionChurn=${proxy.supersessionChurn}${proxy.lastEmitAt ? ` lastEmitAt=${proxy.lastEmitAt}` : ""}`,
 		st.goal
-			? `goal: ${st.goal.id} interval=${resolveGoalNudgeIntervalMs(st.goal.nudgeIntervalMs)}ms nudges=${st.goal.consecutiveNoResolveNudges}/${MAX_CONSECUTIVE_NUDGES_DEFAULT}`
+			? `goal: ${st.goal.id} interval=${resolveGoalNudgeIntervalMs(st.goal.nudgeIntervalMs)}ms nudges=${st.goal.consecutiveNoResolveNudges}/${st.goal.maxNudges === -1 ? "∞" : resolveGoalMaxNudges(st.goal.maxNudges)}`
 			: `goal: none`,
 		closureLine,
 		...taskLines,

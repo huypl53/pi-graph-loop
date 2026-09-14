@@ -815,6 +815,11 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				intervalMs: Type.Optional(
 					Type.Number({ description: "Optional durable idle interval override in milliseconds; positive values only." }),
 				),
+				maxNudges: Type.Optional(
+					Type.Integer({
+						description: "Optional max consecutive unresolved nudges before back-off (-1 for infinite, or positive integer).",
+					}),
+				),
 				update: Type.Optional(
 					Type.Boolean({ description: "When true, update the current goal in place without resetting counters or goalId." }),
 				),
@@ -854,6 +859,17 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 						}
 						const nudgeIntervalMs = hasInterval ? Math.floor(requestedInterval) : undefined;
 						const defaultIntervalMs = resolveGoalNudgeIntervalMs();
+						const hasMaxNudges = params.maxNudges !== undefined;
+						const requestedMaxNudges = Number(params.maxNudges);
+						if (
+							hasMaxNudges &&
+							(!Number.isInteger(requestedMaxNudges) || (requestedMaxNudges <= 0 && requestedMaxNudges !== -1))
+						) {
+							throw new Error(
+								`swarm_set_goal: invalid maxNudges ${params.maxNudges} (must be -1 for infinite or positive integer)`,
+							);
+						}
+						const maxNudges = hasMaxNudges ? requestedMaxNudges : undefined;
 						// Issue 81: validate origin parameter against the allowed set; default "root".
 						const requestedOrigin = params.origin;
 						if (requestedOrigin !== undefined && !GOAL_ORIGIN_VALUES.has(requestedOrigin as any)) {
@@ -879,6 +895,13 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 									? new Date(Math.min(new Date(idle.nextGoalNudgeAt).getTime(), fresh)).toISOString()
 									: new Date(fresh).toISOString();
 							}
+							if (maxNudges !== undefined && st.goal.maxNudges !== maxNudges) {
+								st.goal.maxNudges = maxNudges;
+								if (maxNudges === -1 || maxNudges > st.goal.consecutiveNoResolveNudges) {
+									delete st.goal.backoffTicksRemaining;
+									delete st.idleNudgeState?.goalBackoffTicksRemaining;
+								}
+							}
 							if (requestedOrigin !== undefined) st.goal.origin = newOrigin;
 							if (requestedSetByScope !== undefined) st.goal.setByScope = requestedSetByScope;
 							await trace(p, "goal.updated", {
@@ -887,6 +910,8 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 								via: "tool",
 								updatedText: Boolean(text),
 								updatedInterval: nudgeIntervalMs !== undefined,
+								updatedMaxNudges: maxNudges !== undefined,
+								maxNudges: st.goal.maxNudges,
 								origin: st.goal.origin,
 								setByScope: st.goal.setByScope,
 							});
@@ -931,6 +956,8 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 						// the update path — update leaves the existing interval untouched.
 						const inheritedIntervalMs = nudgeIntervalMs === undefined ? st.goal?.nudgeIntervalMs : undefined;
 						const resolvedIntervalMs = nudgeIntervalMs ?? inheritedIntervalMs ?? defaultIntervalMs;
+						const inheritedMaxNudges = maxNudges === undefined ? st.goal?.maxNudges : undefined;
+						const resolvedMaxNudges = maxNudges ?? inheritedMaxNudges;
 						st.goal = {
 							id: goalId,
 							text,
@@ -941,6 +968,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 							consecutiveNoResolveNudges: 0,
 							nudgeSeq: inheritSeq,
 							nudgeIntervalMs: resolvedIntervalMs,
+							maxNudges: resolvedMaxNudges,
 						};
 						delete st.goal.lastNudgeAt;
 						delete st.goal.lastResolvedAt;
@@ -952,7 +980,9 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 							length: text.length,
 							via: "tool",
 							nudgeIntervalMs: st.goal.nudgeIntervalMs,
+							maxNudges: st.goal.maxNudges,
 							inheritedIntervalMs: inheritedIntervalMs ?? null,
+							inheritedMaxNudges: inheritedMaxNudges ?? null,
 							origin: newOrigin,
 							setByScope: requestedSetByScope,
 						});

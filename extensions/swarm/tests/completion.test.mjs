@@ -108,10 +108,11 @@ ok(
 		subs.includes("deregister"),
 );
 
-// 1b. goal subcommands include update (goal-interval feature).
+// 1b. goal subcommands include update and nudges (goal-interval and max-nudges features).
 ok(
-	"goal <space> offers show/set/update/done",
-	JSON.stringify(await vals("goal ")) === JSON.stringify(["goal show", "goal set", "goal update", "goal done"]),
+	"goal <space> offers show/set/update/nudges/max-nudges/done",
+	JSON.stringify(await vals("goal ")) ===
+		JSON.stringify(["goal show", "goal set", "goal update", "goal nudges", "goal max-nudges", "goal done"]),
 );
 
 // 2. Partial subcommand filters by prefix.

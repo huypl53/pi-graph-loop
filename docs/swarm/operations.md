@@ -797,13 +797,18 @@ The root's durable goal plus an anti-loop nudge that fires when the swarm has no
 > consecutive idle samples. Any busy sample (an agent turns non-idle, or an idle agent
 > acquires an `activeTaskIds` pointer) resets the streak to 0.
 
-- **Set the goal**: `/swarm goal set [--interval <ms>] <text>` or `swarm_set_goal({ text, intervalMs? })`. The root-only
-  tool/command stores `swarm-state.json.goal = { id, text, setAt, setBy, consecutiveNoResolveNudges, nudgeIntervalMs? }`.
+- **Set the goal**: `/swarm goal set [-n|--nudges|--max-nudges <count>] [--interval <ms>] <text>` or `swarm_set_goal({ text, intervalMs?, maxNudges? })`. The root-only
+  tool/command stores `swarm-state.json.goal = { id, text, setAt, setBy, consecutiveNoResolveNudges, nudgeIntervalMs?, maxNudges? }`.
   Setting a new goal replaces the old one, resets `consecutiveNoResolveNudges` to 0, and clears any
   back-off state (`backoffTicksRemaining`, `lastNudgeAt`, `lastResolvedAt`) so a new intent never
   inherits the previous goal's counter. `nudgeIntervalMs` is retained for state compatibility but
   is DORMANT as of R27 — cadence is governed by the check-streak knobs below (`/swarm goal show`
-  still surfaces it as historical metadata).- **Idle predicate** (every pump tick, inside the existing `withLock` in `pumpRootMailbox`):
+  still surfaces it as historical metadata).
+- **Configure / inspect max nudges**: `/swarm goal nudges [<count>]` (alias `/swarm goal max-nudges`) inspects or updates `goal.maxNudges`.
+  - When unset, defaults to `MAX_CONSECUTIVE_NUDGES_DEFAULT` (3, or env `PI_SWARM_MAX_NUDGES`).
+  - When set to `-1` (infinite), the idle streak nudging continues indefinitely without capping or entering back-off; it stops ONLY when the user or root agent marks the goal done (`/swarm goal done` or `swarm_mark_goal_done`) or when the swarm becomes non-idle.
+  - Setting or raising `maxNudges` above current `consecutiveNoResolveNudges` immediately clears any pending back-off state so nudges resume on the next eligible idle streak.
+- **Idle predicate** (every pump tick, inside the existing `withLock` in `pumpRootMailbox`):
   every non-root agent must be `runtimeStatus: "idle"` AND carry no `activeTaskIds` pointer
   (an idle agent holding an assignment pointer counts as "running" — `assignment_in_flight`).
   **Task state is NOT consulted**: open `assigned`/`in_progress` nodes no longer gate the nudge.
@@ -820,13 +825,12 @@ The root's durable goal plus an anti-loop nudge that fires when the swarm has no
   "I addressed the goal"); a non-root `turn_end` is also NOT a resolve (workers don't decide
   the goal). The reset runs in a second `pi.on("turn_end", ...)` handler registered AFTER the
   model-pool swap branch, so the resolve observes the post-swap state.
-- **Back-off**: once `consecutiveNoResolveNudges` reaches `MAX_CONSECUTIVE_NUDGES_DEFAULT` (3,
-  overridable via `PI_SWARM_MAX_NUDGES`), the pump enters a `GOAL_NUDGE_BACKOFF_TICKS`-tick (2)
-  back-off: each subsequent tick decrements `backoffTicksRemaining` without emitting. The tick that
-  drains the counter to 0 is the back-off exit gate and does NOT emit (avoids a one-tick
-  over-emit); the FOLLOWING tick may re-enter the `max_nudges` branch if the counter is still at
-  cap and re-arm the back-off. The pattern stabilises at "3 nudges → 2-tick back-off → repeat"
-  until the goal is resolved (counter reset) or cleared (`swarm_mark_goal_done`).
+- **Back-off**: when `maxNudges !== -1`, once `consecutiveNoResolveNudges` reaches effective `maxNudges`
+  (default 3, overridable via `goal.maxNudges` or `PI_SWARM_MAX_NUDGES`), the pump enters a
+  `GOAL_NUDGE_BACKOFF_TICKS`-tick (2) back-off: each subsequent tick decrements `backoffTicksRemaining`
+  without emitting. The tick that drains the counter to 0 is the back-off exit gate and does NOT emit
+  (avoids a one-tick over-emit); the FOLLOWING tick may re-enter the `max_nudges` branch if the counter
+  is still at cap and re-arm the back-off. When `maxNudges === -1` (infinite), back-off is bypassed entirely.
 - **Idempotency**: the nudge's semantic key is `goal:{goalId}:nudge:idle-streak`, validated via
   `SAFE_ID_RE`. A fresh `swarm_set_goal` mints a new `goalId` so a fresh goal is a fresh emit slot.
   Within the same goal, `findIdempotentMessage(st, "root", "root", key)` suppresses
