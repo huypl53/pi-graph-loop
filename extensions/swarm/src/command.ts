@@ -109,6 +109,34 @@ export function buildMarkerId(rawLabel?: string, d = new Date()): { id: string; 
 	};
 }
 
+export function findMarker(markers: Record<string, SwarmMarker> | undefined, query: string): { marker?: SwarmMarker; error?: string } {
+	if (!markers || !Object.keys(markers).length) {
+		return { error: "no checkpoints found in state" };
+	}
+	const q = query.trim().toLowerCase();
+	if (!q) return { error: "missing marker identifier" };
+	if (markers[query]) return { marker: markers[query] };
+	// Case-insensitive exact match on ID
+	const exactId = Object.keys(markers).find((k) => k.toLowerCase() === q);
+	if (exactId) return { marker: markers[exactId] };
+	// Prefix match on ID or exact match on label
+	const prefixMatches = Object.keys(markers).filter((k) => k.toLowerCase().startsWith(q));
+	if (prefixMatches.length === 1) return { marker: markers[prefixMatches[0]] };
+	if (prefixMatches.length > 1) {
+		return {
+			error: `ambiguous identifier "${query}" (matches: ${prefixMatches.slice(0, 5).join(", ")}${prefixMatches.length > 5 ? "..." : ""})`,
+		};
+	}
+	const labelMatches = Object.keys(markers).filter((k) => markers[k].label?.toLowerCase() === q);
+	if (labelMatches.length === 1) return { marker: markers[labelMatches[0]] };
+	if (labelMatches.length > 1) {
+		return {
+			error: `ambiguous label "${query}" (matches: ${labelMatches.slice(0, 5).join(", ")}${labelMatches.length > 5 ? "..." : ""})`,
+		};
+	}
+	return { error: `checkpoint "${query}" not found` };
+}
+
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
 // --inject/--no-inject --kind <v> --model <v> --provider <v> --caps <v> --yes --purge; everything else goes to `rest`.
 function parseFlags(tokens: string[]): {
@@ -257,7 +285,7 @@ function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
 		case "swarm-msg":
 			return "Usage: /swarm-msg send <to> <message>";
 		case "swarm-mark":
-			return "Usage: /swarm-mark [name] [note...] | list";
+			return "Usage: /swarm-mark [name] [note...] | list | show <id> | edit <id> <note...> | rm <id> | clear [--yes]";
 		default:
 			return "Usage: /swarm ...";
 	}
@@ -1730,8 +1758,8 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				return;
 			}
 			if (cmd === "mark") {
-				const labelRaw = rest.shift();
-				if (labelRaw === "list") {
+				const subOrLabel = rest.shift();
+				if (subOrLabel === "list") {
 					const st = await readState(p, ctx.cwd);
 					const markers = Object.values(st.markers || {}).sort((a, b) => (a.ts < b.ts ? 1 : -1));
 					if (!markers.length) {
@@ -1746,8 +1774,108 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					ctx.ui.notify(`📍 Checkpoints (${markers.length}):\n${lines.join("\n")}`, "info");
 					return;
 				}
+				if (subOrLabel === "show") {
+					const query = rest.shift();
+					if (!query) {
+						ctx.ui.notify("Usage: /swarm-mark show <id>", "warning");
+						return;
+					}
+					const st = await readState(p, ctx.cwd);
+					const { marker, error } = findMarker(st.markers, query);
+					if (!marker) {
+						ctx.ui.notify(error || `Checkpoint "${query}" not found`, "warning");
+						return;
+					}
+					const noteStr = marker.note ? `\n  • Note: "${marker.note}"` : "\n  • Note: (none)";
+					const gitStr = marker.gitHead ? `\n  • Git Commit: ${marker.gitHead}` : "\n  • Git Commit: (none)";
+					const updatedStr = marker.updatedAt ? `\n  • Updated: ${marker.updatedAt.replace("T", " ").slice(0, 19)}` : "";
+					const agentsStr = marker.activeAgents?.length
+						? `\n  • Active Workers (${marker.activeAgents.length}):\n      ${marker.activeAgents.map((a) => `- ${a}`).join("\n      ")}`
+						: "\n  • Active Workers: (none)";
+					const tasksStr = marker.inFlightTasks?.length
+						? `\n  • In-flight Tasks: ${marker.inFlightTasks.join(", ")}`
+						: "\n  • In-flight Tasks: (none)";
+					ctx.ui.notify(
+						`📍 Checkpoint: ${marker.id}\n  • Label: ${marker.label}\n  • Created: ${marker.ts.replace("T", " ").slice(0, 19)} by ${marker.by}${updatedStr}${noteStr}${gitStr}${agentsStr}${tasksStr}`,
+						"info",
+					);
+					return;
+				}
+				if (subOrLabel === "edit" || subOrLabel === "note") {
+					const query = rest.shift();
+					const newNote = rest.join(" ").trim();
+					if (!query || !newNote) {
+						ctx.ui.notify("Usage: /swarm-mark edit <id> <new note...>", "warning");
+						return;
+					}
+					await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const { marker, error } = findMarker(st.markers, query);
+						if (!marker) {
+							ctx.ui.notify(error || `Checkpoint "${query}" not found`, "warning");
+							return;
+						}
+						const oldNote = marker.note;
+						marker.note = newNote;
+						marker.updatedAt = now();
+						st.markers![marker.id] = marker;
+						await trace(p, "audit.checkpoint_updated", {
+							markerId: marker.id,
+							label: marker.label,
+							oldNote,
+							newNote,
+							by: currentAgentId(),
+						});
+						await writeState(p, st);
+						ctx.ui.notify(`📍 Checkpoint updated: ${marker.id} — "${newNote}"`, "info");
+					});
+					return;
+				}
+				if (subOrLabel === "rm" || subOrLabel === "delete") {
+					const query = rest.shift();
+					if (!query) {
+						ctx.ui.notify("Usage: /swarm-mark rm <id>", "warning");
+						return;
+					}
+					await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const { marker, error } = findMarker(st.markers, query);
+						if (!marker) {
+							ctx.ui.notify(error || `Checkpoint "${query}" not found`, "warning");
+							return;
+						}
+						delete st.markers![marker.id];
+						await trace(p, "audit.checkpoint_removed", {
+							markerId: marker.id,
+							label: marker.label,
+							by: currentAgentId(),
+						});
+						await writeState(p, st);
+						ctx.ui.notify(`🗑️ Checkpoint removed: ${marker.id}`, "info");
+					});
+					return;
+				}
+				if (subOrLabel === "clear") {
+					const flags = parseFlags(rest);
+					if (!flags.yes && !rest.includes("--yes")) {
+						ctx.ui.notify("To remove all checkpoints, run: /swarm-mark clear --yes", "warning");
+						return;
+					}
+					await withLock(p, async () => {
+						const st = await readState(p, ctx.cwd);
+						const count = Object.keys(st.markers || {}).length;
+						st.markers = {};
+						await trace(p, "audit.checkpoints_cleared", {
+							count,
+							by: currentAgentId(),
+						});
+						await writeState(p, st);
+						ctx.ui.notify(`🗑️ Cleared all checkpoints (${count})`, "info");
+					});
+					return;
+				}
 				const note = rest.join(" ").trim() || undefined;
-				const { id: markerId, label } = buildMarkerId(labelRaw);
+				const { id: markerId, label } = buildMarkerId(subOrLabel);
 				const gitInfo = await captureGitCommit(pi);
 				const gitHead = gitInfo.headCommit || undefined;
 				const by = currentAgentId();
@@ -2356,7 +2484,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 		handler: async (args, ctx) => runCommand(args, ctx, "swarm-msg"),
 	});
 	pi.registerCommand("swarm-mark", {
-		description: "Mark an audit checkpoint with auto-datetime suffix: [name] [note...] | list",
+		description: "Audit checkpoints: [name] [note...] | list | show <id> | edit <id> <note...> | rm <id> | clear [--yes]",
 		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-mark", argumentPrefix),
 		handler: async (args, ctx) => runCommand(args, ctx, "swarm-mark"),
 	});

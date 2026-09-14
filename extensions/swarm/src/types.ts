@@ -377,6 +377,7 @@ export type SwarmGoal = {
 	consecutiveNoResolveNudges: number; // monotonic; reset on root turn_end {stop} resolve
 	nudgeSeq?: number; // monotonic emit counter (NEVER reset, survives resolve) — idempotency key component so each nudge gets a fresh dedupe slot
 	nudgeIntervalMs?: number; // optional durable per-goal idle interval override; positive integer milliseconds only
+	maxNudges?: number; // optional durable per-goal max consecutive nudges before back-off (-1 for infinite, or positive integer)
 	lastNudgeAt?: string; // ISO; set on every successful nudge emission
 	lastResolvedAt?: string; // ISO; set on every successful counter reset
 	backoffTicksRemaining?: number; // 0..GOAL_NUDGE_BACKOFF_TICKS; when >0 the pump skips the next tick(s)
@@ -452,6 +453,7 @@ export type SwarmMarker = {
 	id: string;
 	label: string;
 	ts: string;
+	updatedAt?: string;
 	note?: string;
 	gitHead?: string;
 	activeAgents: string[];

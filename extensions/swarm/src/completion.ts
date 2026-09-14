@@ -80,7 +80,13 @@ const SCOPED_COMMANDS: Record<string, { name: string; description: string; canon
 		{ name: "validate", description: "Validate a task graph", canonical: "validate" },
 	],
 	"swarm-msg": [{ name: "send", description: "Send a message: <to> <body>", canonical: "send" }],
-	"swarm-mark": [{ name: "list", description: "List recent audit checkpoints", canonical: "list" }],
+	"swarm-mark": [
+		{ name: "list", description: "List recent audit checkpoints", canonical: "mark list" },
+		{ name: "show", description: "Show details of a checkpoint: <id>", canonical: "mark show" },
+		{ name: "edit", description: "Update note of a checkpoint: <id> <note...>", canonical: "mark edit" },
+		{ name: "rm", description: "Remove a checkpoint: <id>", canonical: "mark rm" },
+		{ name: "clear", description: "Clear all checkpoints: [--yes]", canonical: "mark clear" },
+	],
 };
 
 const GRAPH_FORMATS = ["text", "mermaid", "json"];
@@ -177,6 +183,23 @@ async function activeTaskSuggestions(p: Paths, cwd: string, agentId: string, b: 
 		.map((id) => ({ value: `${b}${id}`, label: id, description: `active on ${agent.id}` }));
 }
 
+async function markerSuggestions(p: Paths, cwd: string, b: string, currentWord: string): Promise<AutocompleteItem[]> {
+	try {
+		const st = await readState(p, cwd);
+		const markers = Object.values(st.markers || {}).sort((a, c) => c.ts.localeCompare(a.ts));
+		return markers
+			.filter((m) => startsWith(m.id, currentWord) || startsWith(m.label, currentWord))
+			.map((m) => ({
+				value: `${b}${m.id}`,
+				label: m.id,
+				description: m.note ? `"${m.note}"` : m.ts.replace("T", " ").slice(0, 19),
+			}));
+	} catch (err) {
+		void logSwarmError(cwd, "completion", "marker_suggest.failed", err);
+		return [];
+	}
+}
+
 function simple(items: string[], b: string, currentWord: string): AutocompleteItem[] {
 	return items.filter((v) => startsWith(v, currentWord)).map((v) => ({ value: `${b}${v}`, label: v }));
 }
@@ -227,6 +250,19 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 			case "flow":
 				if (tokens.length === 1) return await taskSuggestions(p, b, currentWord);
 				if (tokens.length === 2) return simple(["--events"], b, currentWord);
+				return [];
+			case "mark":
+				if (tokens.length === 1) {
+					return simple(["list", "show", "edit", "rm", "clear"], b, currentWord);
+				}
+				if (tokens.length === 2) {
+					if (["show", "edit", "rm", "delete"].includes(tokens[1])) {
+						return await markerSuggestions(p, cwd, b, currentWord);
+					}
+					if (tokens[1] === "clear") {
+						return flagSuggestions(["--yes"], b, currentWord);
+					}
+				}
 				return [];
 			case "capture":
 			case "attach":
