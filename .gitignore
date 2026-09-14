@@ -53,3 +53,6 @@ Session.vim
 .worktrees
 .pi/swarm.yml
 .pi/validation/reconcile-offset/.pi
+engineer
+.agents/plugins
+.agentkit

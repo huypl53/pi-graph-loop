@@ -1,0 +1,14 @@
+{
+  "ts": "2026-09-04T11:14:33.502Z",
+  "event": "notify.settled_with_open_assignment",
+  "sessionId": "swarm-redacted",
+  "data": {
+    "agentId": "reviewer",
+    "taskId": "task-feature-x",
+    "openAssignmentId": "msg-3b5e7c9d-1f2a-4c8e-8d3b-5a6c2e4d8f01",
+    "cooldownKey": "settle-notify:reviewer:task-feature-x",
+    "cooldownMs": 60000,
+    "delivered": true,
+    "via": "reconcile_runner"
+  }
+}

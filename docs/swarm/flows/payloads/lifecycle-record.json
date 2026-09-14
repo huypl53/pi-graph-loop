@@ -1,0 +1,28 @@
+{
+  "id": "msg-7f3a1b9c-2e44-4b9d-8c1a-1f0e9d2c5a01",
+  "from": "root",
+  "to": "implementer",
+  "status": "done",
+  "createdAt": "2026-09-04T10:14:32.118Z",
+  "updatedAt": "2026-09-04T10:17:48.502Z",
+  "queuedAt": "2026-09-04T10:14:32.118Z",
+  "injectedAt": "2026-09-04T10:14:32.244Z",
+  "interceptedAt": "2026-09-04T10:14:33.701Z",
+  "ackedAt": "2026-09-04T10:17:48.501Z",
+  "attempts": 1,
+  "requiresAck": true,
+  "requiresResponse": true,
+  "response": {
+    "status": "verified",
+    "resultMessageId": "msg-8a4b2c0d-3f55-4cae-9d2b-200f0ae3d6b2",
+    "sentAt": "2026-09-04T10:17:46.118Z",
+    "verifiedAt": "2026-09-04T10:17:48.502Z"
+  },
+  "lastAck": {
+    "by": "implementer",
+    "status": "done",
+    "note": "Test added at extensions/swarm/tests/messages.test.mjs; passing.",
+    "resultMessageId": "msg-8a4b2c0d-3f55-4cae-9d2b-200f0ae3d6b2",
+    "at": "2026-09-04T10:17:48.501Z"
+  }
+}

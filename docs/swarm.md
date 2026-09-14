@@ -23,14 +23,21 @@ project `.pi/swarm/` runtime directory.
 
 ## Current core surface
 
-The packaged extension registers **31 tools**:
+The packaged extension registers **35 tools** (registration modules in
+`extensions/swarm/src/tools/`):
 
-- 17 agent lifecycle / observability / recovery tools
-- 5 messaging / reconcile tools
-- 8 task-graph tools
-- 1 garbage-collection tool
+| Domain | Count | Registration module |
+| --- | ---: | --- |
+| Agent lifecycle, observability, and recovery | 19 | `src/tools/agents.ts` |
+| Messaging and reconcile | 5 | `src/tools/messages.ts` |
+| Task graph | 9 | `src/tools/tasks.ts` |
+| Retention / garbage collection | 1 | `src/tools/gc.ts` |
+| Diagnostics and audit (retention/trace summary) | 1 | `src/tools/audit.ts` |
 
 The old metric/run/memory/iteration/loop tools are no longer registered.
+See [`docs/swarm/tools.md`](./swarm/tools.md) for the full inventory and
+[`docs/swarm/flows/flow.md`](./swarm/flows/flow.md) for the live message/task/pump/reconcile
+flows with payload-backed edges.
 
 ## Runtime layout
 
@@ -67,26 +74,48 @@ The extension registers `/swarm` for quick TUI use:
 | `/swarm attach <id>` | Print tmux attach/select commands for an agent pane. |
 | `/swarm release <id> [<task-id>] [--force]` | Clear a stale active-task pointer (refuses non-terminal tasks unless `--force`). |
 | `/swarm mailbox reset <id\|here> --yes` | Emergency human-initiated mailbox reset. |
+| `/swarm deregister <here\|tmux-target>` | Self-service de-registration of a pi session from its swarm role (pane stays alive; root-style entry only — workers can only deregister themselves). |
 | `/swarm send <to> <message>` | Send a mailbox/tmux-injected message. |
 | `/swarm trace` | Show recent structured trace events. |
 | `/swarm capture <id>` | Capture an agent pane to `.pi/swarm/traces/tmux/`. |
+| `/swarm pool list` | Model pool health (weighted/round-robin/sticky slot picks, cooldown state). |
+| `/swarm pool show` | Full pool config view (pool OR implicit singleton fallback). |
+| `/swarm pool validate` | Structural check (read-only); warns on `swarm_yml_empty` / `swarm_yml_unreadable` and per-slot `slot_unresolvable` / `slot_no_credential`. |
+| `/swarm pool preview-preflight` | Dry-run spawn gate (read-only). |
+| `/swarm pool cooldown <provider/model> <ms>` | Bench a slot for a cooldown window. |
+| `/swarm pool clear <provider/model>` | Clear a bench. |
+| `/swarm pool help` | Canonical format reference (read-only). |
+
+Configuration lives in `.pi/settings.json` (`extensions.swarm` block, highest
+precedence) or in the comment-friendly `.pi/swarm.yml` (preferred for hand
+edits; pi core would silently drop comments in `settings.json`). The
+extension never edits `.pi/settings.json`. See
+[`docs/swarm/tools.md#configuration`](./swarm/tools.md#configuration).
 
 ## Task graph and shared context
 
 The task graph layer is implemented and remains the primary workflow system:
 
-- `swarm_create_task`
-- `swarm_assign_task`
-- `swarm_update_task`
-- `swarm_task_message`
+- `swarm_create_task` (auto + human-discuss qualification gate)
+- `swarm_confirm_qualification` (records the human-decision branch)
+- `swarm_assign_task` (runs the file-scope ownership preflight)
+- `swarm_update_task` (transitions nodes; `force=true, cancelTask=true` is
+  root-only and revokes active attempts with `TASK_CANCELLED`/
+  `NODE_CANCELLED`/`ASSIGNMENT_SUPERSEDED`)
+- `swarm_task_message` (task-scoped out-of-band message)
 - `swarm_task_status`
 - `swarm_validate_graph`
 - `swarm_print_graph`
 - `swarm_next_nodes`
 
 `task.json` remains the source of truth for task/node state. The durable
-`sharedContext` block and task artifacts under `tasks/<task-id>/artifacts/` are
-still supported.
+`sharedContext` block, qualification record, and task artifacts under
+`tasks/<task-id>/artifacts/` are still supported. Rework edges are
+first-class: a declared `rework: true` edge can re-open a failed/skipped node
+as `ready` without a root force-reset.
+
+For the live runtime flow (qualification → assign → worker update →
+closure → PM notify), see [`docs/swarm/flows/flow.md`](./swarm/flows/flow.md#task-graph-lifecycle).
 
 ## Validation
 

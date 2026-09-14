@@ -1,0 +1,36 @@
+{
+  "ok": true,
+  "tick": {
+    "ts": "2026-09-04T11:14:02.118Z",
+    "reason": "agent_settled",
+    "agentId": "root",
+    "sessionId": "sess-pm-001"
+  },
+  "surfaced": [
+    {
+      "messageId": "msg-7f3a1b9c-2e44-4b9d-8c1a-1f0e9d2c5a01",
+      "from": "implementer",
+      "to": "root",
+      "subject": "Test added; passing",
+      "resultMessageId": "msg-8a4b2c0d-3f55-4cae-9d2b-200f0ae3d6b2",
+      "fingerprint": "fpr-1c8a7d2e4f9b3a5d",
+      "stage": "responded",
+      "category": "response_ready",
+      "via": "agent_settled_pump"
+    },
+    {
+      "taskId": "task-feature-x",
+      "nodeId": "impl",
+      "transition": "in_progress -> done",
+      "fingerprint": "fpr-3e9b1d4f2c7a8b10",
+      "category": "task_progress",
+      "via": "task_update_notify"
+    }
+  ],
+  "suppressed": [],
+  "stale": {
+    "seenAt": "2026-09-04T10:58:21.044Z",
+    "reason": "root_busy"
+  },
+  "r10Boundary": "pi.sendMessage"
+}

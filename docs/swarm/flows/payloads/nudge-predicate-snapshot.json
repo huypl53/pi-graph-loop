@@ -1,0 +1,25 @@
+{
+  "redacted": true,
+  "pumpAt": "2026-09-08T11:15:00.000Z",
+  "taskStallCandidate": {
+    "taskId": "task-docs-42",
+    "status": "in_progress",
+    "createdAt": "2026-09-08T11:10:00.000Z",
+    "actionableUnassignedNodes": ["implement"],
+    "graphAdvanceNudgeInFlight": false,
+    "allEffectiveWorkersIdle": true,
+    "idleAgentCount": 2,
+    "withinInitialReadyGrace": false
+  },
+  "goalCandidate": {
+    "goalId": "goal-docs-42",
+    "goalPresent": true,
+    "effectiveWorkerCount": 2,
+    "allEffectiveWorkersIdle": true,
+    "idleWorkerHasActiveTaskPointer": false,
+    "taskStateConsulted": false,
+    "checkIntervalMs": 10000,
+    "checksRequired": 3,
+    "idleCheckCountBeforeSample": 2
+  }
+}

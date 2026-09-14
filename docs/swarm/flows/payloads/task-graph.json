@@ -1,0 +1,58 @@
+{
+  "task_id": "task-feature-x",
+  "schemaVersion": 1,
+  "status": "in_progress",
+  "title": "Ship swarm_send_message parity test + review",
+  "qualification": {
+    "status": "ready",
+    "mode": "auto",
+    "artifact": "artifacts/qualification-gate.md",
+    "confirmedAt": "2026-09-04T09:50:11.220Z",
+    "confirmedBy": "root"
+  },
+  "nodes": {
+    "qualify": {
+      "status": "done",
+      "role": "qualifier",
+      "dependsOn": []
+    },
+    "impl": {
+      "status": "in_progress",
+      "role": "implementer",
+      "assignee": "implementer",
+      "assigneePolicy": "exact",
+      "allowedFiles": ["extensions/swarm/src/tools/messages.ts", "extensions/swarm/tests/messages.test.mjs"],
+      "dependsOn": ["qualify"],
+      "attemptId": "att-impl-001",
+      "attempts": [
+        {
+          "attemptId": "att-impl-001",
+          "attemptNumber": 1,
+          "assignmentMessageId": "msg-7f3a1b9c-2e44-4b9d-8c1a-1f0e9d2c5a01",
+          "assignee": "implementer",
+          "assignedAt": "2026-09-04T10:14:32.244Z",
+          "status": "active",
+          "lastActivityAt": "2026-09-04T10:17:48.501Z",
+          "scope": {
+            "source": "node-explicit",
+            "sourceNodeId": "impl",
+            "files": [
+              "extensions/swarm/src/tools/messages.ts",
+              "extensions/swarm/tests/messages.test.mjs"
+            ]
+          }
+        }
+      ]
+    },
+    "review": {
+      "status": "pending",
+      "role": "reviewer",
+      "dependsOn": ["impl"]
+    }
+  },
+  "edges": [
+    { "from": "qualify", "to": "impl", "kind": "normal" },
+    { "from": "impl", "to": "review", "kind": "normal" },
+    { "from": "review", "to": "impl", "kind": "rework", "condition": "review.requested_changes" }
+  ]
+}

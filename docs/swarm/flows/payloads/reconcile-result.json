@@ -1,0 +1,36 @@
+{
+  "ok": true,
+  "ranAt": "2026-09-04T11:14:33.502Z",
+  "scope": "self",
+  "actions": {
+    "retried": [
+      {
+        "messageId": "msg-2c4d1a7e-5b88-4d0f-9e2a-4b7c1f3d5e62",
+        "reason": "pane_now_pi_like",
+        "outcome": "injected"
+      }
+    ],
+    "markedDrift": [
+      {
+        "taskId": "task-feature-x",
+        "nodeId": "review",
+        "expected": "pending",
+        "observed": "ready_legacy_no_owner",
+        "fix": "staleAt stamped; no auto-mutation"
+      }
+    ],
+    "deadLettered": [],
+    "notified": [
+      {
+        "kind": "settled_with_open_assignment",
+        "agentId": "reviewer",
+        "taskId": "task-feature-x"
+      }
+    ]
+  },
+  "warnings": [],
+  "advisory": [
+    "task_node_ownership_legacy: node 'review' on task-feature-x has no ownership metadata (pre-policy)"
+  ],
+  "nextOffset": 0
+}

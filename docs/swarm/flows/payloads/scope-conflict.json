@@ -1,0 +1,31 @@
+{
+  "ok": false,
+  "error": "ACTIVE_SCOPE_CONFLICT",
+  "message": "Cannot assign node 'impl-2' to 'implementer-2': active write scope overlaps with attempt att-impl-001 on agent 'implementer'.",
+  "data": {
+    "candidateNode": "impl-2",
+    "candidateTask": "task-feature-y",
+    "candidateScope": {
+      "source": "node-explicit",
+      "sourceNodeId": "impl-2",
+      "files": [
+        "extensions/swarm/src/tools/messages.ts",
+        "extensions/swarm/src/mailbox.ts"
+      ]
+    },
+    "conflictingAttempt": {
+      "attemptId": "att-impl-001",
+      "taskId": "task-feature-x",
+      "agentId": "implementer",
+      "scope": {
+        "source": "node-explicit",
+        "sourceNodeId": "impl",
+        "files": [
+          "extensions/swarm/src/tools/messages.ts",
+          "extensions/swarm/tests/messages.test.mjs"
+        ]
+      }
+    },
+    "overlap": ["extensions/swarm/src/tools/messages.ts"]
+  }
+}

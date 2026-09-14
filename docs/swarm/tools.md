@@ -41,9 +41,17 @@ was a separate persistence layer and is no longer part of the core surface.
 | --- | ---: | --- |
 | Agent lifecycle, observability, and recovery | 19 | `src/tools/agents.ts` |
 | Messaging and reconcile | 5 | `src/tools/messages.ts` |
-| Task graph | 8 | `src/tools/tasks.ts` |
+| Task graph | 9 | `src/tools/tasks.ts` |
 | Retention / garbage collection | 1 | `src/tools/gc.ts` |
-| **Total** | **33** | `extensions/swarm/index.ts` |
+| Diagnostics and audit (retention/trace summary) | 1 | `src/tools/audit.ts` |
+| **Total** | **35** | `extensions/swarm/index.ts` |
+
+> The total is the sum of the five registration modules above; `src/tools/agents.ts`
+> is the largest domain (19) and includes the root-only `swarm_prune`,
+> `swarm_release_agent_task`, and `swarm_stop_agent(force)` tools gated at the
+> server boundary. `swarm_audit` (rotation/trace summary) is a thin diagnostic
+> tool registered alongside retention; it is intentionally not bundled into
+> the GC count.
 
 ## Configuration
 
@@ -135,7 +143,7 @@ A session resolves to one of three identities:
 **Issue 25 Phase 2 profile gating (gate=1 only):** under
 `PI_SWARM_MINIMAL_PROTOCOL=1`, identity gating is further narrowed by role
 profile allowlists — a worker's active set is exactly 5 tools and the
-root's is 12 distinct tool names (13 capabilities). All 31 tools stay
+root's is 12 distinct tool names (13 capabilities). All 35 tools stay
 *registered*; only the active set is filtered, and execution-time authority
 (`ROOT_AUTHORITY_REQUIRED`) remains the real gate. Gate=0 (default)
 keeps the full 31-tool active set for registered agents.

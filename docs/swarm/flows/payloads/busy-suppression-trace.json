@@ -1,0 +1,14 @@
+{
+  "ts": "2026-09-04T11:08:14.220Z",
+  "event": "message.busy_suppressed",
+  "sessionId": "swarm-redacted",
+  "data": {
+    "messageId": "msg-7f3a1b9c-2e44-4b9d-8c1a-1f0e9d2c5a01",
+    "to": "root",
+    "reason": "root_busy",
+    "stage": "surfaced",
+    "deferredTo": "next_idle_tick_or_agent_settled",
+    "r15P0Note": "Bounded surface promise removed: while the root is mid-turn the message is durably in the mailbox but no time-bound surfacing is guaranteed. Surfaces when the root's own agent_settled fires or its next idle watchdog tick processes the mailbox.",
+    "r10Boundary": "pi.sendMessage"
+  }
+}

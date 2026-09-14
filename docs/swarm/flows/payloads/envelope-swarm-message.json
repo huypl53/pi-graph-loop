@@ -1,0 +1,22 @@
+{
+  "id": "msg-7f3a1b9c-2e44-4b9d-8c1a-1f0e9d2c5a01",
+  "swarmId": "swarm-redacted",
+  "from": "root",
+  "to": "implementer",
+  "subject": "Implement swarm_send_message tool parity test",
+  "priority": "normal",
+  "type": "swarm.message",
+  "schemaVersion": 1,
+  "createdAt": "2026-09-04T10:14:32.118Z",
+  "body": "Add a unit test that proves swarm_send_message mirrors the SwarmMessage envelope into mailboxes/<to>.jsonl verbatim, then exercises the input-hook intercept path.",
+  "conversationId": "conv-feature-x",
+  "requiresAck": true,
+  "requiresResponse": true,
+  "ttlMs": 600000,
+  "idempotencyKey": "feature-x-impl-001",
+  "headers": {
+    "task_id": "task-feature-x",
+    "node_id": "impl",
+    "attempt_id": "att-001"
+  }
+}

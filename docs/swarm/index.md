@@ -8,6 +8,7 @@ Use it when you need to understand, extend, or debug swarm without reading one l
 
 ### I want to use swarm
 - [Architecture overview](./architecture.md) — mental model, runtime, invariants
+- [Runtime flows](./flows/flow.md) — interactive message / task / pump / reconcile flows with clickable payload-backed edges (use the local workbench to inspect the actual `SwarmMessage` envelope, `MessageRecord`, `task.json`, scope-conflict error, pump-tick surfaced set, etc.)
 - [Operations guide](./operations.md) — quickstart, runtime files, debugging, validation entrypoints
   - Start with [Model pool configuration](./operations.md#model-pool-multi-provider-rotation)
     (canonical format, legacy singleton, discover/show/validate commands, preflight)
@@ -35,9 +36,10 @@ Use it when you need to understand, extend, or debug swarm without reading one l
 
 ## Recommended reading order for contributors
 1. [Architecture overview](./architecture.md)
-2. [Contributor guide](./contributor-guide.md)
-3. [`extensions/swarm/README.md`](../../extensions/swarm/README.md)
-4. Detailed topic docs only for the subsystem you are changing
+2. [Runtime flows](./flows/flow.md) — read alongside the source so the source-of-truth rules have a concrete shape
+3. [Contributor guide](./contributor-guide.md)
+4. [`extensions/swarm/README.md`](../../extensions/swarm/README.md)
+5. Detailed topic docs only for the subsystem you are changing
 
 ## Documentation rules
 - Prefer adding new behavior docs under `docs/swarm/` first.

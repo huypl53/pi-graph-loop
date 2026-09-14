@@ -1723,6 +1723,30 @@ export async function staleOpenAssignmentScanLocked(
 		let dirty = false;
 		for (const [nodeId, node] of Object.entries(task.nodes)) {
 			if (node.status !== "assigned" && node.status !== "in_progress") continue;
+
+			// Active worker gate: an agent that has NOT settled (tool_running, or busy with fresh heartbeat)
+			// is actively working and must NOT be surfaced as stale open.
+			// Only agents that have actually settled (runtimeStatus === "idle") or whose heartbeat is
+			// dead (hung > DEFAULT_AGENT_HEARTBEAT_STALE_MS) are candidates for stale open.
+			const assigneeAgent = node.assignee ? st.agents[node.assignee] : undefined;
+			if (assigneeAgent && assigneeAgent.status === "running") {
+				if (assigneeAgent.runtimeStatus === "tool_running") {
+					continue;
+				}
+				if (assigneeAgent.runtimeStatus === "busy") {
+					const hb = assigneeAgent.lastHeartbeatAt ? new Date(assigneeAgent.lastHeartbeatAt).getTime() : 0;
+					if (nowMs - hb <= DEFAULT_AGENT_HEARTBEAT_STALE_MS) {
+						continue;
+					}
+				}
+				if (assigneeAgent.runtimeStatus === "idle" && assigneeAgent.lastAgentSettledAt) {
+					const settledMs = new Date(assigneeAgent.lastAgentSettledAt).getTime();
+					if (settledMs && nowMs - settledMs <= thresholdMs) {
+						continue; // Grace period: settled within threshold window
+					}
+				}
+			}
+
 			inspected++;
 			const ts = nowMs;
 			// `lastProgressAt` absent or older than threshold → candidate.

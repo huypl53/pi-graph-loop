@@ -84,6 +84,9 @@ captured errors through `logSwarmError()` / `traceLogged()` from `extensions/swa
 - `swarm_reconcile` (`dryRun` first)
 - `swarm_dead_letters`
 - `swarm_capture_agent_pane`
+- See [`flow.md` message lifecycle](./flows/flow.md#message-lifecycle) for the
+  durable mailbox → tmux inject → input hook intercept → ack → reconcile
+  retry / dead-letter path with real payload examples.
 
 ### Recover or debug task execution
 - `swarm_task_status(..., runtime=true)`
@@ -91,6 +94,9 @@ captured errors through `logSwarmError()` / `traceLogged()` from `extensions/swa
 - `swarm_print_graph`
 - `swarm_reconcile` (also reports advisory `task_node_ownership_legacy` drift for active nodes on pre-policy tasks; never fabricates ownership)
 - `swarm_release_agent_task` for stale pointers after confirming reconcile results
+- See [`flow.md` task graph lifecycle](./flows/flow.md#task-graph-lifecycle) for the
+  qualification gate → scope preflight → worker update → closure → cancel path
+  with real `task.json` and scope-conflict error examples.
 
 ### Cancel a task (root-only)
 

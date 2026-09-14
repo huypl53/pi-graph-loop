@@ -1,0 +1,17 @@
+{
+  "ts": "2026-09-04T11:02:18.044Z",
+  "event": "message.dead_letter",
+  "sessionId": "swarm-redacted",
+  "data": {
+    "id": "msg-9b4c3d2e-4a66-4dbf-8e3c-3a1b4f5d7e93",
+    "from": "root",
+    "to": "worker-dead",
+    "reason": "exceeded_max_retries",
+    "attempts": 3,
+    "engineMaxRetries": 3,
+    "lastError": "pane alive but not running pi (pane_current_command=bash)",
+    "outcome": "dead_letter",
+    "ttl_expired": false,
+    "superseded": false
+  }
+}
