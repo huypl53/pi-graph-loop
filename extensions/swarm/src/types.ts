@@ -447,6 +447,18 @@ export type RecentSpawn = {
 	spawnedBySessionStartedAt?: string;
 };
 
+// Checkpoint marker created via /swarm mark / /swarm-mark for timeline debugging.
+export type SwarmMarker = {
+	id: string;
+	label: string;
+	ts: string;
+	note?: string;
+	gitHead?: string;
+	activeAgents: string[];
+	inFlightTasks: string[];
+	by: string;
+};
+
 export type SwarmState = {
 	version: number;
 	swarmId: string;
@@ -454,6 +466,7 @@ export type SwarmState = {
 	tmuxSession: string;
 	agents: Record<string, SwarmAgent>;
 	delivered: Record<string, string[]>;
+	markers?: Record<string, SwarmMarker>;
 	// Multi-root leader lease (issue 8). Addditive; readState back-fills undefined for
 	// pre-policy swarms so first mutation claims vacant. See identity.ts:readRootLeader /
 	// heartbeatRootLeader / claimRootLeader for the gate semantics.

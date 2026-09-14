@@ -43,6 +43,7 @@ import {
 	withLock,
 	writeState,
 	writeTaskState,
+	captureGitCommit,
 } from "./state.ts";
 import {
 	attachTarget,
@@ -80,8 +81,33 @@ import {
 	TRACE_PROTOCOL_MIGRATION_COMPLETED,
 	TRACE_PROTOCOL_MIGRATION_RECORD,
 } from "./constants.ts";
-import type { ModelSlot } from "./types.ts";
+import type { ModelSlot, SwarmMarker } from "./types.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
+
+export function formatMarkerSuffix(d = new Date()): string {
+	const pad = (n: number) => String(n).padStart(2, "0");
+	const y = d.getFullYear();
+	const m = pad(d.getMonth() + 1);
+	const day = pad(d.getDate());
+	const h = pad(d.getHours());
+	const min = pad(d.getMinutes());
+	const s = pad(d.getSeconds());
+	return `${y}${m}${day}-${h}${min}${s}`;
+}
+
+export function buildMarkerId(rawLabel?: string, d = new Date()): { id: string; label: string } {
+	const suffix = formatMarkerSuffix(d);
+	const clean = (rawLabel || "")
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, "-")
+		.replace(/^-+|-+$/g, "");
+	const label = clean || "mark";
+	return {
+		id: `${label}-${suffix}`,
+		label,
+	};
+}
 
 // Tiny flag parser for /swarm lifecycle subcommands. Recognizes --force --no-kill --literal --enter
 // --inject/--no-inject --kind <v> --model <v> --provider <v> --caps <v> --yes --purge; everything else goes to `rest`.
@@ -220,7 +246,7 @@ When settings.json declares a swarm block AND .pi/swarm.yml exists, /swarm pool 
 Discover: /swarm pool show    Validate: /swarm pool validate    Preflight probe: /swarm pool preview-preflight
 See: docs/swarm/operations.md (Model pool configuration)`;
 
-type ScopedSwarmCommandName = "swarm" | "swarm-agents" | "swarm-tasks" | "swarm-msg";
+type ScopedSwarmCommandName = "swarm" | "swarm-agents" | "swarm-tasks" | "swarm-msg" | "swarm-mark";
 
 function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
 	switch (commandName) {
@@ -230,6 +256,8 @@ function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
 			return "Usage: /swarm-tasks <list|graph|status|next|validate> ...";
 		case "swarm-msg":
 			return "Usage: /swarm-msg send <to> <message>";
+		case "swarm-mark":
+			return "Usage: /swarm-mark [name] [note...] | list";
 		default:
 			return "Usage: /swarm ...";
 	}
@@ -238,6 +266,9 @@ function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
 function normalizeScopedSwarmArgs(commandName: ScopedSwarmCommandName, args: string): string | null {
 	if (commandName === "swarm") return args;
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	if (commandName === "swarm-mark") {
+		return ["mark", ...tokens].join(" ");
+	}
 	if (!tokens.length) return null;
 	const [cmd, ...rest] = tokens;
 	if (commandName === "swarm-agents") {
@@ -1698,6 +1729,85 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				ctx.ui.notify(`Trace: ${relative(ctx.cwd, p.events)}`, "info");
 				return;
 			}
+			if (cmd === "mark") {
+				const labelRaw = rest.shift();
+				if (labelRaw === "list") {
+					const st = await readState(p, ctx.cwd);
+					const markers = Object.values(st.markers || {}).sort((a, b) => (a.ts < b.ts ? 1 : -1));
+					if (!markers.length) {
+						ctx.ui.notify("No checkpoints marked yet. Usage: /swarm-mark [name] [note...]", "info");
+						return;
+					}
+					const lines = markers.slice(0, 15).map((m) => {
+						const noteStr = m.note ? ` — "${m.note}"` : "";
+						const gitStr = m.gitHead ? ` [git: ${m.gitHead.slice(0, 7)}]` : "";
+						return `  • ${m.id} (${m.ts.replace("T", " ").slice(0, 19)})${noteStr}${gitStr}`;
+					});
+					ctx.ui.notify(`📍 Checkpoints (${markers.length}):\n${lines.join("\n")}`, "info");
+					return;
+				}
+				const note = rest.join(" ").trim() || undefined;
+				const { id: markerId, label } = buildMarkerId(labelRaw);
+				const gitInfo = await captureGitCommit(pi);
+				const gitHead = gitInfo.headCommit || undefined;
+				const by = currentAgentId();
+				const ts = now();
+				await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					st.markers ||= {};
+					const activeAgents = Object.values(st.agents || {})
+						.filter((a) => a.status === "running")
+						.map((a) => `${a.id}(${a.runtimeStatus || "idle"})`);
+					const inFlightTasks = Array.from(
+						new Set(
+							Object.values(st.agents || {})
+								.flatMap((a) => a.activeTaskIds || [])
+								.filter(Boolean),
+						),
+					);
+					const markerRecord: SwarmMarker = {
+						id: markerId,
+						label,
+						ts,
+						note,
+						gitHead,
+						activeAgents,
+						inFlightTasks,
+						by,
+					};
+					st.markers[markerId] = markerRecord;
+					await trace(p, "audit.checkpoint", {
+						markerId,
+						label,
+						note,
+						gitHead,
+						activeAgents,
+						inFlightTasks,
+						by,
+					});
+					await writeState(p, st);
+				});
+				ctx.ui.notify(
+					`📍 Checkpoint marked: ${markerId}${note ? ` — "${note}"` : ""}${gitHead ? ` [git: ${gitHead.slice(0, 7)}]` : ""}\nTrace logged to: ${relative(ctx.cwd, p.events)}`,
+					"info",
+				);
+				return;
+			}
+			if (cmd === "markers") {
+				const st = await readState(p, ctx.cwd);
+				const markers = Object.values(st.markers || {}).sort((a, b) => (a.ts < b.ts ? 1 : -1));
+				if (!markers.length) {
+					ctx.ui.notify("No checkpoints marked yet. Usage: /swarm-mark [name] [note...]", "info");
+					return;
+				}
+				const lines = markers.slice(0, 15).map((m) => {
+					const noteStr = m.note ? ` — "${m.note}"` : "";
+					const gitStr = m.gitHead ? ` [git: ${m.gitHead.slice(0, 7)}]` : "";
+					return `  • ${m.id} (${m.ts.replace("T", " ").slice(0, 19)})${noteStr}${gitStr}`;
+				});
+				ctx.ui.notify(`📍 Checkpoints (${markers.length}):\n${lines.join("\n")}`, "info");
+				return;
+			}
 			if (cmd === "capture") {
 				const agentId = rest[0];
 				if (!agentId) {
@@ -2244,5 +2354,10 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 		description: "Messaging shortcut for swarm: send <to> <message>",
 		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-msg", argumentPrefix),
 		handler: async (args, ctx) => runCommand(args, ctx, "swarm-msg"),
+	});
+	pi.registerCommand("swarm-mark", {
+		description: "Mark an audit checkpoint with auto-datetime suffix: [name] [note...] | list",
+		getArgumentCompletions: (argumentPrefix) => swarmScopedArgumentCompletions("swarm-mark", argumentPrefix),
+		handler: async (args, ctx) => runCommand(args, ctx, "swarm-mark"),
 	});
 }

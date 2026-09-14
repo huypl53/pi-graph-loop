@@ -33,7 +33,7 @@ const ok = (name, cond) => {
 	}
 };
 
-for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg"]) {
+for (const name of ["swarm", "swarm-agents", "swarm-tasks", "swarm-msg", "swarm-mark"]) {
 	ok(`${name} registered`, typeof cmds[name]?.handler === "function");
 }
 

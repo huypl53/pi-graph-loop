@@ -50,7 +50,7 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "trace", description: "Show trace file path" },
 	{ name: "capture", description: "Capture an agent's tmux pane: <id>" },
 	{ name: "identity", description: "reload|show an agent's identity" },
-	{ name: "pool", description: "Model pool: list | show | validate | help | preview-preflight | cooldown <slot> <ms> | clear <slot>" },
+	{ name: "pool", description: "Model pool: list | show | validate | help | preview-preflight | rotate" },
 ];
 
 const SCOPED_COMMANDS: Record<string, { name: string; description: string; canonical: string }[]> = {
@@ -80,6 +80,7 @@ const SCOPED_COMMANDS: Record<string, { name: string; description: string; canon
 		{ name: "validate", description: "Validate a task graph", canonical: "validate" },
 	],
 	"swarm-msg": [{ name: "send", description: "Send a message: <to> <body>", canonical: "send" }],
+	"swarm-mark": [{ name: "list", description: "List recent audit checkpoints", canonical: "list" }],
 };
 
 const GRAPH_FORMATS = ["text", "mermaid", "json"];
