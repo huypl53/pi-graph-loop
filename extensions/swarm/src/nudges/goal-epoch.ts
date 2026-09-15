@@ -634,8 +634,10 @@ export async function evaluateIdleGoalNudgeLocked(
 		`Goal ${goal.id} was set ${sinceSec}s ago: "${bodyText}".\n\n` +
 		`All ${idleCount} non-root agent(s) have been idle for ${checksRequired} consecutive checks (${Math.round(checkIntervalMs / 1000)}s apart), independent of task state.\n\n` +
 		`This is nudge ${nudgeNumber} of ${maxText}.\n\n` +
-		`Action: either spawn / assign work to advance the goal, or mark it done:\n` +
-		`  swarm_mark_goal_done(goalId="${goal.id}")\n\n` +
+		`Action:\n` +
+		`- Either spawn / assign work to advance the goal.\n` +
+		`- If waiting for background tasks or ongoing processes, run a synchronous wait (e.g. \`bash sleep 30\` or \`sleep 60\`) to stay actively working instead of settling idle.\n` +
+		`- Or mark it done: swarm_mark_goal_done(goalId="${goal.id}")\n\n` +
 		`(Any reply you produce — including a plain /swarm status, a tool call, or an explanation — is treated as a "resolve": the consecutive counter resets and the back-off clears. Only a silent ignore keeps the counter climbing.)`;
 	await deliverMessageLocked(pi, cwd, p, st, {
 		to: "root",

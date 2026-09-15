@@ -51,6 +51,7 @@ import {
 	PUMP_SESSION_TTL_MS,
 	PUMP_STUCK_DEFER_ESCALATE_MS,
 	REINJECT_AFTER_MS,
+	ROOT_BUSY_ACTIVE_EXECUTION_MS,
 	TASK_INITIAL_READY_GRACE_MS,
 	TASK_NUDGE_MS,
 	TASK_STALE_MS,
@@ -477,13 +478,30 @@ export async function staleSurfaceReason(
 		// === R27 (2026-09-04) — the actionable_graph leg is REMOVED for goal keys. ===
 		// Emission no longer consults task state, so neither may the surface gate
 		// (the R21 liveGraphActionable leg — kept through R25 — contradicts the new
-		// emission gate and would starve every task-independent goal nudge the same
-		// way R22's agent_busy leg did). Only the idle_epoch_advanced leg remains:
-		if (Number.isFinite(idleAnchorMs) && createdAt < idleAnchorMs) {
+		// === R28 (2026-09-15) — Monotonic Goal Nudge Sequence Guard ===
+		// Idle streak nudges carry a monotonic nudgeSeq in their idempotency key
+		// (goal:{goalId}:nudge:idle-streak:{seq}).
+		// First: check epoch advance (immortality guard). If message predates the idle epoch, it's idle_epoch_advanced.
+		// Second: if the idle epoch is not active (allIdleSinceAt undefined due to root/worker busy) and st.goal
+		// has advanced to a higher nudgeSeq, any older sequence number is strictly superseded and must NEVER
+		// surface (prevents out-of-order resurrection like 50->51->52->49 when idleAnchorMs resets).
+		// Also, if the goal is missing or changed, the nudge is stale.
+		const msgSeq = Number(goalKey[2]);
+		if (!st.goal || st.goal.id !== goalKey[1]) {
+			staleReason = "goal_missing";
+			evidence = [`goal_missing:${goalKey[1]}`];
+		} else if (Number.isFinite(idleAnchorMs) && createdAt < idleAnchorMs) {
 			staleReason = "idle_epoch_advanced";
 			evidence = [
 				`message_created_before_idle_epoch:${new Date(createdAt).toISOString()}`,
 				`idle_epoch:${new Date(idleAnchorMs).toISOString()}`,
+			];
+		} else if (!Number.isFinite(idleAnchorMs) && Number.isFinite(st.goal.nudgeSeq) && Number.isFinite(msgSeq) && msgSeq < st.goal.nudgeSeq) {
+			staleReason = "goal_nudge_superseded";
+			evidence = [
+				`msg_seq:${msgSeq}`,
+				`active_nudge_seq:${st.goal.nudgeSeq}`,
+				`goal_id:${st.goal.id}`,
 			];
 		}
 	} else if (taskKey) {
@@ -941,29 +959,49 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 		// it with an explicit steer: steering interrupts the queued continuation and starts a fresh turn,
 		// which is exactly the operator-mandated behavior for stale deferrals.
 		const neverDisplayedBusy = windowMsgs.filter((m) => !surfaced.has(m.id));
-		const oldestWaitMs = neverDisplayedBusy.length
-			? nowMs - new Date(neverDisplayedBusy.map((m) => st.messages[m.id]?.createdAt || m.createdAt).sort()[0] || nowMs).getTime()
+		const activeGoalId = st.goal?.id;
+		const activeNudgeSeq = Number(st.goal?.nudgeSeq);
+		const actionableBusyMsgs = neverDisplayedBusy.filter((m) => {
+			const rec = st.messages[m.id] || m;
+			const key = String(rec.idempotencyKey || m.idempotencyKey || "");
+			const goalKey = key.match(/^goal:([^:]+):nudge:idle-streak:(\d+)$/);
+			if (goalKey && activeGoalId && goalKey[1] === activeGoalId && Number.isFinite(activeNudgeSeq)) {
+				const seq = Number(goalKey[2]);
+				if (Number.isFinite(seq) && seq < activeNudgeSeq) {
+					return false;
+				}
+			}
+			return true;
+		});
+		const oldestWaitMs = actionableBusyMsgs.length
+			? nowMs - new Date(actionableBusyMsgs.map((m) => st.messages[m.id]?.createdAt || m.createdAt).sort()[0] || nowMs).getTime()
 			: 0;
-		if (!idleAtStart && oldestWaitMs < PUMP_STUCK_DEFER_ESCALATE_MS) {
+		const lastToolMs = st.agents.root?.lastToolAt ? new Date(st.agents.root.lastToolAt).getTime() : 0;
+		const isRootActivelyExecuting = Number.isFinite(lastToolMs) && nowMs - lastToolMs < ROOT_BUSY_ACTIVE_EXECUTION_MS;
+		const shouldEscalate = !idleAtStart && oldestWaitMs >= PUMP_STUCK_DEFER_ESCALATE_MS && !isRootActivelyExecuting;
+		if (!idleAtStart && !shouldEscalate) {
 			keepalive();
 			if (neverDisplayedBusy.length) {
 				await trace(p, "mailbox.root_pump_deferred", {
 					reason,
 					queued: neverDisplayedBusy.length,
+					actionableQueued: actionableBusyMsgs.length,
 					oldestWaitMs: Math.round(oldestWaitMs),
 					thresholdMs: PUMP_STUCK_DEFER_ESCALATE_MS,
 					cid: String(process.pid),
 					sid: process.env.PI_SESSION_ID ?? null,
+					rootActivelyExecuting: isRootActivelyExecuting,
 				});
 			}
 			await writeState(p, st);
 			return { toSurface: [] as SwarmMessage[], retriggered: 0 };
 		}
-		const escalateStuck = !idleAtStart && oldestWaitMs >= PUMP_STUCK_DEFER_ESCALATE_MS;
+		const escalateStuck = shouldEscalate;
 		if (escalateStuck) {
 			await trace(p, "mailbox.root_pump_stuck_escalated", {
 				reason,
 				queued: neverDisplayedBusy.length,
+				actionableQueued: actionableBusyMsgs.length,
 				oldestWaitMs: Math.round(oldestWaitMs),
 				thresholdMs: PUMP_STUCK_DEFER_ESCALATE_MS,
 				cid: String(process.pid),
@@ -1000,6 +1038,7 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 				return { msg, rec, groupKey: rootSurfaceGroupKey(rec) };
 			});
 		const coalesced = new Map<string, { msg: SwarmMessage; dropped: string[] }>();
+		const consumedSuppressedIds = new Set<string>();
 		for (const item of surfacePlan) {
 			const v = await staleSurfaceReason(p, st, item.msg, taskIndex, nowMs);
 			if (v.stale) {
@@ -1070,6 +1109,7 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 						reason: liveTerminalReason || "task_terminal",
 						evidence: [liveTerminalReason || "task_terminal", "r13_p1_liveness_gate"],
 					});
+					consumedSuppressedIds.add(item.msg.id);
 					continue;
 				}
 				if (bypassBusyForHigh) {
@@ -1088,6 +1128,21 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 						reason: v.reason,
 						evidence: v.evidence,
 					});
+					// If the stale reason is permanent (superseded, epoch advanced, terminal task/node, missing task/goal),
+					// mark it consumed into receipts so it does not linger in the mailbox forever,
+					// inflating oldestWaitMs and causing false stuck-busy escalations or resurrections.
+					if (
+						v.reason === "goal_nudge_superseded" ||
+						v.reason === "idle_epoch_advanced" ||
+						v.reason === "goal_missing" ||
+						v.reason === "task_missing" ||
+						v.reason === "task_done" ||
+						v.reason === "task_failed" ||
+						v.reason === "task_cancelled" ||
+						v.reason === "node_terminal"
+					) {
+						consumedSuppressedIds.add(item.msg.id);
+					}
 					continue;
 				}
 			}
@@ -1116,7 +1171,6 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 			}).catch(() => {});
 		}
 		let toSurface = [...coalesced.values()].map((entry) => entry.msg).sort(compareSurfaceCandidates);
-		const consumedSuppressedIds = new Set<string>();
 		for (const entry of coalesced.values()) {
 			for (const droppedId of entry.dropped) consumedSuppressedIds.add(droppedId);
 		}
@@ -1126,8 +1180,9 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 			if (!st.consumerReceipts.root) st.consumerReceipts.root = { entries: {}, revision: 0 };
 			if (!st.consumerReceipts.root.entries) st.consumerReceipts.root.entries = {};
 			for (const id of consumedSuppressedIds) {
-				const rec = st.messages[id];
+				const rec = st.messages[id] || windowMsgs.find((m) => m.id === id);
 				if (!rec || rec.to !== "root") continue;
+				surfaced.add(id);
 				if (rec.requiresAck === false) {
 					st.delivered.root = Array.from(new Set([...(st.delivered.root || []), id]));
 					if (!rec.surfacedAt) {
@@ -1146,6 +1201,7 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 					st.consumerReceipts.root.revision = (st.consumerReceipts.root.revision || 0) + 1;
 				}
 			}
+			sess.ids = [...surfaced];
 		}
 		if (!toSurface.length) {
 			keepalive();

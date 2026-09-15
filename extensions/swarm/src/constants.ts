@@ -220,6 +220,11 @@ export const PUMP_RETRIGGER_DELAY_MS = 60 * 1000;
 // deferring forever. Override via PI_SWARM_STUCK_DEFER_ESCALATE_MS.
 export const PUMP_STUCK_DEFER_ESCALATE_MS = Number(process.env.PI_SWARM_STUCK_DEFER_ESCALATE_MS ?? 120 * 1000);
 
+// Root busy active execution threshold: when Root has executed a tool within this window
+// (st.agents.root.lastToolAt), Root is actively executing commands and must NOT be interrupted
+// by stuck-busy escalation even if older un-surfaced messages exist.
+export const ROOT_BUSY_ACTIVE_EXECUTION_MS = Number(process.env.PI_SWARM_ROOT_BUSY_ACTIVE_EXECUTION_MS ?? 30 * 1000);
+
 export const PUMP_RETRIGGER_MAX = 3;
 
 export const MAX_STATUS_TASKS = 100;

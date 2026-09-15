@@ -1,0 +1,12 @@
+# r28-goal-stale-order-prevention: R28. Stale Goal Nudge Ordering & Stuck-Busy Escalation Prevention.
+# Reproduces incident multiple-20260915-105755:
+#   1. Out-of-order resurrection: Nudge 49 resurrected and surfaced AFTER Nudges 50-52
+#      because allIdleSinceAt was cleared by root_busy, causing staleSurfaceReason to fail to suppress.
+#   2. Unconsumed stale messages in mailbox inflated oldestWaitMs >= 120s, triggering false
+#      stuck-busy escalation and interrupting an actively working Root.
+#
+# Pattern 2 (seeded world + single-actor script):
+# The fixture scripts the Root agent verifying mailbox contents. Older superseded nudges
+# are retired into consumerReceipts and never surfaced out of order.
+{"name":"r28 observe no stale nudge resurrection","events":[{"type":"text","delayMs":100,"text":"Checking the mailbox to verify that older superseded goal nudges (e.g. Nudge 49 when active seq is 52) are NOT resurrected or surfaced out of order.","chunks":["Checking the mailbox to verify ","that older superseded goal nudges ","are not resurrected out of order."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"r28-mb-1","arguments":{"pendingOnly":true,"limit":10}}]}
+{"name":"r28 acknowledge clean state","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Verified: mailbox contains no out-of-order resurrected goal nudges, and root execution proceeds without false stuck-busy escalation interruptions.","chunks":["Verified: mailbox contains no out-of-order resurrected goal nudges, ","and root execution proceeds cleanly without interruptions."],"stopReason":"stop"}]}
