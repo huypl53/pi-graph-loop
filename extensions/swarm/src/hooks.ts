@@ -11,6 +11,7 @@ import {
 	NOTIFY_KEY_SETTLE_STALE,
 	ENGINE_MAX_RETRIES,
 	ENGINE_RETRY_WINDOW_MS,
+	POOL_SWAP_SETTLE_GRACE_MS,
 	formatNotifyKey,
 } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isRootSession } from "./session.ts";
@@ -42,7 +43,7 @@ import {
 import { logSwarmError, traceLogged } from "./errorlog.ts";
 import { ensureRoot, heartbeatRootLeader, readRootLeader } from "./identity.ts";
 import { formatSwarmMessageContent, parseSystemDelivery } from "./delivery.ts";
-import { pumpRootMailbox, reconcile, runtimeTaskWarnings } from "./reconcile.ts";
+import { pumpRootMailbox, reconcile, resetIdleEpochState, runtimeTaskWarnings } from "./reconcile.ts";
 import { ensureNodeActivityStamp, scanAgentOpenAssignments, checkStallNotificationStale } from "./taskgraph.ts";
 import { applySwarmToolGating } from "./tools/gating.ts";
 import { tmux } from "./tmux.ts";
@@ -155,6 +156,12 @@ export function getSwapChainCount(agentId: string, nowMs = Date.now()): number {
 	if (!chain) return 0;
 	if (nowMs - chain.at > SWAP_CHAIN_RESET_MS) return 0;
 	return chain.count;
+}
+
+export function isAgentInPoolSwapHandoff(agentId: string, nowMs = Date.now()): boolean {
+	const chain = swapChain.get(agentId);
+	if (!chain) return false;
+	return nowMs - chain.at <= POOL_SWAP_SETTLE_GRACE_MS;
 }
 
 // Exposed for tests only — clears the swap-chain entry for a given agent so each fixture can
@@ -627,7 +634,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 					content: `[PI-SWARM MODEL POOL] The previous turn failed with a ${kind} error from ${slotKey(currentSlot)} (${errorText.slice(0, 160)}). That slot was benched and this session was switched to ${slotKey(picked.slot)} in-place. Continue your current task — your context and mailbox are intact.`,
 					display: true,
 				},
-				ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" },
+				ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp", triggerTurn: true },
 			);
 		}
 	});
@@ -648,7 +655,13 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			await withLock(p, async () => {
 				const st = await readState(p, ctx.cwd);
 				const idleState = st.idleNudgeState;
-				if (!idleState?.allIdleSinceAt && !idleState?.nextGoalNudgeAt && !idleState?.lastGoalNudgeAt) return;
+				if (
+					!idleState?.allIdleSinceAt &&
+					!idleState?.nextGoalNudgeAt &&
+					!idleState?.lastGoalNudgeAt &&
+					!idleState?.goalIdleCheckCount
+				)
+					return;
 				const prev = idleState.allIdleSinceAt ?? null;
 				// === R23C (2026-09-03) — stamp root provenance at the turn_start clear site ===
 				// turn_start is the root's busy edge (the live R23 storm source — `agent_settled`
@@ -660,9 +673,7 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 				// `["root"]` here lets the breaker reject root-churn anchors. Live
 				// evidence: tester-turnstart-probe.mjs (R23C artifacts; pre-fix RED 2 resets/4 emissions
 				// seq 4→7, post-fix GREEN ≤1 emission).
-				idleState.lastEpochBusyAgents = ["root"];
-				delete idleState.allIdleSinceAt;
-				delete idleState.nextGoalNudgeAt;
+				resetIdleEpochState(idleState, ["root"]);
 				await trace(p, "idle.epoch.reset", { reason: "root_busy", previousAllIdleSinceAt: prev, busyAgents: ["root"] }).catch(
 					() => {},
 				);
@@ -979,6 +990,9 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			agent.lastHeartbeatAt = ts;
 			agent.pid = process.pid;
 			agent.updatedAt = ts;
+			if (st.idleNudgeState) {
+				resetIdleEpochState(st.idleNudgeState, [agentId]);
+			}
 			await writeState(p, st);
 			await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health, resurrect });
 		});
@@ -986,10 +1000,6 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		const agentId = currentAgentId();
-		// Issue 17: clear any open engine-retry incident on settle. A settled agent is not in a retry
-		// window (the engine either resolved the last turn or gave up before settling). Stale incidents
-		// from a burst that ended mid-settle must not leak forward into the next failure.
-		engineRetryIncidents.delete(agentId);
 		if (agentId === "root") {
 			const p = paths(ctx.cwd);
 			await pumpRootMailbox(pi, ctx, p, "agent_settled");
@@ -1017,11 +1027,34 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			if (!agent) return;
 			if (agent.pid && agent.pid !== process.pid) return; // pid-guard
 			const ts = now();
+			const nowMs = Date.now();
 			agent.lastAgentSettledAt = ts;
 			agent.health = "healthy";
 			agent.lastHeartbeatAt = ts;
 			agent.updatedAt = ts;
 			ensureAgentDefaults(agent);
+
+			// Check if this settle is a transient handoff during engine-retry or model pool rotation:
+			const activeIncident = engineRetryIncidents.get(agentId);
+			const inEngineRetry = Boolean(activeIncident && nowMs - activeIncident.lastSeenAt <= ENGINE_RETRY_WINDOW_MS);
+			const inSwapHandoff = isAgentInPoolSwapHandoff(agentId, nowMs);
+			const isTransientSettle = inEngineRetry || inSwapHandoff;
+
+			if (!inEngineRetry) {
+				engineRetryIncidents.delete(agentId);
+			}
+
+			if (isTransientSettle) {
+				await trace(p, "agent_settled.transient_suppressed", {
+					agentId,
+					inEngineRetry,
+					inSwapHandoff,
+					activeTaskIds: agent.activeTaskIds,
+				}).catch(() => {});
+				await writeState(p, st);
+				return;
+			}
+
 			const missingResponses = responseMissingRecords(st, agentId);
 			agent.runtimeStatus = missingResponses.length ? "response_missing" : "idle";
 			if (missingResponses.length) {
@@ -1205,6 +1238,9 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			agent.health = "healthy";
 			agent.lastHeartbeatAt = ts;
 			agent.updatedAt = ts;
+			if (st.idleNudgeState) {
+				resetIdleEpochState(st.idleNudgeState, [agentId]);
+			}
 			await writeState(p, st);
 			await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health, resurrect });
 		});

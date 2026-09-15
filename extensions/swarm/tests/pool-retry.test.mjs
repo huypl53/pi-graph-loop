@@ -170,12 +170,12 @@ const turnEnd = handlers["turn_end"][0];
 // =============================================================
 // Fixture 1: Transient within engine retries (NO rotation)
 // =============================================================
-// Emit 2 error turn_ends (engine has 3 retries; 2 is below threshold). Expect NO setModel call,
-// NO bench, NO streak bump, but pool.swap_gated_by_engine_retry should fire for each gated event.
+// Emit 1 error turn_end (engine has 2 retries; 1 is below threshold). Expect NO setModel call,
+// NO bench, NO streak bump, but pool.swap_gated_by_engine_retry should fire for the gated strike.
 {
 	await freshSession();
 	const beforeStreak = (await poolStatus(p)).slots.find((s) => s.model === "glm-5.1")?.health?.failures ?? 0;
-	await burstOfErrors(2, "fetch failed: ECONNREFUSED");
+	await burstOfErrors(1, "fetch failed: ECONNREFUSED");
 	ok("fixture 1: setModel NOT called within engine retry window", setModelCalls.length === 0, `calls=${setModelCalls.length}`);
 	const ps = await poolStatus(p);
 	const glm = ps.slots.find((s) => s.model === "glm-5.1");
@@ -186,7 +186,7 @@ const turnEnd = handlers["turn_end"][0];
 	);
 	ok("fixture 1: glm NOT benched", !glm.inCooldown);
 	const gated = await countTraceEvents("pool.swap_gated_by_engine_retry");
-	ok("fixture 1: pool.swap_gated_by_engine_retry fired for each gated strike", gated === 2, `gated=${gated}`);
+	ok("fixture 1: pool.swap_gated_by_engine_retry fired for the gated strike", gated === 1, `gated=${gated}`);
 	const exhausted = await countTraceEvents("pool.engine_retry_exhausted");
 	ok("fixture 1: pool.engine_retry_exhausted did NOT fire", exhausted === 0, `exhausted=${exhausted}`);
 }
@@ -194,12 +194,12 @@ const turnEnd = handlers["turn_end"][0];
 // =============================================================
 // Fixture 2: Exhausted retries (rotation)
 // =============================================================
-// Emit 3 error turn_ends in a row on the SAME slot+error. Expect setModel called exactly once
-// (on the 3rd strike), slot streak bumped once, swap note sent. Note: round-robin prefers glm
+// Emit 2 error turn_ends in a row on the SAME slot+error. Expect setModel called exactly once
+// (on the 2nd strike), slot streak bumped once, swap note sent. Note: round-robin prefers glm
 // (cursor=0), so after one swap the new slot will be gpt; we model that explicitly.
 {
 	await freshSession();
-	await burstOfErrors(3, "fetch failed: ECONNREFUSED");
+	await burstOfErrors(2, "fetch failed: ECONNREFUSED");
 	ok("fixture 2: setModel called exactly once on exhaustion", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
 	ok("fixture 2: swapped to a DIFFERENT slot", setModelCalls[0] !== "zai-coding-cn/glm-5.1", `to=${setModelCalls[0]}`);
 	const ps = await poolStatus(p);
@@ -210,7 +210,7 @@ const turnEnd = handlers["turn_end"][0];
 		sentMessages.some((s) => /MODEL POOL/.test(s.m.content) && /transient/.test(s.m.content)),
 	);
 	const gated = await countTraceEvents("pool.swap_gated_by_engine_retry");
-	ok("fixture 2: pool.swap_gated_by_engine_retry fired for strikes 1 and 2", gated === 2, `gated=${gated}`);
+	ok("fixture 2: pool.swap_gated_by_engine_retry fired for strike 1", gated === 1, `gated=${gated}`);
 	const exhausted = await countTraceEvents("pool.engine_retry_exhausted");
 	ok("fixture 2: pool.engine_retry_exhausted fired exactly once on the terminal strike", exhausted === 1, `exhausted=${exhausted}`);
 }
@@ -218,7 +218,7 @@ const turnEnd = handlers["turn_end"][0];
 // =============================================================
 // Fixture 3: Engine retry burst with success before exhaustion clears the incident
 // =============================================================
-// Emit 2 errors (below threshold) then a successful stop. Expect NO setModel call (incident
+// Emit 1 error (below threshold) then a successful stop. Expect NO setModel call (incident
 // cleared by the stop), pool.engine_retry_recovered fired, slot streak NOT bumped.
 {
 	await freshSession();
@@ -243,21 +243,6 @@ const turnEnd = handlers["turn_end"][0];
 		{
 			type: "turn_end",
 			turnIndex: 2,
-			message: {
-				role: "assistant",
-				model: "glm-5.1",
-				provider: "zai-coding-cn",
-				stopReason: "error",
-				errorMessage: "fetch failed: ECONNREFUSED",
-			},
-			toolResults: [],
-		},
-		{ ...ctx, model: fakeModelGlm },
-	);
-	await te(
-		{
-			type: "turn_end",
-			turnIndex: 3,
 			message: {
 				role: "assistant",
 				model: "glm-5.1",
@@ -356,12 +341,10 @@ const turnEnd = handlers["turn_end"][0];
 	// Burst 1 on glm
 	await err(1, fakeModelGlm);
 	await err(2, fakeModelGlm);
-	await err(3, fakeModelGlm);
 	ok("fixture 5: first burst swaps exactly once", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
 	// Burst 2 on gpt
+	await err(3, fakeModelGpt);
 	await err(4, fakeModelGpt);
-	await err(5, fakeModelGpt);
-	await err(6, fakeModelGpt);
 	ok("fixture 5: second burst swaps again (second swap)", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
 	ok("fixture 5: two distinct swap targets", new Set(setModelCalls).size === 2, `targets=${[...new Set(setModelCalls)].join(",")}`);
 	const exhausted = await countTraceEvents("pool.engine_retry_exhausted");
@@ -375,7 +358,7 @@ const turnEnd = handlers["turn_end"][0];
 // (the gate is about rotation timing, not benching).
 {
 	await freshSession();
-	await burstOfErrors(3, "Error 429: You exceeded your current quota");
+	await burstOfErrors(2, "Error 429: You exceeded your current quota");
 	ok("fixture 6: quota exhaustion swaps", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
 	const ps = await poolStatus(p);
 	const glm = ps.slots.find((s) => s.model === "glm-5.1");

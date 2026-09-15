@@ -5,6 +5,7 @@ export {
 	resolveGoalMaxNudges,
 	updateIdleEpochLocked,
 	evaluateIdleGoalNudgeLocked,
+	resetIdleEpochState,
 	agentIsEffectivelyAlive,
 	allEffectiveIdleAgents,
 } from "./nudges/goal-epoch.ts";

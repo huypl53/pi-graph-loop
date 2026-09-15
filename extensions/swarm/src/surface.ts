@@ -496,13 +496,14 @@ export async function staleSurfaceReason(
 				`message_created_before_idle_epoch:${new Date(createdAt).toISOString()}`,
 				`idle_epoch:${new Date(idleAnchorMs).toISOString()}`,
 			];
-		} else if (!Number.isFinite(idleAnchorMs) && Number.isFinite(st.goal.nudgeSeq) && Number.isFinite(msgSeq) && msgSeq < st.goal.nudgeSeq) {
+		} else if (
+			!Number.isFinite(idleAnchorMs) &&
+			Number.isFinite(st.goal.nudgeSeq) &&
+			Number.isFinite(msgSeq) &&
+			msgSeq < st.goal.nudgeSeq
+		) {
 			staleReason = "goal_nudge_superseded";
-			evidence = [
-				`msg_seq:${msgSeq}`,
-				`active_nudge_seq:${st.goal.nudgeSeq}`,
-				`goal_id:${st.goal.id}`,
-			];
+			evidence = [`msg_seq:${msgSeq}`, `active_nudge_seq:${st.goal.nudgeSeq}`, `goal_id:${st.goal.id}`];
 		}
 	} else if (taskKey) {
 		const task = taskKey[1] ? taskIndex[taskKey[1]] : undefined;

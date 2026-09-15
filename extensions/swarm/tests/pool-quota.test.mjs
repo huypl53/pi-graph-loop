@@ -206,20 +206,18 @@ registerSwarmHooks(fakePi);
 // =============================================================
 // F1: mutating resets_in_seconds must NOT reset the incident
 // =============================================================
-// Three strikes on the same slot whose bodies differ only in resets_in_seconds. Expected:
-// one incident, counts 1,2 then exhausted on 3 -> bench + swap + notify. (BUG today: three
-// fresh incidents at count:1, no swap, no bench.)
+// Two strikes on the same slot whose bodies differ only in resets_in_seconds. Expected:
+// one incident, count 1 then exhausted on 2 -> bench + swap + notify (ENGINE_MAX_RETRIES=2).
 {
 	await freshSession();
 	await errTurn(1, quotaBody(11508));
-	await errTurn(2, quotaBody(11504));
 	ok(
-		"F1: counts escalate (1,2) across mutating bodies — NOT pinned at 1",
-		JSON.stringify(await gatedCounts()) === "[1,2]",
+		"F1: count 1 recorded — NOT pinned at 1 across mutating bodies",
+		JSON.stringify(await gatedCounts()) === "[1]",
 		JSON.stringify(await gatedCounts()),
 	);
-	await errTurn(3, quotaBody(11499));
-	ok("F1: third strike exhausts and swaps", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
+	await errTurn(2, quotaBody(11504));
+	ok("F1: second strike exhausts and swaps", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
 	ok("F1: swap left the dead slot", setModelCalls[0] !== "zai-coding-cn/glm-5.1", `to=${setModelCalls[0]}`);
 	const exhausted = await countTraceEvents("pool.engine_retry_exhausted");
 	ok("F1: pool.engine_retry_exhausted fired once", exhausted === 1, `exhausted=${exhausted}`);
@@ -273,12 +271,11 @@ registerSwarmHooks(fakePi);
 // =============================================================
 // F4: successful turn clears the incident
 // =============================================================
-// 2 quota strikes (mutating bodies), a stop turn, then 2 more strikes: the incident must
+// 1 quota strike, a stop turn, then 1 more strike: the incident must
 // have been cleared, so nothing exhausts and no swap fires.
 {
 	await freshSession();
 	await errTurn(1, quotaBody(9136));
-	await errTurn(2, quotaBody(9133));
 	await turnEnd()(
 		{
 			type: "turn_end",
@@ -295,8 +292,7 @@ registerSwarmHooks(fakePi);
 		{ ...ctx, model: fakeModelGlm },
 	);
 	ok("F4: recovered trace fired", (await countTraceEvents("pool.engine_retry_recovered")) === 1);
-	await errTurn(3, quotaBody(9128));
-	await errTurn(4, quotaBody(9120));
+	await errTurn(2, quotaBody(9128));
 	ok("F4: post-recovery strikes stay gated (fresh incident), no swap", setModelCalls.length === 0, `calls=${setModelCalls.length}`);
 	ok("F4: recovered fired exactly once", (await countTraceEvents("pool.engine_retry_recovered")) === 1);
 }

@@ -116,8 +116,9 @@ export const POOL_SCAFFOLD_DOC_HINT = "docs/swarm/tools.md#configuration";
 // exponential backoff (2s, 4s, 8s — see @earendil-works/pi-coding-agent/docs/settings.md). These
 // constants size the engine-retry gate in hooks.ts. Values mirror pi's defaults and are stable;
 // engine policy belongs to the engine, so we do not read retry.maxRetries at runtime.
-export const ENGINE_MAX_RETRIES = 3; // mirrors pi's default retry.maxRetries
-export const ENGINE_RETRY_WINDOW_MS = 14_000; // pi's retry budget = baseDelay * (2^N - 1) for N=maxRetries=3
+export const ENGINE_MAX_RETRIES = 2; // prompt rotation threshold after 2 consecutive errors
+export const ENGINE_RETRY_WINDOW_MS = 14_000; // pi's retry budget = baseDelay * (2^N - 1) for N=maxRetries=2
+export const POOL_SWAP_SETTLE_GRACE_MS = 30_000; // grace window for worker to pick up turn after pool swap
 
 // Identity used for an anonymous swarm session that neither sets PI_SWARM_AGENT_ID nor opts in as the
 // root. Such a session is inert for swarm coordination (no agent record, no root pump,

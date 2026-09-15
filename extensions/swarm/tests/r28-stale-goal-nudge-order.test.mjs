@@ -102,11 +102,7 @@ try {
 	st.messages["msg-49"] = msg49;
 
 	// Write mailbox JSONL
-	writeFileSync(
-		join(p.mailboxes, "root.jsonl"),
-		JSON.stringify(msg49) + "\n",
-		"utf8",
-	);
+	writeFileSync(join(p.mailboxes, "root.jsonl"), JSON.stringify(msg49) + "\n", "utf8");
 
 	// Simulate allIdleSinceAt is missing/undefined (due to root_busy or worker busy)
 	st.idleNudgeState = {
@@ -164,19 +160,11 @@ try {
 	await pumpRootMailbox(piIdle, ctxIdle, p, "watchdog");
 
 	const surfaced49 = sentMessagesIdle.some((m) => JSON.stringify(m).includes("Idle streak: goal 49"));
-	ok(
-		"Test 3a: Nudge 49 is NOT surfaced to Root",
-		!surfaced49,
-		`surfaced49=${surfaced49}`,
-	);
+	ok("Test 3a: Nudge 49 is NOT surfaced to Root", !surfaced49, `surfaced49=${surfaced49}`);
 
 	const stAfter = await readState(p, dir);
 	const receipt49 = stAfter.consumerReceipts?.root?.entries?.["msg-49"];
-	ok(
-		"Test 3b: Stale Nudge 49 is recorded in consumerReceipts as consumed",
-		Boolean(receipt49),
-		`receipt49=${JSON.stringify(receipt49)}`,
-	);
+	ok("Test 3b: Stale Nudge 49 is recorded in consumerReceipts as consumed", Boolean(receipt49), `receipt49=${JSON.stringify(receipt49)}`);
 } finally {
 	rmSync(dir, { recursive: true, force: true });
 }

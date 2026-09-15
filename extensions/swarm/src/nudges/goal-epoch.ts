@@ -157,6 +157,19 @@ export function allEffectiveIdleAgents(st: SwarmState, nowMs: number) {
 // Terminal/cancelled/blocked are excluded: blocked graphs cannot make progress (a blocked task
 // re-enters "in_progress" the moment a node unblocks, re-admitting it here).
 
+/**
+ * Resets the idle epoch and idle streak counter whenever any agent leaves settled / becomes busy.
+ */
+export function resetIdleEpochState(idleState: SwarmIdleNudgeState, busyAgents?: string[]) {
+	if (busyAgents && busyAgents.length > 0) {
+		idleState.lastEpochBusyAgents = busyAgents;
+	}
+	delete idleState.allIdleSinceAt;
+	delete idleState.nextGoalNudgeAt;
+	delete idleState.actionableGraphDeferredAt;
+	delete idleState.goalIdleCheckCount;
+}
+
 export async function updateIdleEpochLocked(
 	p: Paths,
 	st: SwarmState,
@@ -197,14 +210,12 @@ export async function updateIdleEpochLocked(
 			});
 			idleState.lastEpochBusyAgents = busyAgents;
 		}
-		delete idleState.allIdleSinceAt;
-		delete idleState.nextGoalNudgeAt;
-		delete idleState.actionableGraphDeferredAt;
 		// === R27 (2026-09-04): busy edge resets the idle-check streak ===
 		// Any busy/vacuous/in-flight sample must restart the N-consecutive-check debounce
 		// from zero ("một nhịp busy giữa chừng → reset về 0, đếm lại từ đầu"). The check
 		// timestamp is kept — the NEXT idle sample still respects the check-interval spacing.
-		delete idleState.goalIdleCheckCount;
+		const busyAgents = idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id);
+		resetIdleEpochState(idleState, busyAgents.length > 0 ? busyAgents : undefined);
 		return { allIdle, idleAgents, vacuous };
 	}
 	// R14 Fix B (2026-09-02): the vacuous→non-vacuous edge also clears the dedupe
