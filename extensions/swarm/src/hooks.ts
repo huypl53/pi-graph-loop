@@ -13,6 +13,8 @@ import {
 	ENGINE_RETRY_WINDOW_MS,
 	POOL_SWAP_SETTLE_GRACE_MS,
 	formatNotifyKey,
+	TRACE_LIFECYCLE_DERIVED,
+	PI_SWARM_MINIMAL_PROTOCOL,
 } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider, isRootSession } from "./session.ts";
 import type { ModelSlot } from "./types.ts";
@@ -1241,6 +1243,29 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			if (st.idleNudgeState) {
 				resetIdleEpochState(st.idleNudgeState, [agentId]);
 			}
+			// === Inferred lifecycle: derive processingAt for active messages to this agent ===
+			if (PI_SWARM_MINIMAL_PROTOCOL === 1) {
+				for (const [mid, m] of Object.entries(st.messages || {})) {
+					if (m.to === agentId && !m.processingAt && !m.respondedAt && !m.terminalAt) {
+						m.processingAt = ts;
+						if (!m.seenAt) m.seenAt = ts;
+						m.lifecycleStage = "processing";
+						m.lifecycleSource = "tool_execution";
+						m.updatedAt = ts;
+						await trace(p, TRACE_LIFECYCLE_DERIVED, {
+							messageId: mid,
+							from: m.from,
+							to: m.to,
+							field: "processingAt",
+							source: "tool_execution",
+							stage: "processing",
+							gate: 1,
+							reason: `agent ${agentId} started tool execution`,
+							via: "tool_execution_start",
+						}).catch(() => {});
+					}
+				}
+			}
 			await writeState(p, st);
 			await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health, resurrect });
 		});
@@ -1403,6 +1428,27 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
 			upsertMessageRecord(st, msg, "intercepted", { interceptedAt: now() });
+			if (PI_SWARM_MINIMAL_PROTOCOL === 1) {
+				const rec = st.messages[msg.id];
+				if (rec && !rec.seenAt) {
+					const ts = now();
+					rec.seenAt = ts;
+					rec.lifecycleStage = "seen";
+					rec.lifecycleSource = "steering_intercept";
+					rec.updatedAt = ts;
+					await trace(p, TRACE_LIFECYCLE_DERIVED, {
+						messageId: msg.id,
+						from: rec.from,
+						to: rec.to,
+						field: "seenAt",
+						source: "steering_intercept",
+						stage: "seen",
+						gate: 1,
+						reason: "message intercepted and steered into agent session",
+						via: "input_intercept",
+					}).catch(() => {});
+				}
+			}
 			await writeState(p, st);
 		});
 		await trace(p, "message.input_intercept", {

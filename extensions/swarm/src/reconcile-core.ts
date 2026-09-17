@@ -455,6 +455,7 @@ export async function reconcile(
 
 			if ((rec.status === "mailbox_delivered" || rec.status === "injected" || rec.status === "intercepted") && !rec.ackedAt) {
 				if (!rec.requiresAck) continue;
+				if (PI_SWARM_MINIMAL_PROTOCOL === 1 && (rec.processingAt || rec.respondedAt || rec.terminalAt)) continue;
 				// Consider the most recent delivery timestamp. Previously this only checked injectedAt, so
 				// `intercepted` messages (which set interceptedAt, not injectedAt) were never detected as stale.
 				const sinceMs = Math.max(

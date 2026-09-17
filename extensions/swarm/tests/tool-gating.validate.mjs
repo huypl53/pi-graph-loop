@@ -90,18 +90,20 @@ console.log("\n[2] GUEST gating is idempotent (re-run session_start does not thr
 await runSessionStart();
 ok("guest: still zero swarm tools after re-run", swarmActive().length === 0);
 
-console.log("\n[3] REGISTERED AGENT session keeps swarm tools active");
+const { WORKER_TOOL_ALLOWLIST, ROOT_TOOL_ALLOWLIST } = await import(join(here, "..", "src", "constants.ts"));
+
+console.log("\n[3] REGISTERED WORKER session gets worker allowlist tools");
 process.env.PI_SWARM_AGENT_ID = "worker";
 delete process.env.PI_SWARM_IS_ROOT;
 await runSessionStart();
-ok("agent: swarm tools present", swarmActive().length === swarmCount, `${swarmActive().length}/${swarmCount}`);
+ok("agent: worker swarm tools present (5)", swarmActive().length === WORKER_TOOL_ALLOWLIST.size, `${swarmActive().length}/${WORKER_TOOL_ALLOWLIST.size}`);
 ok("agent: non-swarm tools preserved", nonSwarmSample().sort().join(",") === "bash,edit,read");
 
-console.log("\n[4] ROOT session (explicit opt-in) keeps swarm tools active");
+console.log("\n[4] ROOT session (explicit opt-in) gets root allowlist tools");
 delete process.env.PI_SWARM_AGENT_ID;
 process.env.PI_SWARM_IS_ROOT = "1";
 await runSessionStart();
-ok("root: swarm tools present", swarmActive().length === swarmCount, `${swarmActive().length}/${swarmCount}`);
+ok("root: root swarm tools present (14)", swarmActive().length === ROOT_TOOL_ALLOWLIST.size, `${swarmActive().length}/${ROOT_TOOL_ALLOWLIST.size}`);
 
 console.log("\n[5] Opt-in escape hatch: guest -> register here -> tools re-enabled in-process");
 delete process.env.PI_SWARM_AGENT_ID;
@@ -110,7 +112,14 @@ await runSessionStart(); // back to guest: tools off
 ok("opt-in start: guest has no swarm tools", swarmActive().length === 0);
 process.env.PI_SWARM_AGENT_ID = "worker"; // mimic `/swarm register here worker`
 applySwarmToolGating(pi); // mimic command.ts re-gate
-ok("opt-in end: swarm tools re-enabled", swarmActive().length === swarmCount, `${swarmActive().length}/${swarmCount}`);
+ok("opt-in end: worker swarm tools re-enabled", swarmActive().length === WORKER_TOOL_ALLOWLIST.size, `${swarmActive().length}/${WORKER_TOOL_ALLOWLIST.size}`);
+
+console.log("\n[5b] ADMIN session gets all registered swarm tools");
+process.env.PI_SWARM_ADMIN_MODE = "1";
+applySwarmToolGating(pi);
+ok("admin: all swarm tools active", swarmActive().length === swarmCount, `${swarmActive().length}/${swarmCount}`);
+delete process.env.PI_SWARM_ADMIN_MODE;
+applySwarmToolGating(pi);
 
 console.log("\n[6] Slash COMMAND is still registered for a guest (escape hatch intact)");
 ok("/swarm command registered", commands.includes("swarm"));

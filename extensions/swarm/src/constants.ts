@@ -302,11 +302,9 @@ export const TRACE_STALE_OPEN_NUDGE_EMITTED = "stale_open.nudge_emitted";
 export const NOTIFY_KEY_PUMP_BATCH_SUPPRESSED = "swarm.pump.batch_suppressed";
 
 // === Issue 25 Phase 1: minimal-protocol feature gate ===
-// Read once at module load (mirrors ORPHAN_SPAWN_WARNING_TIMEOUT_MS pattern). Default 0 — the
-// existing explicit ACK/requiresAck/reconcile semantics remain authoritative and no durable
-// lifecycle mutations happen until the rollout review flips gate=1.
+// Read once at module load. Default 1 (minimal protocol enabled by default, opt-out with 0).
 export const PI_SWARM_MINIMAL_PROTOCOL =
-	process.env.PI_SWARM_MINIMAL_PROTOCOL === "1" || process.env.PI_SWARM_MINIMAL_PROTOCOL === "true" ? 1 : 0;
+	process.env.PI_SWARM_MINIMAL_PROTOCOL === "0" || process.env.PI_SWARM_MINIMAL_PROTOCOL === "false" ? 0 : 1;
 
 // === Issue F2 (task-202608310422): stable telemetry trace event name for graph-advance emits ===
 // Exported so tests + dashboards import the same string the engine emits. Payload:
