@@ -69,6 +69,15 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 					const { msg, delivery } = await enqueueAndDeliver(pi, ctx.cwd, p, params);
 					const injected = Boolean(delivery?.delivered) && !delivery?.mailboxOnly;
 					const mailboxOnly = Boolean(delivery?.mailboxOnly);
+					const deliveryStatus = injected ? "delivered_to_pane" : "queued_in_mailbox";
+					const mailboxPath = join(p.mailboxes, `${msg.to}.jsonl`);
+					const receipt = {
+						messageId: msg.id,
+						to: msg.to,
+						deliveryStatus,
+						mailboxPath,
+						requiresResponse: Boolean(params.requiresResponse),
+					};
 					// Mailbox-only is NORMAL for the root (by design it has no swarm tmux pane; its
 					// pump surfaces mailbox messages within one 5s tick). Reporting it as a bare "no tmux
 					// pane" warning made senders misread delivery as failed. Only non-root recipients
@@ -88,7 +97,10 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 								" (mailbox-only delivery — NORMAL for the root: no tmux pane by design; durable in mailbox; no time-bound surface guarantee; surfaces when the root's own agent_settled fires or its next idle watchdog tick processes the mailbox)"
 							: " (mailbox-only delivery; recipient has no live tmux pane — will surface via reconcile/pump once it restarts)"
 						: "";
-					return textResult(`Sent ${msg.id} to ${msg.to}. Injected: ${injected}${mailboxOnlyNote}`, { message: msg, delivery });
+					return textResult(
+						`Sent ${msg.id} to ${msg.to}. Delivery status: ${deliveryStatus}. Mailbox: ${mailboxPath}.${mailboxOnlyNote}`,
+						{ message: msg, delivery, receipt },
+					);
 				});
 			},
 		}),
