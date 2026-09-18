@@ -567,6 +567,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 		}),
 	);
 
+	/*
 	pi.registerTool(
 		defineTool({
 			name: "swarm_validate_graph",
@@ -723,6 +724,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			},
 		}),
 	);
+	*/
 
 	pi.registerTool(
 		defineTool({
@@ -2362,6 +2364,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 		}),
 	);
 
+	/*
 	pi.registerTool(
 		defineTool({
 			name: "swarm_task_message",
@@ -2480,4 +2483,5 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			},
 		}),
 	);
+	*/
 }

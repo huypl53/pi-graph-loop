@@ -570,7 +570,10 @@ export async function deliverMessageLocked(
 	// from === original.to === m.from/to; etc.) so the verified path cannot be abused by a
 	// mismatched reply. Runs INSIDE the existing deliverMessageLocked lock — no nested withLock.
 	if (params.replyTo) {
-		const original = st.messages[params.replyTo];
+		let original = st.messages[params.replyTo];
+		if (original && !original.requiresResponse && original.replyTo && st.messages[original.replyTo]?.requiresResponse) {
+			original = st.messages[original.replyTo];
+		}
 		if (original?.requiresResponse && original.to === from && original.from === to) {
 			const replyContextCurrent = !original.superseded && !original.lastError?.startsWith("ack_missing");
 			const traceBase = { id: original.id, resultMessageId: m.id, from, to, gate: PI_SWARM_MINIMAL_PROTOCOL };

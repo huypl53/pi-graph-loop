@@ -117,6 +117,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		}),
 	);
 
+	/*
 	pi.registerTool(
 		defineTool({
 			name: "swarm_prune",
@@ -189,6 +190,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			},
 		}),
 	);
+	*/
 
 	pi.registerTool(
 		defineTool({
@@ -272,6 +274,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		}),
 	);
 
+	/*
 	pi.registerTool(
 		defineTool({
 			name: "swarm_agent_identity",
@@ -785,6 +788,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			},
 		}),
 	);
+	*/
 
 	// === Issue 18: swarm_set_goal + swarm_mark_goal_done tools ===
 	// The root's durable goal + the idle-streak nudge counter live on SwarmState.goal (see

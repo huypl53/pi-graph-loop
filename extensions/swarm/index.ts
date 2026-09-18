@@ -18,7 +18,7 @@ export default function (pi: ExtensionAPI) {
 	registerAgentsTools(pi);
 	registerMessagesTools(pi);
 	registerTasksTools(pi);
-	registerGcTools(pi);
+	// registerGcTools(pi);
 	registerAuditTools(pi);
 	registerSwarmCommand(pi);
 }

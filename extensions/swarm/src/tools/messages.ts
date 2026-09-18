@@ -111,6 +111,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 		}),
 	);
 
+	/*
 	pi.registerTool(
 		defineTool({
 			name: "swarm_ack_message",
@@ -276,6 +277,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			},
 		}),
 	);
+	*/
 
 	pi.registerTool(
 		defineTool({
