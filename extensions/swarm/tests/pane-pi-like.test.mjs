@@ -44,8 +44,8 @@ for (const c of [
 ]) {
 	ok(`non-pi command "${c}" is NOT pi-like`, isPiLikeCommand(c) === false);
 }
-// pi always runs as a node process; empty (unresolved target) fails open.
-for (const c of ["node", ""]) {
+// pi runs as node or pi (or bun); empty (unresolved target) fails open.
+for (const c of ["node", "pi", "bun", ""]) {
 	ok(`pi-plausible ${JSON.stringify(c || "(empty)")} is pi-like (fail-open)`, isPiLikeCommand(c) === true);
 }
 

@@ -72,10 +72,10 @@ export function isTmuxRunning(pi: ExtensionAPI, target: string): Promise<boolean
 // pi. Unknown-but-plausible values default to pi-like (fail-open) so this guard never blocks delivery
 // to an exotic-but-valid setup; only clearly-shell panes are rejected.
 // UAT finding (task-swarm-uat-v2): a denylist cannot enumerate every non-pi foreground command (live
-// repro: a pane running `sleep` was marked delivered). Flip the default to ALLOWLIST: pi always runs as a
-// `node` process, so only `node` (and empty, treated as unresolved/fail-open) are pi-like. Everything
-// else — shells, sleep, cat, unknown binaries — is refused and stays retryable.
-const PI_COMMANDS = new Set(["node"]);
+// repro: a pane running `sleep` was marked delivered). Flip the default to ALLOWLIST: pi runs as
+// `node`, `pi` (symlink / packaged binary), or `bun` (and empty, treated as unresolved/fail-open).
+// Everything else — shells, sleep, cat, unknown binaries — is refused and stays retryable.
+const PI_COMMANDS = new Set(["node", "pi", "bun"]);
 
 export function isPiLikeCommand(command: string): boolean {
 	const c = (command || "").trim().replace(/^-/, ""); // login shells appear as "-zsh"
