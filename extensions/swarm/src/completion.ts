@@ -51,6 +51,9 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 	{ name: "capture", description: "Capture an agent's tmux pane: <id>" },
 	{ name: "identity", description: "reload|show an agent's identity" },
 	{ name: "pool", description: "Model pool: list | show | validate | help | preview-preflight | rotate" },
+	{ name: "focus", description: "Show current tmux focus status and busy agents" },
+	{ name: "auto-focus", description: "Toggle/set auto-focus to busy pi: [on|off|status|toggle]" },
+	{ name: "focus-busy", description: "Alias for auto-focus" },
 ];
 
 const SCOPED_COMMANDS: Record<string, { name: string; description: string; canonical: string }[]> = {
@@ -71,6 +74,9 @@ const SCOPED_COMMANDS: Record<string, { name: string; description: string; canon
 		{ name: "release", description: "Release stale task ownership from an agent", canonical: "release" },
 		{ name: "mailbox", description: "Mailbox maintenance: reset <id> --yes", canonical: "mailbox" },
 		{ name: "identity", description: "reload|show an agent's identity", canonical: "identity" },
+		{ name: "focus", description: "Show current tmux focus status and busy agents", canonical: "focus" },
+		{ name: "auto-focus", description: "Toggle/set auto-focus to busy pi", canonical: "auto-focus" },
+		{ name: "focus-busy", description: "Alias for auto-focus", canonical: "auto-focus" },
 	],
 	"swarm-tasks": [
 		{ name: "list", description: "Indexed task list with age/next", canonical: "tasks" },
@@ -103,6 +109,7 @@ const ROLE_FLAGS = ["--kind", "--caps"];
 const SENDKEY_FLAGS = ["--literal", "--enter"];
 const RELEASE_FLAGS = ["--force"];
 const MAILBOX_RESET_FLAGS = ["--yes"];
+const AUTO_FOCUS_SUBS = ["on", "off", "status", "toggle"];
 
 // getArgumentCompletions receives no ctx, so we remember the project cwd from
 // session_start (the command handler uses ctx.cwd; this keeps parity). Fallback
@@ -344,7 +351,12 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 						? [{ value: `${b}--dry-run`, label: "--dry-run", description: "Preview migration without writing" }]
 						: [];
 				return [];
+			case "auto-focus":
+			case "focus-busy":
+				if (tokens.length === 1) return simple(AUTO_FOCUS_SUBS, b, currentWord);
+				return [];
 			case "init":
+			case "focus":
 			case "list":
 			case "status":
 			case "tasks":

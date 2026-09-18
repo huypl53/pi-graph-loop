@@ -1,0 +1,4 @@
+# auto-focus-toggle: exercises the agent settling turn when auto-focus busy pi is enabled.
+# Turn 1: worker sends work update to root and settles so the auto-focus logic evaluates busy agents.
+{"name":"worker-work-and-settle","events":[{"type":"text","delayMs":10,"text":"Completed current phase of work, reporting to root before settling.","chunks":["Completed current phase of work, ","reporting to root before settling."]},{"type":"toolcall","delayMs":15,"name":"swarm_send_message","id":"report-1","arguments":{"to":"root","body":"Phase 1 finished. Settling now to allow focus transition to busy peer.","requiresAck":false}}]}
+{"name":"worker-settled","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Settled and waiting for next assignment.","chunks":["Settled and waiting ","for next assignment."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

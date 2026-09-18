@@ -52,6 +52,7 @@ import { tmux } from "./tmux.ts";
 import { ensurePoolScaffold } from "./pool-scaffold.ts";
 import { maybeRotateTraces } from "./tools/audit.ts";
 import { DEFAULT_TRACE_ROTATE_BYTES } from "./constants.ts";
+import { maybeAutoFocusBusyAgent } from "./focus.ts";
 
 // === R16 (2026-09-02): turn-end resolve-action detector (module-scope export) ===
 // A turn_end{stop, role=assistant} is a RESOLVE only if the root ADVANCED the goal
@@ -1221,6 +1222,12 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			// (no forced inject; runtimeTaskWarnings does the active flagging).
 			if (agent.activeTaskIds.length) await trace(p, "task.stale.settled", { agentId, openTaskCount: agent.activeTaskIds.length });
 		});
+
+		try {
+			await maybeAutoFocusBusyAgent(pi, ctx, agentId);
+		} catch (err: any) {
+			await logSwarmError(ctx?.cwd, "hooks", "settle.auto_focus_failed", err, { agentId });
+		}
 	});
 
 	pi.on("tool_execution_start", async (_event, ctx) => {

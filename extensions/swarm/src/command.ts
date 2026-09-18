@@ -84,6 +84,7 @@ import {
 } from "./constants.ts";
 import type { ModelSlot, SwarmMarker } from "./types.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
+import { formatFocusStatus, getFocusStatus } from "./focus.ts";
 
 export function formatMarkerSuffix(d = new Date()): string {
 	const pad = (n: number) => String(n).padStart(2, "0");
@@ -291,7 +292,7 @@ type ScopedSwarmCommandName = "swarm" | "swarm-agents" | "swarm-tasks" | "swarm-
 function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
 	switch (commandName) {
 		case "swarm-agents":
-			return "Usage: /swarm-agents <list|status|spawn|register|panes|stop|restart|role|pause|resume|sendkey|attach|release|mailbox|identity> ...";
+			return "Usage: /swarm-agents <list|status|spawn|register|panes|stop|restart|role|pause|resume|sendkey|attach|release|mailbox|identity|focus|auto-focus> ...";
 		case "swarm-tasks":
 			return "Usage: /swarm-tasks <list|graph|status|next|validate> ...";
 		case "swarm-msg":
@@ -330,6 +331,9 @@ function normalizeScopedSwarmArgs(commandName: ScopedSwarmCommandName, args: str
 				"release",
 				"mailbox",
 				"identity",
+				"focus",
+				"auto-focus",
+				"focus-busy",
 			].includes(cmd)
 		)
 			return null;
@@ -1767,6 +1771,37 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 			}
 			if (cmd === "trace") {
 				ctx.ui.notify(`Trace: ${relative(ctx.cwd, p.events)}`, "info");
+				return;
+			}
+			if (cmd === "focus" || cmd === "auto-focus" || cmd === "focus-busy") {
+				const sub = rest.shift()?.toLowerCase();
+				if (cmd === "focus" || sub === "status" || (!sub && cmd === "focus") || (!sub && cmd === "auto-focus")) {
+					const info = await getFocusStatus(pi, ctx.cwd);
+					ctx.ui.notify(formatFocusStatus(info), "info");
+					return;
+				}
+				let enabled: boolean;
+				if (sub === "toggle") {
+					const st = await readState(p, ctx.cwd);
+					enabled = !st.autoFocusBusy;
+				} else if (["on", "enable", "true", "1"].includes(sub)) {
+					enabled = true;
+				} else if (["off", "disable", "false", "0"].includes(sub)) {
+					enabled = false;
+				} else {
+					ctx.ui.notify("Usage: /swarm focus | /swarm auto-focus [on|off|toggle|status]", "warning");
+					return;
+				}
+
+				await withLock(p, async () => {
+					const st = await readState(p, ctx.cwd);
+					st.autoFocusBusy = enabled;
+					st.updatedAt = now();
+					await writeState(p, st);
+					await trace(p, "swarm.auto_focus.set", { enabled, by: currentAgentId() });
+				});
+
+				ctx.ui.notify(`Auto-focus busy pi: ${enabled ? "ENABLED" : "DISABLED"}`, "info");
 				return;
 			}
 			if (cmd === "mark") {

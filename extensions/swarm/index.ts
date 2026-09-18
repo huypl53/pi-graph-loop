@@ -12,6 +12,7 @@ export { providerForModel, currentProvider } from "./src/session.ts";
 export { pickSlot, poolStatus, recordProviderError, recordSlotSuccess, setSlotCooldown, slotKey, effectiveConfig } from "./src/pool.ts";
 export { isPiLikeCommand, isPanePiLike } from "./src/tmux.ts";
 export { findIdempotentMessage, readMailbox, readMailboxCached } from "./src/mailbox.ts";
+export { pickNextBusyAgent, maybeAutoFocusBusyAgent, isCurrentActiveTmuxWindow, focusAgentWindow, AUTO_FOCUS_COOLDOWN_MS, getFocusStatus, formatFocusStatus } from "./src/focus.ts";
 
 export default function (pi: ExtensionAPI) {
 	registerSwarmHooks(pi);

@@ -538,6 +538,10 @@ export type SwarmState = {
 	// "next session_start should scaffold + notify". Setting this to a non-empty string suppresses the
 	// notify on every subsequent session_start and /reload until the swarm dir is cleared (clean slate).
 	poolScaffoldNotifiedAt?: string;
+	// Auto-focus busy agent in tmux when an agent settles. Toggled via /swarm auto-focus.
+	autoFocusBusy?: boolean;
+	lastFocusAt?: string;
+	lastFocusedAgentId?: string;
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;
