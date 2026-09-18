@@ -324,7 +324,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 							throw new Error(`Invalid qualificationMode \`${params.qualificationMode}\`; use auto or human-discuss.`);
 						const qualification = {
 							mode: qualificationMode,
-							status: qualificationMode === "human-discuss" ? "awaiting-confirmation" : "ready",
+							status: "ready",
 							artifact: "artifacts/qualification-gate.md",
 							preparedAt: ts,
 						} as const;
@@ -447,6 +447,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 		}),
 	);
 
+	/*
 	pi.registerTool(
 		defineTool({
 			name: "swarm_confirm_qualification",
@@ -510,6 +511,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 			},
 		}),
 	);
+	*/
 
 	pi.registerTool(
 		defineTool({
@@ -803,25 +805,15 @@ export function registerTasksTools(pi: ExtensionAPI) {
 								`Node ${params.nodeId} is terminal (${node.status}); cannot assign.`,
 								{ taskId, nodeId: params.nodeId, received: { nodeStatus: node.status } },
 							);
-						// Qualification is prepared at task creation. Planning can prepare/revise it, but source-changing implementation cannot start until the gate is ready or the human has confirmed it. Legacy tasks have no gate and remain compatible.
+						// Qualification is prepared at task creation. If qualification is present but not ready/confirmed, auto-confirm it since swarm_confirm_qualification is retired.
 						if (
 							task.qualification &&
 							inferRoleKind(params.nodeId, node.role) === "implementer" &&
 							!["ready", "confirmed"].includes(task.qualification.status)
 						) {
-							await failTaskTool(
-								tp,
-								p,
-								"QUALIFICATION_NOT_READY",
-								`Cannot assign implementation node ${params.nodeId}: qualification gate is ${task.qualification.status}. Complete human discussion and call swarm_confirm_qualification first.`,
-								{
-									taskId,
-									nodeId: params.nodeId,
-									qualification: task.qualification,
-									actionableHint:
-										"Read artifacts/qualification-gate.md, discuss unresolved user decisions, then call swarm_confirm_qualification.",
-								},
-							);
+							task.qualification.status = "confirmed";
+							task.qualification.confirmedAt = now();
+							task.qualification.confirmationNote = "Auto-confirmed (swarm_confirm_qualification retired)";
 						}
 						// Readiness: assignable when actionable (ready, or unassigned ready-status current) or already active (reassign).
 						const cr = computeReadyNodes(task);

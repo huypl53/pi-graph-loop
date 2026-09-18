@@ -1178,7 +1178,6 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 		"swarm_spawn_agent",
 		"swarm_stop_agent",
 		"swarm_create_task",
-		"swarm_confirm_qualification",
 		"swarm_assign_task",
 		"swarm_set_goal",
 		"swarm_mark_goal_done",
@@ -1187,7 +1186,7 @@ async function loadExtension({ identity = "worker-a" } = {}) {
 	const extra = activeTools.filter((n) => !expectedOrch.has(n));
 
 	ok(
-		"gate=1 root: exactly 15 distinct root tools active",
+		"gate=1 root: exactly 14 distinct root tools active",
 		activeTools.length === expectedOrch.size && missing.length === 0 && extra.length === 0,
 	);
 }

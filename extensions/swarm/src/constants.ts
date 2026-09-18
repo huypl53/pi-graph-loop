@@ -358,13 +358,12 @@ export const ROOT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
 	"swarm_task_status",
 	"swarm_reconcile",
 	"swarm_audit",
-	// Orchestration surface (6 additional):
+	// Orchestration surface (5 additional):
 	"swarm_agent_status",
 	"swarm_list_agents",
 	"swarm_spawn_agent",
 	"swarm_stop_agent",
 	"swarm_create_task",
-	"swarm_confirm_qualification",
 	"swarm_assign_task",
 	// Goal tools (2):
 	"swarm_set_goal",
