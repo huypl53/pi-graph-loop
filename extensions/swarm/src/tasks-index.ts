@@ -126,7 +126,7 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 		}; staleNodes=${staleNodes}; ackMissing=${ackMissing}`,
 		`proxy metrics: hungButAlive=${proxy.hungButAlive} staleOpen=${proxy.staleOpen} supersessionChurn=${proxy.supersessionChurn}${proxy.lastEmitAt ? ` lastEmitAt=${proxy.lastEmitAt}` : ""}`,
 		st.goal
-			? `goal: ${st.goal.id} interval=${resolveGoalNudgeIntervalMs(st.goal.nudgeIntervalMs)}ms nudges=${st.goal.consecutiveNoResolveNudges}/${st.goal.maxNudges === -1 ? "∞" : resolveGoalMaxNudges(st.goal.maxNudges)}`
+			? `goal: ${st.goal.id}${st.goal.text ? ` — "${st.goal.text.slice(0, 100)}${st.goal.text.length > 100 ? "…" : ""}"` : ""} interval=${resolveGoalNudgeIntervalMs(st.goal.nudgeIntervalMs)}ms nudges=${st.goal.consecutiveNoResolveNudges}/${st.goal.maxNudges === -1 ? "∞" : resolveGoalMaxNudges(st.goal.maxNudges)}`
 			: `goal: none`,
 		closureLine,
 		...taskLines,
@@ -144,6 +144,7 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 			staleNodes,
 			ackMissing,
 			proxyMetrics: proxy,
+			goal: st.goal,
 			closure: closureLine,
 			taskLines,
 		},

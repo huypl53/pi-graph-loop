@@ -500,6 +500,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 			},
 		}),
 	);
+	*/
 
 	pi.registerTool(
 		defineTool({
@@ -539,6 +540,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 		}),
 	);
 
+	/*
 	pi.registerTool(
 		defineTool({
 			name: "swarm_restart_agent",

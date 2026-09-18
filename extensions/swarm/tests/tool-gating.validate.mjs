@@ -103,7 +103,7 @@ console.log("\n[4] ROOT session (explicit opt-in) gets root allowlist tools");
 delete process.env.PI_SWARM_AGENT_ID;
 process.env.PI_SWARM_IS_ROOT = "1";
 await runSessionStart();
-ok("root: root swarm tools present (14)", swarmActive().length === ROOT_TOOL_ALLOWLIST.size, `${swarmActive().length}/${ROOT_TOOL_ALLOWLIST.size}`);
+ok("root: root swarm tools present (15)", swarmActive().length === ROOT_TOOL_ALLOWLIST.size, `${swarmActive().length}/${ROOT_TOOL_ALLOWLIST.size}`);
 
 console.log("\n[5] Opt-in escape hatch: guest -> register here -> tools re-enabled in-process");
 delete process.env.PI_SWARM_AGENT_ID;
