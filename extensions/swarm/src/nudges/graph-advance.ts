@@ -20,7 +20,7 @@ import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Paths, SwarmAgent, SwarmState, TaskPaths, TaskState } from "../types.ts";
+import type { Paths, SwarmAgent, SwarmState, SwarmTaskStallState, TaskPaths, TaskState } from "../types.ts";
 import {
 	ARTIFACT_PROGRESS_ACTIVE_AGENT_SKIP_MS,
 	ARTIFACT_PROGRESS_GRACE_MS,

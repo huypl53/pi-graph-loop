@@ -13,7 +13,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
-import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNodeStatus, TaskState } from "../types.ts";
+import type { NodeInput, ReusableAgentMatch, TaskGate, TaskGateStatus, TaskNode, TaskNodeStatus, TaskState } from "../types.ts";
 import {
 	CANCELLATION_REASON,
 	PI_SWARM_MINIMAL_PROTOCOL,
@@ -26,6 +26,7 @@ import {
 	TRACE_REASSIGN_RATE_LIMITED,
 	TRACE_LIFECYCLE_DERIVED,
 	TRACE_TASK_ATTEMPT_FORCE_REOPEN,
+	TRACE_TASK_LEASE_STAMPED,
 	LATE_RESULT_REFUSAL_REASON,
 } from "../constants.ts";
 import {

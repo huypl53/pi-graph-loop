@@ -14,7 +14,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Paths, ReconcileAction, SwarmState, TaskState } from "./types.ts";
+import type { MessageResponseStatus, Paths, ReconcileAction, SwarmState, TaskState } from "./types.ts";
 import {
 	ACK_MISSING_MS,
 	MAX_ATTEMPTS,
@@ -25,8 +25,11 @@ import {
 	TASK_NUDGE_MS,
 	TASK_STALE_MS,
 	PI_SWARM_MINIMAL_PROTOCOL,
+	TRACE_LIFECYCLE_DERIVED,
+	TRACE_LIFECYCLE_DERIVED_SHADOW,
+	TRACE_MESSAGE_ATTENTION_DERIVED,
 } from "./constants.ts";
-import { ensureAgentDefaults, humanAge, now } from "./utils.ts";
+import { ensureAgentDefaults, humanAge, now, safeId } from "./utils.ts";
 import { computeTaskStatus } from "./taskgraph.ts";
 import { claimRootLeader, ensureRoot, heartbeatRootLeader, requireRootAuthority } from "./identity.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";

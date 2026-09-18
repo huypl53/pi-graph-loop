@@ -23,6 +23,7 @@ import { computeReadyNodes } from "./taskgraph.ts";
 import { readTaskState } from "./state.ts";
 import { resolveGoalNudgeIntervalMs, resolveGoalMaxNudges } from "./nudges/goal-epoch.ts";
 import { taskPaths } from "./state.ts";
+import { logSwarmError } from "./errorlog.ts";
 
 // PM-facing swarm rollup for `/swarm status`. Bounded: scans up to MAX_STATUS_TASKS task.json
 // files, prioritizing non-terminal tasks, and emits stable prefixed lines that are grep-able so
