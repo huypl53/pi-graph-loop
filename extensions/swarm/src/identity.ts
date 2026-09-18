@@ -171,32 +171,36 @@ export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 		`1. Treat this identity file as your role-specific AGENT.md.\n` +
 		`2. Coordinate with peers using \`swarm_send_message\`; do not ask the human to relay swarm traffic.\n` +
 		`3. Check your mailbox with \`swarm_check_mailbox\` when idle or after receiving swarm traffic. Here, idle means you have no active tool calls or immediate task steps; if you are waiting more than ~10 seconds, poll pending mailbox messages.\n` +
-		`4. Use \`swarm_list_agents\` before messaging a peer whose existence you have not verified.\n` +
-		`5. Use \`swarm_trace\` and \`swarm_capture_agent_pane\` when debugging coordination issues.\n` +
-		`6. Stay within your role unless the root explicitly changes your assignment.\n` +
+		(PI_SWARM_MINIMAL_PROTOCOL === 1
+			? `4. Use \`swarm_list_agents\` before messaging a peer whose existence you have not verified.\n` +
+				`5. Stay within your role unless the root explicitly changes your assignment.\n`
+			: `4. Use \`swarm_list_agents\` before messaging a peer whose existence you have not verified.\n` +
+				`5. Use \`swarm_trace\` and \`swarm_capture_agent_pane\` when debugging coordination issues.\n` +
+				`6. Stay within your role unless the root explicitly changes your assignment.\n`) +
 		(["root", "reviewer", "auditor"].includes(agent.roleKind)
 			? `7. Qualification responsibility: read the package skill \`extensions/swarm/qualification-skills/qualification-gate/SKILL.md\` when preparing, challenging, or auditing a task's qualification gate. Keep it private to qualification roles; implementers follow the frozen artifact instead.\n\n`
 			: "\n") +
-		`## ACK Protocol\n\n` +
-		`- For every swarm message with \`requiresAck=true\`, you MUST acknowledge it with \`swarm_ack_message\`.\n` +
-		`- As soon as you start work, call \`swarm_ack_message\` with the message id and \`status=seen\` or \`status=processing\`.\n` +
-		`- When finished, send a result back to the requester with \`swarm_send_message(replyTo=<original-message-id>)\` or \`swarm_task_message\`, then call \`swarm_ack_message(status=done, resultMessageId=<result-message-id>)\`. ACK is lifecycle only; it is not the work result.\n` +
-		`- Never leave a requiresAck message unacked. Reconcile surfaces unacked delivered messages as \`ack_missing\`.\n\n` +
 		(PI_SWARM_MINIMAL_PROTOCOL === 1
-			? `## Reply protocol (gate=1)\n\n` +
+			? `## Reply Protocol\n\n` +
 				`- Replies are auto-verified; do NOT call \`swarm_ack_message\` for normal workflow.\n` +
 				`- Send a result back to the requester with \`swarm_send_message(replyTo=<original-message-id>)\`; the engine stamps \`respondedAt\` + closes response debt atomically.\n` +
 				`- Close your assigned node with \`swarm_update_task\` (status=done). The terminal update runs response validation + debt release in the SAME lock.\n` +
 				`- Late replies (to a superseded / cancelled / orphaned original) are FENCED: the engine emits \`message.reply_rejected_superseded\` and the original record is NOT mutated. Re-read the latest message in your mailbox before retrying.\n\n`
-			: ``) +
+			: `## ACK Protocol\n\n` +
+				`- For every swarm message with \`requiresAck=true\`, you MUST acknowledge it with \`swarm_ack_message\`.\n` +
+				`- As soon as you start work, call \`swarm_ack_message\` with the message id and \`status=seen\` or \`status=processing\`.\n` +
+				`- When finished, send a result back to the requester with \`swarm_send_message(replyTo=<original-message-id>)\` or \`swarm_task_message\`, then call \`swarm_ack_message(status=done, resultMessageId=<result-message-id>)\`. ACK is lifecycle only; it is not the work result.\n` +
+				`- Never leave a requiresAck message unacked. Reconcile surfaces unacked delivered messages as \`ack_missing\`.\n\n`) +
 		`## Lifecycle\n\n` +
 		`- Start by reading this identity when role details are unclear.\n` +
 		`- If an initial task is present, begin it after reading identity; do not wait indefinitely for another instruction.\n` +
 		`- If no task is present, poll your mailbox periodically and remain available until the root stops or reassigns you.\n` +
 		`- Report completion, blockers, and role conflicts to the coordinating agent named in your task or to the root.\n\n` +
 		`## Peer Discovery\n\n` +
-		`- Use \`swarm_list_agents\` to verify peer IDs and tmux targets.\n` +
-		`- Use \`swarm_agent_identity\` to inspect your own or a peer's durable role card.\n` +
+		`- Use \`swarm_list_agents\` to verify peer IDs and status.\n` +
+		(PI_SWARM_MINIMAL_PROTOCOL === 1
+			? ``
+			: `- Use \`swarm_agent_identity\` to inspect your own or a peer's durable role card.\n`) +
 		`- If a target peer does not exist, report the missing peer instead of repeatedly sending messages.\n\n` +
 		`## Review Expectations\n\n` +
 		`- Be explicit about findings, risks, assumptions, and evidence paths.\n` +

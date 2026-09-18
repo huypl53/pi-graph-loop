@@ -45,7 +45,12 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 				conversationId: Type.Optional(Type.String({ description: "Optional conversation/thread id for related messages." })),
 				replyTo: Type.Optional(Type.String({ description: "Optional message id this message replies to." })),
 				requiresAck: Type.Optional(
-					Type.Boolean({ description: "Whether recipient should explicitly ack done/failed. Defaults to true." }),
+					Type.Boolean({
+						description:
+							PI_SWARM_MINIMAL_PROTOCOL === 1
+								? "Optional legacy flag. Under minimal protocol (default), acknowledgements are handled automatically. Defaults to false."
+								: "Whether recipient should explicitly ack done/failed. Defaults to true.",
+					}),
 				),
 				requiresResponse: Type.Optional(
 					Type.Boolean({

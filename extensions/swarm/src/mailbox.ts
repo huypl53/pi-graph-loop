@@ -411,7 +411,7 @@ export async function deliverMessageLocked(
 		body: params.body,
 		conversationId: params.conversationId,
 		replyTo: params.replyTo,
-		requiresAck: params.requiresAck ?? true,
+		requiresAck: params.requiresAck ?? (PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true),
 		requiresResponse: params.requiresResponse ?? false,
 		ttlMs: params.ttlMs,
 		idempotencyKey: params.idempotencyKey,

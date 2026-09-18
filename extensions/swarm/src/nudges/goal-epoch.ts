@@ -28,6 +28,7 @@ import {
 	TASK_NUDGE_MS,
 	TASK_STALE_MS,
 	formatNotifyKey,
+	PI_SWARM_MINIMAL_PROTOCOL,
 } from "../constants.ts";
 
 import { ensureAgentDefaults, now } from "../utils.ts";
@@ -431,7 +432,7 @@ export async function evaluateIdleGoalNudgeLocked(
 						`Pool diag: ${JSON.stringify(poolDiag)}.\n\n` +
 						`Next action (one of):\n` +
 						hints.map((h, i) => `  ${i + 1}. ${h}`).join("\n"),
-					requiresAck: true,
+					requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
 					requiresResponse: false,
 					conversationId: `goal:${goal.id}:escalation:pool-empty:cooldown:${NOTIFY_DEFAULT_COOLDOWN_MS}`,
 					idempotencyKey: `goal:${goal.id}:escalation:pool-empty:${new Date(nowMs).toISOString().slice(0, 13)}`,
@@ -654,7 +655,7 @@ export async function evaluateIdleGoalNudgeLocked(
 		to: "root",
 		subject,
 		body,
-		requiresAck: true,
+		requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
 		idempotencyKey: key,
 		priority: "normal",
 	});
