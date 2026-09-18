@@ -24,6 +24,7 @@ import {
 	REINJECT_AFTER_MS,
 	TASK_NUDGE_MS,
 	TASK_STALE_MS,
+	PI_SWARM_MINIMAL_PROTOCOL,
 } from "./constants.ts";
 import { ensureAgentDefaults, humanAge, now } from "./utils.ts";
 import { computeTaskStatus } from "./taskgraph.ts";
