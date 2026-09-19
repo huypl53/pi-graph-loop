@@ -427,6 +427,7 @@ export type SwarmIdleNudgeState = {
 	// closer than the check interval do NOT advance the streak.
 	goalIdleCheckCount?: number;
 	goalIdleLastCheckAt?: string;
+	lastLongRunningToolNudges?: Record<string, string>;
 };
 
 // In-flight orphan-spawn watchdog entry (Issue 14). Pushed when swarm_spawn_agent mints a NEW agent

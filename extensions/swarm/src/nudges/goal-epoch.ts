@@ -35,7 +35,7 @@ import { ensureAgentDefaults, now } from "../utils.ts";
 import { tmux } from "../tmux.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale } from "../taskgraph.ts";
 import { deliverMessageLocked, findIdempotentMessage, readMailbox } from "../mailbox.ts";
-import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "../state.ts";
+import { mailboxPath, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "../state.ts";
 import { logSwarmError } from "../errorlog.ts";
 
 // Goal-epoch is tick code: trace() failures were swallowed by `.catch(() => {})`. Route the
@@ -105,18 +105,12 @@ export function agentIsEffectivelyAlive(
 	if (a.runtimeStatus === "stopped") return false;
 	const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
 	const hbFresh = Number.isFinite(hb) && nowMs - hb <= AGENT_HEARTBEAT_STALE_MS;
-	// R14 Fix A (2026-09-02): settled-but-alive workers whose heartbeat is stale (the
-	// 10-min default window) but whose tmux pane is alive AND whose runtimeStatus is
-	// "idle" were being misclassified as dead, producing false vacuous pools and
-	// spammed held_no_live_workers traces. The pane-alive + idle signal is the freshest
-	// liveness check we have for a settled worker; honor it. The `tmuxAlive === false`
-	// early-return above is the genuine ghost-eviction signal and stays. The
-	// `status !== "running"` early-return above is the explicit stopped/retired signal
-	// and stays. The `runtimeStatus === "busy"` case is intentionally NOT rescued by
-	// the tmuxAlive fallback — a busy worker with a stale heartbeat is in the
-	// "stuck" shape; we want the goal nudge to surface (the worker's runtimeStatus
-	// is the authoritative signal for liveness during an in-flight tool call).
-	if (a.tmuxAlive === true && a.runtimeStatus === "idle") return true;
+	// R14 Fix A (2026-09-02) + Long-running tool fix (2026-09-19):
+	// Settled or busy workers whose tmux pane is alive are physically running in tmux.
+	// A busy/tool_running worker with a stale heartbeat (>10m) is still alive (e.g. running a long
+	// sync/test command where tool_execution_end hasn't fired yet). It will be monitored via the
+	// long-running tool health check rather than misclassified as dead (which previously caused false idle alarms).
+	if (a.tmuxAlive === true && (a.runtimeStatus === "idle" || a.runtimeStatus === "tool_running")) return true;
 	if (hbFresh) return true;
 	return false;
 }
@@ -465,6 +459,63 @@ export async function evaluateIdleGoalNudgeLocked(
 			});
 			return { emitted: false, reason: "assignment_in_flight" };
 		}
+
+		// Check for workers running a tool for > 10m without heartbeat update (e.g. sync/test command).
+		// Rather than falsely claiming "all agents are idle" or staying silent, emit an actionable
+		// health check so Root can inspect progress (e.g. long sync test vs stuck command).
+		const staleBusyWorker = idleAgents.find((a) => {
+			if (a.runtimeStatus !== "tool_running") return false;
+			const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
+			return !Number.isFinite(hb) || nowMs - hb > AGENT_HEARTBEAT_STALE_MS;
+		});
+
+		if (staleBusyWorker) {
+			idleState.lastLongRunningToolNudges ||= {};
+			const lastNudgeAt = idleState.lastLongRunningToolNudges[staleBusyWorker.id];
+			const lastNudgeMs = lastNudgeAt ? new Date(lastNudgeAt).getTime() : 0;
+			if (nowMs - lastNudgeMs >= NOTIFY_DEFAULT_COOLDOWN_MS) {
+				const hbMs = staleBusyWorker.lastHeartbeatAt ? new Date(staleBusyWorker.lastHeartbeatAt).getTime() : 0;
+				const hbAgeSec = hbMs ? Math.round((nowMs - hbMs) / 1000) : null;
+				const hbAgeText = hbAgeSec !== null ? `${hbAgeSec}s (${Math.round(hbAgeSec / 60)}m)` : ">10m";
+				const targetText = staleBusyWorker.tmuxTarget || "unknown";
+				const mbPath = mailboxPath(p, staleBusyWorker.id);
+				const subject = `[Health Check] Worker ${staleBusyWorker.id} running tool >10m without heartbeat`;
+				const body =
+					`Worker \`${staleBusyWorker.id}\` is in \`${staleBusyWorker.runtimeStatus}\` for ${hbAgeText} without a heartbeat update (>10m).\n` +
+					`Tmux Target: \`${targetText}\`\n` +
+					`Mailbox: ${mbPath}\n\n` +
+					`Possible causes:\n` +
+					`1. Long-running synchronous command (e.g. extensive test suite, heavy migration, full sync, build).\n` +
+					`2. Tool execution is stuck, frozen, or deadlocked.\n\n` +
+					`Suggested Action for Root:\n` +
+					`- Check pane progress: \`tmux capture-pane -t ${targetText} -p | tail -25\`\n` +
+					`- If progress is normal: continue waiting (e.g. run a synchronous wait like \`bash sleep 30\` or \`sleep 60\` to stay in sync).\n` +
+					`- If stuck/frozen: terminate the process via tmux or restart the worker (\`swarm_restart_agent(agentId="${staleBusyWorker.id}")\`).`;
+
+				const key = formatNotifyKey("goal:worker:long_running_tool", {
+					agentId: staleBusyWorker.id,
+					seq: String(Math.floor(nowMs / NOTIFY_DEFAULT_COOLDOWN_MS)),
+				});
+				await deliverMessageLocked(pi, cwd, p, st, {
+					to: "root",
+					subject,
+					body,
+					requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
+					idempotencyKey: key,
+					priority: "normal",
+				});
+				idleState.lastLongRunningToolNudges[staleBusyWorker.id] = new Date(nowMs).toISOString();
+				await traceLogged(p, "goal.nudge.long_running_tool", {
+					goalId: goal.id,
+					agentId: staleBusyWorker.id,
+					runtimeStatus: staleBusyWorker.runtimeStatus,
+					hbAgeSec,
+					target: targetText,
+				});
+				return { emitted: true, reason: "long_running_tool" };
+			}
+		}
+
 		return { emitted: false, reason: "agent_busy" };
 	}
 	const allIdleSinceMs = new Date(idleState.allIdleSinceAt!).getTime();
