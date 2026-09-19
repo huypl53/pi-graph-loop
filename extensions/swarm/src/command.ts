@@ -234,18 +234,20 @@ function classificationShape(validation: { ok: boolean; shape: RawShape }, class
 
 // Canonical pool-help text — kept as a single constant so /swarm pool help, docs/swarm/operations.md,
 // and tests all reference the same source. Pure documentation, no mutation.
-const POOL_HELP_TEXT = `Model pool configuration (canonical format)
+const POOL_HELP_TEXT = `Model pool configuration (canonical format: .pi/swarm.yaml)
 
-{
-  "swarm": {
-    "modelPool": [
-      { "model": "gpt-5.4-mini", "provider": "openai", "weight": 50 },
-      { "model": "claude-sonnet-4", "provider": "anthropic", "weight": 30 },
-      { "model": "glm-5.1", "provider": "zai-coding-cn", "weight": 0 }
-    ],
-    "rotation": { "strategy": "weighted", "cooldownMs": 900000, "maxRetries": 2 }
-  }
-}
+# .pi/swarm.yaml
+modelPool:
+  - model: <your-model>
+    provider: <your-provider>
+    weight: 50
+  - model: <fallback-model>
+    provider: <fallback-provider>
+    weight: 0                  # 0 = fallback-only (used when all weighted slots are benched)
+rotation:
+  strategy: weighted           # weighted | round-robin | sticky
+  cooldownMs: 900000           # bench duration after maxRetries failures (15min)
+  maxRetries: 2                # consecutive failures before bench
 
 Slot fields
   model     required, non-empty string
@@ -257,32 +259,17 @@ Rotation fields
   cooldownMs   bench duration after maxRetries failures (default: 900000 = 15min)
   maxRetries   consecutive failures before bench (default: 2)
 
-Legacy singleton (still supported, observable as an implicit singleton pool):
+Singleton default (optional — used when no modelPool is declared):
 
-{
-  "swarm": {
-    "defaultModel": "glm-5.1",
-    "defaultProvider": "zai-coding-cn"
-  }
-}
+# .pi/swarm.yaml
+defaultModel: <your-model>
+defaultProvider: <your-provider>
 
-Top-level \`swarm\` is preferred; \`extensions.swarm\` is accepted for backward compatibility.
-
-Comment-friendly YAML alternative (.pi/swarm.yml — pi core ignores this file; swarm-only):
-
-# .pi/swarm.yml
-modelPool:
-  - model: glm-5.1
-    provider: zai-coding-cn
-    weight: 50
-rotation:
-  strategy: weighted
-  cooldownMs: 900000
-  maxRetries: 2
-
-Precedence: extensions.swarm > swarm (settings.json) > .pi/swarm.yml.
-When settings.json declares a swarm block AND .pi/swarm.yml exists, /swarm pool validate warns
-(the JSON wins; yml contents are ignored).
+Configuration files:
+  .pi/swarm.yaml (or .pi/swarm.yml) is the primary swarm configuration file.
+  Legacy settings.json (under \`swarm\` or \`extensions.swarm\`) is also supported.
+  Precedence: extensions.swarm > swarm (settings.json) > .pi/swarm.yaml / .pi/swarm.yml.
+  Note: .pi/swarm.json is NOT supported.
 
 Discover: /swarm pool show    Validate: /swarm pool validate    Preflight probe: /swarm pool preview-preflight
 See: docs/swarm/operations.md (Model pool configuration)`;
@@ -1224,10 +1211,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 				if (!sub || sub === "list") {
 					const status = await poolStatus(p);
 					if (!status.slots.length) {
-						ctx.ui.notify(
-							"No model pool configured. Add `modelPool` under `swarm` (or extensions.swarm) in .pi/settings.json.",
-							"warning",
-						);
+						ctx.ui.notify("No model pool configured. Configure `modelPool` in .pi/swarm.yaml (or .pi/swarm.yml).", "warning");
 						return;
 					}
 					const lines = [
@@ -1348,9 +1332,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 						lines.push(`Config validation: FAILED (${v.errors.length} issue${v.errors.length === 1 ? "" : "s"})`);
 						for (const e of v.errors) lines.push(`  \u2717 ${e.field || "config"}: ${e.message}`);
 						lines.push("");
-						lines.push(
-							"Fix in .pi/settings.json (under `swarm` or `extensions.swarm`) or .pi/swarm.yml, then run /swarm pool validate again.",
-						);
+						lines.push("Fix in .pi/swarm.yaml (or .pi/swarm.yml), then run /swarm pool validate again.");
 						await trace(p, "pool.validate", { by: currentAgentId(), ok: false, shape: v.shape.kind, errors: v.errors.length });
 						ctx.ui.notify(lines.join("\n"), "warning");
 					}
@@ -1415,10 +1397,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 					}
 					const { slots, rotation } = effectiveConfig();
 					if (!slots.length) {
-						ctx.ui.notify(
-							"No model pool configured. Add `modelPool` under `swarm` (or `extensions.swarm`) in .pi/settings.json.",
-							"warning",
-						);
+						ctx.ui.notify("No model pool configured. Configure `modelPool` in .pi/swarm.yaml (or .pi/swarm.yml).", "warning");
 						return;
 					}
 					const agentId = currentAgentId();
@@ -1466,7 +1445,7 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 								action: "now",
 								hint: picked.slot.provider
 									? "model not registered under the slot's provider"
-									: "pool slot has no explicit provider; add one in settings.json modelPool",
+									: "pool slot has no explicit provider; add one in .pi/swarm.yaml modelPool",
 							}).catch(() => {});
 							ctx.ui.notify(
 								`Manual rotate refused: picked slot ${slotKey(picked.slot)} has no resolvable model registry entry. /swarm pool list to inspect.`,

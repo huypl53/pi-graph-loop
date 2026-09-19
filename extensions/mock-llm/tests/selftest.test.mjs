@@ -31,7 +31,7 @@ await mockLLM({
 
 assert.equal(registered.name, "mock-llm", "provider should register as mock-llm");
 assert.equal(registered.config.api, "mock-llm-stream");
-assert.equal(registered.config.models.length, 81, "expected 81 scenario models");
+assert.equal(registered.config.models.length, 83, "expected 83 scenario models");
 assert.deepEqual(
 	(await discoverModelConfigs()).map((model) => model.id).sort(),
 	[
@@ -42,6 +42,7 @@ assert.deepEqual(
 		"assignment-fence-stale-attempt",
 		"audit-invariant-violation",
 		"auto-close-evidence-closure",
+		"auto-focus-toggle",
 		"cancel-supersession",
 		"commit-no-evidence",
 		"ct1-prereload-sendmessage",
@@ -112,13 +113,14 @@ assert.deepEqual(
 		"supersession-late-result",
 		"supersession-race-new",
 		"supersession-race-old",
+		"swarm-yaml-no-provider",
 		"swarm-yml-pool",
 		"task-graph-semantics",
 		"torn-json-then-recovery",
 		"wake-up-escalation-reminder",
 	].sort(),
 );
-assert.equal((await listFixtureDiscovery()).length, 81);
+assert.equal((await listFixtureDiscovery()).length, 83);
 
 function makeContext() {
 	return {

@@ -1,0 +1,4 @@
+# swarm-yaml-no-provider: agent spawn without explicit model/provider parameters,
+# relying on .pi/swarm.yaml resolution and verifying no provider-hint errors occur.
+{"name":"spawn worker without provider","events":[{"type":"text","delayMs":15,"text":"Spawning worker relying on swarm.yaml config."},{"type":"toolcall","delayMs":15,"name":"swarm_spawn_agent","id":"call-spawn-yaml-1","arguments":{"id":"worker-yaml-1","role":"implementer"}},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"complete and settle","events":[{"type":"text","delayMs":10,"text":"Worker spawned without explicit provider. Verification complete."},{"type":"stop","delayMs":5,"reason":"stop"}]}

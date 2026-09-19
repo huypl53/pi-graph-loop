@@ -21,6 +21,7 @@ import { classifyGoalClearAuthority, GOAL_ORIGIN_ROOT, GOAL_ORIGIN_VALUES } from
 import { isDeliveryFailureRetryable } from "../delivery.ts";
 import { now, safeId, textResult, truncate } from "../utils.ts";
 import { heartbeatRootLeader, overridePath, requireRootAuthority, writeEffectiveIdentity } from "../identity.ts";
+import { readSwarmRawConfig } from "../config.ts";
 import {
 	attachTarget,
 	deriveTaskProgressState,
@@ -220,6 +221,7 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				"Spawn a new pi agent in a tmux window in the same working directory. The new agent shares project extensions and skills. Requires tmux.",
 			promptGuidelines: [
 				"Use `swarm_spawn_agent` when the user asks to create a pi agent/swarm worker for parallel planning, review, or coding.",
+				"Do NOT specify provider or model when spawning agents. Model and provider are configured by the user in .pi/swarm.yaml. Only specify id, role, roleKind, and initialPrompt unless the user explicitly requested a specific model/provider.",
 			],
 			parameters: Type.Object({
 				id: Type.Optional(
@@ -238,13 +240,13 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				model: Type.Optional(
 					Type.String({
 						description:
-							"pi model id. Defaults to the model pool (if configured), else PI_SWARM_DEFAULT_MODEL/current session model, fallback glm-5.1.",
+							"Optional model override. Omit this parameter; swarm agents automatically inherit model from .pi/swarm.yaml.",
 					}),
 				),
 				provider: Type.Optional(
 					Type.String({
 						description:
-							"pi provider id. Defaults to PI_SWARM_DEFAULT_PROVIDER or model preset provider (zai-coding-cn for glm-5.1, openai for gpt-5.4-mini).",
+							"Optional provider override. Omit this parameter; swarm agents automatically inherit provider from .pi/swarm.yaml.",
 					}),
 				),
 				initialPrompt: Type.Optional(
@@ -255,6 +257,20 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_spawn_agent", async () => {
 					const p = paths(ctx.cwd);
 					await ensureDirs(p);
+					const rawConfig = readSwarmRawConfig(ctx.cwd);
+					const hasUserConfig = Boolean(
+						rawConfig.cfg && (rawConfig.cfg.modelPool || rawConfig.cfg.defaultModel || rawConfig.cfg.defaultProvider),
+					);
+					if (!hasUserConfig && ctx.hasUI) {
+						try {
+							ctx.ui.notify(
+								"[Swarm] Warning: .pi/swarm.yaml is not configured. Spawning with fallback defaults. Please configure .pi/swarm.yaml.",
+								"warning",
+							);
+						} catch (err) {
+							await logSwarmError(p, "spawn_agent", "ui_notify_failed", err);
+						}
+					}
 					const result = await withLock(p, async () => {
 						const st = await readState(p, ctx.cwd);
 						await trace(p, "agent.spawn.request", { requestedBy: currentAgentId(), ...params });
@@ -265,8 +281,11 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 						await writeState(p, st);
 						return { swarmId: st.swarmId, tmuxSession: st.tmuxSession, ...r };
 					});
+					const warnHeader = !hasUserConfig
+						? "[WARNING: .pi/swarm.yaml is not configured. Worker spawned with fallback defaults. Configure .pi/swarm.yaml to set model & provider.]\n\n"
+						: "";
 					return textResult(
-						`Spawned ${result.agent.id} at ${result.agent.tmuxTarget}\nIdentity: ${relative(ctx.cwd, result.identity)}\nSnapshot: ${relative(ctx.cwd, result.snapshot)}`,
+						`${warnHeader}Spawned ${result.agent.id} at ${result.agent.tmuxTarget}\nIdentity: ${relative(ctx.cwd, result.identity)}\nSnapshot: ${relative(ctx.cwd, result.snapshot)}`,
 						result,
 					);
 				});
@@ -466,9 +485,9 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 					}),
 				),
 				model: Type.Optional(
-					Type.String({ description: "pi model id. Defaults to the existing agent's model, then session default." }),
+					Type.String({ description: "Optional model id. Defaults to the adopted agent's model or .pi/swarm.yaml." }),
 				),
-				provider: Type.Optional(Type.String({ description: "pi provider id." })),
+				provider: Type.Optional(Type.String({ description: "Optional provider id. Defaults to the adopted agent's provider or .pi/swarm.yaml." })),
 				initialPrompt: Type.Optional(
 					Type.String({
 						description: "Optional first prompt injected into the adopted pane (defaults to a role/identity kickoff).",

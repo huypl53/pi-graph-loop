@@ -98,9 +98,9 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 # defaultProvider: zai-coding-cn
 `;
 
-// One-shot notify text surfaced to the root TUI on first scaffold into swarm.yml.
+// One-shot notify text surfaced to the root TUI on first scaffold into swarm.yaml / swarm.yml.
 export const POOL_SCAFFOLD_YML_NOTIFY_TEXT =
-	"Created .pi/swarm.yml model-pool placeholder — fill in your model/provider. See docs/swarm/tools.md.";
+	"Created swarm configuration placeholder — fill in your model/provider in .pi/swarm.yaml (or .pi/swarm.yml). See docs/swarm/tools.md.";
 
 // One-shot notify text surfaced to the root TUI on first scaffold.
 // Stable so tests + locale passes can match/swap it without touching hooks.ts.
@@ -272,9 +272,7 @@ export const TASK_INITIAL_READY_GRACE_MS = 60_000;
 
 // Grace period: a freshly set goal may stay quiet this long before the goal idle streak nudge fires.
 export const GOAL_INITIAL_SET_GRACE_MS =
-	Number(process.env.PI_SWARM_GOAL_INITIAL_SET_GRACE_MS) > 0
-		? Number(process.env.PI_SWARM_GOAL_INITIAL_SET_GRACE_MS)
-		: 0;
+	Number(process.env.PI_SWARM_GOAL_INITIAL_SET_GRACE_MS) > 0 ? Number(process.env.PI_SWARM_GOAL_INITIAL_SET_GRACE_MS) : 0;
 
 export const NOTIFY_DEFAULT_COOLDOWN_MS = 300_000; // 5 minutes between nudges of the same template
 

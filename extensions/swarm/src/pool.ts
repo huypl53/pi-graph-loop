@@ -325,6 +325,17 @@ export function validateSwarmSettings(
 	const errors: PoolValidationError[] = [];
 	const warnings: PoolValidationError[] = [];
 	let shape: SettingsShape;
+
+	const swarmJsonFile = join(cwd, CONFIG_DIR_NAME, "swarm.json");
+	if (existsSync(swarmJsonFile)) {
+		warnings.push({
+			kind: "swarm_json_unsupported",
+			field: ".pi/swarm.json",
+			message:
+				".pi/swarm.json is not supported — swarm configuration uses .pi/swarm.yaml (or .pi/swarm.yml). Please remove or rename it to .pi/swarm.yaml.",
+		});
+	}
+
 	const resolved = readSwarmRawConfig(cwd);
 	if (resolved.corrupt.includes("settings.json")) {
 		shape = { kind: "empty" };
@@ -342,6 +353,12 @@ export function validateSwarmSettings(
 	const cfg = resolved.cfg;
 	if (!cfg) {
 		shape = { kind: "empty" };
+		warnings.push({
+			kind: "swarm_yaml_missing",
+			field: ".pi/swarm.yaml",
+			message:
+				"No swarm configuration found (.pi/swarm.yaml or .pi/swarm.yml). Run /swarm pool help or create .pi/swarm.yaml to configure defaultModel and defaultProvider.",
+		});
 		return { ok: true, errors, warnings, shape }; // empty is valid (use defaults)
 	}
 	const source = resolved.source!;
@@ -812,7 +829,7 @@ export async function preflightSpawn(p: Paths, opts: PreflightOptions = {}): Pro
 			error: {
 				kind: "invalid_settings",
 				message: `Settings validation failed: ${first.message}`,
-				suggestion: `Run /swarm pool validate for the full list of issues; fix .pi/settings.json under the \`swarm\` (or \`extensions.swarm\`) key.`,
+				suggestion: `Run /swarm pool validate for the full list of issues; fix in .pi/swarm.yaml (or .pi/swarm.yml).`,
 				errors: validation.errors.map((e) => `${e.field || "config"}: ${e.message}`),
 			},
 		};
@@ -853,7 +870,7 @@ export async function preflightSpawn(p: Paths, opts: PreflightOptions = {}): Pro
 			error: {
 				kind: "unknown_model",
 				model: model || "",
-				suggestion: `Set swarm.defaultModel in .pi/settings.json, or PI_SWARM_DEFAULT_MODEL in your shell.`,
+				suggestion: `Set defaultModel in .pi/swarm.yaml, or PI_SWARM_DEFAULT_MODEL in your shell.`,
 			},
 		};
 	}
@@ -863,7 +880,7 @@ export async function preflightSpawn(p: Paths, opts: PreflightOptions = {}): Pro
 			error: {
 				kind: "provider_not_found",
 				provider: provider || "",
-				suggestion: `Set swarm.defaultProvider in .pi/settings.json, or PI_SWARM_DEFAULT_PROVIDER in your shell.`,
+				suggestion: `Set defaultProvider in .pi/swarm.yaml, or PI_SWARM_DEFAULT_PROVIDER in your shell.`,
 			},
 		};
 	}

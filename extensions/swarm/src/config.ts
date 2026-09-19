@@ -26,22 +26,32 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { parse as parseYaml } from "yaml";
 import { logSwarmError } from "./errorlog.ts";
 
-export type SwarmConfigSource = "extensions.swarm" | "swarm" | "swarm.yml";
+export type SwarmConfigSource = "extensions.swarm" | "swarm" | "swarm.yml" | "swarm.yaml";
+
+export function findSwarmYamlFile(cwd: string): { file: string; source: "swarm.yaml" | "swarm.yml" } | null {
+	const yaml = join(cwd, CONFIG_DIR_NAME, "swarm.yaml");
+	if (existsSync(yaml)) return { file: yaml, source: "swarm.yaml" };
+	const yml = join(cwd, CONFIG_DIR_NAME, "swarm.yml");
+	if (existsSync(yml)) return { file: yml, source: "swarm.yml" };
+	return null;
+}
 
 export function swarmYmlPath(cwd: string): string {
+	const found = findSwarmYamlFile(cwd);
+	if (found) return found.file;
 	return join(cwd, CONFIG_DIR_NAME, "swarm.yml");
 }
 
-// Read + parse `.pi/swarm.yml`. null when absent; THROWS on unparseable YAML.
+// Read + parse `.pi/swarm.yaml` or `.pi/swarm.yml`. null when absent; THROWS on unparseable YAML.
 export function readSwarmYml(cwd: string): Record<string, any> | null {
-	const file = swarmYmlPath(cwd);
-	if (!existsSync(file)) return null;
-	const doc = parseYaml(readFileSync(file, "utf8"));
+	const found = findSwarmYamlFile(cwd);
+	if (!found) return null;
+	const doc = parseYaml(readFileSync(found.file, "utf8"));
 	if (!doc || typeof doc !== "object" || Array.isArray(doc)) return null;
 	return doc as Record<string, any>;
 }
 
-// Resolve the winning raw config. Precedence: extensions.swarm > swarm > swarm.yml.
+// Resolve the winning raw config. Precedence: extensions.swarm > swarm > swarm.yaml / swarm.yml.
 // Never throws; corrupt sources are reported via `corrupt` for the validate path.
 export function readSwarmRawConfig(cwd: string): {
 	cfg: Record<string, any> | null;
@@ -74,8 +84,10 @@ export function readSwarmRawConfig(cwd: string): {
 		// must not silently mask it. Fall through to the yml read below.
 	}
 
-	// --- swarm.yml (throws → treat as corrupt, reported not raised) ---
+	// --- swarm.yaml / swarm.yml (throws → treat as corrupt, reported not raised) ---
 	let yml: Record<string, any> | null = null;
+	const foundYaml = findSwarmYamlFile(cwd);
+	const ymlSource = foundYaml?.source || "swarm.yml";
 	try {
 		yml = readSwarmYml(cwd);
 	} catch (err) {
@@ -83,7 +95,7 @@ export function readSwarmRawConfig(cwd: string): {
 		yml = null;
 		void logSwarmError(cwd, "config", "swarm_yml.parse_failed", err);
 	}
-	if (yml && Object.keys(yml).length) return { cfg: yml, source: "swarm.yml", corrupt };
+	if (yml && Object.keys(yml).length) return { cfg: yml, source: ymlSource, corrupt };
 
 	return { cfg: null, source: null, corrupt };
 }
