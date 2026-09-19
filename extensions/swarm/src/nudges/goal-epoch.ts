@@ -22,6 +22,7 @@ import type { Paths, SwarmAgent, SwarmIdleNudgeState, SwarmMessage, SwarmState }
 import {
 	GOAL_NUDGE_BACKOFF_TICKS,
 	GOAL_NUDGE_IDLE_INTERVAL_MS,
+	GOAL_INITIAL_SET_GRACE_MS,
 	MAX_CONSECUTIVE_NUDGES_DEFAULT,
 	NOTIFY_DEFAULT_COOLDOWN_MS,
 	NOTIFY_KEY_GOAL_IDLE_NUDGE,
@@ -169,9 +170,11 @@ export async function updateIdleEpochLocked(
 	p: Paths,
 	st: SwarmState,
 	nowMs: number,
+	rootBusy: boolean = false,
 ): Promise<{ allIdle: boolean; idleAgents: SwarmAgent[]; vacuous?: boolean }> {
 	const idleState: SwarmIdleNudgeState = (st.idleNudgeState ||= {});
-	const { idleAgents, allIdle, vacuous } = allEffectiveIdleAgents(st, nowMs);
+	const { idleAgents, allIdle: workersIdle, vacuous } = allEffectiveIdleAgents(st, nowMs);
+	const allIdle = workersIdle && !rootBusy;
 	if (!allIdle) {
 		// R14 Fix B (2026-09-02): clearing lastWasVacuous on the all-idle→busy edge
 		// ensures the next vacuous transition (busy→idle-but-no-workers) re-fires the
@@ -180,6 +183,10 @@ export async function updateIdleEpochLocked(
 		// stay suppressed (already fired on the false→true edge). Clearing on the
 		// vacuous branch would defeat the dedupe gate.
 		if (!vacuous && idleState.lastWasVacuous) idleState.lastWasVacuous = false;
+		const busyAgents = [
+			...idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id),
+			...(rootBusy ? ["root"] : []),
+		];
 		if (idleState.allIdleSinceAt || idleState.nextGoalNudgeAt) {
 			// Busy edge: restart stall spacing so the next all-idle edge re-arms emission immediacy.
 			const stallSlotsReset: string[] = [];
@@ -196,9 +203,8 @@ export async function updateIdleEpochLocked(
 			// same array already passed to the `idle.epoch.reset` trace below; persisting it lets the
 			// next fresh-epoch evaluator distinguish worker-busy breaks from root-driven
 			// ones without a second scan over `st.agents`.
-			const busyAgents = idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id);
 			await traceLogged(p, "idle.epoch.reset", {
-				reason: "agent_busy",
+				reason: rootBusy && workersIdle ? "root_busy" : "agent_busy",
 				busyAgents,
 				previousAllIdleSinceAt: idleState.allIdleSinceAt ?? null,
 				stallSlotsReset,
@@ -209,7 +215,6 @@ export async function updateIdleEpochLocked(
 		// Any busy/vacuous/in-flight sample must restart the N-consecutive-check debounce
 		// from zero ("một nhịp busy giữa chừng → reset về 0, đếm lại từ đầu"). The check
 		// timestamp is kept — the NEXT idle sample still respects the check-interval spacing.
-		const busyAgents = idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id);
 		resetIdleEpochState(idleState, busyAgents.length > 0 ? busyAgents : undefined);
 		return { allIdle, idleAgents, vacuous };
 	}
@@ -311,6 +316,7 @@ export async function evaluateIdleGoalNudgeLocked(
 	p: Paths,
 	st: SwarmState,
 	nowMs: number,
+	rootBusy: boolean = false,
 ): Promise<{ emitted: boolean; reason: string }> {
 	const goal = st.goal;
 	// No goal set: idle predicate irrelevant. Pre-policy swarms with no `goal` key parse to undefined
@@ -325,7 +331,7 @@ export async function evaluateIdleGoalNudgeLocked(
 	// effective agent carries an assignment pointer (bug #2). The pump evaluator distinguishes the two
 	// with distinct reasons + traces so the root sees WHY the nudge was held.
 	const idleState: SwarmIdleNudgeState = (st.idleNudgeState ||= {});
-	const epoch = await updateIdleEpochLocked(p, st, nowMs);
+	const epoch = await updateIdleEpochLocked(p, st, nowMs, rootBusy);
 	const { idleAgents, allIdle, vacuous } = epoch;
 	if (vacuous) {
 		// Bug #3 evidence: hold the goal nudge when zero effective non-root agents remain.
@@ -516,8 +522,18 @@ export async function evaluateIdleGoalNudgeLocked(
 			}
 		}
 
+		if (rootBusy) {
+			return { emitted: false, reason: "root_busy" };
+		}
+
 		return { emitted: false, reason: "agent_busy" };
 	}
+
+	const sinceSetMs = nowMs - new Date(goal.setAt).getTime();
+	if (GOAL_INITIAL_SET_GRACE_MS > 0 && sinceSetMs < GOAL_INITIAL_SET_GRACE_MS) {
+		return { emitted: false, reason: "within_goal_grace" };
+	}
+
 	const allIdleSinceMs = new Date(idleState.allIdleSinceAt!).getTime();
 	if (!Number.isFinite(allIdleSinceMs)) {
 		delete idleState.allIdleSinceAt;
@@ -685,7 +701,6 @@ export async function evaluateIdleGoalNudgeLocked(
 	// Emit the nudge via the standard mailbox path. deliverMessageLocked mutates st (upserts the
 	// message record, appends to mailbox JSONL, returns { msg, delivery }). The root's own
 	// pump on the NEXT tick surfaces it to the TUI via the existing customType:"swarm-message" path.
-	const sinceSetMs = nowMs - new Date(goal.setAt).getTime();
 	const subjectText = goal.text.slice(0, 60);
 	const bodyText = goal.text.slice(0, 240);
 	const sinceSec = Math.max(0, Math.round(sinceSetMs / 1000));

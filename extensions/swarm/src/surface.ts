@@ -735,8 +735,9 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 		// === Row 68: shared idle-epoch maintenance (once per tick, before both nudge evaluators) ===
 		// Anchors the busy→all-idle edge at swarm level so BOTH nudge families measure continuous idle
 		// from the same anchor regardless of evaluator call order or goal presence.
+		const rootBusy = typeof ctx?.isIdle === "function" ? !ctx.isIdle() : false;
 		try {
-			await updateIdleEpochLocked(p, st, nowMs);
+			await updateIdleEpochLocked(p, st, nowMs, rootBusy);
 		} catch (err: any) {
 			await trace(p, "idle.epoch.error", { error: String((err as Error)?.message || err) }).catch(() => {});
 		}
@@ -748,7 +749,7 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 		// idle state. Each is wrapped in try/catch (matches the existing reconcile-helper pattern) so a
 		// throw never kills the tick.
 		try {
-			await evaluateTaskGraphStallNudgeLocked(pi, ctx.cwd, p, st, nowMs);
+			await evaluateTaskGraphStallNudgeLocked(pi, ctx.cwd, p, st, nowMs, rootBusy);
 		} catch (err: any) {
 			await trace(p, "task_stall.nudge_error", { error: String((err as Error)?.message || err) }).catch(() => {});
 		}
@@ -757,7 +758,7 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 		// agent has been continuously idle for the full interval, emit the goal fallback nudge. Anti-loop
 		// counter + back-off handled inside the function.
 		try {
-			await evaluateIdleGoalNudgeLocked(pi, ctx.cwd, p, st, nowMs);
+			await evaluateIdleGoalNudgeLocked(pi, ctx.cwd, p, st, nowMs, rootBusy);
 		} catch (err: any) {
 			await trace(p, "goal.nudge.error", { error: String((err as Error)?.message || err) }).catch(() => {});
 		}

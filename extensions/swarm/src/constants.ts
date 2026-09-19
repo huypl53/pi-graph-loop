@@ -270,6 +270,12 @@ export const PREFLIGHT_ASSIGN_GRACE_MS = RAW_PREFLIGHT_GRACE_MS;
 // long before the initial-ready nudge fires.
 export const TASK_INITIAL_READY_GRACE_MS = 60_000;
 
+// Grace period: a freshly set goal may stay quiet this long before the goal idle streak nudge fires.
+export const GOAL_INITIAL_SET_GRACE_MS =
+	Number(process.env.PI_SWARM_GOAL_INITIAL_SET_GRACE_MS) > 0
+		? Number(process.env.PI_SWARM_GOAL_INITIAL_SET_GRACE_MS)
+		: 0;
+
 export const NOTIFY_DEFAULT_COOLDOWN_MS = 300_000; // 5 minutes between nudges of the same template
 
 export const NOTIFY_DEFAULT_MAX_NUDGES = 3; // per task+template cap before we stop reminding

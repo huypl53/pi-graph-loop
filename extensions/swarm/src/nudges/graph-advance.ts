@@ -339,6 +339,7 @@ export async function evaluateTaskGraphStallNudgeLocked(
 	p: Paths,
 	st: SwarmState,
 	nowMs: number,
+	rootBusy: boolean = false,
 ): Promise<{ emitted: boolean; reason: string; taskId?: string }> {
 	// Predicate 1: at least one in_progress task exists.
 	if (!existsSync(p.tasksDir)) return { emitted: false, reason: "no_active_task" };
@@ -377,9 +378,9 @@ export async function evaluateTaskGraphStallNudgeLocked(
 	// Row 68: the shared idle-epoch update runs here (idempotent) so the busy→all-idle edge is
 	// anchored at swarm level even with no goal set. A busy effective agent also resets per-task
 	// stall spacing (inside updateIdleEpochLocked) so the next all-idle edge re-arms immediacy.
-	const epoch = await updateIdleEpochLocked(p, st, nowMs);
+	const epoch = await updateIdleEpochLocked(p, st, nowMs, rootBusy);
 	const { idleAgents, allIdle } = epoch;
-	if (!allIdle) return { emitted: false, reason: "agent_busy" };
+	if (!allIdle) return { emitted: false, reason: rootBusy ? "root_busy" : "agent_busy" };
 	const idleAnchorMs = st.idleNudgeState?.allIdleSinceAt ? new Date(st.idleNudgeState.allIdleSinceAt).getTime() : NaN;
 
 	// Pick the first task with actionable+unassigned nodes that ALSO passes the grace period AND
