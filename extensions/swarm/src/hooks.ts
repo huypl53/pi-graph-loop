@@ -629,13 +629,24 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		};
 		await trace(p, okSwap ? "pool.swap" : "pool.swap_failed", swapTrace).catch(() => {});
 		if (okSwap) {
-			// Tell the agent (and the transcript) what happened so it can retry the failed work
-			// knowing it now runs on a different model.
+			// User-facing pool event notice (operator sees it in TUI; NOT the LLM's trigger turn).
+			// Carries the old/new slot + error kind so the operator can monitor rotation without
+			// digging into traces. deliverAs:"followUp" so it doesn't consume a turn.
+			pi.sendMessage(
+				{
+					customType: "swarm-pool-event",
+					content: `⚠ Pool: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)}.`,
+					display: true,
+				},
+				{ deliverAs: "followUp" },
+			);
+			// Minimal agent trigger: the LLM only needs to know to continue.
+			// No model name, no error body, no slot details — those add noise that wastes a turn.
 			pi.sendMessage(
 				{
 					customType: "swarm-message",
-					content: `[PI-SWARM MODEL POOL] The previous turn failed with a ${kind} error from ${slotKey(currentSlot)} (${errorText.slice(0, 160)}). That slot was benched and this session was switched to ${slotKey(picked.slot)} in-place. Continue your current task — your context and mailbox are intact.`,
-					display: true,
+					content: "Continue your current task.",
+					display: false,
 				},
 				ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp", triggerTurn: true },
 			);
