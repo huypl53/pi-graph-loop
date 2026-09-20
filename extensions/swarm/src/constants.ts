@@ -451,6 +451,9 @@ export const TRACE_AGENT_LEASE_CLEARED = "agent.lease_cleared";
 // PI_SWARM_AGENT_HEARTBEAT_STALE_MS lets operators tighten / loosen the window.
 export const DEFAULT_AGENT_HEARTBEAT_STALE_MS = 600_000; // 10 minutes
 
+// R29 (2026-09-20): Grace window for freshly spawned workers to launch tmux process & record first heartbeat (default: 3 minutes)
+export const DEFAULT_AGENT_BOOT_GRACE_MS = 180_000;
+
 // === Issue 83a — stale-open surfacing threshold ===
 // Window (ms) after which an `assigned`/`in_progress` node WITHOUT a `lastProgressAt` update
 // is surfaced to the root via `stale_open_surfaced` + an root mailbox nudge.

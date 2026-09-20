@@ -30,6 +30,7 @@ import {
 	TASK_STALE_MS,
 	formatNotifyKey,
 	PI_SWARM_MINIMAL_PROTOCOL,
+	DEFAULT_AGENT_BOOT_GRACE_MS,
 } from "../constants.ts";
 
 import { ensureAgentDefaults, now } from "../utils.ts";
@@ -46,6 +47,7 @@ const traceLogged = (p2: Paths, event: string, data: Record<string, unknown>): P
 		logSwarmError(p2, "goal-epoch", "trace_failed", err, { traceEvent: event }),
 	) as Promise<void>;
 const AGENT_HEARTBEAT_STALE_MS = Number(process.env.PI_SWARM_AGENT_HEARTBEAT_STALE_MS ?? 10 * 60_000);
+const AGENT_BOOT_GRACE_MS = Number(process.env.PI_SWARM_AGENT_SPAWN_BOOT_GRACE_MS ?? DEFAULT_AGENT_BOOT_GRACE_MS);
 
 import { currentAgentId } from "../session.ts";
 import { TERMINAL_NODE_STATUSES } from "../constants.ts";
@@ -98,7 +100,7 @@ export function resolveGoalIdleChecksRequired(): number {
 }
 
 export function agentIsEffectivelyAlive(
-	a: { status?: string; runtimeStatus?: string; tmuxAlive?: boolean; lastHeartbeatAt?: string },
+	a: { status?: string; runtimeStatus?: string; tmuxAlive?: boolean; lastHeartbeatAt?: string; createdAt?: string },
 	nowMs: number,
 ): boolean {
 	if (a.status !== "running") return false;
@@ -113,6 +115,16 @@ export function agentIsEffectivelyAlive(
 	// long-running tool health check rather than misclassified as dead (which previously caused false idle alarms).
 	if (a.tmuxAlive === true && (a.runtimeStatus === "idle" || a.runtimeStatus === "tool_running")) return true;
 	if (hbFresh) return true;
+	// R29 (2026-09-20): Freshly spawned worker boot grace.
+	// A worker just spawned hasn't registered its first heartbeat yet (lastHeartbeatAt undefined/null),
+	// and its tmuxAlive may be null (not yet probed). If it was created within AGENT_BOOT_GRACE_MS,
+	// it is booting up and must be counted as alive to avoid false "worker pool empty" escalations.
+	if (!a.lastHeartbeatAt && a.createdAt) {
+		const createdMs = new Date(a.createdAt).getTime();
+		if (Number.isFinite(createdMs) && nowMs - createdMs <= AGENT_BOOT_GRACE_MS) {
+			return true;
+		}
+	}
 	return false;
 }
 
@@ -395,6 +407,9 @@ export async function evaluateIdleGoalNudgeLocked(
 				const staleAgents = poolDiag.filter(
 					(d) => d.heartbeatAgeSec !== null && d.heartbeatAgeSec > 600 && d.tmuxAlive !== false && d.runtimeStatus !== "stopped",
 				);
+				const bootFailedAgents = poolDiag.filter(
+					(d) => d.heartbeatAgeSec === null && d.tmuxAlive !== false && d.runtimeStatus !== "stopped",
+				);
 				const hints: string[] = [];
 				if (deadAgents.length > 0) {
 					const ids = deadAgents.map((a) => a.id).join(", ");
@@ -411,6 +426,12 @@ export async function evaluateIdleGoalNudgeLocked(
 				if (staleAgents.length > 0 && deadAgents.length === 0 && stoppedAgents.length === 0) {
 					hints.push(
 						`All agents stale (>10min no heartbeat). Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to mint a fresh worker.`,
+					);
+				}
+				if (bootFailedAgents.length > 0 && deadAgents.length === 0 && stoppedAgents.length === 0 && staleAgents.length === 0) {
+					const ids = bootFailedAgents.map((a) => a.id).join(", ");
+					hints.push(
+						`Boot failed / no heartbeat (${bootFailedAgents.length}): ${ids}. Workers exceeded boot grace without registering a heartbeat. Run \`swarm_restart_agent(agentId=...)\` or spawn fresh.`,
 					);
 				}
 				if (hints.length === 0) {
