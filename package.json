@@ -14,7 +14,7 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions"
+      "./extensions/swarm"
     ],
     "skills": [
       "./skills"
