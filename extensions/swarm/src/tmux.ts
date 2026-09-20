@@ -45,13 +45,13 @@ const PANE_SEND_ENTER_DEBOUNCE_MS = 450;
 
 export async function sendToPane(pi: ExtensionAPI, target: string, text: string) {
 	if (text.length <= PANE_SEND_CHUNK_CHARS) {
-		await tmux(pi, ["send-keys", "-t", target, "-l", text], 10_000);
+		await tmux(pi, ["send-keys", "-t", target, "-l", "--", text], 10_000);
 	} else {
 		// Chunk large injections (long kickoffs with mailbox + identity prompts) with a gap between
 		// chunks; send-keys -l has practical size limits and TUIs need time to ingest each batch.
 		for (let i = 0; i < text.length; i += PANE_SEND_CHUNK_CHARS) {
 			if (i > 0) await sleep(PANE_SEND_CHUNK_GAP_MS);
-			await tmux(pi, ["send-keys", "-t", target, "-l", text.slice(i, i + PANE_SEND_CHUNK_CHARS)], 10_000);
+			await tmux(pi, ["send-keys", "-t", target, "-l", "--", text.slice(i, i + PANE_SEND_CHUNK_CHARS)], 10_000);
 		}
 	}
 	await sleep(PANE_SEND_ENTER_DEBOUNCE_MS);

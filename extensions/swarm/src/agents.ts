@@ -799,10 +799,10 @@ export async function sendKeys(
 ) {
 	if (!target || target === "unknown") throw new Error("agent has no tmux pane target");
 	if (opts.literal) {
-		await tmux(pi, ["send-keys", "-t", target, "-l", keys], 10_000);
+		await tmux(pi, ["send-keys", "-t", target, "-l", "--", keys], 10_000);
 	} else {
 		const tokens = keys.split(/\s+/).filter(Boolean);
-		if (tokens.length) await tmux(pi, ["send-keys", "-t", target, ...tokens], 10_000);
+		if (tokens.length) await tmux(pi, ["send-keys", "-t", target, "--", ...tokens], 10_000);
 	}
 	if (opts.enter) await tmux(pi, ["send-keys", "-t", target, "Enter"], 10_000);
 	await sleep(120);
