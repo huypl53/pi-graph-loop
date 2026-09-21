@@ -195,10 +195,7 @@ export async function updateIdleEpochLocked(
 		// stay suppressed (already fired on the false→true edge). Clearing on the
 		// vacuous branch would defeat the dedupe gate.
 		if (!vacuous && idleState.lastWasVacuous) idleState.lastWasVacuous = false;
-		const busyAgents = [
-			...idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id),
-			...(rootBusy ? ["root"] : []),
-		];
+		const busyAgents = [...idleAgents.filter((a) => a.runtimeStatus !== "idle").map((a) => a.id), ...(rootBusy ? ["root"] : [])];
 		if (idleState.allIdleSinceAt || idleState.nextGoalNudgeAt) {
 			// Busy edge: restart stall spacing so the next all-idle edge re-arms emission immediacy.
 			const stallSlotsReset: string[] = [];
@@ -377,12 +374,28 @@ export async function evaluateIdleGoalNudgeLocked(
 		// message is durably enqueued in the mailbox and the pump surfaces it once the
 		// root is idle (R13 P0 path; unchanged).
 		if (goal.origin === "user" || goal.origin === "system" || goal.origin === "batch") {
+			const effectiveMaxNudges = resolveGoalMaxNudges(goal.maxNudges);
+			const isInfinite = effectiveMaxNudges === -1;
+			const isCapped = !isInfinite && (goal.consecutiveNoResolveNudges ?? 0) >= effectiveMaxNudges;
+
 			const cooldownUntilMs = idleStateVac.lastPoolEmptyEscalationAt
 				? new Date(idleStateVac.lastPoolEmptyEscalationAt).getTime() + NOTIFY_DEFAULT_COOLDOWN_MS
 				: 0;
-			if (nowMs >= cooldownUntilMs) {
+			if (!isCapped && nowMs >= cooldownUntilMs) {
 				const poolDiag = Object.values(st.agents)
-					.filter((a) => a.id !== "root")
+					.filter((a) => {
+						if (a.id === "root") return false;
+						// Exclude historical agents that have been stopped for longer than the heartbeat stale window.
+						// Those agents are cleanly retired and should not pollute actionable poolDiag.
+						if (a.runtimeStatus === "stopped") {
+							const stoppedAt = a.lastShutdownAt || a.updatedAt || a.lastHeartbeatAt;
+							const stoppedMs = stoppedAt ? new Date(stoppedAt).getTime() : NaN;
+							if (Number.isFinite(stoppedMs) && nowMs - stoppedMs > AGENT_HEARTBEAT_STALE_MS) {
+								return false;
+							}
+						}
+						return true;
+					})
 					.map((a) => {
 						const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
 						const ageSec = Number.isFinite(hb) ? Math.round((nowMs - hb) / 1000) : null;

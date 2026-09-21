@@ -59,11 +59,11 @@ export async function sendToPane(pi: ExtensionAPI, target: string, text: string)
 }
 
 export function isTmuxRunning(pi: ExtensionAPI, target: string): Promise<boolean> {
-	// `#{pane_alive}` is not portable/reliable across tmux versions and was observed
-	// to report false for live panes. A target is alive if tmux can resolve it to a
-	// pane id; `display-message` exits non-zero when the pane/window/session is gone.
-	return tmux(pi, ["display-message", "-p", "-t", target, "#{pane_id}"], 3_000)
-		.then((out) => out.trim().length > 0)
+	// `display-message -p -t target` falls back to the session's active window/pane if the window
+	// has been killed but the session is alive, causing false "tmuxAlive: true" reports for stopped agents.
+	// `list-panes -t target` fails strictly if the target window/pane does not exist.
+	return tmux(pi, ["list-panes", "-t", target], 3_000)
+		.then(() => true)
 		.catch(() => false);
 }
 

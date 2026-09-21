@@ -658,7 +658,10 @@ export async function stopAgent(
 		}
 	}
 	let kill = { killed: false, method: "skipped" as string };
-	if (opts.killPane !== false) kill = await killAgentPane(pi, p, agent);
+	if (opts.killPane !== false) {
+		kill = await killAgentPane(pi, p, agent);
+		agent.tmuxAlive = false;
+	}
 	agent.status = "stopped";
 	agent.runtimeStatus = "stopped";
 	agent.health = "unhealthy";
