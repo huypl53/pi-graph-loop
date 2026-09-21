@@ -101,6 +101,16 @@ export function turnEndIsResolveAction(event: any): { resolve: boolean; reason: 
 	return { resolve: false, reason: "no_resolve_action" };
 }
 
+// === Root delegation guard & edit streak tracking ===
+export const ROOT_EDIT_STREAK_WARN_THRESHOLD = 3;
+let rootEditStreak = 0;
+export function getRootEditStreak(): number {
+	return rootEditStreak;
+}
+export function resetRootEditStreak(): void {
+	rootEditStreak = 0;
+}
+
 // Root mailbox pump state. Module-level so the PM pump can be (re)started from outside the
 // session_start hook — notably by `/swarm register here root`, which opts a running session in
 // as the root after startup. `swarmPi` is captured once in registerSwarmHooks (always called
@@ -966,7 +976,11 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		const agentId = currentAgentId();
-		if (agentId === "root") return;
+		if (agentId === "root") {
+			return {
+				systemPrompt: `${event.systemPrompt}\n\n[PI-SWARM ROOT ORCHESTRATOR]\nYou are agent \`root\`, the Swarm Root Orchestrator. Your primary role is planning, decomposing tasks, spawning/managing agents, and delegating work using swarm tools (\`swarm_create_task\`, \`swarm_assign_task\`, \`swarm_send_message\`). You may perform quick direct file edits when optimal, but substantial code implementation and bug fixes should be delegated to swarm worker agents.\n[/PI-SWARM ROOT ORCHESTRATOR]`,
+			};
+		}
 		const p = paths(ctx.cwd);
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
@@ -1342,10 +1356,39 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 		}
 	});
 
+	pi.on("tool_result", async (event, ctx) => {
+		const agentId = currentAgentId();
+		if (agentId !== "root") return;
+		try {
+			const toolName = (event as any)?.toolName;
+			if (toolName === "edit" || toolName === "write") {
+				rootEditStreak++;
+				if (rootEditStreak >= ROOT_EDIT_STREAK_WARN_THRESHOLD) {
+					const notice = `\n\n[Root Orchestrator Advisory]: You have performed ${rootEditStreak} consecutive direct file edits.\n- If this is an intentional quick edit, proceed.\n- If you are implementing a feature or fixing bugs, remember your role as Root: please delegate work to swarm workers via \`swarm_create_task\` and \`swarm_assign_task\`.`;
+					const content = (event as any).content;
+					if (Array.isArray(content) && content.length > 0) {
+						const last = content[content.length - 1];
+						if (last && typeof last === "object" && typeof last.text === "string") {
+							last.text += notice;
+						} else {
+							content.push({ type: "text", text: notice });
+						}
+						return { content };
+					}
+				}
+			} else if (typeof toolName === "string" && (toolName.startsWith("swarm_") || SWARM_RESOLVE_TOOLS.has(toolName))) {
+				rootEditStreak = 0;
+			}
+		} catch (err) {
+			await logSwarmError(ctx?.cwd, "hooks", "tool_result.streak_failed", err);
+		}
+	});
+
 	pi.on("session_shutdown", async (_event, ctx) => {
 		const agentId = currentAgentId();
 		if (agentId === "root") {
 			stopRootPump();
+			rootEditStreak = 0;
 			// Issue 17 (binding C1 — symmetry with session_start): clear any open incident for the
 			// root on shutdown. Defense-in-depth — the process is going away anyway, but
 			// explicit symmetry keeps the invariant visible to readers.

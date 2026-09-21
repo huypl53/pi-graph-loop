@@ -31,7 +31,7 @@ await mockLLM({
 
 assert.equal(registered.name, "mock-llm", "provider should register as mock-llm");
 assert.equal(registered.config.api, "mock-llm-stream");
-assert.equal(registered.config.models.length, 84, "expected 84 scenario models");
+assert.equal(registered.config.models.length, 85, "expected 85 scenario models");
 assert.deepEqual(
 	(await discoverModelConfigs()).map((model) => model.id).sort(),
 	[
@@ -106,6 +106,7 @@ assert.deepEqual(
 		"response-credit-verified-result",
 		"response-missing-settle",
 		"response-required-death",
+		"root-delegation-guard",
 		"settled-with-open-assignment",
 		"shared-context-a",
 		"shared-context-b",
@@ -121,7 +122,7 @@ assert.deepEqual(
 		"wake-up-escalation-reminder",
 	].sort(),
 );
-assert.equal((await listFixtureDiscovery()).length, 84);
+assert.equal((await listFixtureDiscovery()).length, 85);
 
 function makeContext() {
 	return {
