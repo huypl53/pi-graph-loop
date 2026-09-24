@@ -1,0 +1,9 @@
+# root-message-batching: R30 — root inbound message coalescing & batch surfacing
+#
+# Exercises batched message surfacing on root:
+#   1. Root opens its mailbox (observes multiple incoming worker messages).
+#   2. Root acknowledges the batch and inspects mailbox state.
+#   3. Root settles after processing all batched updates in a single turn.
+{"name":"r30 open mailbox baseline","events":[{"type":"text","delayMs":15,"text":"Starting R30 validation lane. Checking root mailbox to observe worker messages batched for delivery.","chunks":["Starting R30 validation lane. ","Checking root mailbox ","to observe worker messages batched for delivery."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"mb-0","arguments":{"pendingOnly":true,"markDelivered":false,"limit":20}}]}
+{"name":"r30 verify batch processing","events":[{"type":"text","delayMs":20,"text":"Observed incoming worker messages. Under the R30 batching implementation, pending worker messages are surfaced as a single batched turn, preventing sequential turn thrashing at the root.","chunks":["Observed incoming worker messages. ","Under the R30 batching implementation, ","pending worker messages are surfaced as a single batched turn, ","preventing sequential turn thrashing at the root."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":false,"markDelivered":false,"limit":20}}]}
+{"name":"r30 settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Lane complete: multiple worker messages successfully processed via batched delivery with single turn trigger.","chunks":["Lane complete: ","multiple worker messages successfully processed ","via batched delivery with single turn trigger."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

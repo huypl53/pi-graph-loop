@@ -49,6 +49,27 @@ export function formatSwarmMessageContent(msg: SwarmMessage) {
 	return `[${stamp}] Inter-agent swarm message from ${msg.from} to ${msg.to}${msg.subject ? ` (${msg.subject})` : ""}:\n\n${msg.body}${ackLine}`;
 }
 
+export function formatSwarmBatchMessageContent(msgs: SwarmMessage[]) {
+	if (msgs.length === 0) return "";
+	if (msgs.length === 1) return formatSwarmMessageContent(msgs[0]);
+
+	const ts = new Date(msgs[msgs.length - 1].createdAt || Date.now());
+	const stamp = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}-${String(ts.getDate()).padStart(2, "0")} ${String(ts.getHours()).padStart(2, "0")}:${String(ts.getMinutes()).padStart(2, "0")}:${String(ts.getSeconds()).padStart(2, "0")}`;
+
+	const showAckHint = PI_SWARM_MINIMAL_PROTOCOL === 0;
+	const items = msgs.map((m, idx) => {
+		const prio = m.priority && m.priority !== "normal" ? ` | Priority: ${m.priority}` : "";
+		const subj = m.subject ? ` (${m.subject})` : "";
+		const ackLine =
+			showAckHint && m.requiresAck
+				? `\n[PI-SWARM ACK REQUIRED] messageId="${m.id}"`
+				: "";
+		return `--- [${idx + 1}/${msgs.length}] From ${m.from} to ${m.to}${subj}${prio} [${m.id}] ---\n${m.body.trim()}${ackLine}`;
+	});
+
+	return `[${stamp}] Inter-agent swarm batch delivery for ${msgs[0].to} (${msgs.length} incoming messages):\n\n${items.join("\n\n")}`;
+}
+
 export function buildSystemDelivery(msg: SwarmMessage) {
 	// Keep this as a single physical line: `tmux send-keys -l` does not reliably
 	// preserve embedded newlines across terminal editors. Base64 prevents marker

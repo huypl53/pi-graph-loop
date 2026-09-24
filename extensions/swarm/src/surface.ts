@@ -93,7 +93,7 @@ import {
 	upsertMessageRecord,
 } from "./mailbox.ts";
 import { claimRootLeader, ensureRoot, heartbeatRootLeader, readRootLeader, requireRootAuthority } from "./identity.ts";
-import { formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
+import { formatSwarmBatchMessageContent, formatSwarmMessageContent, isDeliveryFailureRetryable } from "./delivery.ts";
 import { isPanePiLike, isTmuxRunning, tmux } from "./tmux.ts";
 import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState, writeTaskState } from "./state.ts";
 import { logSwarmError, traceLogged } from "./errorlog.ts";
@@ -157,7 +157,7 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 			if (rec.superseded) continue; // superseded assignments are waived; not current work
 			if (rec.status === "dead_letter")
 				warnings.push(`node ${id} assignment/handoff message ${msgId} is dead-lettered (${rec.lastError || "unknown"})`);
-			if (rec.requiresAck && !rec.ackedAt) warnings.push(`node ${id} message ${msgId} requires ack but is ${rec.status}`);
+			if (PI_SWARM_MINIMAL_PROTOCOL === 0 && rec.requiresAck && !rec.ackedAt) warnings.push(`node ${id} message ${msgId} requires ack but is ${rec.status}`);
 			// Assignment acked done but the node was never advanced past assigned/in_progress.
 			if (rec.lastAck?.status === "done" && (node.status === "assigned" || node.status === "in_progress"))
 				warnings.push(`node ${id} message ${msgId} acked done but node is still ${node.status}`);
@@ -370,7 +370,10 @@ export function isActionableRootMessage(
 		// that filter the per-tick surface plan.
 		// Predicate order: check `isResultClass` FIRST so nudges (which also lack replyTo in our
 		// fingerprint) keep falling through to the existing task/node terminal gates.
-		const isResultClass = Boolean(rec.requiresAck) && rec.requiresResponse === false && Boolean(rec.replyTo);
+		const isResultClass =
+			(Boolean(rec.requiresAck) || PI_SWARM_MINIMAL_PROTOCOL === 1) &&
+			rec.requiresResponse === false &&
+			Boolean(rec.replyTo);
 		const task = taskIndex[taskNodeRef.taskId];
 		if (!task) return { ok: false, reason: "task_missing" };
 		if (isResultClass) {
@@ -1247,24 +1250,50 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 	// The decision block above (readState/writeState/trace) runs in all modes to record surfacing
 	// decisions without ctx usage.
 	if (ctx.mode === "tui") {
-		for (let i = 0; i < pending.length; i++) {
-			const msg = pending[i];
-			// Stuck-busy escalation path: steer (interrupt the queued continuation and start a fresh
-			// turn) instead of triggerTurn — the engine is NOT idle, so a queued turn would never fire.
+		const isBatch = pending.length > 1;
+		if (isBatch) {
 			const opts = result.escalatedStuck
 				? { triggerTurn: true, deliverAs: "steer" as const }
-				: i === 0
-					? { triggerTurn: true }
-					: { deliverAs: "followUp" as const };
+				: { triggerTurn: true };
 			pi.sendMessage(
 				{
-					customType: "swarm-message",
-					content: formatSwarmMessageContent(msg),
+					customType: "swarm-batch-message",
+					content: formatSwarmBatchMessageContent(pending),
 					display: true,
-					details: msg,
+					details: {
+						batch: true,
+						count: pending.length,
+						ids: pending.map((m) => m.id),
+						messages: pending,
+					},
 				},
 				opts,
 			);
+			await trace(p, "notification.batch.surfaced", {
+				count: pending.length,
+				ids: pending.map((m) => m.id),
+				isBatch: true,
+			}).catch(() => {});
+		} else {
+			for (let i = 0; i < pending.length; i++) {
+				const msg = pending[i];
+				// Stuck-busy escalation path: steer (interrupt the queued continuation and start a fresh
+				// turn) instead of triggerTurn — the engine is NOT idle, so a queued turn would never fire.
+				const opts = result.escalatedStuck
+					? { triggerTurn: true, deliverAs: "steer" as const }
+					: i === 0
+						? { triggerTurn: true }
+						: { deliverAs: "followUp" as const };
+				pi.sendMessage(
+					{
+						customType: "swarm-message",
+						content: formatSwarmMessageContent(msg),
+						display: true,
+						details: msg,
+					},
+					opts,
+				);
+			}
 		}
 		// Global-consume informational PM traffic ONLY AFTER a real TUI surface succeeded. This avoids
 		// losing a message on stale-ctx/sendMessage failure while still preventing a later root
