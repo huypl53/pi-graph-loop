@@ -34,7 +34,7 @@ import {
 	spawnAgent,
 	stopAgent,
 } from "../agents.ts";
-import { ERR_ROOT_PANE_REJECTED } from "../constants.ts";
+import { ERR_ROOT_PANE_REJECTED, PI_SWARM_MINIMAL_PROTOCOL } from "../constants.ts";
 import { responseMissingRecords, verifiedResponseCount } from "../mailbox.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
 import { resolveGoalNudgeIntervalMs } from "../reconcile.ts";
@@ -67,13 +67,19 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 						// acked-failed) is not pending; only never-acknowledged queued/failed count.
 						const pendingMessages = records.filter((m) => isDeliveryFailureRetryable(m)).length;
 						const mailboxDelivered = records.filter((m) => m.status === "mailbox_delivered").length;
-						const unackedMessages = records.filter(
-							(m) =>
-								m.requiresAck &&
-								!m.ackedAt &&
-								(m.status === "mailbox_delivered" || m.status === "injected" || m.status === "intercepted"),
-						).length;
-						const ackMissing = records.filter((m) => m.requiresAck && Boolean(m.ackMissingAt) && !m.ackedAt).length;
+						const unackedMessages =
+							PI_SWARM_MINIMAL_PROTOCOL === 1
+								? 0
+								: records.filter(
+										(m) =>
+											m.requiresAck &&
+											!m.ackedAt &&
+											(m.status === "mailbox_delivered" || m.status === "injected" || m.status === "intercepted"),
+									).length;
+						const ackMissing =
+							PI_SWARM_MINIMAL_PROTOCOL === 1
+								? 0
+								: records.filter((m) => m.requiresAck && Boolean(m.ackMissingAt) && !m.ackedAt).length;
 						const deadLetters = records.filter((m) => m.status === "dead_letter").length;
 						const responseMissing = responseMissingRecords(st, agent.id).length;
 						const responsesVerified = verifiedResponseCount(st, agent.id);

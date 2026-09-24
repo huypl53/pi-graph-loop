@@ -27,6 +27,7 @@ import {
 	NOTIFY_DEFAULT_COOLDOWN_MS,
 	NOTIFY_DEFAULT_MAX_NUDGES,
 	PI_SWARM_KEEP_TASK_WORKERS_OPT_OUT_ENV,
+	PI_SWARM_MINIMAL_PROTOCOL,
 	PI_SWARM_PROXY_METRIC_INTERVAL_MS,
 	REMINDER_NO_PROGRESS_MS,
 	SAFE_ID_RE,
@@ -295,7 +296,7 @@ export function deriveNodeAttention(st: SwarmState, task: TaskState, nodeId: str
 	}
 
 	// 5/6. Protocol problems.
-	if (msg && msg.requiresAck && !msg.ackedAt && !msg.lastAck) {
+	if (PI_SWARM_MINIMAL_PROTOCOL === 0 && msg && msg.requiresAck && !msg.ackedAt && !msg.lastAck) {
 		const since = Math.max(isoMs(msg.injectedAt), isoMs(msg.interceptedAt), isoMs(msg.createdAt));
 		const age = nowMs - since;
 		if (age > ACK_MISSING_MS) {
@@ -1007,7 +1008,7 @@ export function computeNodeClosureSummary(st: SwarmState, task: TaskState, nodeI
 		if (!assignmentAck)
 			assignmentAck = { messageId: msgId, status: rec.status, acked: Boolean(rec.ackedAt), ackStatus: rec.lastAck?.status ?? null };
 		if (rec.status === "dead_letter") blocking.push(`message ${msgId} is dead-lettered (${rec.lastError || "unknown"})`);
-		if (rec.requiresAck && !rec.ackedAt) blocking.push(`assignment message ${msgId} not acknowledged`);
+		if (PI_SWARM_MINIMAL_PROTOCOL === 0 && rec.requiresAck && !rec.ackedAt) blocking.push(`assignment message ${msgId} not acknowledged`);
 		if (rec.lastAck?.status === "done" && verdict === "open")
 			blocking.push(`message ${msgId} acked done but node is still ${node.status}`);
 	}
@@ -1599,7 +1600,7 @@ R12 P0 contract: the sweep no longer force-kills shared-pool workers, but a task
 
 (Idempotent within the sweep call: at most one nudge per close call. Not emitted on \`≥1 → ≥1\` or \`0 → 0\` transitions.)`,
 					idempotencyKey: key,
-					requiresAck: true,
+					requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
 					requiresResponse: true,
 					conversationId: `task:${taskId}:pool_depleted`,
 				}).catch((err: any) => {
@@ -1843,7 +1844,7 @@ Act NOW in this turn:
   3. If the node is genuinely long-running (evidence of progress in artifacts), ack this nudge done with a note; it will not re-fire within the window.
 
 (Auto-clears when the node records progress or closes. Capped at ${NOTIFY_DEFAULT_MAX_NUDGES} nudges per node; ${Math.round(NOTIFY_DEFAULT_COOLDOWN_MS / 60000)}min cooldown.)`,
-			requiresAck: true,
+			requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
 			idempotencyKey: key,
 		});
 		await trace(p, TRACE_STALE_OPEN_NUDGE_EMITTED, {

@@ -155,7 +155,7 @@ export async function reconcileTasks(
 					continue;
 				}
 				if (rec.status === "dead_letter") staleReasons.push(`assignment message ${msgId} dead-lettered`);
-				else if (rec.requiresAck && !rec.ackedAt && !st.consumerReceipts?.root?.entries?.[msgId]) {
+				else if (PI_SWARM_MINIMAL_PROTOCOL === 0 && rec.requiresAck && !rec.ackedAt && !st.consumerReceipts?.root?.entries?.[msgId]) {
 					const sinceMs = Math.max(
 						rec.injectedAt ? new Date(rec.injectedAt).getTime() : 0,
 						rec.interceptedAt ? new Date(rec.interceptedAt).getTime() : 0,
@@ -458,8 +458,7 @@ export async function reconcile(
 			}
 
 			if ((rec.status === "mailbox_delivered" || rec.status === "injected" || rec.status === "intercepted") && !rec.ackedAt) {
-				if (!rec.requiresAck) continue;
-				if (PI_SWARM_MINIMAL_PROTOCOL === 1 && (rec.processingAt || rec.respondedAt || rec.terminalAt)) continue;
+				if (!rec.requiresAck || PI_SWARM_MINIMAL_PROTOCOL === 1) continue;
 				// Consider the most recent delivery timestamp. Previously this only checked injectedAt, so
 				// `intercepted` messages (which set interceptedAt, not injectedAt) were never detected as stale.
 				const sinceMs = Math.max(

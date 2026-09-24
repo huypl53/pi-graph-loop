@@ -17,7 +17,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join, sep } from "node:path";
 import type { IndexedTask, Paths, SwarmState, TaskState } from "./types.ts";
-import { MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_STATUS_TASKS } from "./constants.ts";
+import { MAX_CONSECUTIVE_NUDGES_DEFAULT, MAX_STATUS_TASKS, PI_SWARM_MINIMAL_PROTOCOL } from "./constants.ts";
 import { ensureAgentDefaults, humanAge, safeId } from "./utils.ts";
 import { computeReadyNodes } from "./taskgraph.ts";
 import { readTaskState } from "./state.ts";
@@ -40,8 +40,10 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 		if (a.status === "running") runningAgents++;
 	}
 	let ackMissing = 0;
-	for (const rec of Object.values(st.messages)) {
-		if (rec.requiresAck && !rec.ackedAt && rec.status !== "dead_letter" && rec.status !== "acked") ackMissing++;
+	if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
+		for (const rec of Object.values(st.messages)) {
+			if (rec.requiresAck && !rec.ackedAt && rec.status !== "dead_letter" && rec.status !== "acked") ackMissing++;
+		}
 	}
 
 	const pmStatus = (task: TaskState): string => {
@@ -94,9 +96,11 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 			let unacked = 0;
 			for (const node of Object.values(task.nodes)) {
 				if (node.staleAt) staleNodes++;
-				for (const msgId of node.messageIds || []) {
-					const rec = st.messages[msgId];
-					if (rec && rec.requiresAck && !rec.ackedAt) unacked++;
+				if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
+					for (const msgId of node.messageIds || []) {
+						const rec = st.messages[msgId];
+						if (rec && rec.requiresAck && !rec.ackedAt) unacked++;
+					}
 				}
 			}
 			const { ready, current } = computeReadyNodes(task);

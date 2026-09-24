@@ -16,6 +16,7 @@ import {
 	DEFAULT_MODEL,
 	DEFAULT_PROVIDER,
 	ORPHAN_SPAWN_WARNING_TIMEOUT_MS,
+	PI_SWARM_MINIMAL_PROTOCOL,
 	SETTLE_NOTIFY_COOLDOWN_MS,
 	SPAWN_SETTLE_MS,
 } from "./constants.ts";
@@ -629,31 +630,33 @@ export async function stopAgent(
 	// hooks.ts settle branch: per-agent cooldown (`lastAckDebtNotifyAt`) + idempotency key from
 	// sorted unacked ids so re-stops within the cooldown are silently deduped. The agent record
 	// persists across the stop (mailbox/identity/history live by stable id), so the cooldown stamp
-	// survives and prevents storm.
-	const ackDebt = unackedRequiresAckRecords(state, agentId);
-	if (ackDebt.length) {
-		const sinceAckDebt = agent.lastAckDebtNotifyAt
-			? Date.now() - new Date(agent.lastAckDebtNotifyAt).getTime()
-			: Number.POSITIVE_INFINITY;
-		if (sinceAckDebt > SETTLE_NOTIFY_COOLDOWN_MS) {
-			// mirror the hooks.ts settle branch
-			const sortedIds = [...ackDebt.map((r) => r.id)].sort();
-			const hash = createHash("sha1").update(sortedIds.join("|")).digest("hex").slice(0, 8);
-			const idempotencyKey = `r25:ackdebt:${agentId}:${hash}`;
-			agent.lastAckDebtNotifyAt = ts;
-			const subjectList = ackDebt.map((r) => r.subject || "(no subject)").join("; ");
-			const idList = sortedIds.join(", ");
-			try {
-				await deliverMessageLocked(pi, cwd, p, state, {
-					to: "root",
-					subject: `agent ${agentId} stopped owing ${ackDebt.length} unacked ack(s)`,
-					body: `Agent ${agentId} stopped (swarm_stop_agent) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
-					requiresAck: false,
-					idempotencyKey,
-				});
-				await trace(p, "message.ack_debt.stop.notify", { agentId, messageIds: sortedIds });
-			} catch (err: any) {
-				await trace(p, "message.ack_debt.stop.notify_failed", { agentId, error: String(err?.message || err) });
+	// survives and prevents storm. Under PI_SWARM_MINIMAL_PROTOCOL=1 manual acks are retired.
+	if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
+		const ackDebt = unackedRequiresAckRecords(state, agentId);
+		if (ackDebt.length) {
+			const sinceAckDebt = agent.lastAckDebtNotifyAt
+				? Date.now() - new Date(agent.lastAckDebtNotifyAt).getTime()
+				: Number.POSITIVE_INFINITY;
+			if (sinceAckDebt > SETTLE_NOTIFY_COOLDOWN_MS) {
+				// mirror the hooks.ts settle branch
+				const sortedIds = [...ackDebt.map((r) => r.id)].sort();
+				const hash = createHash("sha1").update(sortedIds.join("|")).digest("hex").slice(0, 8);
+				const idempotencyKey = `r25:ackdebt:${agentId}:${hash}`;
+				agent.lastAckDebtNotifyAt = ts;
+				const subjectList = ackDebt.map((r) => r.subject || "(no subject)").join("; ");
+				const idList = sortedIds.join(", ");
+				try {
+					await deliverMessageLocked(pi, cwd, p, state, {
+						to: "root",
+						subject: `agent ${agentId} stopped owing ${ackDebt.length} unacked ack(s)`,
+						body: `Agent ${agentId} stopped (swarm_stop_agent) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
+						requiresAck: false,
+						idempotencyKey,
+					});
+					await trace(p, "message.ack_debt.stop.notify", { agentId, messageIds: sortedIds });
+				} catch (err: any) {
+					await trace(p, "message.ack_debt.stop.notify_failed", { agentId, error: String(err?.message || err) });
+				}
 			}
 		}
 	}

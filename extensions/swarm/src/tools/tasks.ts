@@ -1242,7 +1242,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 							body,
 							subject: `Task ${task.taskId} / node ${params.nodeId} assigned`,
 							conversationId,
-							requiresAck: true,
+							requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
 							requiresResponse: true,
 							idempotencyKey,
 							clearReason: "swarm_assign_task",
@@ -2429,7 +2429,7 @@ export function registerTasksTools(pi: ExtensionAPI) {
 							body,
 							subject: params.subject,
 							conversationId,
-							requiresAck: params.replyExpected !== false,
+							requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : params.replyExpected !== false,
 							requiresResponse: params.replyExpected !== false,
 							priority: params.priority,
 						});

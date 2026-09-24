@@ -80,6 +80,7 @@ export function responseMissingRecords(st: SwarmState, agentId: string) {
 // injected, intercepted, queued} are all debt. Returns ids + the live records for the caller to
 // build the notify body / idempotency key.
 export function unackedRequiresAckRecords(st: SwarmState, agentId: string) {
+	if (PI_SWARM_MINIMAL_PROTOCOL === 1) return [];
 	return Object.values(st.messages || {}).filter(
 		(m) =>
 			m.to === agentId &&
