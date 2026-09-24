@@ -115,6 +115,7 @@ export function defaultState(cwd: string): SwarmState {
 		cwd,
 		tmuxSession: `pi-swarm-${projectSlug(cwd)}-${swarmId.slice(-6)}`,
 		agents: {},
+		autoFocusBusy: true,
 		delivered: {},
 		messages: {},
 		proxyMetrics: { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0 },

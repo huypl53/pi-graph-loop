@@ -52,7 +52,7 @@ import { tmux } from "./tmux.ts";
 import { ensurePoolScaffold } from "./pool-scaffold.ts";
 import { maybeRotateTraces } from "./tools/audit.ts";
 import { DEFAULT_TRACE_ROTATE_BYTES } from "./constants.ts";
-import { maybeAutoFocusBusyAgent } from "./focus.ts";
+import { maybeAutoFocusBusyAgent, maybeAutoFocusOnBusy } from "./focus.ts";
 
 // === R16 (2026-09-02): turn-end resolve-action detector (module-scope export) ===
 // A turn_end{stop, role=assistant} is a RESOLVE only if the root ADVANCED the goal
@@ -1024,6 +1024,12 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			await writeState(p, st);
 			await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health, resurrect });
 		});
+
+		try {
+			await maybeAutoFocusOnBusy(pi, ctx, agentId);
+		} catch (err: any) {
+			await logSwarmError(ctx?.cwd, "hooks", "agent_start.auto_focus_failed", err, { agentId });
+		}
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
@@ -1084,13 +1090,13 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			}
 
 			const missingResponses = responseMissingRecords(st, agentId);
-			agent.runtimeStatus = missingResponses.length ? "response_missing" : "idle";
 			if (missingResponses.length) {
 				// Lifecycle-fencing (issue 9, site 1): skip the settle-with-missing-response notify if every
 				// outstanding rec is stale (superseded by a later assignment, or no longer addressed to this
 				// settling agent). Fence at emit time using durable message state — no pane liveness inference.
 				const liveMissing = missingResponses.filter((rec) => !rec.superseded && rec.to === agentId);
 				if (liveMissing.length === 0) {
+					agent.runtimeStatus = "idle";
 					await trace(p, "notification.stale.suppressed", {
 						site: "agent_settled.response_missing",
 						agentId,
@@ -1098,62 +1104,111 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 						dropped: missingResponses.map((m) => m.id),
 					});
 				} else {
-					for (const rec of liveMissing) {
-						rec.response = {
-							...(rec.response || { status: "missing" as MessageResponseStatus }),
-							status: "missing",
-							missingAt: rec.response?.missingAt || ts,
-							lastError: `response_missing: ${agentId} settled before sending a verified result`,
-						};
-						rec.updatedAt = ts;
-					}
-					try {
-						await deliverMessageLocked(pi, ctx.cwd, p, st, {
-							to: "root",
-							subject: `agent ${agentId} settled with missing response(s)`,
-							body: `Agent ${agentId} settled while ${liveMissing.length} requiresResponse message(s) are still missing verified result messages: ${liveMissing.map((m) => m.id).join(", ")}. The agent is marked response_missing and is blocked from reuse until it sends replies and ack done with resultMessageId.`,
-							requiresAck: false,
-						});
-						await trace(p, "message.response_missing.settled.notify", { agentId, messageIds: liveMissing.map((m) => m.id) });
-					} catch (err: any) {
-						await trace(p, "message.response_missing.notify_failed", { agentId, error: String(err?.message || err) });
+					// 2-Tier Response Missing Handling:
+					// Tier 1: If worker is running, first nudge the WORKER directly in its own pane so it can self-repair without bothering root.
+					// Tier 2: If worker was already nudged or is stopped/dead, mark response_missing and escalate to root.
+					const needsWorkerNudge = liveMissing.filter((rec) => {
+						const nudgeCount = (rec.response as any)?.workerNudgeCount || 0;
+						return nudgeCount < 1;
+					});
+					const isWorkerAlive = agent.status === "running" && agent.tmuxTarget && agent.tmuxTarget !== "unknown";
+
+					if (needsWorkerNudge.length > 0 && isWorkerAlive) {
+						for (const rec of needsWorkerNudge) {
+							rec.response = {
+								...(rec.response || { status: "missing" as MessageResponseStatus }),
+								status: "missing",
+								missingAt: rec.response?.missingAt || ts,
+								lastError: `response_missing: worker settled before sending verified result (self-nudge sent)`,
+								workerNudgeCount: ((rec.response as any)?.workerNudgeCount || 0) + 1,
+								lastWorkerNudgeAt: ts,
+							} as any;
+							rec.updatedAt = ts;
+
+							try {
+								await deliverMessageLocked(pi, ctx.cwd, p, st, {
+									to: agentId,
+									subject: `[Swarm Reminder] Missing verified response for ${rec.id}`,
+									body: `You settled without providing a verified response for assignment ${rec.id} (${rec.subject || "Task assignment"}).\n\nPlease complete your node or report your status/blocker to root (via swarm_send_message with replyTo="${rec.id}") so this task can advance.`,
+									replyTo: rec.id,
+									conversationId: rec.conversationId,
+									requiresAck: false,
+									requiresResponse: false,
+									priority: "high",
+								});
+								await trace(p, "message.response_missing.worker_nudged", {
+									agentId,
+									messageId: rec.id,
+									workerNudgeCount: (rec.response as any).workerNudgeCount,
+								});
+							} catch (err: any) {
+								await trace(p, "message.response_missing.worker_nudge_failed", {
+									agentId,
+									messageId: rec.id,
+									error: String(err?.message || err),
+								});
+							}
+						}
+						// Keep worker idle so it can act on the nudge
+						agent.runtimeStatus = "idle";
+					} else {
+						agent.runtimeStatus = "response_missing";
+						for (const rec of liveMissing) {
+							rec.response = {
+								...(rec.response || { status: "missing" as MessageResponseStatus }),
+								status: "missing",
+								missingAt: rec.response?.missingAt || ts,
+								lastError: `response_missing: ${agentId} settled before sending a verified result`,
+							};
+							rec.updatedAt = ts;
+						}
+						try {
+							await deliverMessageLocked(pi, ctx.cwd, p, st, {
+								to: "root",
+								subject: `agent ${agentId} settled with missing response(s)`,
+								body: `Agent ${agentId} settled while ${liveMissing.length} requiresResponse message(s) are still missing verified result messages: ${liveMissing.map((m) => m.id).join(", ")}. The agent is marked response_missing and is blocked from reuse until it sends replies and ack done with resultMessageId.`,
+								requiresAck: false,
+							});
+							await trace(p, "message.response_missing.settled.notify", { agentId, messageIds: liveMissing.map((m) => m.id) });
+						} catch (err: any) {
+							await trace(p, "message.response_missing.notify_failed", { agentId, error: String(err?.message || err) });
+						}
 					}
 				}
+			} else {
+				agent.runtimeStatus = "idle";
 			}
-			// R25 — PM auto-notify for ack-debt (separate from response-missing + open-assignment
-			// cases). A worker that settles owing live, non-superseded requiresAck messages is
-			// invisible to the root today; this closes that gap. Storm guards mirror the
-			// response-missing branch: per-agent cooldown (`lastAckDebtNotifyAt`, distinct from
-			// `lastSettleNotifyAt` so the open-assignment cooldown is not coupled) +
-			// idempotencyKey=r25:ackdebt:<agent>:<sha8(sorted ids)> reused across settles.
-			// requiresAck=false (informational). deliverMessageLocked derives from=currentAgentId()
-			// which is the worker in this hook context — the correct author for the notify.
-			const ackDebt = unackedRequiresAckRecords(st, agentId);
-			if (ackDebt.length) {
-				const sinceAckDebt = agent.lastAckDebtNotifyAt
-					? Date.now() - new Date(agent.lastAckDebtNotifyAt).getTime()
-					: Number.POSITIVE_INFINITY;
-				if (sinceAckDebt > SETTLE_NOTIFY_COOLDOWN_MS) {
-					const sortedIds = [...ackDebt.map((r) => r.id)].sort();
-					const hash = createHash("sha1").update(sortedIds.join("|")).digest("hex").slice(0, 8);
-					const idempotencyKey = `r25:ackdebt:${agentId}:${hash}`;
-					agent.lastAckDebtNotifyAt = ts;
-					const subjectList = ackDebt.map((r) => r.subject || "(no subject)").join("; ");
-					const idList = sortedIds.join(", ");
-					try {
-						await deliverMessageLocked(pi, ctx.cwd, p, st, {
-							to: "root",
-							subject: `agent ${agentId} settled owing ${ackDebt.length} unacked ack(s)`,
-							body: `Agent ${agentId} settled (agent_settled) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
-							requiresAck: false,
-							idempotencyKey,
-						});
-						await trace(p, "message.ack_debt.settled.notify", { agentId, messageIds: sortedIds });
-					} catch (err: any) {
-						await trace(p, "message.ack_debt.notify_failed", { agentId, error: String(err?.message || err) });
+			// R25 — PM auto-notify for ack-debt. Under PI_SWARM_MINIMAL_PROTOCOL=1 manual acks are retired
+			// (swarm_ack_message is hidden and message lifecycle is inferred from actions), so this notify is
+			// active only under legacy gate=0.
+			if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
+				const ackDebt = unackedRequiresAckRecords(st, agentId);
+				if (ackDebt.length) {
+					const sinceAckDebt = agent.lastAckDebtNotifyAt
+						? Date.now() - new Date(agent.lastAckDebtNotifyAt).getTime()
+						: Number.POSITIVE_INFINITY;
+					if (sinceAckDebt > SETTLE_NOTIFY_COOLDOWN_MS) {
+						const sortedIds = [...ackDebt.map((r) => r.id)].sort();
+						const hash = createHash("sha1").update(sortedIds.join("|")).digest("hex").slice(0, 8);
+						const idempotencyKey = `r25:ackdebt:${agentId}:${hash}`;
+						agent.lastAckDebtNotifyAt = ts;
+						const subjectList = ackDebt.map((r) => r.subject || "(no subject)").join("; ");
+						const idList = sortedIds.join(", ");
+						try {
+							await deliverMessageLocked(pi, ctx.cwd, p, st, {
+								to: "root",
+								subject: `agent ${agentId} settled owing ${ackDebt.length} unacked ack(s)`,
+								body: `Agent ${agentId} settled (agent_settled) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
+								requiresAck: false,
+								idempotencyKey,
+							});
+							await trace(p, "message.ack_debt.settled.notify", { agentId, messageIds: sortedIds });
+						} catch (err: any) {
+							await trace(p, "message.ack_debt.notify_failed", { agentId, error: String(err?.message || err) });
+						}
+					} else {
+						await trace(p, "message.ack_debt.settled.notify_cooldown", { agentId, cooldownMs: SETTLE_NOTIFY_COOLDOWN_MS });
 					}
-				} else {
-					await trace(p, "message.ack_debt.settled.notify_cooldown", { agentId, cooldownMs: SETTLE_NOTIFY_COOLDOWN_MS });
 				}
 			}
 			// PM auto-notify (engine behavior): a settle while still holding open assignments is a
@@ -1301,6 +1356,12 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 			await writeState(p, st);
 			await trace(p, "agent.status", { agentId, runtimeStatus: agent.runtimeStatus, health: agent.health, resurrect });
 		});
+
+		try {
+			await maybeAutoFocusOnBusy(pi, ctx, agentId);
+		} catch (err: any) {
+			await logSwarmError(ctx?.cwd, "hooks", "tool_start.auto_focus_failed", err, { agentId });
+		}
 	});
 
 	pi.on("tool_execution_end", async (_event, ctx) => {

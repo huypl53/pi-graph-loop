@@ -54,7 +54,25 @@ export function pickNextBusyAgent(st: SwarmState, excludeAgentId?: string, targe
 }
 
 /**
- * Check if the tmux window for the given agent (or current process) is currently the active window.
+ * Check if auto-focus is enabled via state flag or environment variable.
+ * Default is ENABLED (true) unless explicitly disabled via PI_SWARM_AUTO_FOCUS=0/false
+ * or state autoFocusBusy === false.
+ */
+export function isAutoFocusEnabled(st?: SwarmState | null): boolean {
+	if (process.env.PI_SWARM_AUTO_FOCUS === "0" || process.env.PI_SWARM_AUTO_FOCUS === "false") {
+		return false;
+	}
+	if (process.env.PI_SWARM_AUTO_FOCUS === "1" || process.env.PI_SWARM_AUTO_FOCUS === "true") {
+		return true;
+	}
+	if (st && typeof st.autoFocusBusy === "boolean") {
+		return st.autoFocusBusy;
+	}
+	return true;
+}
+
+/**
+ * Check if the tmux window for the given agent is currently the active window of its session.
  * This prevents focus stealing when the user is working or viewing a different window.
  */
 export async function isCurrentActiveTmuxWindow(
@@ -66,19 +84,6 @@ export async function isCurrentActiveTmuxWindow(
 		return false;
 	}
 
-	// Strategy 1: If TMUX_PANE is present in the current process, check window_active directly for this pane.
-	if (process.env.TMUX_PANE) {
-		try {
-			const out = await tmux(pi, ["display-message", "-p", "-t", process.env.TMUX_PANE, "#{window_active}"], 3_000);
-			return out.trim() === "1";
-		} catch (err: any) {
-			await logSwarmError(process.cwd(), "focus", "is_current_active.pane_check_failed", err, {
-				pane: process.env.TMUX_PANE,
-			});
-		}
-	}
-
-	// Strategy 2: Query active window of the target session and match against agent window or target.
 	try {
 		const out = await tmux(
 			pi,
@@ -97,8 +102,11 @@ export async function isCurrentActiveTmuxWindow(
 			if (agent.tmuxTarget && agent.tmuxTarget !== "unknown") {
 				if (agent.tmuxTarget === curPaneId || agent.tmuxTarget.endsWith(`:${curWinIndex}.0`)) return true;
 			}
+			if (agent.id && (agent.id === curWinName || agent.id === curWinIndex)) return true;
+			return false;
 		}
-		return false;
+
+		return Boolean(curWinName || curWinIndex);
 	} catch (err: any) {
 		await logSwarmError(process.cwd(), "focus", "is_current_active.session_check_failed", err, {
 			session,
@@ -144,7 +152,70 @@ export async function focusAgentWindow(
 }
 
 /**
- * Evaluate auto-focus policy and conditionally switch tmux window to a busy pi agent.
+ * Automatically focus on a specific worker agent when it becomes busy (agent_start / tool_execution_start).
+ */
+export async function maybeAutoFocusOnBusy(
+	pi: ExtensionAPI,
+	ctx: { cwd: string },
+	agentId: string,
+	options?: { force?: boolean; bypassCooldown?: boolean },
+): Promise<{ switched: boolean; targetAgentId?: string; reason: string }> {
+	if (agentId === "root") return { switched: false, reason: "root_excluded" };
+
+	const p = paths(ctx.cwd);
+	const st = await readState(p, ctx.cwd);
+
+	if (!isAutoFocusEnabled(st) && !options?.force) {
+		return { switched: false, reason: "disabled" };
+	}
+
+	const agent = st.agents[agentId];
+	if (!agent || agent.roleKind === "root") {
+		return { switched: false, reason: "root_or_unknown_agent" };
+	}
+
+	// Don't switch if already focused on this agent
+	if (st.lastFocusedAgentId === agentId) {
+		return { switched: false, reason: "already_focused" };
+	}
+
+	// Cooldown check (prevent rapid window flapping)
+	if (st.lastFocusAt && !options?.bypassCooldown) {
+		const elapsed = Date.now() - new Date(st.lastFocusAt).getTime();
+		if (elapsed < AUTO_FOCUS_COOLDOWN_MS) {
+			return { switched: false, reason: "cooldown" };
+		}
+	}
+
+	const res = await focusAgentWindow(pi, agent, ctx.cwd);
+	if (!res.ok) {
+		return { switched: false, targetAgentId: agent.id, reason: res.error || "switch_failed" };
+	}
+
+	const ts = now();
+	await withLock(p, async () => {
+		const latestSt = await readState(p, ctx.cwd);
+		latestSt.lastFocusAt = ts;
+		latestSt.lastFocusedAgentId = agent.id;
+		latestSt.updatedAt = ts;
+		await writeState(p, latestSt);
+	});
+
+	try {
+		await trace(p, "tmux.focus.switch", {
+			to: agent.id,
+			trigger: "busy",
+			target: res.target,
+		});
+	} catch (err: any) {
+		await logSwarmError(ctx.cwd, "focus", "trace_switch.failed", err, { to: agent.id });
+	}
+
+	return { switched: true, targetAgentId: agent.id, reason: "ok" };
+}
+
+/**
+ * Evaluate auto-focus policy and conditionally switch tmux window to a busy pi agent on settle.
  */
 export async function maybeAutoFocusBusyAgent(
 	pi: ExtensionAPI,
@@ -156,7 +227,7 @@ export async function maybeAutoFocusBusyAgent(
 	const st = await readState(p, ctx.cwd);
 
 	// 1. Feature flag check
-	if (!st.autoFocusBusy && !options?.force) {
+	if (!isAutoFocusEnabled(st) && !options?.force) {
 		return { switched: false, reason: "disabled" };
 	}
 
@@ -290,7 +361,7 @@ export async function getFocusStatus(pi: ExtensionAPI, cwd: string): Promise<Foc
 	);
 
 	return {
-		enabled: Boolean(st.autoFocusBusy),
+		enabled: isAutoFocusEnabled(st),
 		session,
 		sessionAlive,
 		activeWindowIndex,

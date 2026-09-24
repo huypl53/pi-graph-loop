@@ -167,34 +167,38 @@ console.log("\n=== 2. Slash command /swarm auto-focus test ===");
 	// Initialize swarm
 	await cmds.swarm.handler("init", ctx);
 
-	// 2.1 Default status is disabled
+	// 2.1 Default status is ENABLED
 	await cmds.swarm.handler("auto-focus status", ctx);
-	ok("initial status is DISABLED", notes.at(-1)?.msg?.includes("DISABLED"));
+	ok("initial status is ENABLED", notes.at(-1)?.msg?.includes("ENABLED"));
 
-	// 2.2 Turn ON
-	await cmds.swarm.handler("auto-focus on", ctx);
-	ok("/swarm auto-focus on reports ENABLED", notes.at(-1)?.msg?.includes("ENABLED"));
+	// 2.2 Turn OFF
+	await cmds.swarm.handler("auto-focus off", ctx);
+	ok("/swarm auto-focus off reports DISABLED", notes.at(-1)?.msg?.includes("DISABLED"));
 
 	// Verify state file persisted
 	const st1 = JSON.parse(readFileSync(join(scratch, ".pi", "swarm", "swarm-state.json"), "utf8"));
-	ok("state.json has autoFocusBusy === true", st1.autoFocusBusy === true);
+	ok("state.json has autoFocusBusy === false", st1.autoFocusBusy === false);
 
-	// 2.3 /swarm focus displays current focus status
+	// 2.3 Turn ON
+	await cmds.swarm.handler("auto-focus on", ctx);
+	ok("/swarm auto-focus on reports ENABLED", notes.at(-1)?.msg?.includes("ENABLED"));
+
+	// 2.4 /swarm focus displays current focus status
 	await cmds.swarm.handler("focus", ctx);
 	ok("/swarm focus reports status and session", notes.at(-1)?.msg?.includes("Auto-focus busy pi: ENABLED") && notes.at(-1)?.msg?.includes("Worker tmux session"));
 
-	// 2.4 /swarm auto-focus with no args displays status
+	// 2.5 /swarm auto-focus with no args displays status
 	await cmds.swarm.handler("auto-focus", ctx);
 	ok("/swarm auto-focus with no args reports status", notes.at(-1)?.msg?.includes("Auto-focus busy pi: ENABLED"));
 
-	// 2.5 Toggle turns it OFF
+	// 2.6 Toggle turns it DISABLED
 	await cmds.swarm.handler("auto-focus toggle", ctx);
 	ok("/swarm auto-focus toggle turns it DISABLED", notes.at(-1)?.msg?.includes("DISABLED"));
 
 	const st2 = JSON.parse(readFileSync(join(scratch, ".pi", "swarm", "swarm-state.json"), "utf8"));
 	ok("state.json has autoFocusBusy === false", st2.autoFocusBusy === false);
 
-	// 2.6 /swarm-agents alias works for both focus and auto-focus
+	// 2.7 /swarm-agents alias works for both focus and auto-focus
 	await cmds["swarm-agents"].handler("auto-focus on", ctx);
 	ok("/swarm-agents auto-focus on enables", notes.at(-1)?.msg?.includes("ENABLED"));
 
@@ -345,6 +349,129 @@ console.log("\n=== 4. Error safety test (No silent throw / durable logging) ==="
 		const content = readFileSync(errFile, "utf8");
 		ok("error log contains select_window.failed", content.includes("select_window.failed"));
 	}
+
+	rmSync(scratch, { recursive: true, force: true });
+}
+
+console.log("\n=== 5. Reproduce: Busy worker auto-focus and command focus ===");
+{
+	const scratch = join(tmpdir(), `swarm-auto-focus-s5-${process.pid}-${Date.now()}`);
+	mkdirSync(scratch, { recursive: true });
+
+	const {
+		isCurrentActiveTmuxWindow,
+		maybeAutoFocusOnBusy,
+		isAutoFocusEnabled,
+	} = await import(join(here, "..", "src", "focus.ts"));
+	const { paths, writeState } = await import(join(here, "..", "src", "state.ts"));
+	const p = paths(scratch);
+
+	// 5.1 isCurrentActiveTmuxWindow must check agent, NOT current process TMUX_PANE
+	process.env.TMUX = "1";
+	process.env.TMUX_PANE = "%999"; // some unrelated pane (like root or IDE)
+	const fakePi1 = {
+		exec: async (bin, args) => {
+			if (args[0] === "display-message" && args.includes("#{window_active}")) {
+				// %999 is active in its own window
+				return { code: 0, stdout: "1\n", stderr: "" };
+			}
+			if (args[0] === "display-message" && args.includes("#{window_name}\t#{window_index}\t#{pane_id}")) {
+				// Target session active window is worker-a (index 0, pane %10)
+				return { code: 0, stdout: "worker-a\t0\t%10\n", stderr: "" };
+			}
+			return { code: 0, stdout: "\n", stderr: "" };
+		},
+	};
+
+	const agentA = { id: "worker-a", tmuxSession: "sess", tmuxWindow: "worker-a", tmuxTarget: "sess:worker-a.0" };
+	const agentB = { id: "worker-b", tmuxSession: "sess", tmuxWindow: "worker-b", tmuxTarget: "sess:worker-b.0" };
+
+	const isA = await isCurrentActiveTmuxWindow(fakePi1, "sess", agentA);
+	const isB = await isCurrentActiveTmuxWindow(fakePi1, "sess", agentB);
+	ok("isCurrentActiveTmuxWindow returns true for matching agentA", isA === true);
+	ok("isCurrentActiveTmuxWindow returns false for non-matching agentB despite TMUX_PANE active", isB === false);
+
+	// 5.2 isAutoFocusEnabled checks default and env var PI_SWARM_AUTO_FOCUS
+	delete process.env.PI_SWARM_AUTO_FOCUS;
+	ok("isAutoFocusEnabled is true by default with no env and empty state", isAutoFocusEnabled({}) === true);
+	ok("isAutoFocusEnabled is false when autoFocusBusy: false", isAutoFocusEnabled({ autoFocusBusy: false }) === false);
+	process.env.PI_SWARM_AUTO_FOCUS = "0";
+	ok("isAutoFocusEnabled is false when PI_SWARM_AUTO_FOCUS=0", isAutoFocusEnabled({ autoFocusBusy: true }) === false);
+	process.env.PI_SWARM_AUTO_FOCUS = "1";
+	ok("isAutoFocusEnabled is true when PI_SWARM_AUTO_FOCUS=1", isAutoFocusEnabled({ autoFocusBusy: false }) === true);
+	delete process.env.PI_SWARM_AUTO_FOCUS;
+
+	// 5.3 maybeAutoFocusOnBusy switches to busy agent
+	const tmuxCommands = [];
+	const fakePi2 = {
+		exec: async (bin, args) => {
+			tmuxCommands.push(args.join(" "));
+			return { code: 0, stdout: "\n", stderr: "" };
+		},
+	};
+
+	const st = {
+		version: 1,
+		swarmId: "test-swarm",
+		cwd: scratch,
+		tmuxSession: "sess",
+		autoFocusBusy: true,
+		agents: {
+			"worker-b": {
+				id: "worker-b",
+				role: "worker",
+				roleKind: "worker",
+				status: "running",
+				runtimeStatus: "busy",
+				tmuxSession: "sess",
+				tmuxWindow: "worker-b",
+				tmuxTarget: "sess:worker-b.0",
+			},
+		},
+		delivered: {},
+		messages: {},
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+	};
+	await writeState(p, st);
+
+	const rBusy = await maybeAutoFocusOnBusy(fakePi2, { cwd: scratch }, "worker-b");
+	ok("maybeAutoFocusOnBusy switches to newly busy worker-b", rBusy.switched === true && rBusy.targetAgentId === "worker-b");
+	ok("executed tmux select-window -t sess:worker-b on busy", tmuxCommands.some((c) => c.includes("select-window -t sess:worker-b")));
+
+	// 5.4 /swarm focus <agentId> and /swarm focus (busy)
+	const notes = [];
+	const ctx = {
+		cwd: scratch,
+		ui: {
+			notify: (msg, level) => notes.push({ msg, level }),
+		},
+	};
+	const cmds = {};
+	const fakePi3 = {
+		registerTool: () => {},
+		registerCommand: (name, opts) => {
+			cmds[name] = opts;
+		},
+		exec: async (bin, args) => {
+			tmuxCommands.push(args.join(" "));
+			if (args[0] === "display-message" && args.includes("#{window_index}\t#{window_name}\t#{pane_id}")) {
+				return { code: 0, stdout: "0\tworker-b\t%10\n", stderr: "" };
+			}
+			return { code: 0, stdout: "\n", stderr: "" };
+		},
+		on: () => {},
+	};
+	factory(fakePi3);
+
+	// Focus explicit agent
+	await cmds["swarm"].handler("focus worker-b", ctx);
+	ok("/swarm focus worker-b executes select-window", tmuxCommands.some((c) => c.includes("select-window -t sess:worker-b")));
+	ok("/swarm focus worker-b notifies user", notes.at(-1)?.msg?.includes("worker-b"));
+
+	// Focus busy agent with bare /swarm focus
+	await cmds["swarm"].handler("focus", ctx);
+	ok("/swarm focus focuses to busy agent", notes.at(-1)?.msg?.includes("worker-b"));
 
 	rmSync(scratch, { recursive: true, force: true });
 }

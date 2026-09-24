@@ -84,7 +84,7 @@ import {
 } from "./constants.ts";
 import type { ModelSlot, SwarmMarker } from "./types.ts";
 import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompletions } from "./completion.ts";
-import { formatFocusStatus, getFocusStatus } from "./focus.ts";
+import { formatFocusStatus, getFocusStatus, focusAgentWindow, pickNextBusyAgent, isAutoFocusEnabled } from "./focus.ts";
 
 export function formatMarkerSuffix(d = new Date()): string {
 	const pad = (n: number) => String(n).padStart(2, "0");
@@ -1754,21 +1754,77 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 			}
 			if (cmd === "focus" || cmd === "auto-focus" || cmd === "focus-busy") {
 				const sub = rest.shift()?.toLowerCase();
-				if (cmd === "focus" || sub === "status" || (!sub && cmd === "focus") || (!sub && cmd === "auto-focus")) {
+				if (sub === "status" || (!sub && cmd === "auto-focus")) {
 					const info = await getFocusStatus(pi, ctx.cwd);
 					ctx.ui.notify(formatFocusStatus(info), "info");
 					return;
 				}
+
+				// If /swarm focus without arguments or /swarm focus busy: focus immediately to the busy agent!
+				if (cmd === "focus" && (!sub || sub === "busy")) {
+					const st = await readState(p, ctx.cwd);
+					const target =
+						pickNextBusyAgent(st) ||
+						Object.values(st.agents || {}).find(
+							(a) => a.id !== "root" && a.status === "running" && (a.runtimeStatus === "busy" || a.runtimeStatus === "tool_running"),
+						) ||
+						Object.values(st.agents || {}).find((a) => a.id !== "root" && a.status === "running");
+
+					if (!target) {
+						const info = await getFocusStatus(pi, ctx.cwd);
+						ctx.ui.notify(formatFocusStatus(info), "info");
+						return;
+					}
+					const res = await focusAgentWindow(pi, target, ctx.cwd);
+					if (res.ok) {
+						await withLock(p, async () => {
+							const latestSt = await readState(p, ctx.cwd);
+							latestSt.lastFocusAt = now();
+							latestSt.lastFocusedAgentId = target.id;
+							latestSt.updatedAt = now();
+							await writeState(p, latestSt);
+						});
+						ctx.ui.notify(`Focused tmux to agent: ${target.id} (${res.target})`, "info");
+					} else {
+						ctx.ui.notify(`Failed to focus to ${target.id}: ${res.error}`, "warning");
+					}
+					return;
+				}
+
+				// If /swarm focus <agentId>: focus directly to that agent!
+				if (cmd === "focus" && sub && !["on", "off", "toggle", "enable", "disable"].includes(sub)) {
+					const st = await readState(p, ctx.cwd);
+					const target = st.agents[sub] || Object.values(st.agents || {}).find((a) => a.id.toLowerCase() === sub);
+					if (!target) {
+						ctx.ui.notify(`Unknown agent: ${sub}. Available agents: ${Object.keys(st.agents || {}).join(", ")}`, "warning");
+						return;
+					}
+					const res = await focusAgentWindow(pi, target, ctx.cwd);
+					if (res.ok) {
+						await withLock(p, async () => {
+							const latestSt = await readState(p, ctx.cwd);
+							latestSt.lastFocusAt = now();
+							latestSt.lastFocusedAgentId = target.id;
+							latestSt.updatedAt = now();
+							await writeState(p, latestSt);
+						});
+						ctx.ui.notify(`Focused tmux to agent: ${target.id} (${res.target})`, "info");
+					} else {
+						ctx.ui.notify(`Failed to focus to ${target.id}: ${res.error}`, "warning");
+					}
+					return;
+				}
+
 				let enabled: boolean;
 				if (sub === "toggle") {
 					const st = await readState(p, ctx.cwd);
-					enabled = !st.autoFocusBusy;
+					enabled = !isAutoFocusEnabled(st);
 				} else if (["on", "enable", "true", "1"].includes(sub)) {
 					enabled = true;
 				} else if (["off", "disable", "false", "0"].includes(sub)) {
 					enabled = false;
 				} else {
-					ctx.ui.notify("Usage: /swarm focus | /swarm auto-focus [on|off|toggle|status]", "warning");
+					ctx.ui.notify("Usage: /swarm focus [agentId|busy|status] | /swarm auto-focus [on|off|toggle|status]", "warning");
 					return;
 				}
 
