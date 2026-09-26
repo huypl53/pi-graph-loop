@@ -471,13 +471,31 @@ workers and makes teardown deterministic (one workspace to close when no workers
 - **herdr 0.8.2 commands used**: `workspace list`, `workspace create --label`,
   `workspace get`, `workspace close`, `pane list --workspace`.
 
-### Herdr focus for register-here targets
+### Surface coverage (H6, 2026-09-26)
 
-A bare `/swarm focus` may receive a register-here record with `tmuxWindow=p1` and
-`tmuxTarget=wN:p1`. Herdr resolves that exact pane inside its recorded workspace, then focuses
-the owning tab id. If the workspace or pane does not match, focus fails without guessing a tab
-or changing the currently focused tab. The Tmux `select-window`/`select-pane` sequence is
-unchanged.
+All terminal-touching call sites route through `getTerminalDriver()` — no swarm code path
+execs `tmux` directly under herdr mode, and tmux mode emits the pre-driver argv byte-for-byte
+through `TmuxDriver`. The H6 audit closed the four residual raw-tmux sites:
+
+| Site | Driver method |
+|------|---------------|
+| `agents.ts` `killAgentPane` (stop/restart path) | `driver.killAgent` |
+| `agents.ts` `sendKeys` (`/swarm sendkey`, `swarm_send_keys`) | `driver.sendKeys` |
+| `focus.ts` `isCurrentActiveTmuxWindow` + `getFocusStatus` | `driver.getFocusStatus` |
+| `focus.ts` `focusAgentWindow` (`/swarm focus`) | `driver.focusWindow` |
+| `commands/registration.ts` pane-id resolution (`/swarm register`) | `driver.resolvePaneId` |
+
+`TerminalDriver.resolvePaneId` is the new interface method (H6): tmux emits
+`display-message -p -t <target> #{pane_id}`; herdr passes through workspace-qualified pane ids
+(`wN:pM`) and resolves legacy composite targets by tab label. For `/swarm focus`, register-here
+records whose legacy `tmuxWindow` contains a pane component such as `p1` are resolved by exact
+`tmuxTarget` pane id within the recorded Herdr workspace, then focus that pane's owning tab id.
+If the pane is absent or the session/workspace does not match, focus fails closed without guessing
+a tab or falling back to the currently focused tab. Tmux's `select-window` then best-effort
+`select-pane` behavior is unchanged. R10-1 boundary counters at the real `pi.exec` seam live in
+`extensions/swarm/tests/herdr-h6-driver-mirroring.test.mjs` and `scripts/uat/herdr-h6-red.mjs`
+(RED + GREEN evidence durably stored under
+`.pi/swarm/tasks/herdr-h6-driver-mirroring-20260926/artifacts/{red,green}-evidence/`).
 
 ## Child pi args — default loads swarm extension
 

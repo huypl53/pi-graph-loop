@@ -1,0 +1,5 @@
+# Integrated live acceptance fixture: a real interactive root Pi calls the production
+# swarm_spawn_agent boundary without model/provider overrides; the spawned worker has its own
+# herdr-h6-live-worker-tool fixture and must execute a real Pi bash tool turn.
+{"name":"spawn isolated Herdr worker","stopReason":"toolUse","events":[{"type":"toolcall","delayMs":10,"name":"swarm_spawn_agent","id":"h6-root-spawn-1","arguments":{"id":"h6-live-worker3","role":"worker","roleKind":"worker","initialPrompt":"Use the bash tool once to write ../worker-tool-turn.txt with the text H6_WORKER_TOOL_TURN, then report completion and await further tasks."}}]}
+{"name":"report the live spawn result","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"The live swarm_spawn_agent tool result above is the evidence; I will wait for further instructions.","chunks":["The live swarm_spawn_agent tool result above is the evidence; I will wait for further instructions."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

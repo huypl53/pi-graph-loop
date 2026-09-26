@@ -6,7 +6,8 @@ import { startRootPump } from "../hooks.ts";
 import { claimRootLeader, ensureRoot } from "../identity.ts";
 import { currentAgentId } from "../session.ts";
 import { readState, trace, withLock, writeState } from "../state.ts";
-import { currentPaneTarget, isHereToken, tmux } from "../tmux.ts";
+import { currentPaneTarget, isHereToken } from "../tmux.ts";
+import { getTerminalDriver } from "../terminal/index.ts";
 import { applySwarmToolGating } from "../tools/gating.ts";
 import type { Paths } from "../types.ts";
 import { safeId } from "../utils.ts";
@@ -34,7 +35,8 @@ export async function handleRegisterCommand(rest: string[], ctx: any, p: Paths, 
 			if (cur) {
 				let tpid = "";
 				try {
-					tpid = (await tmux(pi, ["display-message", "-p", "-t", tmuxTarget, "#{pane_id}"], 3_000)).trim();
+					// H6: was raw tmux display-message; driver-routed (identical tmux argv; herdr-native under herdr mode)
+					tpid = await getTerminalDriver().resolvePaneId(pi, tmuxTarget);
 				} catch (err: any) {
 					expected("tmux_target_unresolvable", err);
 				}
@@ -105,7 +107,8 @@ export async function handleRegisterCommand(rest: string[], ctx: any, p: Paths, 
 			if (cur) {
 				let tpid = "";
 				try {
-					tpid = (await tmux(pi, ["display-message", "-p", "-t", result.agent.tmuxTarget, "#{pane_id}"], 3_000)).trim();
+					// H6: was raw tmux display-message; driver-routed (identical tmux argv; herdr-native under herdr mode)
+					tpid = await getTerminalDriver().resolvePaneId(pi, result.agent.tmuxTarget);
 				} catch (err: any) {
 					expected("tmux_target_unresolvable", err);
 				}

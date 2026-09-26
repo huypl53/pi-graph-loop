@@ -528,9 +528,9 @@ export async function evaluateIdleGoalNudgeLocked(
 					`1. Long-running synchronous command (e.g. extensive test suite, heavy migration, full sync, build).\n` +
 					`2. Tool execution is stuck, frozen, or deadlocked.\n\n` +
 					`Suggested Action for Root:\n` +
-					`- Check pane progress: \`tmux capture-pane -t ${targetText} -p | tail -25\`\n` +
+					`- Check pane progress: capture the agent's pane via the terminal driver (tmux: \`tmux capture-pane -t ${targetText} -p | tail -25\`; herdr: \`herdr pane read ${targetText}\`)\n` +
 					`- If progress is normal: continue waiting (e.g. run a synchronous wait like \`bash sleep 30\` or \`sleep 60\` to stay in sync).\n` +
-					`- If stuck/frozen: terminate the process via tmux or restart the worker (\`swarm_restart_agent(agentId="${staleBusyWorker.id}")\`).`;
+					`- If stuck/frozen: terminate the agent's pane via the terminal manager or restart the worker (\`swarm_restart_agent(agentId="${staleBusyWorker.id}")\`).`;
 
 				const key = formatNotifyKey("goal:worker:long_running_tool", {
 					agentId: staleBusyWorker.id,

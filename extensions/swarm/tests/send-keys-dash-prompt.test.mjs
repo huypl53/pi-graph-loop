@@ -11,6 +11,13 @@ import { sendKeys, spawnAgent } from "../src/agents.ts";
 import { ensureDirs, paths } from "../src/state.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
+// This suite intentionally tests TmuxDriver command behavior even when the repo's .pi/swarm.yml
+// opts into Herdr. Pin the backend explicitly so config changes cannot silently switch the test's
+// mocked tmux-only ExtensionAPI.exec surface to the Herdr driver.
+const previousTerminalManager = process.env.PI_SWARM_TERMINAL_MANAGER;
+const previousTmuxOk = process.env.PI_SWARM_TMUX_OK;
+process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
+process.env.PI_SWARM_TMUX_OK = "1";
 const scratch = join(tmpdir(), `swarm-dash-prompt-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 mkdirSync(join(scratch, ".pi", "swarm"), { recursive: true });
@@ -192,4 +199,8 @@ console.log("\n[6] Live tmux test against real tmux session");
 }
 
 console.log(`\nResults: ${pass} passed, ${fail} failed.`);
+if (previousTerminalManager === undefined) delete process.env.PI_SWARM_TERMINAL_MANAGER;
+else process.env.PI_SWARM_TERMINAL_MANAGER = previousTerminalManager;
+if (previousTmuxOk === undefined) delete process.env.PI_SWARM_TMUX_OK;
+else process.env.PI_SWARM_TMUX_OK = previousTmuxOk;
 if (fail > 0) process.exit(1);

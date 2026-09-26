@@ -1,0 +1,7 @@
+# herdr-h6-driver-mirroring: deterministic mock lane for an isolated, pre-seeded worker.
+# The live tools are swarm_stop_agent and swarm_list_agents; registration and /swarm sendkey are
+# command surfaces (not LLM tools) and are covered by the focused regression + real-binary UAT.
+# Run with PI_SWARM_TERMINAL_MANAGER=herdr from an isolated project whose worker-h6 targets a disposable Herdr pane.
+{"name":"herdr-h6 stop worker","events":[{"type":"toolcall","delayMs":10,"name":"swarm_stop_agent","id":"h6-stop-1","arguments":{"agentId":"worker-h6","force":true}},{"type":"text","delayMs":5,"text":"Worker stopped through the selected terminal driver.","chunks":["Worker stopped through the selected terminal ","driver."]}]}
+{"name":"herdr-h6 verify state","events":[{"type":"toolcall","delayMs":10,"name":"swarm_list_agents","id":"h6-list-1","arguments":{}},{"type":"text","delayMs":5,"text":"The isolated worker is stopped; no production agent was touched.","chunks":["The isolated worker is stopped; ","no production agent was touched."]}]}
+{"name":"herdr-h6 settle","stopReason":"stop","events":[{"type":"text","delayMs":5,"text":"H6 mock lane completed with the active stop and state-inspection tools.","chunks":["H6 mock lane completed with the active stop ","and state-inspection tools."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

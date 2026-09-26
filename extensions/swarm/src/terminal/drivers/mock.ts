@@ -93,6 +93,12 @@ export class MockTerminalDriver implements TerminalDriver {
 		return false;
 	}
 
+	async resolvePaneId(_pi: ExtensionAPI, target: string): Promise<string> {
+		const pane = this.panes.get(target);
+		if (!pane?.paneId) throw new Error(`mock: cannot resolve pane id for target ${target}`);
+		return pane.paneId;
+	}
+
 	async inspectProcess(_pi: ExtensionAPI, target: string): Promise<{ piLike: boolean; command: string; pid?: number }> {
 		const pane = this.panes.get(target);
 		const command = pane?.command || "node";
@@ -104,7 +110,7 @@ export class MockTerminalDriver implements TerminalDriver {
 	}
 
 	async sendKeys(_pi: ExtensionAPI, target: string, keys: string, opts?: { literal?: boolean; enter?: boolean }): Promise<void> {
-		if (!target || target === "unknown") throw new Error("agent has no tmux pane target");
+		if (!target || target === "unknown") throw new Error("agent has no terminal pane target");
 		this.sentKeys.push({ target, keys, opts });
 	}
 

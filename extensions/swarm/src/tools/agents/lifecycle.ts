@@ -20,7 +20,7 @@ export function registerAgentLifecycleTools(pi: ExtensionAPI): void {
 			name: "swarm_spawn_agent",
 			label: "Swarm Spawn",
 			description:
-				"Spawn a new pi agent in a tmux window in the same working directory. The new agent shares project extensions and skills. Requires tmux.",
+				"Spawn a new pi agent in a terminal window (tmux or herdr, per the configured terminal manager) in the same working directory. The new agent shares project extensions and skills. Requires a supported terminal manager.",
 			promptGuidelines: [
 				"Use `swarm_spawn_agent` when the user asks to create a pi agent/swarm worker for parallel planning, review, or coding.",
 				"Do NOT specify provider or model when spawning agents. Model and provider are configured by the user in .pi/swarm.yaml. Only specify id, role, roleKind, and initialPrompt unless the user explicitly requested a specific model/provider.",
@@ -100,7 +100,7 @@ export function registerAgentLifecycleTools(pi: ExtensionAPI): void {
 			name: "swarm_stop_agent",
 			label: "Swarm Stop",
 			description:
-				"Stop a swarm agent: kill its tmux pane/window and mark it stopped. Refuses if the agent has active tasks unless force=true. Mailbox, identity, and history persist via the stable id.",
+				"Stop a swarm agent: kill its terminal pane/window and mark it stopped. Refuses if the agent has active tasks unless force=true. Mailbox, identity, and history persist via the stable id.",
 			promptGuidelines: [
 				"Use `swarm_stop_agent` to retire an agent. For a non-destructive park that keeps the pane alive, use `swarm_set_agent_paused` instead.",
 			],
@@ -109,7 +109,8 @@ export function registerAgentLifecycleTools(pi: ExtensionAPI): void {
 				force: Type.Optional(Type.Boolean({ description: "Stop even if the agent has active tasks. Defaults to false." })),
 				killPane: Type.Optional(
 					Type.Boolean({
-						description: "Kill the tmux pane/window. Defaults to true; set false to mark stopped without touching tmux.",
+						description:
+							"Kill the agent's pane/window. Defaults to true; set false to mark stopped without touching its terminal.",
 					}),
 				),
 			}),

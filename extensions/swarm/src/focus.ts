@@ -82,11 +82,12 @@ export async function isCurrentActiveTmuxWindow(pi: ExtensionAPI, session: strin
 	}
 
 	try {
-		const out = await tmux(pi, ["display-message", "-p", "-t", session, "#{window_name}\t#{window_index}\t#{pane_id}"], 3_000);
-		const parts = out.trim().split("\t");
-		const curWinName = parts[0];
-		const curWinIndex = parts[1];
-		const curPaneId = parts[2];
+		// H6: was raw tmux display-message; now driver-routed (TmuxDriver emits the identical argv).
+		const status = await getTerminalDriver().getFocusStatus(pi, session, { order: "name-first" });
+		if (!status.sessionAlive) return false;
+		const curWinName = status.activeWindowName;
+		const curWinIndex = status.activeWindowIndex;
+		const curPaneId = status.activePaneId;
 
 		if (agent) {
 			if (agent.tmuxWindow && agent.tmuxWindow !== "unknown") {
@@ -307,20 +308,24 @@ export interface FocusStatusInfo {
 export async function getFocusStatus(pi: ExtensionAPI, cwd: string): Promise<FocusStatusInfo> {
 	const p = paths(cwd);
 	const st = await readState(p, cwd);
-	const session = st.tmuxSession;
+	let session = st.tmuxSession;
 	let sessionAlive = false;
 	let activeWindowIndex: string | undefined;
 	let activeWindowName: string | undefined;
 	let activePaneId: string | undefined;
 
 	try {
-		const out = await tmux(pi, ["display-message", "-p", "-t", session, "#{window_index}\t#{window_name}\t#{pane_id}"], 3_000);
-		const parts = out.trim().split("\t");
-		if (parts.length >= 2) {
+		// H6: was raw tmux display-message; now driver-routed (TmuxDriver emits the identical argv).
+		const driver = getTerminalDriver();
+		const status = await driver.getFocusStatus(pi, session);
+		if (driver.id === "herdr" && status.session) session = status.session;
+		if (status.sessionAlive) {
+			// A live Herdr workspace may have no focused tab; that is still an alive session, not
+			// a NOT RUNNING result. HerdrDriver leaves the active fields undefined in that case.
 			sessionAlive = true;
-			activeWindowIndex = parts[0];
-			activeWindowName = parts[1];
-			activePaneId = parts[2];
+			activeWindowIndex = status.activeWindowIndex;
+			activeWindowName = status.activeWindowName;
+			activePaneId = status.activePaneId;
 		}
 	} catch (err: any) {
 		await logSwarmError(cwd, "focus", "get_focus_status.tmux_check_failed", err, { session });

@@ -80,6 +80,13 @@ export interface TerminalDriver {
 
 	isTargetAlive(pi: ExtensionAPI, target: string): Promise<boolean>;
 
+	/**
+	 * Resolve a target to its concrete pane id (H6). Tmux: `display-message -p -t <target>
+	 * #{pane_id}`. Herdr: native pane id pass-through / label resolution. Throws when the target
+	 * cannot be resolved (callers compact with expected(...)).
+	 */
+	resolvePaneId(pi: ExtensionAPI, target: string): Promise<string>;
+
 	inspectProcess(pi: ExtensionAPI, target: string): Promise<{ piLike: boolean; command: string; pid?: number }>;
 
 	sendText(pi: ExtensionAPI, target: string, text: string): Promise<void>;
@@ -90,7 +97,7 @@ export interface TerminalDriver {
 
 	focusWindow(pi: ExtensionAPI, target: TerminalTargetRef | string): Promise<{ ok: boolean; error?: string }>;
 
-	getFocusStatus(pi: ExtensionAPI, session: string): Promise<FocusStatus>;
+	getFocusStatus(pi: ExtensionAPI, session: string, opts?: { order?: "name-first" | "index-first" }): Promise<FocusStatus>;
 
 	getAttachCommands(target: TerminalTargetRef | string): AttachCommands;
 
