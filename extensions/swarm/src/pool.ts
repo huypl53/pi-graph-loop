@@ -520,6 +520,23 @@ function weightedPick<T extends { weight: number }>(items: T[]): T {
 	return items[items.length - 1];
 }
 
+// Pool-avoid-failed-slot-20260926: pure helper — remove the just-failed slot from a candidate
+// list BEFORE selection (the avoidance is a PRE-FILTER, not a re-roll). Live defect (2026-09-26):
+// pool-swap supplies avoidKey: slotKey(currentSlot), but pickSlot only consulted it in the
+// round-robin branch, so weighted selection still included the just-failed slot while it stayed
+// eligible (first rate_limit failure does not bench) → h6-planner swapped ccs/glm-4.7 →
+// ccs/glm-4.7 (reason=weighted(w=1)) and re-hit the same 429s until the swap-chain cap. Filtering
+// FIRST preserves the alternatives' relative configured weights exactly (same distribution over a
+// subset), keeps the roll deterministic under a pinned Math.random, and cannot recurse or bias.
+function filterAvoiding<T extends { slot: ModelSlot }>(items: T[], avoidKey?: string): T[] {
+	if (!avoidKey) return items;
+	// Strict avoidance: when every candidate IS the just-failed slot (single-slot pool, or all
+	// alternatives benched earlier in this failover), return EMPTY — the caller's existing
+	// undefined safe-fallback path then reports pool.swap_no_candidate and keeps the current model,
+	// instead of re-selecting the slot that just failed and pretending a swap occurred.
+	return items.filter((e) => slotKey(e.slot) !== avoidKey);
+}
+
 function stickyIndex(key: string, n: number): number {
 	const hash = createHash("sha256").update(key).digest();
 	return hash.readUInt32BE(0) % n;
@@ -577,33 +594,47 @@ export async function pickSlot(
 			.map((slot, index) => ({ slot, index }))
 			.filter(({ slot }) => (slot.weight ?? 1) === 0 && !inCooldown(h.slots[slotKey(slot)], nowMs));
 
-		if (eligible.length) {
+		// Pool-avoid-failed-slot: pre-filter the just-failed slot from BOTH candidate pools before
+		// any strategy selects (previously only round-robin honored avoidKey; weighted + sticky
+		// re-picked the slot that just failed). filterAvoiding strictly removes that slot; when
+		// every candidate would be filtered (single-slot / no alternatives), the arrays are empty
+		// and the selection falls through to the existing undefined safe fallback below.
+		const eligibleAlt = filterAvoiding(eligible, opts.avoidKey);
+		const fallbackAlt = filterAvoiding(fallbacks, opts.avoidKey);
+
+		if (eligibleAlt.length) {
 			if (rotation.strategy === "sticky" && opts.stickyKey) {
-				const { slot, index } = eligible[stickyIndex(opts.stickyKey, eligible.length)];
+				// Stable alternative: hash over the FILTERED candidate set (indices shift only when
+				// the failed slot is removed) so an avoid-pass never lands back on the failed slot
+				// while remaining deterministic for the same (stickyKey, candidate set).
+				const { slot, index } = eligibleAlt[stickyIndex(opts.stickyKey, eligibleAlt.length)];
 				return { slot, index, fromPool: true, reason: `sticky(${opts.stickyKey})` };
 			}
 			if (rotation.strategy === "round-robin") {
-				let cursor = (((h.rrCursor ?? 0) % eligible.length) + eligible.length) % eligible.length;
-				if (opts.avoidKey && eligible.length > 1 && slotKey(eligible[cursor].slot) === opts.avoidKey) {
-					cursor = (cursor + 1) % eligible.length;
+				let cursor = (((h.rrCursor ?? 0) % eligibleAlt.length) + eligibleAlt.length) % eligibleAlt.length;
+				if (opts.avoidKey && eligibleAlt.length > 1 && slotKey(eligibleAlt[cursor].slot) === opts.avoidKey) {
+					cursor = (cursor + 1) % eligibleAlt.length;
 				}
 				h.rrCursor = cursor + 1;
 				await writePoolHealth(p, h).catch((err) => logSwarmError(p, "pool", "writePoolHealth.failed", err));
-				const { slot, index } = eligible[cursor];
+				const { slot, index } = eligibleAlt[cursor];
 				return { slot, index, fromPool: true, reason: `round-robin(${cursor})` };
 			}
-			const { slot, index } = weightedPick(eligible.map((e) => ({ ...e, weight: e.slot.weight ?? 1 })));
+			const { slot, index } = weightedPick(eligibleAlt.map((e) => ({ ...e, weight: e.slot.weight ?? 1 })));
 			return { slot, index, fromPool: true, reason: `weighted(w=${slot.weight ?? 1})` };
 		}
 
-		if (fallbacks.length) {
-			const { slot, index } = fallbacks[0];
+		if (fallbackAlt.length) {
+			const { slot, index } = fallbackAlt[0];
 			return { slot, index, fromPool: true, reason: "fallback-only (all weighted slots benched)" };
 		}
 
-		// Everything is in cooldown: return undefined — the caller keeps its current model and simply
-		// retries on it (quota errors on every slot means the swap loop cannot help; thrashing between
-		// benched slots would burn the remaining turn budget). PoolStatus/traces make the outage visible.
+		// Everything is in cooldown (or the ONLY slot is the one that just failed): return undefined —
+		// the caller keeps its current model and simply retries on it (quota errors on every slot means
+		// the swap loop cannot help; thrashing between benched slots would burn the remaining turn
+		// budget). PoolStatus/traces make the outage visible. With avoidKey set and no alternatives,
+		// returning undefined (instead of the failed slot) makes pool-swap record swap_no_candidate
+		// and keep the current model — an honest no-swap beats a same-slot "swap".
 		return undefined;
 	});
 }
