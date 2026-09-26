@@ -61,6 +61,9 @@ export type SwarmAgent = {
 	// Absent on legacy agents; treated as "never probed" by the gate.
 	lastProbeAt?: string;
 	tmuxSession: string;
+	// G2 (herdr spawn seam): pane id returned by the herdr driver at spawn time. Present only
+	// when PI_SWARM_TERMINAL_MANAGER=herdr; absent in tmux mode (tmuxTarget carries the pane).
+	herdrPaneId?: string;
 	tmuxWindow: string;
 	tmuxTarget: string;
 	model: string;
