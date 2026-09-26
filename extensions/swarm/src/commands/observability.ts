@@ -2,13 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { openFlowDialog, pickFlowTask } from "../flow-dialog.ts";
-import {
-	focusAgentWindow,
-	formatFocusStatus,
-	getFocusStatus,
-	isAutoFocusEnabled,
-	pickNextBusyAgent,
-} from "../focus.ts";
+import { focusAgentWindow, formatFocusStatus, getFocusStatus, isAutoFocusEnabled, pickNextBusyAgent } from "../focus.ts";
 import { buildFlowSnapshot } from "../observability.ts";
 import { listTasksIndexed, renderTasksIndexedList, resolveTaskArg } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";

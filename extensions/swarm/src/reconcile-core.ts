@@ -155,7 +155,12 @@ export async function reconcileTasks(
 					continue;
 				}
 				if (rec.status === "dead_letter") staleReasons.push(`assignment message ${msgId} dead-lettered`);
-				else if (PI_SWARM_MINIMAL_PROTOCOL === 0 && rec.requiresAck && !rec.ackedAt && !st.consumerReceipts?.root?.entries?.[msgId]) {
+				else if (
+					PI_SWARM_MINIMAL_PROTOCOL === 0 &&
+					rec.requiresAck &&
+					!rec.ackedAt &&
+					!st.consumerReceipts?.root?.entries?.[msgId]
+				) {
 					const sinceMs = Math.max(
 						rec.injectedAt ? new Date(rec.injectedAt).getTime() : 0,
 						rec.interceptedAt ? new Date(rec.interceptedAt).getTime() : 0,

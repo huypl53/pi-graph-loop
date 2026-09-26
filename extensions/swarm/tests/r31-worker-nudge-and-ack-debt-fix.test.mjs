@@ -107,9 +107,7 @@ console.log("\n[R31-S1] swarm_assign_task under PI_SWARM_MINIMAL_PROTOCOL=1 sets
 		{
 			taskId: "task-r31-test",
 			title: "R31 test task",
-			nodes: [
-				{ id: "node-1", title: "Step 1", allowedFiles: ["step1.txt"] },
-			],
+			nodes: [{ id: "node-1", title: "Step 1", allowedFiles: ["step1.txt"] }],
 		},
 		undefined,
 		undefined,
@@ -216,9 +214,13 @@ console.log("\n[R31-S2] Worker settle 1 with requiresResponse missing -> nudges 
 
 	// Check worker status: should NOT be blocked to response_missing on strike 1
 	const stAfterStrike1 = await readState(p, scratch);
-	ok("R31-S2 worker runtimeStatus is NOT response_missing on strike 1", stAfterStrike1.agents[workerId]?.runtimeStatus !== "response_missing", {
-		status: stAfterStrike1.agents[workerId]?.runtimeStatus,
-	});
+	ok(
+		"R31-S2 worker runtimeStatus is NOT response_missing on strike 1",
+		stAfterStrike1.agents[workerId]?.runtimeStatus !== "response_missing",
+		{
+			status: stAfterStrike1.agents[workerId]?.runtimeStatus,
+		},
+	);
 
 	// --- Strike 2: Worker settles AGAIN without responding -> now escalate to root! ---
 	await settleHandler({}, ctx);
@@ -228,9 +230,13 @@ console.log("\n[R31-S2] Worker settle 1 with requiresResponse missing -> nudges 
 	ok("R31-S2 root received response_missing on strike 2 (escalation)", Boolean(rootAlertOnStrike2));
 
 	const stAfterStrike2 = await readState(p, scratch);
-	ok("R31-S2 worker runtimeStatus is response_missing on strike 2", stAfterStrike2.agents[workerId]?.runtimeStatus === "response_missing", {
-		status: stAfterStrike2.agents[workerId]?.runtimeStatus,
-	});
+	ok(
+		"R31-S2 worker runtimeStatus is response_missing on strike 2",
+		stAfterStrike2.agents[workerId]?.runtimeStatus === "response_missing",
+		{
+			status: stAfterStrike2.agents[workerId]?.runtimeStatus,
+		},
+	);
 }
 
 // --- Scenario 3: swarm_reconcile under PI_SWARM_MINIMAL_PROTOCOL=1 does NOT return awaiting_ack or ack_missing ---
@@ -278,13 +284,7 @@ console.log("\n[R31-S3] swarm_reconcile under PI_SWARM_MINIMAL_PROTOCOL=1 does n
 	process.env.PI_SWARM_IS_ROOT = "1";
 	process.env.PI_SWARM_MINIMAL_PROTOCOL = "1";
 
-	const recRes = await tools.swarm_reconcile.execute(
-		"reconcile-1",
-		{ dryRun: true },
-		undefined,
-		undefined,
-		{ cwd: scratch },
-	);
+	const recRes = await tools.swarm_reconcile.execute("reconcile-1", { dryRun: true }, undefined, undefined, { cwd: scratch });
 
 	const actions = recRes.details?.actions || [];
 	const hasAwaitingAck = actions.some((a) => a.action === "awaiting_ack" || a.action === "ack_missing");
@@ -337,13 +337,7 @@ console.log("\n[R31-S4] swarm_stop_agent under PI_SWARM_MINIMAL_PROTOCOL=1 does 
 	process.env.PI_SWARM_IS_ROOT = "1";
 	process.env.PI_SWARM_MINIMAL_PROTOCOL = "1";
 
-	await tools.swarm_stop_agent.execute(
-		"stop-1",
-		{ agentId: workerId, force: true },
-		undefined,
-		undefined,
-		{ cwd: scratch },
-	);
+	await tools.swarm_stop_agent.execute("stop-1", { agentId: workerId, force: true }, undefined, undefined, { cwd: scratch });
 
 	const rootMsgs = await readMailbox(p, "root");
 	const ackDebtMsg = rootMsgs.find((m) => m.subject?.includes("unacked ack(s)"));
@@ -479,4 +473,3 @@ console.log(`\nResults: ${pass} passed, ${fail} failed.`);
 if (fail > 0) {
 	process.exit(1);
 }
-

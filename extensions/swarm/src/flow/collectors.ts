@@ -5,14 +5,7 @@ import { readRecentEvents } from "../observability.ts";
 import { computeReadyNodes, computeTaskClosure, hasOutgoingTaskEdge } from "../taskgraph.ts";
 import type { Paths, SwarmState, TaskPaths, TaskState } from "../types.ts";
 import { now } from "../utils.ts";
-import {
-	freshnessLabel,
-	isDeadRuntime,
-	messageLifecyclePhrase,
-	safeHint,
-	sanitizeUntrustedText,
-	severityRank,
-} from "./formatting.ts";
+import { freshnessLabel, isDeadRuntime, messageLifecyclePhrase, safeHint, sanitizeUntrustedText, severityRank } from "./formatting.ts";
 import type { FlowAttentionItem, FlowDialogData, FlowHandoffLine, FlowLaneItem, NodeMessage } from "./types.ts";
 import { WATCH_AGE_MS } from "./types.ts";
 

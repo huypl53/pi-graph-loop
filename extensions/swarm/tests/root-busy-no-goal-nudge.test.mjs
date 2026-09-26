@@ -116,9 +116,7 @@ try {
 	await src.pumpRootMailbox(pi, ctx, p, "watchdog");
 
 	const finalState = await readState(p, dir);
-	const idleMessages = Object.values(finalState.messages || {}).filter(
-		(m) => m.idempotencyKey?.includes(":nudge:idle-streak:"),
-	);
+	const idleMessages = Object.values(finalState.messages || {}).filter((m) => m.idempotencyKey?.includes(":nudge:idle-streak:"));
 
 	// Assertions:
 	// 1. Root is busy, so NO goal idle nudge should be enqueued in mailbox
@@ -129,11 +127,7 @@ try {
 	);
 
 	// 2. No goal nudge should have been surfaced to Root
-	ok(
-		"no goal nudge surfaced while root is busy",
-		sentMessages.length === 0,
-		`sentMessages=${sentMessages.length}`,
-	);
+	ok("no goal nudge surfaced while root is busy", sentMessages.length === 0, `sentMessages=${sentMessages.length}`);
 
 	// 3. The check streak must not accumulate while Root is busy
 	ok(

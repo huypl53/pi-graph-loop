@@ -1,24 +1,8 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { SwarmState, TaskState } from "../types.ts";
 import { latestNonSupersededMessage } from "./collectors.ts";
-import {
-	clock,
-	laneIcon,
-	nodeAge,
-	nodeDisplayLabel,
-	renderGraphOverview,
-	sanitizeUntrustedText,
-	statusIcon,
-} from "./formatting.ts";
-import type {
-	FlowAttentionItem,
-	FlowDialogData,
-	GraphTreeEntry,
-	GraphTreeModel,
-	NodeMessage,
-	Row,
-	Section,
-} from "./types.ts";
+import { clock, laneIcon, nodeAge, nodeDisplayLabel, renderGraphOverview, sanitizeUntrustedText, statusIcon } from "./formatting.ts";
+import type { FlowAttentionItem, FlowDialogData, GraphTreeEntry, GraphTreeModel, NodeMessage, Row, Section } from "./types.ts";
 
 export interface FlowRenderHost {
 	fg(c: string, s: string): string;
@@ -151,16 +135,13 @@ export function renderFlowHeader(host: FlowRenderHost, W: number): string[] {
 		];
 	}
 	const title = ` swarm flow · ${snap.task.taskId} · ${snap.task.status} · ${snap.freshnessLabel}${snap.stale ? " · stale" : ""} `;
-	const ttl =
-		title.length + 8 > W ? ` swarm flow · ${snap.task.taskId.slice(0, Math.max(8, W - 58))}… · ${snap.task.status} ` : title;
+	const ttl = title.length + 8 > W ? ` swarm flow · ${snap.task.taskId.slice(0, Math.max(8, W - 58))}… · ${snap.task.status} ` : title;
 	const out: string[] = [];
 	out.push(
 		host.fg("border", "╭─") + host.fg("accent", ttl) + host.fg("border", "─".repeat(Math.max(1, W - 3 - visibleWidth(ttl))) + "╮"),
 	);
 	out.push(
-		host.fg("border", "│ ") +
-			host.pad(host.fg("dim", `open=${snap.open} stale=${snap.staleCount}`), innerW) +
-			host.fg("border", " │"),
+		host.fg("border", "│ ") + host.pad(host.fg("dim", `open=${snap.open} stale=${snap.staleCount}`), innerW) + host.fg("border", " │"),
 	);
 	if (host.filterMode || host.filter) {
 		out.push(
@@ -191,9 +172,7 @@ export function renderFlowHelp(host: FlowRenderHost, W: number): string[] {
 		["filter", "/"],
 		["close", "Esc or q"],
 	] as Array<[string, string]>) {
-		out.push(
-			host.fg("border", "│ ") + host.pad(`${host.fg("accent", k)} · ${host.fg("dim", v)}`, innerW) + host.fg("border", " │"),
-		);
+		out.push(host.fg("border", "│ ") + host.pad(`${host.fg("accent", k)} · ${host.fg("dim", v)}`, innerW) + host.fg("border", " │"));
 	}
 	out.push(host.fg("border", "╰" + "─".repeat(Math.max(0, W - 2)) + "╯"));
 	return out;
@@ -204,9 +183,7 @@ export function renderFlowDetail(host: FlowRenderHost, W: number, item: Row): st
 	const out: string[] = [];
 	const title = ` ${item.section.toLowerCase()} · ${item.title} `;
 	out.push(
-		host.fg("border", "╭─") +
-			host.fg("accent", title) +
-			host.fg("border", "─".repeat(Math.max(1, W - 3 - visibleWidth(title))) + "╮"),
+		host.fg("border", "╭─") + host.fg("accent", title) + host.fg("border", "─".repeat(Math.max(1, W - 3 - visibleWidth(title))) + "╮"),
 	);
 	for (const ln of wrapTextWithAnsi(item.detail, Math.max(20, innerW))) {
 		out.push(host.fg("border", "│ ") + host.pad(truncateToWidth(ln, innerW), innerW) + host.fg("border", " │"));
@@ -338,9 +315,7 @@ export function renderFlowV3(host: FlowRenderHost, width: number): string[] {
 			const subject = msg.subject || "(no subject)";
 			out.push(host.fg("border", "│ ") + host.pad(host.fg("accent", subject), innerW) + host.fg("border", " │"));
 			out.push(
-				host.fg("border", "│ ") +
-					host.pad(host.fg("dim", "─".repeat(Math.max(0, innerW - 2))), innerW) +
-					host.fg("border", " │"),
+				host.fg("border", "│ ") + host.pad(host.fg("dim", "─".repeat(Math.max(0, innerW - 2))), innerW) + host.fg("border", " │"),
 			);
 			const rawBody = msg.body ? sanitizeUntrustedText(msg.body).replace(/\r/g, "") : "";
 			const bodyLines = rawBody ? wrapTextWithAnsi(rawBody, Math.max(20, innerW - 4)) : ["(empty body)"];
@@ -381,16 +356,12 @@ export function renderFlowV3(host: FlowRenderHost, width: number): string[] {
 				host.fg("border", "─".repeat(Math.max(1, W - 3 - visibleWidth(header))) + "╮"),
 		);
 		if (nodeMessages.length === 0) {
-			out.push(
-				host.fg("border", "│ ") + host.pad(host.fg("muted", "no messages for this node"), innerW) + host.fg("border", " │"),
-			);
+			out.push(host.fg("border", "│ ") + host.pad(host.fg("muted", "no messages for this node"), innerW) + host.fg("border", " │"));
 		} else {
 			const limit = 8;
 			const start = Math.max(0, Math.min(host.messageScroll, nodeMessages.length - limit));
 			if (start > 0) {
-				out.push(
-					host.fg("border", "│ ") + host.pad(host.fg("muted", `  ↑ +${start} earlier`), innerW) + host.fg("border", " │"),
-				);
+				out.push(host.fg("border", "│ ") + host.pad(host.fg("muted", `  ↑ +${start} earlier`), innerW) + host.fg("border", " │"));
 			}
 			for (let i = start; i < Math.min(nodeMessages.length, start + limit); i++) {
 				const msg = nodeMessages[i];

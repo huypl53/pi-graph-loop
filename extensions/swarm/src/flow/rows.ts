@@ -53,7 +53,13 @@ export function collectNodeRows(task: TaskState, st: SwarmState): Row[] {
 	});
 }
 
-export function collectLaneRows(task: TaskState, lanes: FlowLaneItem[], expandOthers: boolean, otherAgentsCount: number, st?: SwarmState): Row[] {
+export function collectLaneRows(
+	task: TaskState,
+	lanes: FlowLaneItem[],
+	expandOthers: boolean,
+	otherAgentsCount: number,
+	st?: SwarmState,
+): Row[] {
 	const rows: Row[] = lanes.map((lane) => ({
 		section: "LANES" as Section,
 		id: lane.id,

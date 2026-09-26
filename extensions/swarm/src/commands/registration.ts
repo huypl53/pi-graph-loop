@@ -12,12 +12,7 @@ import type { Paths } from "../types.ts";
 import { safeId } from "../utils.ts";
 import { parseFlags } from "./parser.ts";
 
-export async function handleRegisterCommand(
-	rest: string[],
-	ctx: any,
-	p: Paths,
-	pi: ExtensionAPI,
-): Promise<void> {
+export async function handleRegisterCommand(rest: string[], ctx: any, p: Paths, pi: ExtensionAPI): Promise<void> {
 	const tmuxTarget = rest.shift();
 	const id = rest.shift();
 	if (!tmuxTarget || !id) {
@@ -135,12 +130,7 @@ export async function handleRegisterCommand(
 	);
 }
 
-export async function handleDeregisterCommand(
-	rest: string[],
-	ctx: any,
-	p: Paths,
-	pi: ExtensionAPI,
-): Promise<void> {
+export async function handleDeregisterCommand(rest: string[], ctx: any, p: Paths, pi: ExtensionAPI): Promise<void> {
 	const flags = parseFlags(rest);
 	const target = flags.rest.shift();
 	if (!target) {

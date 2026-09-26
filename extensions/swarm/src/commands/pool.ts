@@ -62,13 +62,7 @@ Configuration files:
 Discover: /swarm pool show    Validate: /swarm pool validate    Preflight probe: /swarm pool preview-preflight
 See: docs/swarm/operations.md (Model pool configuration)`;
 
-export async function handlePoolCommand(
-	cmd: "pool",
-	rest: string[],
-	ctx: any,
-	p: Paths,
-	pi: ExtensionAPI,
-): Promise<void> {
+export async function handlePoolCommand(cmd: "pool", rest: string[], ctx: any, p: Paths, pi: ExtensionAPI): Promise<void> {
 	const sub = rest.shift();
 	if (!sub || sub === "list") {
 		const status = await poolStatus(p);
@@ -84,7 +78,9 @@ export async function handlePoolCommand(
 			const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m` : "ok";
 			const err = s.health?.lastError ? ` lastError=${s.health.lastError.slice(0, 60)}` : "";
 			const rolesCol = anyRoles ? ` roles=[${(s.roles || []).join(",") || "(all)"}]` : "";
-			lines.push(`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${rolesCol}${err}`);
+			lines.push(
+				`  ${s.key.padEnd(34)} w=${String(s.weight ?? 1).padEnd(3)} ${state} failures=${s.health?.failures ?? 0}${rolesCol}${err}`,
+			);
 		}
 		ctx.ui.notify(lines.join("\n"), "info");
 		return;
@@ -108,10 +104,7 @@ export async function handlePoolCommand(
 			);
 		} else {
 			const ok = await setSlotCooldown(p, key, null);
-			ctx.ui.notify(
-				ok ? `Slot ${key} cooldown cleared` : `Unknown slot key: ${key} (see /swarm pool list)`,
-				ok ? "info" : "warning",
-			);
+			ctx.ui.notify(ok ? `Slot ${key} cooldown cleared` : `Unknown slot key: ${key} (see /swarm pool list)`, ok ? "info" : "warning");
 		}
 		return;
 	}
@@ -123,7 +116,9 @@ export async function handlePoolCommand(
 		const singleton = implicitSingletonPool();
 		const status = await poolStatus(p);
 		if (status.slots.length) {
-			lines.push(`Model pool: configured (${status.slots.length} slot${status.slots.length === 1 ? "" : "s"}, source=${shapeSource})`);
+			lines.push(
+				`Model pool: configured (${status.slots.length} slot${status.slots.length === 1 ? "" : "s"}, source=${shapeSource})`,
+			);
 			for (const s of status.slots) {
 				const state = s.inCooldown
 					? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m`
@@ -141,7 +136,9 @@ export async function handlePoolCommand(
 			);
 		} else {
 			lines.push(`Model pool: not configured — using implicit singleton (source=${singleton.source})`);
-			lines.push(`  ${singleton.slots[0].provider || "(default)"}/${singleton.slots[0].model}  weight=1  (fallback-only when pool is empty)`);
+			lines.push(
+				`  ${singleton.slots[0].provider || "(default)"}/${singleton.slots[0].model}  weight=1  (fallback-only when pool is empty)`,
+			);
 			lines.push(`Rotation: not configured (strategy defaults to weighted)`);
 		}
 		lines.push("");
@@ -157,7 +154,9 @@ export async function handlePoolCommand(
 			lines.push("Config validation: PASSED");
 			if (v.shape.kind === "empty") lines.push("  - No swarm config (using defaults).");
 			else if (v.shape.kind === "singleton") {
-				lines.push(`  - Singleton config: model=${(v.shape as any).defaultModel || "(unset)"}, provider=${(v.shape as any).defaultProvider || "(unset)"}`);
+				lines.push(
+					`  - Singleton config: model=${(v.shape as any).defaultModel || "(unset)"}, provider=${(v.shape as any).defaultProvider || "(unset)"}`,
+				);
 			} else if (v.shape.kind === "explicit-pool") lines.push(`  - Explicit pool with ${(v.shape as any).slots} slot(s).`);
 			else if (v.shape.kind === "both") lines.push(`  - Both: ${(v.shape as any).slots} pool slot(s) + singleton fallback.`);
 			lines.push("  - No duplicates, all weights/cooldownMs/maxRetries are well-formed.");
@@ -224,8 +223,7 @@ export async function handlePoolCommand(
 		}
 		const agentId = currentAgentId();
 		const currentModelId = ctx.model?.id || currentModel();
-		const currentProviderId =
-			ctx.model?.provider && ctx.model.provider.trim() ? ctx.model.provider : currentProvider(currentModelId);
+		const currentProviderId = ctx.model?.provider && ctx.model.provider.trim() ? ctx.model.provider : currentProvider(currentModelId);
 		if (!currentModelId) {
 			await trace(p, "pool.manual_rotate_no_current_slot", { agentId, action, reason: "ctx.model.id is empty" }).catch((err: any) => {
 				expected("trace_failed", err);
@@ -323,7 +321,10 @@ export async function handlePoolCommand(
 				},
 				ctx.isIdle?.() ? { triggerTurn: true } : { deliverAs: "followUp" },
 			);
-			ctx.ui.notify(`Manual rotation: ${slotKey(currentSlot)} -> ${slotKey(picked.slot)} (gate bypassed; reason: ${picked.reason}).`, "info");
+			ctx.ui.notify(
+				`Manual rotation: ${slotKey(currentSlot)} -> ${slotKey(picked.slot)} (gate bypassed; reason: ${picked.reason}).`,
+				"info",
+			);
 			return;
 		}
 		await setSlotCooldown(p, slotKey(currentSlot), rotation.cooldownMs);

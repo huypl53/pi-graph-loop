@@ -43,7 +43,8 @@ export async function runtimeTaskWarnings(pi: ExtensionAPI, st: SwarmState, task
 			if (rec.superseded) continue; // superseded assignments are waived; not current work
 			if (rec.status === "dead_letter")
 				warnings.push(`node ${id} assignment/handoff message ${msgId} is dead-lettered (${rec.lastError || "unknown"})`);
-			if (PI_SWARM_MINIMAL_PROTOCOL === 0 && rec.requiresAck && !rec.ackedAt) warnings.push(`node ${id} message ${msgId} requires ack but is ${rec.status}`);
+			if (PI_SWARM_MINIMAL_PROTOCOL === 0 && rec.requiresAck && !rec.ackedAt)
+				warnings.push(`node ${id} message ${msgId} requires ack but is ${rec.status}`);
 			// Assignment acked done but the node was never advanced past assigned/in_progress.
 			if (rec.lastAck?.status === "done" && (node.status === "assigned" || node.status === "in_progress"))
 				warnings.push(`node ${id} message ${msgId} acked done but node is still ${node.status}`);

@@ -12,11 +12,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ModelSlot } from "../types.ts";
 import { classifyProviderError, scrubErrorIdentity } from "../types.ts";
-import {
-	ENGINE_MAX_RETRIES,
-	ENGINE_RETRY_WINDOW_MS,
-	SWARM_GUEST_ID,
-} from "../constants.ts";
+import { ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, SWARM_GUEST_ID } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
 import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "../pool.ts";
 import { paths, readState, trace, withLock } from "../state.ts";
@@ -231,5 +227,4 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 			);
 		}
 	});
-
 }

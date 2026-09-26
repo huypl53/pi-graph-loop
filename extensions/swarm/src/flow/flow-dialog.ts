@@ -3,28 +3,13 @@ import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/
 import { expected, logSwarmError } from "../errorlog.ts";
 import { readState, readTaskState } from "../state.ts";
 import type { Paths, SwarmState, TaskPaths, TaskState } from "../types.ts";
-import {
-	collectFlowData,
-	collectNodeMessages,
-} from "./collectors.ts";
-import {
-	collectAttentionRows,
-	collectEventRows,
-	collectLaneRows,
-	collectNodeRows,
-} from "./rows.ts";
+import { collectFlowData, collectNodeMessages } from "./collectors.ts";
+import { collectAttentionRows, collectEventRows, collectLaneRows, collectNodeRows } from "./rows.ts";
 import type { FlowRenderHost } from "./flow-render.ts";
 import { renderFlowLegacy, renderFlowV3 } from "./flow-render.ts";
 import { truncateLeft } from "./formatting.ts";
 import { buildGraphTree, deriveCurrentNodeIds } from "./tree.ts";
-import type {
-	FlowDialogData,
-	GraphTreeEntry,
-	GraphTreeModel,
-	NodeMessage,
-	Row,
-	Section,
-} from "./types.ts";
+import type { FlowDialogData, GraphTreeEntry, GraphTreeModel, NodeMessage, Row, Section } from "./types.ts";
 import { DEFAULT_EVENT_LIMIT } from "./types.ts";
 
 export class FlowDialog implements Component, FlowRenderHost {
@@ -102,7 +87,14 @@ export class FlowDialog implements Component, FlowRenderHost {
 			const task = await readTaskState(this.opts.tp.taskJson);
 			this.opts.st = st;
 			this.opts.task = task;
-			this.data = await collectFlowData(this.opts.p, this.opts.cwd, task, this.opts.tp, st, this.opts.eventLimit || DEFAULT_EVENT_LIMIT);
+			this.data = await collectFlowData(
+				this.opts.p,
+				this.opts.cwd,
+				task,
+				this.opts.tp,
+				st,
+				this.opts.eventLimit || DEFAULT_EVENT_LIMIT,
+			);
 			this.graphModel = buildGraphTree(task);
 			this.nodeMsgCache = new Map();
 			for (const nid of Object.keys(task.nodes)) {

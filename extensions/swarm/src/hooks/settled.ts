@@ -15,12 +15,7 @@ import {
 	formatNotifyKey,
 } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
-import {
-	deliverMessageLocked,
-	findIdempotentMessage,
-	responseMissingRecords,
-	unackedRequiresAckRecords,
-} from "../mailbox.ts";
+import { deliverMessageLocked, findIdempotentMessage, responseMissingRecords, unackedRequiresAckRecords } from "../mailbox.ts";
 import { ensureAgentDefaults, now } from "../utils.ts";
 import { paths, readState, trace, withLock, writeState } from "../state.ts";
 import { logSwarmError } from "../errorlog.ts";
@@ -168,7 +163,10 @@ export function registerSettledHook(pi: ExtensionAPI) {
 								body: `Agent ${agentId} settled while ${liveMissing.length} requiresResponse message(s) are still missing verified result messages: ${liveMissing.map((m) => m.id).join(", ")}. The agent is marked response_missing and is blocked from reuse until it sends replies and ack done with resultMessageId.`,
 								requiresAck: false,
 							});
-							await trace(p, "message.response_missing.settled.notify", { agentId, messageIds: liveMissing.map((m) => m.id) });
+							await trace(p, "message.response_missing.settled.notify", {
+								agentId,
+								messageIds: liveMissing.map((m) => m.id),
+							});
 						} catch (err: any) {
 							await trace(p, "message.response_missing.notify_failed", { agentId, error: String(err?.message || err) });
 						}
@@ -308,5 +306,4 @@ export function registerSettledHook(pi: ExtensionAPI) {
 			await logSwarmError(ctx?.cwd, "hooks", "settle.auto_focus_failed", err, { agentId });
 		}
 	});
-
 }

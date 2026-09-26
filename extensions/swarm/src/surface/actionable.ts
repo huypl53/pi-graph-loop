@@ -9,12 +9,7 @@
 // types (Paths/TaskState). No Pi runtime boundary is crossed here — this module is a pure
 // predicate over durable state records (L1) and never calls pi.sendMessage.
 import type { Paths, TaskState } from "../types.ts";
-import {
-	PI_SWARM_MINIMAL_PROTOCOL,
-	PUMP_RETRIGGER_MAX,
-	TERMINAL_NODE_STATUSES,
-	TRACE_LATE_RESULT_REJECTED,
-} from "../constants.ts";
+import { PI_SWARM_MINIMAL_PROTOCOL, PUMP_RETRIGGER_MAX, TERMINAL_NODE_STATUSES, TRACE_LATE_RESULT_REJECTED } from "../constants.ts";
 import { taskPaths, trace, traceTask } from "../state.ts";
 
 // Helper to parse taskId/nodeId from conversationId (format: "task:${taskId}:${nodeId}").
@@ -131,9 +126,7 @@ export function isActionableRootMessage(
 		// Predicate order: check `isResultClass` FIRST so nudges (which also lack replyTo in our
 		// fingerprint) keep falling through to the existing task/node terminal gates.
 		const isResultClass =
-			(Boolean(rec.requiresAck) || PI_SWARM_MINIMAL_PROTOCOL === 1) &&
-			rec.requiresResponse === false &&
-			Boolean(rec.replyTo);
+			(Boolean(rec.requiresAck) || PI_SWARM_MINIMAL_PROTOCOL === 1) && rec.requiresResponse === false && Boolean(rec.replyTo);
 		const task = taskIndex[taskNodeRef.taskId];
 		if (!task) return { ok: false, reason: "task_missing" };
 		if (isResultClass) {

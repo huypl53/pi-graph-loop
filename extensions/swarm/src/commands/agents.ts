@@ -2,20 +2,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { relative } from "node:path";
-import {
-	attachTarget,
-	reloadIdentity,
-	restartAgent,
-	sendKeys,
-	setAgentPaused,
-	setAgentRole,
-	spawnAgent,
-	stopAgent,
-} from "../agents.ts";
-import {
-	TRACE_AGENT_LEASE_CLEARED,
-	TRACE_AGENT_LEASE_SET,
-} from "../constants.ts";
+import { attachTarget, reloadIdentity, restartAgent, sendKeys, setAgentPaused, setAgentRole, spawnAgent, stopAgent } from "../agents.ts";
+import { TRACE_AGENT_LEASE_CLEARED, TRACE_AGENT_LEASE_SET } from "../constants.ts";
 import { expected, logSwarmError } from "../errorlog.ts";
 import { overridePath } from "../identity.ts";
 import { buildSwarmStatusSummary } from "../reconcile.ts";
@@ -27,13 +15,7 @@ import { now, safeId } from "../utils.ts";
 import { parseFlags } from "./parser.ts";
 import { handleDeregisterCommand, handleRegisterCommand } from "./registration.ts";
 
-export async function handleAgentsCommand(
-	cmd: string,
-	rest: string[],
-	ctx: any,
-	p: Paths,
-	pi: ExtensionAPI,
-): Promise<void> {
+export async function handleAgentsCommand(cmd: string, rest: string[], ctx: any, p: Paths, pi: ExtensionAPI): Promise<void> {
 	if (!cmd || cmd === "init") {
 		const st = await withLock(p, async () => {
 			const s = await readState(p, ctx.cwd);
@@ -152,7 +134,10 @@ export async function handleAgentsCommand(
 		}
 		const flags = parseFlags(rest);
 		const caps = flags.caps
-			? String(flags.caps).split(",").map((s) => s.trim()).filter(Boolean)
+			? String(flags.caps)
+					.split(",")
+					.map((s) => s.trim())
+					.filter(Boolean)
 			: undefined;
 		try {
 			const result = await withLock(p, async () => {
@@ -239,9 +224,11 @@ export async function handleAgentsCommand(
 			agent.leaseReason = leaseReason;
 			agent.updatedAt = now();
 			await writeState(p, st);
-			await trace(p, TRACE_AGENT_LEASE_SET, { agentId: agent.id, leaseKind, leaseUntil, leaseReason, by: "command" }).catch((err: any) => {
-				expected("trace_failed", err);
-			});
+			await trace(p, TRACE_AGENT_LEASE_SET, { agentId: agent.id, leaseKind, leaseUntil, leaseReason, by: "command" }).catch(
+				(err: any) => {
+					expected("trace_failed", err);
+				},
+			);
 			return { cleared: false, agentId: agent.id, leaseKind, leaseUntil, leaseReason };
 		}).catch((err: any) => {
 			return { failed: String((err as Error)?.message || err) };

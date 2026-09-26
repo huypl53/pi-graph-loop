@@ -117,7 +117,9 @@ export class HerdrDriver implements TerminalDriver {
 	 * Best-effort: a failed listing resolves to undefined (caller treats the pane as not alive).
 	 */
 	private async resolvePaneIdByLabel(pi: ExtensionAPI, compositeTarget: string): Promise<string | undefined> {
-		const label = String(compositeTarget || "").split(":")[1]?.replace(/\.\d+$/, "");
+		const label = String(compositeTarget || "")
+			.split(":")[1]
+			?.replace(/\.\d+$/, "");
 		if (!label) return undefined;
 		try {
 			const panes = await this.listPanes(pi);

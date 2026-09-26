@@ -279,7 +279,10 @@ export async function auditTimeline(p: Paths, messageId: string, opts: AuditEven
 	const cwd = dirname(dirname(p.root));
 	const st = await readState(p, cwd);
 	const record = st.messages?.[messageId];
-	const fileEvents = await readAuditEvents(p, { ...opts, messageId: undefined, limit: 500 } as AuditEventFilter & { generations?: boolean; rollupWindowMs?: number; });
+	const fileEvents = await readAuditEvents(p, { ...opts, messageId: undefined, limit: 500 } as AuditEventFilter & {
+		generations?: boolean;
+		rollupWindowMs?: number;
+	});
 	const traceEvents = (fileEvents.events || []).filter((e: any) => {
 		const d = e.detail || e;
 		return (
