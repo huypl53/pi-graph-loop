@@ -156,9 +156,23 @@ function recordReworkConsumption(
 
 export function activateReworkNodes(task: TaskState, tp?: TaskPaths) {
 	const reopened: string[] = [];
+	// G1 (followup-g1-graph-rework-reopen): a non-rework edge whose target is terminal may also
+	// be re-derived when the SOURCE node was itself reopened by a rework cycle (i.e. it has a
+	// prior attempt with supersededBy:"<rework>"). This is the precise condition: the source
+	// node is downstream of a rework edge that already fired, so re-deriving its non-rework
+	// downstream edge is the correct continuation. Fresh first-pass tasks are unaffected
+	// (review is `pending` when test passes → computeReadyNodes handles it normally; this
+	// branch is a no-op). Each re-derivation keys off the source attempt id and goes through
+	// the same ledger as a rework edge, so a fresh cycle re-derives once, repeated identical
+	// cycles are suppressed, and ping-pong is impossible.
+	const sourceWasReworkReopened = (node: TaskNode): boolean => {
+		if (!node.attemptHistory) return false;
+		return node.attemptHistory.some((a: any) => a?.supersededBy === "<rework>");
+	};
 	for (const [sourceNodeId, sourceNode] of Object.entries(task.nodes)) {
 		if (!(sourceNode.status === "failed" || sourceNode.status === "skipped" || sourceNode.status === "done")) continue;
-		const outgoing = task.edges.filter((edge) => edge.from === sourceNodeId && edge.rework);
+		const sourceInReworkCycle = sourceWasReworkReopened(sourceNode);
+		const outgoing = task.edges.filter((edge) => edge.from === sourceNodeId && (edge.rework || sourceInReworkCycle));
 		for (const activation of outgoing) {
 			if (!edgeMatchesActivation(task, activation)) continue;
 			const source = sourceAttemptIdentity(task, activation);

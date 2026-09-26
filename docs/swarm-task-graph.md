@@ -406,6 +406,19 @@ Assignment (`swarm_assign_task`) is **idempotent per task/node/assignee/attempt*
 
 **Retries do not require a duplicate response.** `swarm_ack_message` rejects a `done`/`processing` ack on a superseded assignment with `ASSIGNMENT_SUPERSEDED` (it points at the current assignment), so an implementer replying to an old assignment cannot double-complete. A `failed` ack is always allowed (informational); the root can override with `waive=true` to accept a superseded assignment as `waived`. `requiresResponse` semantics remain intact on the current assignment.
 
+### Rework re-entry re-derivation (G1)
+
+When a rework cycle fires (e.g. `review rejected → fix implemented → test ready`), the source
+node of the next non-rework edge is itself downstream of a rework edge. `activateReworkNodes`
+detects this (the source node has a prior attempt with `supersededBy: "<rework>"`) and
+re-derives the non-rework edge's terminal target as `ready` — same reopen path as a rework
+edge (prior attempt superseded, status→ready, ledger keyed by source attempt id). This is
+what makes `test --passed--> review` re-derive review after a rework cycle without
+`force=true`. Fresh first-pass tasks are unaffected (review is `pending` when test passes,
+so `computeReadyNodes` handles it normally). Each re-derivation consumes one ledger entry
+keyed by the source attempt id, so a fresh cycle re-derives once and repeated identical
+cycles are suppressed. `force=true` remains the anomaly-only escape hatch.
+
 ### Stale & reassignment cleanup
 
 **Reassign semantics.** When a node is reassigned, the harness clears the prior owner's state so it cannot pollute the new assignment: a fresh `swarm_assign_task` deletes any prior `node.staleAt` (`task.stale.cleared` trace; `swarm_update_task` also clears it on active re-entry to `assigned`/`in_progress`/`ready`); the old assignment message is superseded + waived (excluded from `response_missing` and reuse blocking); the old assignee's `activeTaskIds` is released. Declared rework edges also re-enter work without an root force-reset: when a terminal `failed`/`skipped` node is the target of a satisfied `rework` edge, the engine can reopen it as `ready` so the next assignment is a normal graph transition, not a manual task reset. The shutdown/settle dying-agent scan only claims a node while the agent is its **canonical** owner — it skips nodes where `node.assignee !== agentId`, where the canonical `assignmentMessageId` is missing/superseded, or where that canonical message is addressed to a different agent. Thus an old owner that shuts down or settles after a reassign is not reported as still holding the node and does not stamp `staleAt` onto the new owner. `staleAt` is advisory only; `swarm_reconcile` may re-stamp it if the new owner actually goes idle.
