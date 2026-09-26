@@ -49,6 +49,50 @@ export function translateTmuxKeyToHerdr(token: string): string {
 export class HerdrDriver implements TerminalDriver {
 	readonly id = "herdr" as const;
 	private workspaceId?: string;
+	// G4 (herdr-workspace-isolation): cached id of the dedicated `swarm-agents` workspace
+	// where spawned worker tabs live. Distinct from `workspaceId` (the ROOT's workspace).
+	// On stale-cache (workspace was closed externally), re-create via `workspace create`.
+	private agentsWorkspaceId?: string;
+	// Track which pane ids belong to swarm-spawned agents so teardown can count only
+	// swarm panes (never touches foreign panes in the agents workspace).
+	private readonly swarmPaneIds = new Set<string>();
+
+	private getAgentsWorkspaceLabel(): string {
+		return process.env.PI_SWARM_HERDR_WS_LABEL || "swarm-agents";
+	}
+
+	private async ensureAgentsWorkspace(pi: ExtensionAPI): Promise<string> {
+		if (this.agentsWorkspaceId) {
+			// Stale-cache probe: verify the cached ws still exists.
+			try {
+				const probe = await this.herdrJson(pi, ["workspace", "get", this.agentsWorkspaceId], 3_000);
+				if (probe?.result?.workspace?.workspace_id) return this.agentsWorkspaceId;
+			} catch {
+				// workspace_not_found or other failure → fall through to re-create
+			}
+			this.agentsWorkspaceId = undefined;
+		}
+		// List workspaces and match by label.
+		const list = await this.herdrJson(pi, ["workspace", "list"], 5_000);
+		const wsList = Array.isArray(list?.result?.workspaces) ? list.result.workspaces : [];
+		const label = this.getAgentsWorkspaceLabel();
+		const existing = wsList.find((w: any) => w?.label === label);
+		if (existing?.workspace_id) {
+			this.agentsWorkspaceId = existing.workspace_id;
+			return existing.workspace_id;
+		}
+		// Create the dedicated agents workspace.
+		const created = await this.herdrJson(pi, ["workspace", "create", "--label", label], 10_000);
+		const wsId = created?.result?.workspace?.workspace_id || created?.workspace_id || created?.result?.workspace_id;
+		if (!wsId) {
+			await logSwarmError(process.cwd(), "herdr", "ensure_agents_workspace.create_failed", new Error("no workspace_id in response"), {
+				created,
+			});
+			throw new Error("herdr workspace create returned no workspace_id");
+		}
+		this.agentsWorkspaceId = wsId;
+		return wsId;
+	}
 
 	constructor(workspaceId?: string) {
 		this.workspaceId = workspaceId;
@@ -175,9 +219,12 @@ export class HerdrDriver implements TerminalDriver {
 		// returns the new tab + root_pane ids; (2) `pane run <PANE_ID> <COMMAND>...`
 		// runs the launch command in that root pane. The 0.4.x contract (positional
 		// command on `tab create`) is rejected by 0.8.2 with `unknown option: <cmd>`.
-		const ws = this.getWorkspaceId() || opts.session;
+		// G4 (herdr-workspace-isolation): workers land in a dedicated `swarm-agents`
+		// workspace, NOT the root workspace. The root workspace id is preserved for
+		// root-pane detection only.
+		const agentsWs = await this.ensureAgentsWorkspace(pi);
 		const createArgs = ["tab", "create"];
-		if (ws) createArgs.push("--workspace", ws);
+		createArgs.push("--workspace", agentsWs);
 		if (opts.window) createArgs.push("--label", opts.window);
 		if (opts.cwd) createArgs.push("--cwd", opts.cwd);
 		createArgs.push("--env", `PI_SWARM_AGENT_ID=${opts.window}`, "--env", "PI_SWARM_IS_ROOT=0");
@@ -190,10 +237,9 @@ export class HerdrDriver implements TerminalDriver {
 		}
 		const tabId = res?.result?.tab?.tab_id || res?.tab?.tab_id || res?.tab_id || res?.tab || opts.window;
 		const paneId = res?.result?.root_pane?.pane_id || res?.root_pane?.pane_id || res?.pane_id || res?.pane || tabId;
-		const session = res?.result?.tab?.workspace_id || ws || opts.session;
-		if (session && !this.workspaceId) {
-			this.workspaceId = session;
-		}
+		const session = res?.result?.tab?.workspace_id || agentsWs;
+		// Track this pane as a swarm-spawned agent so teardown can count only swarm panes.
+		if (paneId) this.swarmPaneIds.add(paneId);
 		// Step 2: launch the command in the root pane via `pane run`. The command is a
 		// shell line (env-prefix assignments + quoted pi invocation), so we wrap it in
 		// `sh -c <command> -- swarm-agent` — `pane run` takes argv, not a shell string.
@@ -211,26 +257,78 @@ export class HerdrDriver implements TerminalDriver {
 		const targetStr = typeof target === "string" ? target : target.target || target.paneId;
 		if (!targetStr || targetStr === "unknown") return { killed: false, method: "no-target" };
 
-		const alive = await this.isTargetAlive(pi, targetStr);
-		if (!alive) return { killed: false, method: "already-dead" };
+		// G4: don't gate on isTargetAlive — the pane may still be open (running a shell
+		// prompt after the pi process exited) and we still need to close it for teardown.
+		// isTargetAlive checks the foreground process; a pane with a shell prompt is
+		// "dead" from the agent's perspective but still occupies the workspace.
 
+		let killed = false;
+		let method = "kill-failed";
 		try {
 			await this.herdr(pi, ["pane", "close", targetStr], 5_000);
-			return { killed: true, method: "pane-close" };
+			killed = true;
+			method = "pane-close";
 		} catch (err: any) {
 			await logSwarmError(process.cwd(), "herdr", "kill_agent.pane_close_fallback", err, { target: targetStr });
 		}
 
-		const tabId = typeof target === "string" ? target : target.window;
-		if (tabId && tabId !== "unknown" && tabId !== targetStr) {
-			try {
-				await this.herdr(pi, ["tab", "close", tabId], 5_000);
-				return { killed: true, method: "tab-close" };
-			} catch (tabErr: any) {
-				await logSwarmError(process.cwd(), "herdr", "kill_agent.tab_close_failed", tabErr, { tabId });
+		if (!killed) {
+			const tabId = typeof target === "string" ? target : target.window;
+			if (tabId && tabId !== "unknown" && tabId !== targetStr) {
+				try {
+					await this.herdr(pi, ["tab", "close", tabId], 5_000);
+					killed = true;
+					method = "tab-close";
+				} catch (tabErr: any) {
+					await logSwarmError(process.cwd(), "herdr", "kill_agent.tab_close_failed", tabErr, { tabId });
+				}
 			}
 		}
-		return { killed: false, method: "kill-failed" };
+
+		// G4 teardown: remove the pane from the swarm tracking set and close the
+		// agents workspace if no swarm panes remain. Never touches the root workspace.
+		if (killed) this.swarmPaneIds.delete(targetStr);
+		await this.maybeCloseAgentsWorkspace(pi);
+
+		return { killed, method };
+	}
+
+	/**
+	 * G4 teardown: if no swarm-spawned panes remain in the agents workspace, close it.
+	 * Counts only panes the driver spawned (tracked by pane id in `swarmPaneIds`),
+	 * so foreign panes in the agents workspace never block or trigger close wrongly.
+	 * Never touches the root workspace.
+	 */
+	private async maybeCloseAgentsWorkspace(pi: ExtensionAPI): Promise<void> {
+		if (!this.agentsWorkspaceId) return;
+		// Prune the tracking set: remove pane ids that no longer exist.
+		// Use `pane list --workspace <wsId>` to get the authoritative pane set for the
+		// agents workspace, then intersect with our tracked set. This avoids false
+		// negatives from `isTargetAlive` racing with a freshly-spawned pane that hasn't
+		// fully started its foreground process yet.
+		let wsPanes: string[] = [];
+		try {
+			const list = await this.herdrJson(pi, ["pane", "list", "--workspace", this.agentsWorkspaceId], 5_000);
+			const rawList = Array.isArray(list?.result?.panes) ? list.result.panes : [];
+			wsPanes = rawList.map((p: any) => p?.pane_id || p?.paneId).filter(Boolean);
+		} catch {
+			// workspace gone or list failed — nothing to close
+			return;
+		}
+		const stillAlive = new Set<string>();
+		for (const paneId of this.swarmPaneIds) {
+			if (wsPanes.includes(paneId)) stillAlive.add(paneId);
+		}
+		this.swarmPaneIds.clear();
+		for (const id of stillAlive) this.swarmPaneIds.add(id);
+		if (this.swarmPaneIds.size > 0) return;
+		// No swarm panes remain — close the agents workspace.
+		try {
+			await this.herdr(pi, ["workspace", "close", this.agentsWorkspaceId], 5_000);
+			this.agentsWorkspaceId = undefined;
+		} catch (err: any) {
+			await logSwarmError(process.cwd(), "herdr", "maybe_close_agents_workspace.failed", err, { wsId: this.agentsWorkspaceId });
+		}
 	}
 
 	async inspectProcess(pi: ExtensionAPI, target: string): Promise<{ piLike: boolean; command: string; pid?: number }> {

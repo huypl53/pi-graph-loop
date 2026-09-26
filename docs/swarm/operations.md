@@ -445,6 +445,26 @@ terminal multiplexer with a JSON CLI). Set via `PI_SWARM_TERMINAL_MANAGER=herdr`
 `.pi/swarm/tasks/herdr-stabilize-20260926/artifacts/audit-matrix.md` for the full
 method-by-method mapping and live-binary verification evidence.
 
+### Workspace isolation
+
+Under herdr mode, worker tabs are created in a **dedicated `swarm-agents` workspace** —
+not the root workspace. This keeps root tabs visually separate from swarm-spawned
+workers and makes teardown deterministic (one workspace to close when no workers remain).
+
+- **Label**: `swarm-agents` (constant, overridable via `PI_SWARM_HERDR_WS_LABEL`).
+- **Creation**: on first spawn, the driver calls `workspace list` → if no workspace
+  with the label exists, calls `workspace create --label swarm-agents`. The workspace
+  id is cached on the driver instance.
+- **Stale-cache recovery**: if the cached workspace id no longer resolves
+  (`workspace_not_found`), the driver re-creates it on the next spawn.
+- **Teardown**: after every `killAgent`, the driver calls `pane list --workspace <wsId>`
+  and intersects with its tracked swarm pane ids. If no swarm panes remain, it calls
+  `workspace close <wsId>` and clears the cache.
+- **Root workspace**: never touched. `spawnAgent` never resolves the root workspace id
+  for tab placement; the root workspace id is used only for root-pane detection.
+- **herdr 0.8.2 commands used**: `workspace list`, `workspace create --label`,
+  `workspace get`, `workspace close`, `pane list --workspace`.
+
 ## Child pi args — default loads swarm extension
 
 Spawned workers inherit the parent's `pi` invocation. `childPiArgs()`
