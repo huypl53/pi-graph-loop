@@ -44,6 +44,7 @@ const { pumpRootMailbox, evaluateIdleGoalNudgeLocked } = await import(join(srcDi
 const { paths, withLock, readState, writeState } = await import(join(srcDir, "state.ts"));
 const { ensureRoot, heartbeatRootLeader, claimRootLeader } = await import(join(srcDir, "identity.ts"));
 const { deliverMessageLocked } = await import(join(srcDir, "mailbox.ts"));
+const { registerSettledHook } = await import(join(srcDir, "hooks/settled.ts"));
 
 // ============================================================================
 // Test harness
@@ -578,7 +579,10 @@ console.log("\n[CT-2.A] within 5s of worker send: 0 pi.sendMessage + 1 durable m
 console.log("\n[CT-2.B] after root agent_settled: 1 pi.sendMessage with triggerTurn=true");
 {
 	const scratchDir = freshScratch("b");
-	const { p } = await seedRootBusyScratch(scratchDir, { rootBusy: true });
+	// R28 fixture correction: the message below references `task-ct2-y`, so the seeded task
+	// must match — otherwise `isActionableRootMessage` returns `task_missing` and suppresses the
+	// surface (the original test seeded `task-ct2-x` by default, explaining the 0 sends).
+	const { p } = await seedRootBusyScratch(scratchDir, { rootBusy: true, taskId: "task-ct2-y" });
 
 	const sendMessages = [];
 	const pi = {
@@ -677,7 +681,10 @@ console.log("\n[CT-2.B] after root agent_settled: 1 pi.sendMessage with triggerT
 console.log("\n[CT-2.C] NO duplicate surface on replay (consumerReceipts dedupe)");
 {
 	const scratchDir = freshScratch("c");
-	const { p } = await seedRootBusyScratch(scratchDir, { rootBusy: true });
+	// R28 fixture correction: the message below references `task-ct2-z`, so the seeded task
+	// must match — otherwise `isActionableRootMessage` returns `task_missing` and suppresses the
+	// surface (the original test seeded `task-ct2-x` by default, explaining the 0 sends).
+	const { p } = await seedRootBusyScratch(scratchDir, { rootBusy: true, taskId: "task-ct2-z" });
 
 	const sendMessages = [];
 	const pi = {
@@ -756,11 +763,105 @@ console.log("\n[CT-2.C] NO duplicate surface on replay (consumerReceipts dedupe)
 }
 
 // ============================================================================
+// CT-2.D — R28 hook-path probe: registered registerSettledHook callback, NOT direct pump
+// (plan gate: "exercise the registered root agent_settled hook, not just pumpRootMailbox").
+// Uses a VALID seeded task id (matches the message's conversationId/idempotencyKey) so the
+// task_missing gate in isActionableRootMessage does NOT suppress the surface.
+// ============================================================================
+console.log("\n[CT-2.D] R28 hook-path: registered agent_settled callback surfaces once with triggerTurn=true");
+{
+	const scratchDir = freshScratch("d");
+	// R28 fixture: message references `task-ct2-d`, so the seeded task must match.
+	const { p } = await seedRootBusyScratch(scratchDir, { rootBusy: true, taskId: "task-ct2-d" });
+
+	const sendMessages = [];
+	const onCallbacks = [];
+	const pi = {
+		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+		setModel: async () => true,
+		sendMessage: (m, o) => {
+			sendMessages.push({ m, o });
+		},
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => {},
+		registerTool: () => {},
+		registerCommand: () => {},
+		// Capture the agent_settled callback so the test can invoke it directly,
+		// exercising the REAL registered hook path (not direct pumpRootMailbox).
+		on: (event, cb) => {
+			if (event === "agent_settled") onCallbacks.push(cb);
+		},
+	};
+
+	// Register the hook via the production factory — this is what the real extension does.
+	registerSettledHook(pi);
+
+	// Inject a worker result message that references the seeded task.
+	await withLock(p, async () => {
+		const st = await readState(p, scratchDir);
+		await deliverMessageLocked(pi, scratchDir, p, st, {
+			to: "root",
+			priority: "normal",
+			subject: "Result: implement of task-ct2-d done",
+			body: "Node implement of task-ct2-d completed successfully.",
+			requiresAck: true,
+			requiresResponse: false,
+			conversationId: "task:task-ct2-d:node:implement:nudge:result:seq:1",
+			idempotencyKey: "task:task-ct2-d:node:implement:nudge:result:seq:1",
+		});
+		await writeState(p, st);
+	});
+
+	// Flip root to idle (mimics the agent_settled boundary condition).
+	await withLock(p, async () => {
+		const st = await readState(p, scratchDir);
+		st.agents.root.runtimeStatus = "idle";
+		if (st.consumerReceipts?.root) {
+			st.consumerReceipts.root.entries = {};
+		}
+		await writeState(p, st);
+	});
+
+	// Invoke the REGISTERED agent_settled hook callback (not direct pumpRootMailbox).
+	// This exercises the production wiring: registerSettledHook -> pi.on("agent_settled", cb) -> pumpRootMailbox.
+	const ctxIdle = {
+		cwd: scratchDir,
+		mode: "tui",
+		isIdle: () => true,
+		hasUI: false,
+		ui: { setStatus: () => {} },
+		model: { id: "gpt-5.4-mini", provider: "openai" },
+	};
+	ok("CT-2.D registered hook callback was captured", onCallbacks.length === 1, `got ${onCallbacks.length}`);
+	if (onCallbacks.length === 1) {
+		await onCallbacks[0]({}, ctxIdle);
+	}
+
+	const postHookSendMessages = sendMessages.length;
+	const firstPostHook = sendMessages[0];
+
+	ok(
+		"CT-2.D hook-path sendMessageCallCount === 1 (registered agent_settled surfaces the message)",
+		postHookSendMessages === 1,
+		`got ${postHookSendMessages}`,
+	);
+	ok(
+		"CT-2.D hook-path opts.triggerTurn === true (the root surfaces as a real trigger)",
+		firstPostHook?.o?.triggerTurn === true,
+		`got ${JSON.stringify(firstPostHook?.o)}`,
+	);
+
+	PROBE_OUTCOME["CT-2.D"] =
+		postHookSendMessages === 1 && firstPostHook?.o?.triggerTurn === true ? "CONTRACT_CONFIRMED" : "BUG_FOUND_R_ROW_NEEDED";
+}
+
+// ============================================================================
 // Probe outcome table
 // ============================================================================
 console.log("\n=== CT probe outcome table ===");
 let allConfirmed = true;
-for (const probe of ["CT-1.A", "CT-1.B", "CT-1.C", "CT-2.A", "CT-2.B", "CT-2.C"]) {
+for (const probe of ["CT-1.A", "CT-1.B", "CT-1.C", "CT-2.A", "CT-2.B", "CT-2.C", "CT-2.D"]) {
 	const outcome = PROBE_OUTCOME[probe] || "NOT_RUN";
 	console.log(`  ${probe}: ${outcome}`);
 	if (outcome !== "CONTRACT_CONFIRMED") allConfirmed = false;
