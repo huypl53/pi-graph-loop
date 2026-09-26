@@ -21,6 +21,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { now } from "./utils.ts";
+import { DEFAULT_ERRORLOG_PER_SOURCE_MAX } from "./constants.ts";
 
 export type ErrorLogSource = string; // caller module id: "trace" | "hooks" | "mailbox" | ...
 
@@ -34,6 +35,46 @@ let budgetMemo: number | null = null;
 /** Test hook: forget the memoized budget so env changes are re-read. */
 export function resetErrorLogBudgetForTests(): void {
 	budgetMemo = null;
+	usedMemo = null;
+}
+
+// === G5: per-source ring (in-memory eviction policy) ======================================
+// Prevents one noisy source from exhausting the global errorlog budget (live incident:
+// task-202609020643-r18-reproduce-scratch-cw produced 4014 stale_open.task_unreadable entries).
+// The on-disk errors.jsonl is append-only; the ring is purely an in-memory gate that decides
+// whether a new entry from a saturated source is appended (evicting the oldest in-memory entry
+// from that source) or dropped. Eviction is logical, not physical — the file retains all
+// entries ever written (until the 4MiB size guard kicks in). This matches the existing
+// global-cap behavior: the global cap also does not truncate the file.
+interface PerSourceState {
+	count: number;
+	exhaustedAnnounced: boolean; // true after we've already emitted the per-source breadcrumb for the current saturation
+}
+const perSourceMemo: Map<string, PerSourceState> = new Map();
+let perSourceMaxMemo: number | null = null;
+
+function perSourceMax(): number {
+	// Read env at call time (mirrors maxEntries()) so tests can override PI_SWARM_ERRORLOG_PER_SOURCE_MAX
+	// without re-importing the module. The constants.ts PI_SWARM_ERRORLOG_PER_SOURCE_MAX export is
+	// kept for documentation/observability; the runtime gate reads the env directly.
+	// No floor here: the floor in constants.ts is for the documented default value; the runtime gate
+	// honors any positive env value so tests can exercise small caps.
+	if (perSourceMaxMemo !== null) return perSourceMaxMemo;
+	const raw = Number(process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX);
+	if (raw === 0) {
+		perSourceMaxMemo = 0;
+	} else if (Number.isFinite(raw) && raw > 0) {
+		perSourceMaxMemo = Math.floor(raw);
+	} else {
+		perSourceMaxMemo = DEFAULT_ERRORLOG_PER_SOURCE_MAX;
+	}
+	return perSourceMaxMemo;
+}
+
+/** Test hook: forget the per-source memo so env changes are re-read. */
+export function resetErrorLogPerSourceForTests(): void {
+	perSourceMemo.clear();
+	perSourceMaxMemo = null;
 }
 
 function errorLogPath(cwd: string): string {
@@ -104,6 +145,38 @@ export async function logSwarmError(
 				}
 			}
 			return;
+		}
+		// G5: per-source cap. Runs AFTER the global gate so the global cap always wins; runs BEFORE
+		// bumpUsed so a source-saturated drop does not consume global budget. When a source is
+		// saturated, the new entry is DROPPED (not appended) — the per-source cap is a budget
+		// guard at finer granularity than the global cap, and dropping is the only way to actually
+		// bound per-source growth. AGENTS.md no-silent-swallow mandate: logSwarmError MUST be called
+		// at the catch site (it IS — we got here). The drop is the per-source gate decision, not a
+		// silent swallow at the catch site. One breadcrumb per (source, exhaustion-cross) — never
+		// per drop — so a runaway source cannot spam stderr.
+		const psMax = perSourceMax();
+		if (psMax > 0) {
+			let st = perSourceMemo.get(source);
+			if (!st) {
+				st = { count: 0, exhaustedAnnounced: false };
+				perSourceMemo.set(source, st);
+			}
+			if (st.count >= psMax) {
+				if (!st.exhaustedAnnounced) {
+					try {
+						console.error(
+							`[swarm:errorlog] per-source budget exhausted (source=${source}, max=${psMax}); further entries from this source are dropped`,
+						);
+					} catch {
+						expected("console_breadcrumb_never_throws"); // self-silent by contract: diagnostics-of-diagnostics
+					}
+					st.exhaustedAnnounced = true;
+				}
+				return; // drop — do not append, do not consume global budget
+			}
+			// Under cap: arm the next exhaustion-cross breadcrumb and record the append.
+			st.exhaustedAnnounced = false;
+			st.count += 1;
 		}
 		bumpUsed(used + 1);
 		const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
