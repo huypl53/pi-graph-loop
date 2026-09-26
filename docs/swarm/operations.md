@@ -882,6 +882,34 @@ All recovery nudges share one semantic key space (`task:{taskId}:node:{nodeId}:n
 and the same dedupe/cooldown/cap contract. Every message tells the recipient the concrete next action
 (the exact tool call) plus an alternative path (cancel/inspect).
 
+### Response-debt lifecycle (H1, 2026-09-26)
+
+Rules governing which messages mint response debt and how debt clears (source:
+`extensions/swarm/src/mailbox.ts`, `extensions/swarm/src/nudges/artifact-progress.ts`,
+`extensions/swarm/src/taskgraph/sweep.ts`):
+
+- **Nudges are informational** — artifact-progress nudges and pool-depleted nudges send
+  `requiresResponse: false` (they keep `requiresAck: true` for delivery evidence). A nudge never
+  mints a response-debt record; the actionable contract stays in the message body (reply to the
+  assignment / close the node). Pre-fix, every nudge minted its own parallel debt record, and one
+  verified reply cleared only the assignment's record — the nudge's record stayed open, reconcile
+  re-flagged `response_missing`, and the engine re-nudged until TTL (duplicate-reminder loop).
+- **Single debt per assignment** — a reply that passes `validateResultMessage` against the
+  assignment record settles ALL open response records sharing that assignment context: same
+  `from`/`to` pair plus a matching `task:<taskId>:<nodeId>` conversationId or a `replyTo` chain to
+  the original. One trace (`message.response.verified_parallel`) covers the sweep. Superseded and
+  waived records stay fenced — their evidence is never overwritten.
+- **Attempt-window causality** — the artifact-progress nudge counts an artifact mtime as progress
+  only when the mtime is inside the CURRENT attempt's window (`mtime > activeAttempt.assignedAt`).
+  Stale mtimes left by a superseded attempt no longer re-arm nudges for reassigned work. Legacy
+  nodes with no attempt identity keep the old mtime-only baseline behavior (documented fallback,
+  not silently changed).
+- **Gate=0 settle rule** — under `PI_SWARM_MINIMAL_PROTOCOL=0`, a reply that passes
+  `validateResultMessage` settles the target record AND all context-parallel records, and unsticks
+  a `response_missing` runtimeStatus. What stays gate=1-only is the v2 lifecycle derivation:
+  under gate=0 no `respondedAt`/`lifecycleStage`/`lifecycleSource`/`terminalAt` is stamped
+  (Phase-1 shadow-only contract preserved).
+
 ### Goal idle-streak nudge (Issue 18, redesigned R27)
 
 The root's durable goal plus an anti-loop nudge that fires when the swarm has nothing to do.

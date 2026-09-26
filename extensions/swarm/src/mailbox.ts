@@ -577,7 +577,7 @@ export async function deliverMessageLocked(
 		if (original?.requiresResponse && original.to === from && original.from === to) {
 			const replyContextCurrent = !original.superseded && !original.lastError?.startsWith("ack_missing");
 			const traceBase = { id: original.id, resultMessageId: m.id, from, to, gate: PI_SWARM_MINIMAL_PROTOCOL };
-			if (PI_SWARM_MINIMAL_PROTOCOL === 1 && replyContextCurrent) {
+			if (replyContextCurrent) {
 				let validationPassed = true;
 				try {
 					validateResultMessage(st, original, m.id, from);
@@ -591,6 +591,12 @@ export async function deliverMessageLocked(
 					}).catch(() => {});
 				}
 				if (validationPassed) {
+					// H1 Fix 4 (gate=0 settle rule): the record settlement below is UNCONDITIONAL on
+					// gate — a validated reply settles debt under gate=0 too (previously the whole
+					// block sat behind `=== 1`, so correct replies left debt open forever under
+					// PI_SWARM_MINIMAL_PROTOCOL=0). What stays gate=1-only is the v2 lifecycle
+					// derivation (`deriveLifecycleFromTrigger`), preserving the Phase-1
+					// shadow-only regression contract for gate=0.
 					original.response = {
 						...(original.response || { status: "missing" as MessageResponseStatus }),
 						status: "verified",
@@ -600,28 +606,82 @@ export async function deliverMessageLocked(
 						lastError: undefined,
 					};
 					original.updatedAt = now();
-					// Read context off the existing record via the conversationId regex (no new fields).
-					const idMatch =
+					if (PI_SWARM_MINIMAL_PROTOCOL === 1) {
+						// Read context off the existing record via the conversationId regex (no new fields).
+						const idMatch =
+							typeof original.conversationId === "string"
+								? original.conversationId.match(/^task:([a-z0-9_-]+):([a-z0-9_-]+)$/)
+								: null;
+						const d = deriveLifecycleFromTrigger(original, {
+							kind: "reply_accepted",
+							taskId: idMatch?.[1],
+							nodeId: idMatch?.[2],
+						});
+						if (d.kind === "set") {
+							(original as any)[d.field] = d.value;
+							original.lifecycleStage = d.stage;
+							original.lifecycleSource = d.source;
+							original.terminalReason = d.reason;
+							await trace(p, TRACE_LIFECYCLE_DERIVED, {
+								messageId: original.id,
+								from: original.from,
+								to: original.to,
+								field: d.field,
+								source: d.source,
+								stage: d.stage,
+								gate: 1,
+								reason: d.reason,
+								via: "deliverMessageLocked.reply",
+							}).catch(() => {});
+						}
+					}
+					// H1 Fix 2 — context-wide parallel settlement: after the target record verifies,
+					// sweep every OTHER open response record that shares this assignment context
+					// (same from/to pair + same task:<taskId>:<nodeId> conversationId OR replyTo-chain
+					// back to the original). One verified reply settles ALL minted reminders for the
+					// assignment — single debt per assignment, not per message. Reuses the single
+					// validateResultMessage verdict; superseded/waived records stay fenced (their
+					// supersession evidence is never erased).
+					const convoMatch =
 						typeof original.conversationId === "string"
 							? original.conversationId.match(/^task:([a-z0-9_-]+):([a-z0-9_-]+)$/)
 							: null;
-					const d = deriveLifecycleFromTrigger(original, { kind: "reply_accepted", taskId: idMatch?.[1], nodeId: idMatch?.[2] });
-					if (d.kind === "set") {
-						(original as any)[d.field] = d.value;
-						original.lifecycleStage = d.stage;
-						original.lifecycleSource = d.source;
-						original.terminalReason = d.reason;
-						await trace(p, TRACE_LIFECYCLE_DERIVED, {
-							messageId: original.id,
-							from: original.from,
-							to: original.to,
-							field: d.field,
-							source: d.source,
-							stage: d.stage,
-							gate: 1,
-							reason: d.reason,
-							via: "deliverMessageLocked.reply",
-						}).catch(() => {});
+					const settledParallel: string[] = [];
+					if (convoMatch) {
+						for (const rec of Object.values(st.messages || {})) {
+							if (rec === original) continue;
+							if (rec.to !== original.to || rec.from !== original.from) continue;
+							if (!rec.requiresResponse) continue;
+							if (rec.response?.status === "verified" || rec.response?.status === "waived") continue;
+							if (rec.superseded) continue; // fenced: preserve supersession evidence
+							const recConvo =
+								typeof rec.conversationId === "string"
+									? rec.conversationId.match(/^task:([a-z0-9_-]+):([a-z0-9_-]+)$/)
+									: null;
+							const sameContext =
+								(Boolean(recConvo) && recConvo?.[1] === convoMatch?.[1] && recConvo?.[2] === convoMatch?.[2]) ||
+								rec.replyTo === original.id ||
+								(Boolean(original.replyTo) && rec.replyTo === original.replyTo);
+							if (!sameContext) continue;
+							rec.response = {
+								...(rec.response || { status: "missing" as MessageResponseStatus }),
+								status: "verified",
+								resultMessageId: m.id,
+								sentAt: rec.response?.sentAt,
+								verifiedAt: now(),
+								lastError: undefined,
+							};
+							rec.updatedAt = now();
+							settledParallel.push(rec.id);
+						}
+					}
+					if (settledParallel.length > 0) {
+						await traceLogged(trace, p, "mailbox", p, "message.response.verified_parallel", {
+							...traceBase,
+							settledIds: settledParallel,
+							count: settledParallel.length,
+							via: "deliverMessageLocked.reply.parallel_settle",
+						});
 					}
 					// Release response debt: if the assignee's runtimeStatus was "response_missing" and
 					// this was their last open response, unstick it. responseMissingRecords is the
@@ -635,9 +695,9 @@ export async function deliverMessageLocked(
 					}
 					await trace(p, "message.response.verified", { ...traceBase, proposal: "§B.2" });
 				} else {
-					// Validation failed (e.g. conversationId mismatch) — advisory-only "sent" path,
-					// same shape as the gate=0 path. The engine still records the reply was sent but
-					// does NOT verify the assignment and does NOT clear debt.
+					// Validation failed (e.g. conversationId mismatch) — advisory-only "sent" path.
+					// The engine still records the reply was sent but does NOT verify the assignment
+					// and does NOT clear debt. Under gate=0 the traceBase.gate already reads 0.
 					original.response = {
 						...(original.response || { status: "missing" as MessageResponseStatus }),
 						status: "sent",

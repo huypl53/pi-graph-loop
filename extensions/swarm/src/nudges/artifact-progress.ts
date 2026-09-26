@@ -93,6 +93,17 @@ export async function evaluateArtifactProgressNudgeLocked(
 				}
 			}
 			if (!contributingFile) continue;
+			// H1 Fix 3 (followup-h1-response-debt-lifecycle-20260926): attempt-window causality.
+			// The mtime must fall INSIDE the current attempt's window (mtime > active attempt's
+			// assignedAt) to count as progress on THIS assignment. Stale pre-assignment mtimes
+			// (e.g. left by a superseded attempt before a rework re-assignment) must not re-arm
+			// nudges for already-closed work. Legacy nodes with no attempt identity keep the
+			// old mtime-only behavior (documented in docs/swarm/operations.md).
+			const activeAttempt = node.attemptHistory?.find((a) => a.attemptId === node.activeAttemptId && a.status === "active");
+			if (activeAttempt) {
+				const attemptStartMs = new Date(activeAttempt.assignedAt).getTime();
+				if (Number.isFinite(attemptStartMs) && attemptStartMs > 0 && maxMtimeMs <= attemptStartMs) continue;
+			}
 			// Baseline: max(lastProgressAt, artifactProgressNudgeAt). A worker that just got nudged
 			// is NOT eligible for another nudge unless NEW progress lands (the backoff gate).
 			const baselineMs = Math.max(
@@ -188,7 +199,13 @@ export async function evaluateArtifactProgressNudgeLocked(
 					conversationId: `task:${task.taskId}:${nodeId}`,
 					replyTo: node.assignmentMessageId,
 					requiresAck: true,
-					requiresResponse: true,
+					// H1 Fix 1 (followup-h1-response-debt-lifecycle-20260926): nudges are INFORMATIONAL.
+					// requiresResponse:true minted a PARALLEL response-debt record per nudge; a correct
+					// reply to the original assignment cleared only the assignment record, so the nudge's
+					// record stayed open -> reconcile re-flagged response_missing -> duplicate reminder
+					// loop until TTL (planner-uat 4x, implementer-uat 3x live on 2026-09-26). The actionable
+					// contract stays in the body (reply to the assignment / close the node).
+					requiresResponse: false,
 					idempotencyKey: `r20:nudge:${task.taskId}:${nodeId}:${priorCount + 1}`,
 				});
 				node.artifactProgressNudgeAt = new Date(nowMs).toISOString();
