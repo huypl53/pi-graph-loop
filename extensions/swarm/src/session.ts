@@ -44,7 +44,10 @@ export function currentProvider(model = currentModel()) {
 }
 
 export function childPiArgs() {
-	// Default keeps spawned agents in the same trusted project so they discover project extensions/skills.
-	// Tests or unusual projects can override, e.g. PI_SWARM_CHILD_ARGS="--approve --no-extensions -e extensions/swarm/index.ts".
-	return process.env.PI_SWARM_CHILD_ARGS || "--approve";
+	// Default loads the swarm extension so spawned agents have swarm tools (swarm_send_message,
+	// swarm_update_task, etc.). The path is repo-canonical ("extensions/swarm/index.ts") so it
+	// resolves regardless of cwd — the root pi must be running from the repo root for the
+	// extension to load (same precondition as parent-load). Tests or unusual projects override
+	// via PI_SWARM_CHILD_ARGS, e.g. PI_SWARM_CHILD_ARGS="--approve --no-extensions".
+	return process.env.PI_SWARM_CHILD_ARGS || "--approve -e extensions/swarm/index.ts";
 }
