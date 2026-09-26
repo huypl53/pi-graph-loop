@@ -165,6 +165,11 @@ export class TmuxDriver implements TerminalDriver {
 		}
 	}
 
+	async resolvePaneId(pi: ExtensionAPI, target: string): Promise<string> {
+		const out = await this.tmux(pi, ["display-message", "-p", "-t", target, "#{pane_id}"], 3_000);
+		return out.trim();
+	}
+
 	async inspectProcess(pi: ExtensionAPI, target: string): Promise<{ piLike: boolean; command: string; pid?: number }> {
 		try {
 			const out = await this.tmux(pi, ["display-message", "-p", "-t", target, "#{pane_current_command}\t#{pane_pid}"], 3_000);
@@ -241,16 +246,18 @@ export class TmuxDriver implements TerminalDriver {
 		}
 	}
 
-	async getFocusStatus(pi: ExtensionAPI, session: string): Promise<FocusStatus> {
+	async getFocusStatus(pi: ExtensionAPI, session: string, opts: { order?: "name-first" | "index-first" } = {}): Promise<FocusStatus> {
 		try {
-			const out = await this.tmux(pi, ["display-message", "-p", "-t", session, "#{window_index}\t#{window_name}\t#{pane_id}"], 3_000);
+			const nameFirst = opts.order === "name-first";
+			const format = nameFirst ? "#{window_name}\t#{window_index}\t#{pane_id}" : "#{window_index}\t#{window_name}\t#{pane_id}";
+			const out = await this.tmux(pi, ["display-message", "-p", "-t", session, format], 3_000);
 			const parts = out.trim().split("\t");
 			if (parts.length >= 2) {
 				return {
 					session,
 					sessionAlive: true,
-					activeWindowIndex: parts[0],
-					activeWindowName: parts[1],
+					activeWindowName: nameFirst ? parts[0] : parts[1],
+					activeWindowIndex: nameFirst ? parts[1] : parts[0],
 					activePaneId: parts[2],
 				};
 			}

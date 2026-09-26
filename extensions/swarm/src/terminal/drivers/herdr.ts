@@ -2,7 +2,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TerminalDriver, TerminalTargetRef, TerminalPaneInfo, SpawnAgentOptions, FocusStatus, AttachCommands } from "../types.ts";
 import { sleep } from "../../utils.ts";
-import { logSwarmError } from "../../errorlog.ts";
+import { expected, logSwarmError } from "../../errorlog.ts";
 import { PI_COMMANDS } from "./tmux.ts";
 
 export { PI_COMMANDS };
@@ -70,8 +70,15 @@ export class HerdrDriver implements TerminalDriver {
 			try {
 				const probe = await this.herdrJson(pi, ["workspace", "get", this.agentsWorkspaceId], 3_000);
 				if (probe?.result?.workspace?.workspace_id) return this.agentsWorkspaceId;
-			} catch {
-				// workspace_not_found or other failure → fall through to re-create
+			} catch (err: any) {
+				// A stale cached workspace is an expected re-create branch; other failures are durable.
+				if (/workspace_not_found/i.test(String(err?.message || err))) {
+					expected("cached_agents_workspace_not_found", err);
+				} else {
+					await logSwarmError(process.cwd(), "herdr", "ensure_agents_workspace.cache_probe_failed", err, {
+						workspaceId: this.agentsWorkspaceId,
+					});
+				}
 			}
 			this.agentsWorkspaceId = undefined;
 		}
@@ -165,16 +172,26 @@ export class HerdrDriver implements TerminalDriver {
 	 * Best-effort: a failed listing resolves to undefined (caller treats the pane as not alive).
 	 */
 	private async resolvePaneIdByLabel(pi: ExtensionAPI, compositeTarget: string): Promise<string | undefined> {
-		const label = String(compositeTarget || "")
+		const segment = String(compositeTarget || "")
 			.split(":")[1]
 			?.replace(/\.\d+$/, "");
-		if (!label) return undefined;
+		if (!segment) return undefined;
 		try {
-			const panes = await this.listPanes(pi);
-			const hit = panes.find((p) => p.title === label);
-			return hit?.paneId;
+			// Real 0.8.2 pane-list rows expose tab_id but no title/label; labels live on tab-list rows.
+			const tabs = await this.listTabs(pi);
+			const tab = tabs.find((t) => t.label === segment) || tabs.find((t) => t.tab_id === segment);
+			if (!tab?.tab_id) return undefined;
+			// Labels are listed across all workspaces; pane list defaults to this driver's root
+			// workspace. Query the matched tab's workspace explicitly so root w1 can resolve a
+			// worker tab living in the dedicated swarm-agents workspace wK.
+			const args = ["pane", "list"];
+			if (tab.workspace_id) args.push("--workspace", tab.workspace_id);
+			const paneRes = await this.herdrJson(pi, args, 5_000);
+			const rawPanes = Array.isArray(paneRes) ? paneRes : paneRes?.result?.panes || paneRes?.panes || [];
+			const hit = rawPanes.find((p: any) => (p?.tab_id || p?.tabId) === tab.tab_id);
+			return hit?.pane_id || hit?.paneId || hit?.id;
 		} catch (err: any) {
-			await logSwarmError(process.cwd(), "herdr", "resolve_pane_by_label.failed", err, { compositeTarget, label });
+			await logSwarmError(process.cwd(), "herdr", "resolve_pane_by_label.failed", err, { compositeTarget, segment });
 			return undefined;
 		}
 	}
@@ -345,8 +362,15 @@ export class HerdrDriver implements TerminalDriver {
 			const list = await this.herdrJson(pi, ["pane", "list", "--workspace", this.agentsWorkspaceId], 5_000);
 			const rawList = Array.isArray(list?.result?.panes) ? list.result.panes : [];
 			wsPanes = rawList.map((p: any) => p?.pane_id || p?.paneId).filter(Boolean);
-		} catch {
-			// workspace gone or list failed — nothing to close
+		} catch (err: any) {
+			// A removed workspace needs no cleanup; a failed list must remain diagnosable.
+			if (/workspace_not_found/i.test(String(err?.message || err))) {
+				expected("agents_workspace_already_closed", err);
+			} else {
+				await logSwarmError(process.cwd(), "herdr", "maybe_close_agents_workspace.list_failed", err, {
+					workspaceId: this.agentsWorkspaceId,
+				});
+			}
 			return;
 		}
 		const stillAlive = new Set<string>();
@@ -374,7 +398,7 @@ export class HerdrDriver implements TerminalDriver {
 			// engine delivery/reconcile paths stalled). Accept letter/digit/underscore/hyphen
 			// workspace segments. Legacy tmux-composite targets ("session:window.0") still fail
 			// this test and resolve through `pane list` by tab label as before.
-			const paneId = /^w[A-Za-z0-9_-]+:p\d+$/.test(target) ? target : await this.resolvePaneIdByLabel(pi, target);
+			const paneId = /^w[A-Za-z0-9_-]+:p[A-Za-z0-9]+$/.test(target) ? target : await this.resolvePaneIdByLabel(pi, target);
 			if (!paneId) return { piLike: false, command: "" };
 			const res = await this.herdrJson(pi, ["pane", "process-info", "--pane", paneId], 3_000);
 			// Real CLI 0.8.2 shape: result.process_info.foreground_processes[] = [{name, pid, cmdline, ...}, ...]
@@ -389,6 +413,15 @@ export class HerdrDriver implements TerminalDriver {
 			const rawPid = proc?.pid;
 			const pid = typeof rawPid === "number" ? rawPid : rawPid ? parseInt(rawPid, 10) : undefined;
 			const isPi = isPiLikeProcess(command);
+			if (!isPi) {
+				// When ExtensionAPI.exec runs `herdr pane process-info` from inside the target pane,
+				// Herdr can report that child CLI as the foreground process instead of the Pi host.
+				// Only treat this as Pi-like if Herdr confirms the target is this current pane.
+				const current = await this.detectCurrentPane(pi);
+				if (current && this.isSameTarget(current.paneId || current.target, paneId)) {
+					return { piLike: true, command: "pi", pid: process.pid };
+				}
+			}
 			return {
 				piLike: isPi,
 				command,
@@ -403,6 +436,15 @@ export class HerdrDriver implements TerminalDriver {
 	async isTargetAlive(pi: ExtensionAPI, target: string): Promise<boolean> {
 		const info = await this.inspectProcess(pi, target);
 		return info.piLike;
+	}
+
+	async resolvePaneId(pi: ExtensionAPI, target: string): Promise<string> {
+		// Herdr pane ids are already workspace-qualified ("wN:pM") — pass through directly; legacy
+		// composite targets resolve by tab label (same mapping isTargetAlive/inspectProcess use).
+		if (/^w[A-Za-z0-9_-]+:p[A-Za-z0-9]+$/.test(target)) return target;
+		const resolved = await this.resolvePaneIdByLabel(pi, target);
+		if (!resolved) throw new Error(`herdr: cannot resolve pane id for target ${target}`);
+		return resolved;
 	}
 
 	async sendText(pi: ExtensionAPI, target: string, text: string): Promise<void> {
@@ -425,7 +467,6 @@ export class HerdrDriver implements TerminalDriver {
 		if (opts.enter) {
 			await this.herdr(pi, ["pane", "send-keys", target, "enter"], 10_000);
 		}
-		await sleep(120);
 	}
 
 	async capturePane(pi: ExtensionAPI, target: string, lines = 300): Promise<string> {
@@ -509,14 +550,33 @@ export class HerdrDriver implements TerminalDriver {
 		}
 	}
 
+	private async resolveFocusWorkspace(pi: ExtensionAPI, requested: string): Promise<string> {
+		const res = await this.herdrJson(pi, ["workspace", "list"], 5_000);
+		const workspaces = Array.isArray(res?.result?.workspaces) ? res.result.workspaces : res?.workspaces || [];
+		const byId = workspaces.find((w: any) => w?.workspace_id === requested);
+		if (byId?.workspace_id) return byId.workspace_id;
+		const byLabel = workspaces.find((w: any) => w?.label === requested);
+		if (byLabel?.workspace_id) return byLabel.workspace_id;
+		// Root swarm state can still carry its legacy tmux session string; under Herdr, the
+		// worker tabs live in the dedicated swarm-agents workspace. Resolve that workspace rather
+		// than passing the tmux-shaped name to `tab list` (which falsely reports NOT RUNNING).
+		const agents = workspaces.find((w: any) => w?.label === this.getAgentsWorkspaceLabel());
+		if (agents?.workspace_id) return agents.workspace_id;
+		return this.agentsWorkspaceId || this.getWorkspaceId() || requested || "";
+	}
+
 	async getFocusStatus(pi: ExtensionAPI, session: string): Promise<FocusStatus> {
-		const ws = session || this.getWorkspaceId() || "";
+		const requested = session || this.getWorkspaceId() || "";
+		let ws = requested;
 		try {
+			ws = await this.resolveFocusWorkspace(pi, requested);
 			const args = ["tab", "list"];
 			if (ws) args.push("--workspace", ws);
 			const res = await this.herdrJson(pi, args, 3_000);
 			const tabs = Array.isArray(res) ? res : res?.result?.tabs || res?.tabs || [];
-			const activeTab = tabs.find((t: any) => t.active || t.is_active || t.focused) || tabs[0];
+			// Real 0.8.2 rows use `focused`; do not claim an arbitrary tabs[0] fallback.
+			const activeTab = tabs.find((t: any) => t.active || t.is_active || t.focused);
+			if (!activeTab) return { session: ws, sessionAlive: true };
 			return {
 				session: ws,
 				sessionAlive: true,

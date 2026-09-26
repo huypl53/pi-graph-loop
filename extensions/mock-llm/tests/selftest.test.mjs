@@ -31,7 +31,7 @@ await mockLLM({
 
 assert.equal(registered.name, "mock-llm", "provider should register as mock-llm");
 assert.equal(registered.config.api, "mock-llm-stream");
-assert.equal(registered.config.models.length, 91, "expected 91 scenario models");
+assert.equal(registered.config.models.length, 96, "expected 96 scenario models");
 assert.deepEqual(
 	(await discoverModelConfigs()).map((model) => model.id).sort(),
 	[
@@ -69,7 +69,12 @@ assert.deepEqual(
 		"graph-advance-nudge-rearm",
 		"handoff-chain",
 		"heartbeat-gc-dead-pane",
+		"herdr-h6-driver-mirroring",
 		"herdr-h6-focus-command",
+		"herdr-h6-live-root-spawn",
+		"herdr-h6-live-root-spawn-stop",
+		"herdr-h6-live-worker-tool",
+		"herdr-h6-register-self-liveness",
 		"idle-nudge-recovery",
 		"inferred-lifecycle-worker",
 		"initial-ready-nudge",
@@ -128,7 +133,7 @@ assert.deepEqual(
 		"wake-up-escalation-reminder",
 	].sort(),
 );
-assert.equal((await listFixtureDiscovery()).length, 91);
+assert.equal((await listFixtureDiscovery()).length, 96);
 
 function makeContext() {
 	return {
@@ -292,6 +297,7 @@ await withFixture(
 		assert.ok(types.indexOf("text_start") < types.indexOf("done"));
 	},
 );
+
 // The Herdr focus mock turn is consumed in the interactive tmux lane after the local slash
 // command has been issued externally; it does not pretend /swarm focus is an LLM toolcall.
 {

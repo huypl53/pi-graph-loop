@@ -10,14 +10,14 @@
 			name: "swarm_prune",
 			label: "Swarm Prune",
 			description:
-				"Root/admin cleanup tool. Dry-run by default. Marks zombie agents whose tmux panes are gone and can optionally remove stopped agent records from state.",
+				"Root/admin cleanup tool. Dry-run by default. Marks zombie agents whose terminal panes are gone and can optionally remove stopped agent records from state.",
 			promptGuidelines: [
 				"Use `swarm_prune` only for root/admin cleanup. Do not use it for normal worker tasks. Run dryRun first before mutating state.",
 			],
 			parameters: Type.Object({
 				dryRun: Type.Optional(Type.Boolean({ description: "Preview actions without modifying state. Defaults to true." })),
 				markDead: Type.Optional(
-					Type.Boolean({ description: "Mark running agents with missing tmux panes as stopped. Defaults to true." }),
+					Type.Boolean({ description: "Mark running agents with missing terminal panes as stopped. Defaults to true." }),
 				),
 				removeStopped: Type.Optional(
 					Type.Boolean({
@@ -46,7 +46,7 @@
 							const hasPane = Boolean(agent.tmuxTarget) && agent.tmuxTarget !== "unknown";
 							const tmuxAlive = hasPane ? await isTmuxRunning(pi, agent.tmuxTarget) : false;
 							if (markDead && agent.status === "running" && !tmuxAlive) {
-								actions.push({ agentId, action: "mark_stopped", reason: "tmux pane is not alive" });
+								actions.push({ agentId, action: "mark_stopped", reason: "the agent's pane is not alive" });
 								if (!dryRun) {
 									agent.status = "stopped";
 									agent.runtimeStatus = "stopped";
@@ -137,7 +137,7 @@
 			name: "swarm_reload_identity",
 			label: "Swarm Reload Identity",
 			description:
-				"Regenerate the effective identity (generated card + optional .override.md) for an agent, stamp identityVersion/identityHash/identityLoadedAt, and (if its tmux pane is alive) inject a [PI-SWARM IDENTITY RELOAD] instruction so the agent re-reads its identity now. Best-effort tmux injection never fails the reload; if the pane is dead the new identity takes effect on the next session_start.",
+				"Regenerate the effective identity (generated card + optional .override.md) for an agent, stamp identityVersion/identityHash/identityLoadedAt, and (if its terminal pane is alive) inject a [PI-SWARM IDENTITY RELOAD] instruction so the agent re-reads its identity now. Best-effort terminal injection never fails the reload; if the pane is dead the new identity takes effect on the next session_start.",
 			promptGuidelines: [
 				"Use `swarm_reload_identity` after editing an agent's .override.md or when a running agent should pick up new identity instructions.",
 			],
@@ -196,8 +196,8 @@
 		defineTool({
 			name: "swarm_capture_agent_pane",
 			label: "Swarm Capture",
-			description: "Capture the tmux pane history for a swarm agent and save it under .pi/swarm/traces/tmux for debugging.",
-			promptGuidelines: ["Use `swarm_capture_agent_pane` to debug what a spawned agent is currently seeing or doing in tmux."],
+			description: "Capture the agent's terminal pane history for a swarm agent and save it under .pi/swarm/traces/tmux for debugging.",
+			promptGuidelines: ["Use `swarm_capture_agent_pane` to debug what a spawned agent is currently seeing or doing in its terminal pane."],
 			parameters: Type.Object({ agentId: Type.String({ description: "Agent id to capture." }) }),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_capture_agent_pane", async () => {
@@ -247,7 +247,7 @@
 			name: "swarm_register_agent",
 			label: "Swarm Register",
 			description:
-				"Adopt an EXISTING tmux pane into the swarm under a role WITHOUT spawning a new pi. Upsert by id: re-registering with a different tmuxTarget retargets the agent (fixes the 'tmuxTarget: unknown' ghost-agent case for externally-started agents). The operator asserts the pane is available for the role. The reserved 'root' id is refused here — opt a session in as the PM via '/swarm register here root' or PI_SWARM_IS_ROOT=1.",
+				"Adopt an EXISTING terminal pane into the swarm under a role WITHOUT spawning a new pi. Upsert by id: re-registering with a different tmuxTarget retargets the agent (fixes the 'tmuxTarget: unknown' ghost-agent case for externally-started agents). The operator asserts the pane is available for the role. The reserved 'root' id is refused here — opt a session in as the PM via '/swarm register here root' or PI_SWARM_IS_ROOT=1.",
 			promptGuidelines: [
 				"Use `swarm_register_agent` to bring an already-running pi pane (or shell pane you will start pi in) into the swarm as a role, instead of spawning a fresh agent. Prefer `swarm_spawn_agent` when you need a brand new pi.",
 			],
@@ -419,9 +419,9 @@
 			name: "swarm_send_keys",
 			label: "Swarm Send Keys",
 			description:
-				"Send raw tmux keys to an agent's pane: interrupt (C-c), dismiss, navigate, or type text. Non-literal mode interprets tmux key names; literal mode sends exact text. Powerful/destructive — use to unstick a runaway agent.",
+				"Send raw terminal keys to an agent's pane: interrupt (C-c), dismiss, navigate, or type text. Non-literal mode interprets terminal key names; literal mode sends exact text. Powerful/destructive — use to unstick a runaway agent.",
 			promptGuidelines: [
-				"Use `swarm_send_keys` to send raw tmux input to an agent pane, e.g. C-c to interrupt. Prefer the normal mailbox/identity tools for coordination; this is an escape hatch. Targets another agent's pane by id — never use to send keys into the root pane from a worker.",
+				"Use `swarm_send_keys` to send raw terminal input to an agent pane, e.g. C-c to interrupt. Prefer the normal mailbox/identity tools for coordination; this is an escape hatch. Targets another agent's pane by id — never use to send keys into the root pane from a worker.",
 			],
 			parameters: Type.Object({
 				agentId: Type.String({ description: "Agent id whose pane to send keys to." }),
@@ -430,7 +430,7 @@
 				}),
 				literal: Type.Optional(
 					Type.Boolean({
-						description: "Send keys as literal text via send-keys -l. Defaults to false (interpret tmux key names).",
+						description: "Send keys as literal text. Defaults to false (interpret terminal key names).",
 					}),
 				),
 				enter: Type.Optional(Type.Boolean({ description: "Append an Enter after the keys. Defaults to false." })),

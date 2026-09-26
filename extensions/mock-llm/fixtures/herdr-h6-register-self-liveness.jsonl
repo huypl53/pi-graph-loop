@@ -1,0 +1,5 @@
+# Lane contract: a disposable worker Pi runs `/swarm register here worker-h6`, then a fresh root Pi
+# in the same isolated project asks this scripted model to call swarm_list_agents on shared state.
+# The final text is deliberately generic; the live tool result, not canned text, is the evidence.
+{"name":"verify Herdr self-registration","stopReason":"toolUse","events":[{"type":"toolcall","delayMs":10,"name":"swarm_list_agents","id":"h6-register-list-1","arguments":{}}]}
+{"name":"report verified registration","stopReason":"stop","events":[{"type":"text","delayMs":5,"text":"I requested the live swarm agent listing; inspect the tool result above for the actual state.","chunks":["I requested the live swarm agent listing; inspect the tool result above for the actual state."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

@@ -1,0 +1,4 @@
+# Integrated live acceptance fixture: a genuinely spawned Herdr worker uses Pi's bash tool once,
+# writes a marker inside the disposable UAT run, then returns a normal completion.
+{"name":"write the live worker-turn marker","stopReason":"toolUse","events":[{"type":"toolcall","delayMs":10,"name":"bash","id":"h6-live-worker-bash-1","arguments":{"command":"printf 'H6_WORKER_TOOL_TURN\\n' > ../worker-tool-turn.txt"}}]}
+{"name":"finish after tool result","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"I executed the worker-side bash tool and wrote ../worker-tool-turn.txt.","chunks":["I executed the worker-side bash tool and wrote ../worker-tool-turn.txt."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

@@ -554,24 +554,18 @@ export async function registerAgent(
 	return { agent, tmuxAlive, piRunning, injected, identity: identityPath(p, id), probe: probeFile };
 }
 
-// Kill an agent's tmux pane/window. Prefers kill-window (each spawned agent owns its window); falls
-// back to kill-pane for shared/registered panes. Returns what happened; never throws.
+// Kill an agent's pane/window via the active terminal driver (H6: was raw tmux kill-window/kill-pane
+// which broke under herdr pane ids). The driver owns the window→pane fallback internally (TmuxDriver
+// emits the same commands as the pre-driver implementation; herdr uses tab/pane close). Never throws.
 export async function killAgentPane(pi: ExtensionAPI, p: Paths, agent: SwarmAgent): Promise<{ killed: boolean; method: string }> {
 	if (!agent.tmuxTarget || agent.tmuxTarget === "unknown") return { killed: false, method: "no-target" };
-	const alive = await isTmuxRunning(pi, agent.tmuxTarget);
-	if (!alive) return { killed: false, method: "already-dead" };
-	const winTarget = agent.tmuxWindow && agent.tmuxWindow !== "unknown" ? `${agent.tmuxSession}:${agent.tmuxWindow}` : agent.tmuxTarget;
 	try {
-		await tmux(pi, ["kill-window", "-t", winTarget], 5_000);
-		return { killed: true, method: "kill-window" };
-	} catch (err: any) {
-		// Expected: shared window (other panes alive) or already gone — the pane-only kill below is
-		// the designed fallback, not an error path.
-		expected("kill_window_fallback_to_pane");
-	}
-	try {
-		await tmux(pi, ["kill-pane", "-t", agent.tmuxTarget], 5_000);
-		return { killed: true, method: "kill-pane" };
+		return await getTerminalDriver().killAgent(pi, {
+			target: agent.tmuxTarget,
+			session: agent.tmuxSession,
+			window: agent.tmuxWindow,
+			paneId: agent.tmuxTarget,
+		});
 	} catch (err: any) {
 		await trace(p, "agent.kill_failed", { agentId: agent.id, target: agent.tmuxTarget, error: String((err as Error)?.message || err) });
 		return { killed: false, method: "kill-failed" };
@@ -771,8 +765,9 @@ export function setAgentPaused(state: SwarmState, agentId: string, paused: boole
 	return agent;
 }
 
-// Send raw tmux keys to an agent pane. Non-literal mode interprets tmux key names (C-c, Up, Enter);
-// literal mode (-l) sends the exact text. Optionally append an Enter. Lock-free core.
+// Send raw keys to an agent pane via the active terminal driver (H6: was raw tmux send-keys).
+// Non-literal mode interprets terminal key names (C-c, Up, Enter); literal mode sends the exact
+// text. Optionally append an Enter. Lock-free core.
 export async function sendKeys(
 	pi: ExtensionAPI,
 	p: Paths,
@@ -780,14 +775,9 @@ export async function sendKeys(
 	keys: string,
 	opts: { literal?: boolean; enter?: boolean } = {},
 ) {
-	if (!target || target === "unknown") throw new Error("agent has no tmux pane target");
-	if (opts.literal) {
-		await tmux(pi, ["send-keys", "-t", target, "-l", "--", keys], 10_000);
-	} else {
-		const tokens = keys.split(/\s+/).filter(Boolean);
-		if (tokens.length) await tmux(pi, ["send-keys", "-t", target, "--", ...tokens], 10_000);
-	}
-	if (opts.enter) await tmux(pi, ["send-keys", "-t", target, "Enter"], 10_000);
+	if (!target || target === "unknown") throw new Error("agent has no terminal pane target");
+	void p; // signature kept for callers; agents.ts owns the post-send pacing (plan D2).
+	await getTerminalDriver().sendKeys(pi, target, keys, opts);
 	await sleep(120);
 }
 

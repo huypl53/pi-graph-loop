@@ -1,0 +1,7 @@
+# Integrated Herdr acceptance: one interactive root Pi session spawns an isolated worker,
+# waits for an actual worker bash-tool turn, then stops it through the production stop tool so
+# the dedicated worker workspace teardown path is exercised in the same HerdrDriver instance.
+{"name":"spawn isolated Herdr worker","stopReason":"toolUse","events":[{"type":"toolcall","delayMs":10,"name":"swarm_spawn_agent","id":"h6-root-spawn-stop-1","arguments":{"id":"h6-live-worker4","role":"worker","roleKind":"worker","initialPrompt":"Use the bash tool once to write ../worker-tool-turn.txt with the text H6_WORKER_TOOL_TURN, then report completion and await further tasks."}}]}
+{"name":"report spawn result","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Spawn completed; the actual tool result above identifies the live worker.","chunks":["Spawn completed; the actual tool result above identifies the live worker."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"stop the disposable worker","stopReason":"toolUse","events":[{"type":"toolcall","delayMs":10,"name":"swarm_stop_agent","id":"h6-root-stop-1","arguments":{"agentId":"h6-live-worker4","force":true,"killPane":true}}]}
+{"name":"report stop result","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"The worker was stopped through swarm_stop_agent; inspect its tool result and the Herdr workspace list.","chunks":["The worker was stopped through swarm_stop_agent; inspect its tool result and the Herdr workspace list."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
