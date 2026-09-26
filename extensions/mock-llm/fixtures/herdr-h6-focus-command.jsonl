@@ -1,0 +1,2 @@
+# The mock turn is only for interactive-lane transcript evidence; `/swarm focus` is a Pi slash command, not an LLM tool.
+{"name":"herdr-h6 focus command transcript turn","stopReason":"stop","events":[{"type":"text","delayMs":5,"text":"Mock transcript turn completed after the live /swarm focus command was issued and its Herdr result captured.","chunks":["Mock transcript turn completed after the live ","/swarm focus command was issued and its Herdr result captured."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
