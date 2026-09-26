@@ -113,12 +113,52 @@ function createMockPi() {
 			return { code: 0, stdout: "herdr 0.4.0\n", stderr: "" };
 		}
 
+		if (sub === "workspace" && action === "list") {
+			return {
+				code: 0,
+				stdout: JSON.stringify({
+					result: {
+						workspaces: state.workspaces || [],
+					},
+				}),
+				stderr: "",
+			};
+		}
+
+		if (sub === "workspace" && action === "get") {
+			const wsIdx = args.indexOf("--workspace");
+			const wsId = wsIdx !== -1 ? args[wsIdx + 1] : args[2];
+			const ws = (state.workspaces || []).find((w) => w.workspace_id === wsId) || { workspace_id: wsId, label: "swarm-agents" };
+			return {
+				code: 0,
+				stdout: JSON.stringify({
+					result: { workspace: ws },
+				}),
+				stderr: "",
+			};
+		}
+
+		if (sub === "workspace" && action === "create") {
+			const labelIdx = args.indexOf("--label");
+			const label = labelIdx !== -1 ? args[labelIdx + 1] : "swarm-agents";
+			const newWs = { workspace_id: "w99", label, tab_count: 0, pane_count: 0 };
+			state.workspaces = state.workspaces || [];
+			state.workspaces.push(newWs);
+			return {
+				code: 0,
+				stdout: JSON.stringify({
+					result: { workspace: newWs },
+				}),
+				stderr: "",
+			};
+		}
+
 		if (sub === "tab" && action === "create") {
 			return {
 				code: 0,
 				stdout: JSON.stringify({
 					result: {
-						tab: { tab_id: "w1:t2", workspace_id: "w1" },
+						tab: { tab_id: "w1:t2", workspace_id: "w99" },
 						root_pane: { pane_id: "w1:p3" },
 					},
 				}),
@@ -195,7 +235,7 @@ await asyncTest("isAvailable checks herdr binary version", async () => {
 	equal(mockPi.calls[0].args[0], "--version");
 });
 
-await asyncTest("spawnAgent creates tab with workspace confinement, isolated env (herdr 0.8.2 two-step contract)", async () => {
+await asyncTest("spawnAgent creates tab in dedicated agents workspace (G4 herdr-workspace-isolation)", async () => {
 	const mockPi = createMockPi();
 	const driver = new HerdrDriver("w1");
 	const res = await driver.spawnAgent(mockPi, {
@@ -205,7 +245,8 @@ await asyncTest("spawnAgent creates tab with workspace confinement, isolated env
 		cwd: "/test/workspace",
 	});
 
-	equal(res.session, "w1");
+	// G4: tab lands in the agents workspace (w99 from the mock), NOT the root workspace (w1).
+	equal(res.session, "w99");
 	equal(res.window, "w1:t2");
 	equal(res.target, "w1:p3");
 
@@ -213,7 +254,11 @@ await asyncTest("spawnAgent creates tab with workspace confinement, isolated env
 	const spawnCall = mockPi.calls.find((c) => c.args[0] === "tab" && c.args[1] === "create");
 	assertOk(spawnCall, "spawnCall must exist");
 	assertOk(spawnCall.args.includes("--workspace"));
-	assertOk(spawnCall.args.includes("w1"));
+	assertOk(spawnCall.args.includes("w99"), "tab create must target the agents workspace, not root");
+	assertOk(
+		!spawnCall.args.includes("w1") || spawnCall.args.indexOf("w1") !== spawnCall.args.indexOf("--workspace") + 1,
+		"root workspace must NOT be the --workspace value",
+	);
 	assertOk(spawnCall.args.includes("--env"));
 	assertOk(spawnCall.args.includes("PI_SWARM_AGENT_ID=worker-test"));
 	assertOk(spawnCall.args.includes("PI_SWARM_IS_ROOT=0"));
@@ -228,6 +273,14 @@ await asyncTest("spawnAgent creates tab with workspace confinement, isolated env
 	assertOk(paneRunCall.args.includes("sh"), "pane run wraps the command in sh -c");
 	assertOk(paneRunCall.args.includes("-c"), "pane run uses sh -c");
 	assertOk(paneRunCall.args.includes("pi --agent worker"), "pane run carries the launch command");
+
+	// G4: driver must have called workspace list + workspace create (ensureAgentsWorkspace).
+	const wsListCall = mockPi.calls.find((c) => c.args[0] === "workspace" && c.args[1] === "list");
+	assertOk(wsListCall, "driver must call workspace list to find/create agents workspace");
+	const wsCreateCall = mockPi.calls.find((c) => c.args[0] === "workspace" && c.args[1] === "create");
+	assertOk(wsCreateCall, "driver must call workspace create when agents workspace is absent");
+	assertOk(wsCreateCall.args.includes("--label"), "workspace create must include --label");
+	assertOk(wsCreateCall.args.includes("swarm-agents"), "workspace create must use the swarm-agents label");
 });
 
 await asyncTest("listPanes queries panes scoped to workspace", async () => {
