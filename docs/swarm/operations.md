@@ -400,6 +400,24 @@ The JSON result shape is stable for ritual artifacts: it includes `schema: "swar
 4. run `swarm_reconcile`
 5. only force-update state when you understand why the task drifted
 
+## Child pi args — default loads swarm extension
+
+Spawned workers inherit the parent's `pi` invocation. `childPiArgs()`
+(`extensions/swarm/src/session.ts`) returns the args appended to each worker's `pi` command:
+
+- **Default**: `--approve -e extensions/swarm/index.ts`. This loads the swarm extension into
+  the worker so `swarm_send_message`, `swarm_update_task`, `swarm_reconcile`, and all other
+  swarm tools are available. Without this default, workers fall back to bash/read/edit and
+  cannot drive the task graph (observed in uat-swarm-features-20260926).
+- **Override**: `PI_SWARM_CHILD_ARGS="<args>"` wins verbatim. Use this to disable the
+  extension load for tests / sandboxed spawns, e.g.
+  `PI_SWARM_CHILD_ARGS="--approve --no-extensions"` or
+  `PI_SWARM_CHILD_ARGS="--approve -e ./test-doubles/swarm-mock.ts"`.
+- **Cwd-independence**: the default uses the repo-canonical path
+  `extensions/swarm/index.ts`, which resolves correctly regardless of where a spawn cwd
+  lives. The root must run from the repo root (the same precondition as loading the parent
+  extension) for both parent and child to find the file.
+
 ## Orphan-spawn watchdog (Issue 14)
 
 <!-- (sections below kept in original order) -->

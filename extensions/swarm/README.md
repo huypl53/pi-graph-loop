@@ -101,6 +101,14 @@ Quick start:
 PI_SWARM_IS_ROOT=1 pi --model glm-5.1 --provider zai-coding-cn -e extensions/swarm/index.ts
 ```
 
+Workers spawned by the swarm extension inherit the parent's `pi` invocation plus the
+args returned by `childPiArgs()` (`src/session.ts`). The default is
+`--approve -e extensions/swarm/index.ts` so workers have swarm tools
+(`swarm_send_message`, `swarm_update_task`, ...) loaded automatically. Override with
+`PI_SWARM_CHILD_ARGS="<args>"` to disable the extension load for tests / sandboxes, e.g.
+`PI_SWARM_CHILD_ARGS="--approve --no-extensions"`. See
+[`docs/swarm/operations.md` → "Child pi args"](./docs/swarm/operations.md#child-pi-args-default-loads-swarm-extension).
+
 Project-local swarm defaults can be set in `.pi/settings.json`:
 
 ```json
@@ -108,9 +116,6 @@ Project-local swarm defaults can be set in `.pi/settings.json`:
   "swarm": {
     "defaultModel": "gpt-5.4-mini",
     "defaultProvider": "openai"
-  }
-}
-```
 
 A nested `extensions.swarm` object is also accepted for backward compatibility,
 but top-level `swarm` is the safer recommendation because pi itself may use
