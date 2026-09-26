@@ -190,5 +190,6 @@ export function readSwarmSettings(cwd = process.cwd()): SwarmSettings {
 		defaultProvider: typeof cfg.defaultProvider === "string" && cfg.defaultProvider.trim() ? cfg.defaultProvider.trim() : undefined,
 		modelPool: parseModelPool(cfg.modelPool),
 		rotation: parseRotationConfig(cfg.rotation),
+		terminalManager: typeof cfg.terminalManager === "string" && cfg.terminalManager.trim() ? cfg.terminalManager.trim() : undefined,
 	};
 }

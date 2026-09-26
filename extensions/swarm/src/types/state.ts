@@ -10,6 +10,10 @@ export type SwarmSettings = {
 	// spawn/restart pick from the pool (respecting health/cooldown) instead of the single default.
 	modelPool?: ModelSlot[];
 	rotation?: RotationConfig;
+	// Terminal manager override ("herdr" | "tmux"). Precedence at the driver factory:
+	// env PI_SWARM_TERMINAL_MANAGER > this cfg > tmux default. Live-wired 2026-09-26 (H2);
+	// previously declared-but-unwired (the yml key was silently ignored).
+	terminalManager?: string;
 };
 
 // Multi-root policy (roadmap issue 8, strict-reject): a single durable leader record on
