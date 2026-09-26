@@ -1,0 +1,5 @@
+# agent-lifecycle-uat: scripted lifecycle toolcalls against a seeded scratch swarm.
+# Turn 1 registers a worker, (attempt at spawn is exercised by the driver directly since
+# tmux panes are absent offline), then exercises role-kind refusal + pause/resume + identity override.
+{"name":"agent lifecycle turn 1","events":[{"type":"toolcall","delayMs":10,"name":"swarm_register_agent","id":"lc-reg-1","arguments":{"id":"worker-lc","tmuxTarget":"unknown","role":"UAT lifecycle worker","roleKind":"implementer","inject":false}},{"type":"text","delayMs":5,"text":"Worker registered. Next: role-kind mismatch refusal via swarm_set_role.","chunks":["Worker registered. ","Next: role-kind mismatch refusal via swarm_set_role."]},{"type":"toolcall","delayMs":10,"name":"swarm_set_role","id":"lc-role-1","arguments":{"agentId":"worker-lc","role":"forced root","roleKind":"root"}}]}
+{"name":"agent lifecycle settle","stopReason":"stop","events":[{"type":"text","delayMs":5,"text":"Role escalation attempt captured; pause/resume handled by the driver.","chunks":["Role escalation attempt captured; ","pause/resume handled by the driver."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

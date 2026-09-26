@@ -4,6 +4,10 @@ Notable changes in this project. Newest first.
 
 ## [Unreleased]
 
+### Tested
+
+- **swarm (UAT `uat-swarm-features-20260926`)**: end-to-end UAT of the swarm extension via swarm-driven orchestration — 6-node task graph (`plan → implement → test → review → commit`) with rework edges drove a full audit cycle. Four lane workers produced 96 GREEN assertions across 6 domains (task-graph 18/18, agent-lifecycle 15/15, messaging 14/14, governance 16/16, goal-nudge 12/12, reconcile 21/21) with R10-1 boundary counters at real runtime boundaries (real `pi.sendMessage`, real `pi.exec` tmux, real tool handlers — never stub assertions). Strict suite (`npm run test:swarm`) and mockllm (`npm run test:mockllm`) both exit 0; bare-catch census clean; lane-scratch errors.jsonl censuses clean. Reviewer caught one vacuous RED assertion (R25 precedent — `ok(..., violated === false ? true : true)`); rework edge routed it back to implementer; re-verified lane passed on round 2 (RED 14/14 non-vacuous, GREEN 12/12). Full report: `.pi/swarm/tasks/uat-swarm-features-20260926/artifacts/commit.md`. Evidence: `.pi/swarm-uat/runs/uat-20260926-final/<domain>/`. Disclosed follow-ups: F1 pre-existing fixture failure (`qualification-gate-human-discuss` scripts retired tools), G1 graph design gap (review re-open after rework loop needs rework edge or `force=true`), G2 herdr terminal-driver seam gap (Phase-8 §6.1), G3 `childPiArgs()` default `--approve` (workers spawn without swarm tools), G4 30 pre-existing test failures in strict suite (preserved by design, not triaged).
+
 ### Refactored
 
 - **swarm (Phases 5–6 real split, follow-up to `plans/260926-0218-swarm-refactor-terminal-manager`)**: completed the deferred monolith decompositions — the phase-5/6 "facade" files are now genuine extractions with verbatim-moved bodies, not re-export shims:
