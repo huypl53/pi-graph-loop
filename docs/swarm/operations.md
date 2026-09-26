@@ -300,6 +300,7 @@ prints the action directly so the operator never has to guess the fix.
 #### Rotation + health (unchanged)
 
 - **Auto-swap on provider errors (in-process)**: pi never exits on 429/401/5xx — the turn fails with `stopReason "error"`. The swarm `turn_end` hook classifies the error, benches the exact failing slot, and `setModel()`s the session to another healthy slot in-process. Context, mailbox and identity are preserved; the agent retries its work on the new model.
+- **Failover avoids the slot that just failed**: auto-swap passes the current slot as `avoidKey`; weighted, round-robin, and sticky selection exclude it when another eligible slot exists, preserving the alternatives' relative weights. If no alternative is eligible, the picker returns no candidate and traces `pool.swap_no_candidate` rather than reporting a same-slot swap. A single-slot pool therefore keeps its current model for the engine's retry path.
 - **Healthy turns reset the streak**: a turn that ends `stopReason "stop"` clears that slot's failure streak and bench backoff — one transient blip never benches a slot that is otherwise serving fine.
 - **Incident dedupe**: pi may emit several error turns for one underlying failure (internal stream retries, overflow-recovery re-runs). An identical error on the same slot within 30s counts once toward `maxRetries`.
 - **Exponential bench backoff**: consecutive benches without an intervening success double the cooldown (capped at 24h). A long outage (e.g. monthly quota) costs one probe per doubling instead of one retry per `cooldownMs`.
