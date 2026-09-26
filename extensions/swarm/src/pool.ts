@@ -18,14 +18,7 @@ import type {
 } from "./types/index.ts";
 import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
 import { currentModel, currentProvider } from "./session.ts";
-import {
-	parseQuotaResetMs,
-	readSwarmRawConfig,
-	readSwarmSettings,
-	readSwarmYml,
-	swarmYmlPath,
-	type SwarmConfigSource,
-} from "./config.ts";
+import { parseQuotaResetMs, readSwarmRawConfig, readSwarmSettings, readSwarmYml, swarmYmlPath, type SwarmConfigSource } from "./config.ts";
 import { atomicWriteFile, trace } from "./state.ts";
 import { expected, logSwarmError, traceLogged } from "./errorlog.ts";
 
@@ -87,8 +80,6 @@ import { sleep } from "./utils.ts";
 // happens once at module-load and is captured thereafter.
 const QUOTA_RESET_DEFAULT_MS =
 	Number(process.env.PI_SWARM_QUOTA_RESET_MS) > 0 ? Math.floor(Number(process.env.PI_SWARM_QUOTA_RESET_MS)) : 0;
-
-
 
 // Read quotaResetMs directly from the raw config (settings.json blocks or swarm.yml — resolved by
 // readSwarmRawConfig with the same precedence). `readSwarmSettings()` strips unknown fields

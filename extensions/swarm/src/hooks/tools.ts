@@ -155,5 +155,4 @@ export function registerToolHooks(pi: ExtensionAPI) {
 			await logSwarmError(ctx?.cwd, "hooks", "tool_result.streak_failed", err);
 		}
 	});
-
 }

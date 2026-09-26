@@ -57,10 +57,7 @@ export function formatSwarmBatchMessageContent(msgs: SwarmMessage[]) {
 	const items = msgs.map((m, idx) => {
 		const prio = m.priority && m.priority !== "normal" ? ` | Priority: ${m.priority}` : "";
 		const subj = m.subject ? ` (${m.subject})` : "";
-		const ackLine =
-			showAckHint && m.requiresAck
-				? `\n[PI-SWARM ACK REQUIRED] messageId="${m.id}"`
-				: "";
+		const ackLine = showAckHint && m.requiresAck ? `\n[PI-SWARM ACK REQUIRED] messageId="${m.id}"` : "";
 		return `--- [${idx + 1}/${msgs.length}] From ${m.from} to ${m.to}${subj}${prio} [${m.id}] ---\n${m.body.trim()}${ackLine}`;
 	});
 

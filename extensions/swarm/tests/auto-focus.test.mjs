@@ -8,13 +8,7 @@ import { dirname } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const mod = await import(join(here, "..", "index.ts"));
-const {
-	default: factory,
-	pickNextBusyAgent,
-	maybeAutoFocusBusyAgent,
-	focusAgentWindow,
-	AUTO_FOCUS_COOLDOWN_MS,
-} = mod;
+const { default: factory, pickNextBusyAgent, maybeAutoFocusBusyAgent, focusAgentWindow, AUTO_FOCUS_COOLDOWN_MS } = mod;
 
 let fail = 0;
 const ok = (name, cond, extra) => {
@@ -185,7 +179,10 @@ console.log("\n=== 2. Slash command /swarm auto-focus test ===");
 
 	// 2.4 /swarm focus displays current focus status
 	await cmds.swarm.handler("focus", ctx);
-	ok("/swarm focus reports status and session", notes.at(-1)?.msg?.includes("Auto-focus busy pi: ENABLED") && notes.at(-1)?.msg?.includes("Worker tmux session"));
+	ok(
+		"/swarm focus reports status and session",
+		notes.at(-1)?.msg?.includes("Auto-focus busy pi: ENABLED") && notes.at(-1)?.msg?.includes("Worker tmux session"),
+	);
 
 	// 2.5 /swarm auto-focus with no args displays status
 	await cmds.swarm.handler("auto-focus", ctx);
@@ -297,7 +294,10 @@ console.log("\n=== 3. maybeAutoFocusBusyAgent lifecycle integration ===");
 	displayMessageOutput = "worker-a\t0\t%0";
 	const r3 = await maybeAutoFocusBusyAgent(fakePi, ctx, "worker-a");
 	ok("successfully switches to worker-b when active window matches", r3.switched === true && r3.targetAgentId === "worker-b");
-	ok("executed tmux select-window -t sess:worker-b", tmuxCommands.some((c) => c.includes("select-window -t sess:worker-b")));
+	ok(
+		"executed tmux select-window -t sess:worker-b",
+		tmuxCommands.some((c) => c.includes("select-window -t sess:worker-b")),
+	);
 
 	// 3.4 Cooldown guard: immediate subsequent settle should be blocked by cooldown
 	const r4 = await maybeAutoFocusBusyAgent(fakePi, ctx, "worker-a");
@@ -358,11 +358,7 @@ console.log("\n=== 5. Reproduce: Busy worker auto-focus and command focus ===");
 	const scratch = join(tmpdir(), `swarm-auto-focus-s5-${process.pid}-${Date.now()}`);
 	mkdirSync(scratch, { recursive: true });
 
-	const {
-		isCurrentActiveTmuxWindow,
-		maybeAutoFocusOnBusy,
-		isAutoFocusEnabled,
-	} = await import(join(here, "..", "src", "focus.ts"));
+	const { isCurrentActiveTmuxWindow, maybeAutoFocusOnBusy, isAutoFocusEnabled } = await import(join(here, "..", "src", "focus.ts"));
 	const { paths, writeState } = await import(join(here, "..", "src", "state.ts"));
 	const p = paths(scratch);
 
@@ -437,7 +433,10 @@ console.log("\n=== 5. Reproduce: Busy worker auto-focus and command focus ===");
 
 	const rBusy = await maybeAutoFocusOnBusy(fakePi2, { cwd: scratch }, "worker-b");
 	ok("maybeAutoFocusOnBusy switches to newly busy worker-b", rBusy.switched === true && rBusy.targetAgentId === "worker-b");
-	ok("executed tmux select-window -t sess:worker-b on busy", tmuxCommands.some((c) => c.includes("select-window -t sess:worker-b")));
+	ok(
+		"executed tmux select-window -t sess:worker-b on busy",
+		tmuxCommands.some((c) => c.includes("select-window -t sess:worker-b")),
+	);
 
 	// 5.4 /swarm focus <agentId> and /swarm focus (busy)
 	const notes = [];
@@ -466,7 +465,10 @@ console.log("\n=== 5. Reproduce: Busy worker auto-focus and command focus ===");
 
 	// Focus explicit agent
 	await cmds["swarm"].handler("focus worker-b", ctx);
-	ok("/swarm focus worker-b executes select-window", tmuxCommands.some((c) => c.includes("select-window -t sess:worker-b")));
+	ok(
+		"/swarm focus worker-b executes select-window",
+		tmuxCommands.some((c) => c.includes("select-window -t sess:worker-b")),
+	);
 	ok("/swarm focus worker-b notifies user", notes.at(-1)?.msg?.includes("worker-b"));
 
 	// Focus busy agent with bare /swarm focus

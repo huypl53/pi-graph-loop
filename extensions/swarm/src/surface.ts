@@ -28,12 +28,7 @@
 import { evaluateIdleGoalNudgeLocked, updateIdleEpochLocked, allEffectiveIdleAgents } from "./nudges/goal-epoch.ts";
 import { checkStallNotificationStale } from "./taskgraph.ts";
 
-export {
-	checkStallNotificationStale,
-	evaluateIdleGoalNudgeLocked,
-	updateIdleEpochLocked,
-	allEffectiveIdleAgents,
-};
+export { checkStallNotificationStale, evaluateIdleGoalNudgeLocked, updateIdleEpochLocked, allEffectiveIdleAgents };
 export { orchSession } from "./surface/session.ts";
 export { runtimeTaskWarnings } from "./surface/warnings.ts";
 export { isActionableRootMessage, parseTaskNodeRef } from "./surface/actionable.ts";

@@ -3,12 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { findReusableAgent } from "../agents.ts";
-import {
-	listTasksIndexed,
-	renderTasksIndexedList,
-	resolveTaskArg,
-	runtimeTaskWarnings,
-} from "../reconcile.ts";
+import { listTasksIndexed, renderTasksIndexedList, resolveTaskArg, runtimeTaskWarnings } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";
 import { readState, trace, traceTask } from "../state.ts";
 import {
@@ -104,9 +99,7 @@ export async function handleTasksCommand(
 			if (closure.openAssignments.length)
 				blocks.push(`  Open: ${closure.openAssignments.map((a) => `${a.nodeId}->${a.assignee}(${a.status})`).join(", ")}`);
 			if (closure.staleAssignments.length)
-				blocks.push(
-					`  Stale: ${closure.staleAssignments.map((a) => `${a.nodeId}->${a.assignee} (${a.reason})`).join(", ")}`,
-				);
+				blocks.push(`  Stale: ${closure.staleAssignments.map((a) => `${a.nodeId}->${a.assignee} (${a.reason})`).join(", ")}`);
 			if (closure.blocking.length) blocks.push(`  Blockers: ${closure.blocking.join("; ")}`);
 			if (warnings.length) blocks.push(`Runtime warnings:\n${warnings.map((w) => `  \u26a0 ${w}`).join("\n")}`);
 		}
@@ -137,10 +130,7 @@ export async function handleTasksCommand(
 		const tp = hit.tp;
 		const { ready, current } = computeReadyNodes(task);
 		const actionable = Array.from(
-			new Set([
-				...ready,
-				...current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee),
-			]),
+			new Set([...ready, ...current.filter((id) => task.nodes[id] && task.nodes[id].status === "ready" && !task.nodes[id].assignee)]),
 		);
 		const st = await readState(p, ctx.cwd);
 		const lines: string[] = [

@@ -119,7 +119,9 @@ try {
 	// 1. Must NOT emit false alarm saying all agents are idle
 	ok(
 		"no false alarm claiming all non-root agents have been idle",
-		!sentBodies.some((b) => b.includes("All 1 non-root agent(s) have been idle") || (b.includes("Idle streak") && b.includes("has no active work"))),
+		!sentBodies.some(
+			(b) => b.includes("All 1 non-root agent(s) have been idle") || (b.includes("Idle streak") && b.includes("has no active work")),
+		),
 		sentBodies.join("\n"),
 	);
 

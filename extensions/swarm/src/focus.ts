@@ -75,21 +75,13 @@ export function isAutoFocusEnabled(st?: SwarmState | null): boolean {
  * Check if the tmux window for the given agent is currently the active window of its session.
  * This prevents focus stealing when the user is working or viewing a different window.
  */
-export async function isCurrentActiveTmuxWindow(
-	pi: ExtensionAPI,
-	session: string,
-	agent?: SwarmAgent,
-): Promise<boolean> {
+export async function isCurrentActiveTmuxWindow(pi: ExtensionAPI, session: string, agent?: SwarmAgent): Promise<boolean> {
 	if (!process.env.TMUX && (!agent?.tmuxTarget || agent.tmuxTarget === "unknown")) {
 		return false;
 	}
 
 	try {
-		const out = await tmux(
-			pi,
-			["display-message", "-p", "-t", session, "#{window_name}\t#{window_index}\t#{pane_id}"],
-			3_000,
-		);
+		const out = await tmux(pi, ["display-message", "-p", "-t", session, "#{window_name}\t#{window_index}\t#{pane_id}"], 3_000);
 		const parts = out.trim().split("\t");
 		const curWinName = parts[0];
 		const curWinIndex = parts[1];
@@ -124,10 +116,7 @@ export async function focusAgentWindow(
 	agent: SwarmAgent,
 	cwd = process.cwd(),
 ): Promise<{ ok: boolean; target: string; error?: string }> {
-	const winTarget =
-		agent.tmuxWindow && agent.tmuxWindow !== "unknown"
-			? `${agent.tmuxSession}:${agent.tmuxWindow}`
-			: agent.tmuxTarget;
+	const winTarget = agent.tmuxWindow && agent.tmuxWindow !== "unknown" ? `${agent.tmuxSession}:${agent.tmuxWindow}` : agent.tmuxTarget;
 
 	if (!winTarget || winTarget === "unknown") {
 		return { ok: false, target: "unknown", error: "Target agent has no valid tmux window or target" };
@@ -324,11 +313,7 @@ export async function getFocusStatus(pi: ExtensionAPI, cwd: string): Promise<Foc
 	let activePaneId: string | undefined;
 
 	try {
-		const out = await tmux(
-			pi,
-			["display-message", "-p", "-t", session, "#{window_index}\t#{window_name}\t#{pane_id}"],
-			3_000,
-		);
+		const out = await tmux(pi, ["display-message", "-p", "-t", session, "#{window_index}\t#{window_name}\t#{pane_id}"], 3_000);
 		const parts = out.trim().split("\t");
 		if (parts.length >= 2) {
 			sessionAlive = true;
@@ -394,9 +379,7 @@ export function formatFocusStatus(info: FocusStatusInfo): string {
 	}
 
 	if (info.busyAgents.length > 0) {
-		const busyList = info.busyAgents
-			.map((a) => `${a.id} (${a.runtimeStatus}, win: ${a.tmuxWindow || "unknown"})`)
-			.join(", ");
+		const busyList = info.busyAgents.map((a) => `${a.id} (${a.runtimeStatus}, win: ${a.tmuxWindow || "unknown"})`).join(", ");
 		lines.push(`Other busy workers (${info.busyAgents.length}): ${busyList}`);
 	} else {
 		lines.push("Other busy workers: none (all other agents idle)");

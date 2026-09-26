@@ -8,7 +8,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond) => {
 	if (cond) {
 		pass++;
@@ -47,19 +48,34 @@ factory(pi);
 const scratch = mkdtempSync(join(tmpdir(), "swarm-inferred-lifecycle-"));
 mkdirSync(join(scratch, ".pi/swarm"), { recursive: true });
 
-writeFileSync(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify({
-	version: 1,
-	swarmId: "swarm-test",
-	cwd: scratch,
-	tmuxSession: "test",
-	agents: {
-		root: { id: "root", role: "root", roleKind: "root", status: "running", runtimeStatus: "idle", tmuxPane: "%0" },
-		"worker-1": { id: "worker-1", role: "worker", roleKind: "worker", status: "running", runtimeStatus: "idle", tmuxPane: "%1", activeTaskIds: [] }
-	},
-	delivered: {},
-	messages: {},
-	rootPumpSessions: {}
-}, null, 2));
+writeFileSync(
+	join(scratch, ".pi/swarm/swarm-state.json"),
+	JSON.stringify(
+		{
+			version: 1,
+			swarmId: "swarm-test",
+			cwd: scratch,
+			tmuxSession: "test",
+			agents: {
+				root: { id: "root", role: "root", roleKind: "root", status: "running", runtimeStatus: "idle", tmuxPane: "%0" },
+				"worker-1": {
+					id: "worker-1",
+					role: "worker",
+					roleKind: "worker",
+					status: "running",
+					runtimeStatus: "idle",
+					tmuxPane: "%1",
+					activeTaskIds: [],
+				},
+			},
+			delivered: {},
+			messages: {},
+			rootPumpSessions: {},
+		},
+		null,
+		2,
+	),
+);
 
 const sendTool = toolDefs.get("swarm_send_message");
 
@@ -67,12 +83,18 @@ const sendTool = toolDefs.get("swarm_send_message");
 process.env.PI_SWARM_AGENT_ID = "root";
 const rootCtx = { cwd: scratch, mode: "tui", hasUI: false, isIdle: () => true };
 
-const sendRes = await sendTool.execute("c1", {
-	to: "worker-1",
-	body: "Please run tests",
-	subject: "Task directive",
-	requiresResponse: true,
-}, undefined, undefined, rootCtx);
+const sendRes = await sendTool.execute(
+	"c1",
+	{
+		to: "worker-1",
+		body: "Please run tests",
+		subject: "Task directive",
+		requiresResponse: true,
+	},
+	undefined,
+	undefined,
+	rootCtx,
+);
 
 const msgId = sendRes?.details?.receipt?.messageId;
 ok("message sent with id", Boolean(msgId));
@@ -108,11 +130,17 @@ ok("lifecycleStage is processing", rec?.lifecycleStage === "processing");
 ok("lifecycleSource is tool_execution", rec?.lifecycleSource === "tool_execution");
 
 // Step 4: Worker-1 replies with result message
-const replyRes = await sendTool.execute("c2", {
-	to: "root",
-	body: "Tests passed successfully",
-	replyTo: msgId,
-}, undefined, undefined, workerCtx);
+const replyRes = await sendTool.execute(
+	"c2",
+	{
+		to: "root",
+		body: "Tests passed successfully",
+		replyTo: msgId,
+	},
+	undefined,
+	undefined,
+	workerCtx,
+);
 
 st = JSON.parse(readFileSync(join(scratch, ".pi/swarm/swarm-state.json"), "utf8"));
 rec = st.messages[msgId];

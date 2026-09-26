@@ -12,15 +12,17 @@ import { FRESHNESS_MS } from "./types.ts";
  */
 export function sanitizeUntrustedText(text: string | undefined | null): string {
 	if (!text) return "";
-	return text
-		// Strip OSC (Operating System Command) sequences: ESC ] ... (BEL or ST)
-		.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
-		// Strip CSI escape sequences: ESC [ ... [command byte]
-		.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
-		// Strip other ESC sequences (e.g., ESC N, ESC O, etc.)
-		.replace(/\x1b[@-Z\\-_]/g, "")
-		// Strip any remaining bare ESC or dangerous control characters except tab, newline, carriage return
-		.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b]/g, "");
+	return (
+		text
+			// Strip OSC (Operating System Command) sequences: ESC ] ... (BEL or ST)
+			.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
+			// Strip CSI escape sequences: ESC [ ... [command byte]
+			.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+			// Strip other ESC sequences (e.g., ESC N, ESC O, etc.)
+			.replace(/\x1b[@-Z\\-_]/g, "")
+			// Strip any remaining bare ESC or dangerous control characters except tab, newline, carriage return
+			.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b]/g, "")
+	);
 }
 
 export function pad2(n: number): string {

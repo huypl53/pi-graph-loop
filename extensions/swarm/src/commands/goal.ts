@@ -9,18 +9,9 @@ import type { Paths } from "../types.ts";
 import { now, safeId } from "../utils.ts";
 import { parseFlags, parseGoalMaxNudges, parseGoalSetInterval } from "./parser.ts";
 
-export async function handleGoalCommand(
-	cmd: "goal",
-	rest: string[],
-	ctx: any,
-	p: Paths,
-	_pi: ExtensionAPI,
-): Promise<void> {
+export async function handleGoalCommand(cmd: "goal", rest: string[], ctx: any, p: Paths, _pi: ExtensionAPI): Promise<void> {
 	if (currentAgentId() !== "root") {
-		ctx.ui.notify(
-			"goal is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)",
-			"warning",
-		);
+		ctx.ui.notify("goal is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning");
 		return;
 	}
 	const sub = rest.shift();

@@ -1,21 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import {
-	TRACE_PROTOCOL_MIGRATION_COMPLETED,
-	TRACE_PROTOCOL_MIGRATION_RECORD,
-} from "../constants.ts";
+import { TRACE_PROTOCOL_MIGRATION_COMPLETED, TRACE_PROTOCOL_MIGRATION_RECORD } from "../constants.ts";
 import { readState, trace, withLock, writeState } from "../state.ts";
 import type { Paths } from "../types.ts";
 import { now } from "../utils.ts";
 import { parseFlags } from "./parser.ts";
 
-export async function handleProtocolCommand(
-	cmd: "protocol",
-	rest: string[],
-	ctx: any,
-	p: Paths,
-	_pi: ExtensionAPI,
-): Promise<void> {
+export async function handleProtocolCommand(cmd: "protocol", rest: string[], ctx: any, p: Paths, _pi: ExtensionAPI): Promise<void> {
 	const sub = rest.shift();
 	if (sub !== "migrate") {
 		ctx.ui.notify("Usage: /swarm protocol migrate [--dry-run]", "warning");

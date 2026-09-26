@@ -180,5 +180,4 @@ export function registerTurnHooks(pi: ExtensionAPI) {
 			await trace(p, "goal.nudge.resolve_error", { error: String((err as Error)?.message || err) }).catch(() => {});
 		}
 	});
-
 }

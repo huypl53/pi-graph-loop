@@ -195,7 +195,11 @@ console.log("\n[R30-S3] Replay guard: next pump tick does not re-send batched me
 	const result2 = await pumpRootMailbox(pi, ctx, p, "agent_settled");
 	const countAfterTick2 = sendMessages.length;
 
-	ok("R30-S3 tick 2 does not add new sendMessages", countAfterTick2 === countAfterTick1, `tick1: ${countAfterTick1}, tick2: ${countAfterTick2}`);
+	ok(
+		"R30-S3 tick 2 does not add new sendMessages",
+		countAfterTick2 === countAfterTick1,
+		`tick1: ${countAfterTick1}, tick2: ${countAfterTick2}`,
+	);
 	ok("R30-S3 tick 2 delivered === 0", result2.delivered === 0, `got ${result2.delivered}`);
 }
 

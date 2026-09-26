@@ -41,8 +41,7 @@ export type PreflightError =
 	| { kind: "invalid_settings"; message: string; suggestion: string; errors: string[] };
 
 export type PreflightResult =
-	| { ok: true; resolved: { model: string; provider: string; fromPool: boolean } }
-	| { ok: false; error: PreflightError };
+	{ ok: true; resolved: { model: string; provider: string; fromPool: boolean } } | { ok: false; error: PreflightError };
 
 // Persisted per-slot health, keyed by `${provider}/${model}`. Stored in .pi/swarm/pool-state.json.
 export type PoolSlotHealth = {

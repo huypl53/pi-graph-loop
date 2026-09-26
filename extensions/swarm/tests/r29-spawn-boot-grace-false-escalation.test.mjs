@@ -91,7 +91,8 @@ const { deliverMessageLocked } = await import(join(srcDir, "mailbox.ts"));
 // Harness
 // ============================================================================
 
-let pass = 0, fail = 0;
+let pass = 0,
+	fail = 0;
 const ok = (name, cond, info) => {
 	if (cond) {
 		pass++;
@@ -131,7 +132,13 @@ function readEvents(scratchDir) {
 		.trim()
 		.split("\n")
 		.filter(Boolean)
-		.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
 		.filter(Boolean);
 }
 
@@ -426,9 +433,9 @@ if (fail === 0) {
 	const redCount = fail;
 	console.log(
 		`✓  ${redCount} RED assertion(s) observed — reproduce confirmed.\n` +
-		"   S1 and S2 should be RED (wrong behavior proven).\n" +
-		"   S3, S5 should be GREEN (no regression in dead-worker detection).\n" +
-		"   S4, S6 may be GREEN or need post-fix re-run.",
+			"   S1 and S2 should be RED (wrong behavior proven).\n" +
+			"   S3, S5 should be GREEN (no regression in dead-worker detection).\n" +
+			"   S4, S6 may be GREEN or need post-fix re-run.",
 	);
 }
 process.exit(fail === 0 ? 0 : 1);

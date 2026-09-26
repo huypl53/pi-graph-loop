@@ -17,10 +17,7 @@ export async function handleAttentionCommand(
 ): Promise<void> {
 	if (cmd === "attention") {
 		if (currentAgentId() !== "root") {
-			ctx.ui.notify(
-				"attention is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)",
-				"warning",
-			);
+			ctx.ui.notify("attention is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning");
 			return;
 		}
 		const arg = rest.shift();
@@ -33,9 +30,7 @@ export async function handleAttentionCommand(
 			ctx.ui.notify(`${hint}\n\n${renderTasksIndexedList(list)}`, "warning");
 			return;
 		}
-		const scope = targets.hit
-			? [{ task: targets.hit.task, tp: targets.hit.tp }]
-			: list.map((t) => ({ task: t.task, tp: t.tp }));
+		const scope = targets.hit ? [{ task: targets.hit.task, tp: targets.hit.tp }] : list.map((t) => ({ task: t.task, tp: t.tp }));
 		const st = await readState(p, ctx.cwd);
 		const nowMs = Date.now();
 		const lines: string[] = [
@@ -70,10 +65,7 @@ export async function handleAttentionCommand(
 
 	if (cmd === "remind") {
 		if (currentAgentId() !== "root") {
-			ctx.ui.notify(
-				"remind is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)",
-				"warning",
-			);
+			ctx.ui.notify("remind is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning");
 			return;
 		}
 		const taskIdRaw = rest.shift();

@@ -118,8 +118,7 @@ console.log("\n[Reproducing bug] 429 quota swap nudge should NOT contain raw err
 	});
 
 	// The raw 429 error text that currently gets embedded in the nudge
-	const RAW_ERROR_TEXT =
-		'You exceeded your current quota, please check your plan and billing details. resets_in_seconds=12345';
+	const RAW_ERROR_TEXT = "You exceeded your current quota, please check your plan and billing details. resets_in_seconds=12345";
 	const errText = `429: {"error":{"message":"${RAW_ERROR_TEXT}","type":"insufficient_quota","code":"insufficient_quota"}}`;
 
 	// Trigger ENGINE_MAX_RETRIES error turns to exhaust the engine gate and trigger a swap
@@ -158,7 +157,8 @@ console.log("\n[Reproducing bug] 429 quota swap nudge should NOT contain raw err
 	ok("a triggerTurn message was sent", !!triggerMsg, `sentMessages opts: ${JSON.stringify(sentMessages.map((s) => s.o))}`);
 	if (triggerMsg) {
 		const content = String(triggerMsg.m.content);
-		const isMinimal = content.toLowerCase().includes("continue") &&
+		const isMinimal =
+			content.toLowerCase().includes("continue") &&
 			!content.includes("gpt-5.4-mini") &&
 			!content.includes("openai") &&
 			!content.includes("glm") &&
@@ -173,7 +173,11 @@ console.log("\n[Reproducing bug] 429 quota swap nudge should NOT contain raw err
 	}
 
 	// The display-only message (what the user sees) should carry pool event info
-	ok("a user-facing display-only warning was sent (no triggerTurn)", !!displayMsg, `sentMessages: ${JSON.stringify(sentMessages.map((s) => s.o))}`);
+	ok(
+		"a user-facing display-only warning was sent (no triggerTurn)",
+		!!displayMsg,
+		`sentMessages: ${JSON.stringify(sentMessages.map((s) => s.o))}`,
+	);
 	if (displayMsg) {
 		const warnContent = String(displayMsg.m.content);
 		const hasPoolInfo = warnContent.includes("gpt-5.4-mini") || warnContent.includes("openai") || warnContent.includes("quota");

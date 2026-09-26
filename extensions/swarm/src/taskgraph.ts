@@ -1008,7 +1008,8 @@ export function computeNodeClosureSummary(st: SwarmState, task: TaskState, nodeI
 		if (!assignmentAck)
 			assignmentAck = { messageId: msgId, status: rec.status, acked: Boolean(rec.ackedAt), ackStatus: rec.lastAck?.status ?? null };
 		if (rec.status === "dead_letter") blocking.push(`message ${msgId} is dead-lettered (${rec.lastError || "unknown"})`);
-		if (PI_SWARM_MINIMAL_PROTOCOL === 0 && rec.requiresAck && !rec.ackedAt) blocking.push(`assignment message ${msgId} not acknowledged`);
+		if (PI_SWARM_MINIMAL_PROTOCOL === 0 && rec.requiresAck && !rec.ackedAt)
+			blocking.push(`assignment message ${msgId} not acknowledged`);
 		if (rec.lastAck?.status === "done" && verdict === "open")
 			blocking.push(`message ${msgId} acked done but node is still ${node.status}`);
 	}

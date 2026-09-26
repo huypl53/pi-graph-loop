@@ -128,7 +128,7 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 		// second root lane cannot starve this PM process). Recent window bounds work; acked messages
 		// (ackedAt = "recipient processed it") are skipped. We no longer pre-filter surfaced here: surfaced
 		// vs triggered vs re-trigger is decided below, because surfacing must be gated on idle.
-	
+
 		const sess = orchSession(st, nowMs)!;
 		const surfaced = new Set(sess.ids);
 		const triggeredAt = { ...(sess.triggeredAt ?? {}) };
@@ -166,9 +166,7 @@ export async function pumpRootMailbox(pi: ExtensionAPI, ctx: any, p: Paths, reas
 	if (ctx.mode === "tui") {
 		const isBatch = pending.length > 1;
 		if (isBatch) {
-			const opts = result.escalatedStuck
-				? { triggerTurn: true, deliverAs: "steer" as const }
-				: { triggerTurn: true };
+			const opts = result.escalatedStuck ? { triggerTurn: true, deliverAs: "steer" as const } : { triggerTurn: true };
 			pi.sendMessage(
 				{
 					customType: "swarm-batch-message",

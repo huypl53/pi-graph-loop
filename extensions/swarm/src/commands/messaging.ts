@@ -10,13 +10,7 @@ import type { Paths } from "../types.ts";
 import { safeId } from "../utils.ts";
 import { parseFlags } from "./parser.ts";
 
-export async function handleMessagingCommand(
-	cmd: "send" | "mailbox",
-	rest: string[],
-	ctx: any,
-	p: Paths,
-	pi: ExtensionAPI,
-): Promise<void> {
+export async function handleMessagingCommand(cmd: "send" | "mailbox", rest: string[], ctx: any, p: Paths, pi: ExtensionAPI): Promise<void> {
 	if (cmd === "send") {
 		const to = rest.shift();
 		const body = rest.join(" ");

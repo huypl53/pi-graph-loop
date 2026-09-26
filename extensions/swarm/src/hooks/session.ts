@@ -281,5 +281,4 @@ export function registerSessionHooks(
 			await logSwarmError(ctx?.cwd, "hooks", "agent_start.auto_focus_failed", err, { agentId });
 		}
 	});
-
 }
