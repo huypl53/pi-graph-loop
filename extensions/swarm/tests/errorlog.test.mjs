@@ -140,6 +140,188 @@ if (errorlog) {
 	ok("budget=0 disables further logging", afterBudget === beforeBudget, { beforeBudget, afterBudget });
 	delete process.env.PI_SWARM_ERRORLOG_MAX_ENTRIES;
 	errorlog.resetErrorLogBudgetForTests();
+
+	// === G5: per-source budget cap (RED tests — fail before the fix) =====================
+	// Helper: capture console.error calls during a block of work.
+	const captureConsoleError = async (fn) => {
+		const orig = console.error;
+		const calls = [];
+		console.error = (...args) => calls.push(args.join(" "));
+		try {
+			await fn();
+		} finally {
+			console.error = orig;
+		}
+		return calls;
+	};
+
+	// --- 8. per-source cap: noisy source saturates at PI_SWARM_ERRORLOG_PER_SOURCE_MAX ---
+	{
+		// Fresh scratch dir so prior writes don't pollute the count.
+		const sub = join(scratch, "per-source-cap");
+		await mkdir(join(sub, ".pi", "swarm", "traces"), { recursive: true });
+		process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX = "3";
+		process.env.PI_SWARM_ERRORLOG_MAX_ENTRIES = "2000";
+		errorlog.resetErrorLogBudgetForTests();
+		if (typeof errorlog.resetErrorLogPerSourceForTests === "function") {
+			errorlog.resetErrorLogPerSourceForTests();
+		}
+		const subErrorsFile = join(sub, ".pi", "swarm", "traces", "errors.jsonl");
+		const readSub = async () =>
+			(await readFile(subErrorsFile, "utf8"))
+				.split("\n")
+				.filter((l) => l.trim())
+				.map((l) => JSON.parse(l));
+		for (let i = 0; i < 5; i++) {
+			await errorlog.logSwarmError(sub, "noisy", "cap.test", new Error(`boom-noisy-${i}`));
+		}
+		await errorlog.logSwarmError(sub, "quiet", "cap.test", new Error("boom-quiet-0"));
+		const lines = await readSub();
+		const noisyLines = lines.filter((r) => r.source === "noisy");
+		const quietLines = lines.filter((r) => r.source === "quiet");
+		ok(
+			"per-source cap: noisy source retains exactly PI_SWARM_ERRORLOG_PER_SOURCE_MAX entries (first 3, drops new when saturated)",
+			noisyLines.length === 3 && noisyLines[0]?.error?.includes("boom-noisy-0") && noisyLines[2]?.error?.includes("boom-noisy-2"),
+			{ noisyCount: noisyLines.length, noisyErrors: noisyLines.map((r) => r.error) },
+		);
+		ok(
+			"per-source cap: quiet source is NOT affected by noisy source's saturation",
+			quietLines.length === 1 && quietLines[0]?.error?.includes("boom-quiet-0"),
+			{ quietCount: quietLines.length, quietErrors: quietLines.map((r) => r.error) },
+		);
+		delete process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX;
+		errorlog.resetErrorLogBudgetForTests();
+		if (typeof errorlog.resetErrorLogPerSourceForTests === "function") {
+			errorlog.resetErrorLogPerSourceForTests();
+		}
+	}
+
+	// --- 9. per-source breadcrumb: one console.error per exhaustion-cross, not per drop ---
+	{
+		const sub = join(scratch, "per-source-breadcrumb");
+		await mkdir(join(sub, ".pi", "swarm", "traces"), { recursive: true });
+		process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX = "2";
+		process.env.PI_SWARM_ERRORLOG_MAX_ENTRIES = "2000";
+		errorlog.resetErrorLogBudgetForTests();
+		if (typeof errorlog.resetErrorLogPerSourceForTests === "function") {
+			errorlog.resetErrorLogPerSourceForTests();
+		}
+		const calls = await captureConsoleError(async () => {
+			for (let i = 0; i < 4; i++) {
+				await errorlog.logSwarmError(sub, "chatty", "crumb.test", new Error(`boom-chatty-${i}`));
+			}
+		});
+		const perSourceCrumbs = calls.filter((c) => c.includes("per-source budget exhausted") && c.includes("chatty"));
+		ok(
+			"per-source breadcrumb: exactly 1 crumb for 4 appends with cap=2 (one per exhaustion-cross, not per drop)",
+			perSourceCrumbs.length === 1,
+			{ crumbCount: perSourceCrumbs.length, allCrumbs: calls },
+		);
+		delete process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX;
+		errorlog.resetErrorLogBudgetForTests();
+		if (typeof errorlog.resetErrorLogPerSourceForTests === "function") {
+			errorlog.resetErrorLogPerSourceForTests();
+		}
+	}
+
+	// --- 10. global cap still wins: per-source cap cannot bypass global exhaustion ---------
+	// Note: PI_SWARM_ERRORLOG_MAX_ENTRIES has a floor of MIN_ENTRIES=200, so we use 250 (above floor).
+	// Per-source cap is set above global (300) so per-source never fires; the global cap is the
+	// binding constraint. Write 250 entries from one source, then verify the 251st is dropped.
+	{
+		const sub = join(scratch, "global-still-wins");
+		await mkdir(join(sub, ".pi", "swarm", "traces"), { recursive: true });
+		process.env.PI_SWARM_ERRORLOG_MAX_ENTRIES = "250";
+		process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX = "300";
+		errorlog.resetErrorLogBudgetForTests();
+		if (typeof errorlog.resetErrorLogPerSourceForTests === "function") {
+			errorlog.resetErrorLogPerSourceForTests();
+		}
+		// Write 250 entries from src-a to exhaust the global cap (per-source cap=300 never fires).
+		for (let i = 0; i < 250; i++) {
+			await errorlog.logSwarmError(sub, "src-a", "global.test", new Error(`a-${i}`));
+		}
+		// Now try to write the 251st — should be dropped by global cap.
+		await errorlog.logSwarmError(sub, "src-a", "global.test", new Error("a-250-should-be-dropped"));
+		const subErrorsFile = join(sub, ".pi", "swarm", "traces", "errors.jsonl");
+		const lines = (await readFile(subErrorsFile, "utf8"))
+			.split("\n")
+			.filter((l) => l.trim())
+			.map((l) => JSON.parse(l));
+		ok(
+			"global cap still wins: 251st entry is dropped when global=250 (per-source=300 cannot bypass)",
+			lines.length === 250 && !lines.some((r) => r.error?.includes("a-250-should-be-dropped")),
+			{ lineCount: lines.length, lastError: lines[lines.length - 1]?.error },
+		);
+		delete process.env.PI_SWARM_ERRORLOG_MAX_ENTRIES;
+		delete process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX;
+		errorlog.resetErrorLogBudgetForTests();
+		if (typeof errorlog.resetErrorLogPerSourceForTests === "function") {
+			errorlog.resetErrorLogPerSourceForTests();
+		}
+	}
+
+	// --- 11. per-source cap disabled (PI_SWARM_ERRORLOG_PER_SOURCE_MAX=0): no per-source gate ---
+	{
+		const sub = join(scratch, "per-source-disabled");
+		await mkdir(join(sub, ".pi", "swarm", "traces"), { recursive: true });
+		process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX = "0";
+		process.env.PI_SWARM_ERRORLOG_MAX_ENTRIES = "2000";
+		errorlog.resetErrorLogBudgetForTests();
+		if (typeof errorlog.resetErrorLogPerSourceForTests === "function") {
+			errorlog.resetErrorLogPerSourceForTests();
+		}
+		for (let i = 0; i < 50; i++) {
+			await errorlog.logSwarmError(sub, "loud", "disabled.test", new Error(`loud-${i}`));
+		}
+		const subErrorsFile = join(sub, ".pi", "swarm", "traces", "errors.jsonl");
+		const lines = (await readFile(subErrorsFile, "utf8"))
+			.split("\n")
+			.filter((l) => l.trim())
+			.map((l) => JSON.parse(l));
+		ok("per-source cap disabled: all 50 entries from one source are appended (global cap is the only gate)", lines.length === 50, {
+			lineCount: lines.length,
+		});
+		delete process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX;
+		errorlog.resetErrorLogBudgetForTests();
+		if (typeof errorlog.resetErrorLogPerSourceForTests === "function") {
+			errorlog.resetErrorLogPerSourceForTests();
+		}
+	}
+
+	// --- 12. real errors still logged across sources: no source is silently dropped -------
+	{
+		const sub = join(scratch, "real-errors-still-logged");
+		await mkdir(join(sub, ".pi", "swarm", "traces"), { recursive: true });
+		process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX = "2";
+		process.env.PI_SWARM_ERRORLOG_MAX_ENTRIES = "2000";
+		errorlog.resetErrorLogBudgetForTests();
+		if (typeof errorlog.resetErrorLogPerSourceForTests === "function") {
+			errorlog.resetErrorLogPerSourceForTests();
+		}
+		for (const src of ["src-a", "src-b", "src-c"]) {
+			for (let i = 0; i < 3; i++) {
+				await errorlog.logSwarmError(sub, src, "interleave.test", new Error(`${src}-${i}`));
+			}
+		}
+		const subErrorsFile = join(sub, ".pi", "swarm", "traces", "errors.jsonl");
+		const lines = (await readFile(subErrorsFile, "utf8"))
+			.split("\n")
+			.filter((l) => l.trim())
+			.map((l) => JSON.parse(l));
+		const bySource = { "src-a": 0, "src-b": 0, "src-c": 0 };
+		for (const r of lines) bySource[r.source] = (bySource[r.source] || 0) + 1;
+		ok(
+			"real errors still logged: each of 3 sources retains its last 2 entries (no source silently dropped)",
+			bySource["src-a"] === 2 && bySource["src-b"] === 2 && bySource["src-c"] === 2,
+			{ bySource, totalLines: lines.length },
+		);
+		delete process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX;
+		errorlog.resetErrorLogBudgetForTests();
+		if (typeof errorlog.resetErrorLogPerSourceForTests === "function") {
+			errorlog.resetErrorLogPerSourceForTests();
+		}
+	}
 }
 
 // --- 7. no NEW silent swallows in the fixed hot spots (static assertion) -------------------

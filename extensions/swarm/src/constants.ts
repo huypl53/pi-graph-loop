@@ -552,6 +552,17 @@ export const DEFAULT_TRACE_RETENTION_MS =
 export const DEFAULT_TRACE_KEEP_GENERATIONS =
 	Number(process.env.PI_SWARM_TRACE_KEEP_GENERATIONS) > 0 ? Math.floor(Number(process.env.PI_SWARM_TRACE_KEEP_GENERATIONS)) : 5;
 
+// === G5: per-source errorlog budget cap ===
+// Default per-source cap (entries per source per process). With global=2000 and per-source=200,
+// up to 10 distinct sources can each fill their bucket before the global cap kicks in. The
+// runtime gate in errorlog.ts reads PI_SWARM_ERRORLOG_PER_SOURCE_MAX directly from env at call
+// time (no floor) so tests can exercise small caps. 0 disables the per-source cap (global-only).
+export const DEFAULT_ERRORLOG_PER_SOURCE_MAX = 200;
+export const PI_SWARM_ERRORLOG_PER_SOURCE_MAX =
+	Number(process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX) > 0
+		? Math.floor(Number(process.env.PI_SWARM_ERRORLOG_PER_SOURCE_MAX))
+		: DEFAULT_ERRORLOG_PER_SOURCE_MAX;
+
 // === Issue 28 — rework reopen trace ===
 // Emitted when activateReworkNodes reopens a previously-done/failed/skipped node because a rework
 // edge activated. Payload includes priorAttemptId so operators can correlate with the canonical

@@ -65,8 +65,13 @@ tail -50 .pi/swarm/traces/errors.jsonl | jq -r '"\(.source)/\(.op) [\(.code // "
 ```
 
 It is budget-capped (`PI_SWARM_ERRORLOG_MAX_ENTRIES`, default 2000; `0` disables logging) so a
-poisoned state dir cannot grow it unbounded. Errors are recorded WITHOUT blocking the calling
-tool/hook: logging is best-effort, self-silent, and never throws. New swarm code must route
+poisoned state dir cannot grow it unbounded. A per-source budget cap (`PI_SWARM_ERRORLOG_PER_SOURCE_MAX`,
+default 200; `0` disables the per-source gate) additionally bounds growth from one noisy source: once a
+source has appended its cap within the process lifetime, further entries from that source are dropped
+(one `[swarm:errorlog] per-source budget exhausted` stderr breadcrumb per exhaustion-cross, not per drop);
+the global cap always wins and a saturated source's drops do not consume global budget. Errors are
+recorded WITHOUT blocking the calling tool/hook: logging is best-effort, self-silent, and never throws.
+New swarm code must route
 captured errors through `logSwarmError()` / `traceLogged()` from `extensions/swarm/src/errorlog.ts`
 — silent swallowing is forbidden (see AGENTS.md, "no silent error swallowing").
 
