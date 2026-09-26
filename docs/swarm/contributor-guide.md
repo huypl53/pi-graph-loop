@@ -46,7 +46,7 @@ Pre-existing failures (kept byte-identical by this refactor — do NOT fix in th
 refactor; record new R-rows for fixes):
 
 ```text
-ct-contract-probes.test.mjs         19 passed / 4 failed       (CT-2.B/C known)
+ct-contract-probes.test.mjs         19 passed / 4 failed       (CT-2.B/C known — historical; fixed by R28/706124f, see G4 inventory)
 minimal-protocol-authoritative      29 pass / 18 fail
 model-routing.test.mjs              4 passed / 1 failed
 root-wake.test.mjs          31 passed / 3 failed
@@ -59,6 +59,41 @@ supersession-fencing.test.mjs       17 pass / 3 fail
 Baseline inventory script: `.pi/swarm/tasks/task-20260903-structure-refactor/artifacts/baseline-inventory.sh`.
 This IS the refactor gate — diff the new run's `baseline-inventory.txt` line-by-line
 against the committed baseline to detect drift.
+
+### G4 triage inventory (2026-09-26)
+
+The strict suite originally had **30 pre-existing failures** (historical baseline, preserved
+byte-identical through the phases 1–8 refactor for fail-set parity). The G4 triage then
+root-caused each red; the table below is the authoritative inventory AFTER triage + the
+subsequent fixture corrections (R28 / commit `706124f`). Current classification totals:
+**0 real defects, 10 harness-drift suites, 3 pass suites** — the historical 30-failure count is
+the pre-triage baseline, not the current state.
+
+Each row links to the evidence log under `.pi/swarm-uat/runs/g4-triage-impl/<suite>.log` and the
+harness-fix commit (for drift) where one exists.
+
+| Suite | Status | Classification | Evidence | Action |
+|---|---|---|---|---|
+| `ct-contract-probes.test.mjs` | 26/0 | **Harness drift** (was misclassified "Real defect"/R-row pre-R28) | `g4-triage-impl/ct-contract-probes.log` + R28 evidence | Fixture mismatch, NOT a production defect: the `seedRootBusyScratch()` helper defaulted to `task-ct2-x` while CT-2.B's message referenced `task-ct2-y` and CT-2.C's referenced `task-ct2-z`, so `isActionableRootMessage` returned `task_missing` and suppressed the surface (`sendMessageCallCount === 0`). R28 (task `r28-ct2-pump-agent-settled-surface-20260926`) corrected the fixtures against **unchanged production** — all 6 original probes plus the new CT-2.D registered-hook probe pass (26/0, all 7 `CONTRACT_CONFIRMED`). Fix committed as `706124f` (`test(swarm): correct CT-2 task fixtures`, tests file only). CT-2.D exercises the REAL registered `agent_settled` hook via `registerSettledHook` + captured `pi.on("agent_settled", cb)` and counts at the real `pi.sendMessage` boundary. Evidence: `.pi/swarm-uat/runs/r28-fixture-corrected/`, R28 artifacts under `.pi/swarm/tasks/r28-ct2-pump-agent-settled-surface-20260926/artifacts/`. |
+| `minimal-protocol-authoritative.test.mjs` | 50/0 | PASS (was 18 fail) | — | Already fixed; no action |
+| `minimal-protocol-migration.test.mjs` | 23/0 | PASS | — | No action |
+| `minimal-protocol-shadow.test.mjs` | 24/7 | Harness drift | `g4-triage-impl/minimal-protocol-shadow.log` | Test asserts gate=0 behavior; needs `PI_SWARM_MINIMAL_PROTOCOL=0` env to exercise the gate=0 path. Fix: subprocess pattern or explicit env in test runner. |
+| `model-routing.test.mjs` | 4/1 | Harness drift | `g4-triage-impl/model-routing.log` | "fast model -> openai preset" asserts a known-preset mapping that was never implemented. The other 4 assertions (the actual fix) pass. Stale expectation. |
+| `root-wake.test.mjs` | 31/3 | Harness drift | `g4-triage-impl/root-wake.log` | C4: back-fill scanned 5 (test expected 4 — extra message in fixture). C8: coalesce dropped 2 (test expected count=1). Count mismatches from fixture drift. |
+| `functional.test.mjs` | crash | Harness drift | `g4-triage-impl/functional.log` | Test pins `PI_SWARM_AGENT_ID=implementer-01` (non-root) and calls `swarm_create_task` which now requires root authority (`identity.ts:98`). Fix: run root-authority steps in a root-pinned subprocess or split the suite. |
+| `pool-config.test.mjs` | 45/0 | PASS | — | No action |
+| `row75-graph-guardrails.test.mjs` | crash | Harness drift | `g4-triage-impl/row75-graph-guardrails.log` | `ensureWorker` calls retired `swarm_register_agent` tool. Same family as `attention-reminder` and `agent-lifecycle`. |
+| `supersession-fencing.test.mjs` | 17/3 | Harness drift | `g4-triage-impl/supersession-fencing.log` | C6.a / C7.d / C7.e read `reconcile.ts` and look for `isActionableRootMessage` signature + `TRACE_LATE_RESULT_REJECTED` reference, but the function moved to `surface/actionable.ts` during a refactor. Test reads wrong file. |
+| `reconcile-reinject.test.mjs` | 16/4 | Harness drift | `g4-triage-impl/reconcile-reinject.log` | Mock answers `tmux display-message` only; commit c4f1c2c replaced the `isTmuxRunning` probe with strict `list-panes`. Mock needs `list-panes` answer. |
+| `attention-reminder.test.mjs` | crash | Harness drift | `g4-triage-impl/attention-reminder.log` | `ensureWorker` calls retired `swarm_register_agent` tool. |
+| `agent-lifecycle.test.mjs` | crash | Harness drift | `g4-triage-impl/agent-lifecycle.log` | `ensureWorker` calls retired `swarm_register_agent` tool. |
+
+**Fail-set parity verified**: all 10 in-allowlist failing/crashing suites fail identically on
+stashed base (commit `8e425d1`) — no live regression introduced by the G4 triage work.
+
+(No proposed R-rows remain: the single triage-time real-defect candidate — the CT-2.B/C
+"silent pump" — was reclassified harness drift by R28 after fixture correction passed against
+unchanged production; see the `ct-contract-probes` row above.)
 
 ## Change discipline
 
