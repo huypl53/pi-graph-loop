@@ -1,14 +1,11 @@
 // === swarm/delivery.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import type { SwarmMessage } from "./types.ts";
+import type { SwarmMessage } from "./types/index.ts";
 import { PI_SWARM_MINIMAL_PROTOCOL, SYSTEM_END, SYSTEM_START } from "./constants.ts";
 import { currentAgentId } from "./session.ts";
 import { logSwarmError } from "./errorlog.ts";
-import { deliver } from "./mailbox.ts";
 import { now } from "./utils.ts";
-import { reconcile } from "./reconcile.ts";
-import { tmux } from "./tmux.ts";
 
 // Whether a message record is a retryable DELIVERY failure eligible for reconcile re-injection
 // (and worth surfacing as "pending" in agent status). Message `status` "queued"/"failed" is

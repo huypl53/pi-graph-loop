@@ -4,6 +4,22 @@ Notable changes in this project. Newest first.
 
 ## [Unreleased]
 
+### Fixed
+
+- **swarm (Phase 8 of `plans/260926-0218-swarm-refactor-terminal-manager`)**: fixed two HerdrDriver bugs found by live validation against herdr 0.8.2 (both invisible to the unit suite's herdr 0.4.0-shaped mocks) — `capturePane` no longer passes the unsupported `--workspace` flag to `herdr pane read` (exit 2 on every capture); `inspectProcess`/`isTargetAlive` now resolve legacy tmux-composite targets ("session:window.0") to herdr pane ids by tab label and parse the real `result.process_info.foreground_processes[0]` response shape, restoring pi-aliveness detection (previously always false). Red-green verified against the real CLI; `herdr-driver.test.mjs` 16/16. Also converted the 2 real bare catches in `errorlog.ts` to `expected(...)` markers (silent-catch grep now 0 across `extensions/swarm/src`).
+
+### Tested
+
+- **swarm (Phase 8)**: strict 129-test harness ledger (no `|| true` masking) with fail-set parity vs HEAD baseline — 30 pre-existing red suites identical, `ml:selftest` fixture-count drift fixed (selftest 87 fixtures, PASS); new compulsory mock-LLM fixture `terminal-manager-switch.jsonl` (spawn → send_keys → capture → settle) validated headless with live worker pane, populated capture snapshot, and empty `errors.jsonl`; live tmux validation (dedicated session `swarm-val-refactor`: init/spawn/identity/status 2/2 healthy) and live herdr validation (driver-resolved lane end-to-end). Full report: `docs/swarm/validation-report-refactor.md`. Disclosed pre-existing gaps: headless `ml:swarm-yml-pool` TMUX test bug (fail-set identical at HEAD), `agents.ts spawnAgent` still on raw tmux facade (driver-seam wiring is follow-up).
+
+### Refactored
+
+- **swarm (Phase 7 of `plans/260926-0218-swarm-refactor-terminal-manager`)**: decomposed the two remaining runtime monoliths into submodules with backward-compatible facades — `src/hooks.ts` (1,681 → 172 LOC) now delegates to `src/hooks/{streaks,pump-manager,pool-swap,turns,session,settled,tools,shutdown-input}.ts`; `src/surface.ts` (1,369 → ~150 LOC) delegates to `src/surface/{session,warnings,actionable,staleness,ranking,pump,pump-phases,pump-decision,coalesce,pump-shared}.ts`. Extracted `src/orphan-watch.ts` (shared `ORPHAN_TIMERS` map + `clearOrphanWatch`) breaking the last static import cycle — madge reports **0 circular dependencies** across all 116 modules (HEAD: 39). Behavioral pins preserved: `root-wake` classification literals stay physically in the `src/hooks.ts` facade startRootPump; `r27b` Guard-3 imports stay physically on the `src/surface.ts` facade; `r30` single-send L2 batching unchanged (13/13); hook registration order (pool-swap → turns → session → settled → tools → shutdown-input) unchanged; 14 tools / 5 commands / 11 hooks registered identically. Facade→submodule edges are contract-pinned: `hooks/session.ts` receives `startRootPump` via DI to avoid a facade↔submodule cycle. Module caps: hooks ≤312 LOC, surface ≤309 LOC.
+  - Validation: full-suite ledger parity vs pristine-HEAD baseline — 117 common suites, only shared-suite diff is `pool-config.test.mjs` 1→0 (pre-existing uncommitted env fix in the worktree copy); 30 pre-existing red suites fail IDENTICALLY (fail-multiset diff-verified: root-wake, idle-nudge, supersession-fencing, cancellation, pool-*, attempt-fencing, r25, …); phase-2 driver suites herdr-driver 16/0 + terminal-driver 4/0 green.
+  - tmux mock-LLM lane (session `pgl-phase7-validation`, pane capture `/tmp/phase7-pane-final.txt`): `pi --provider mock-llm --model root-message-batching -e ./extensions/mock-llm -e ./extensions/swarm` — swarm registered (14 tools / 5 commands / 11 hooks), R30 lane completed with batched single-turn delivery; transcript `.pi/mock-llm/transcripts/root-message-batching/`, trace `.pi/swarm/traces/events.jsonl` (`mailbox.root_pump` + `notification.batch.suppressed` observed).
+  - Disclosed dead-code drop: duplicated `ackRootNudgeLocked` / `ackRootGraphAdvanceNudgesLocked` copies in old surface.ts were unreachable (live copies remain in `src/nudges/graph-advance.ts`).
+  - Disclosed pre-existing tsc classes unchanged (tmuxAlive ×8, actionableGraphDeferredAt ×2, HealthStatus "stale" ×2, surface loose-typing) — identical to HEAD.
+
 ## [v0.0.3] - 2026-09-24
 
 ### feat(swarm): auto-focus tmux window to busy worker (enabled by default)

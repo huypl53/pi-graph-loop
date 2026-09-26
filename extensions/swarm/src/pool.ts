@@ -15,12 +15,42 @@ import type {
 	RotationConfig,
 	RotationStrategy,
 	SwarmSettings,
-} from "./types.ts";
+} from "./types/index.ts";
 import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
-import { currentModel, currentProvider, readSwarmSettings } from "./session.ts";
-import { readSwarmRawConfig, readSwarmYml, swarmYmlPath, type SwarmConfigSource } from "./config.ts";
+import { currentModel, currentProvider } from "./session.ts";
+import {
+	parseQuotaResetMs,
+	readSwarmRawConfig,
+	readSwarmSettings,
+	readSwarmYml,
+	swarmYmlPath,
+	type SwarmConfigSource,
+} from "./config.ts";
 import { atomicWriteFile, trace } from "./state.ts";
 import { expected, logSwarmError, traceLogged } from "./errorlog.ts";
+
+export { parseQuotaResetMs } from "./config.ts";
+
+export function classifyProviderError(message: string): ProviderErrorKind {
+	const m = (message || "").toLowerCase();
+	// Issue 70: usage_limit_reached / "usage limit has been reached" (live 429 quota bodies) must
+	// classify quota — they route into the pool's immediate-bench policy (lastBenchReason=quota).
+	// This branch runs BEFORE the 429/rate_limit branch so plain "429 rate limit" stays rate_limit.
+	if (/quota|insufficient|billing|balance|exceeded your current quota|prepaid|usage_limit|usage limit/.test(m)) return "quota";
+	if (/rate.?limit|too many requests|429|overloaded/.test(m)) return "rate_limit";
+	if (/invalid api key|unauthorized|forbidden|401|403|authentication|api key/.test(m)) return "auth";
+	if (/timeout|timed out|econnrefused|econnreset|enotfound|5\d\d|network|connection/.test(m)) return "transient";
+	return "unknown";
+}
+
+// Issue 70: stable incident-identity string for an error message. Erases every digit run
+// (resets_in_seconds, resets_at, request ids, ports, counts) and collapses whitespace so
+// provider 429 bodies that mutate per-second normalize to ONE identity while genuinely
+// different messages stay distinct. Paired with classifyProviderError kind + providerKey this
+// forms the engine-retry incident identity (replaces raw error-text equality).
+export function scrubErrorIdentity(message: string): string {
+	return (message || "").toLowerCase().replace(/\d+/g, "n").replace(/\s+/g, " ").trim().slice(0, 200);
+}
 
 // Credential probe for preflightSpawn (3b): does this provider have a usable API key?
 // Mirrors pi's own lookup order: ~/.pi/agent/auth.json entries, then the conventional
@@ -58,40 +88,7 @@ import { sleep } from "./utils.ts";
 const QUOTA_RESET_DEFAULT_MS =
 	Number(process.env.PI_SWARM_QUOTA_RESET_MS) > 0 ? Math.floor(Number(process.env.PI_SWARM_QUOTA_RESET_MS)) : 0;
 
-// Quota-reset duration format (user request 2026-09-05): quotaResetMs is normally minutes or
-// hours, and raw milliseconds are error-prone (a user writing 18000 meaning 18 minutes actually
-// got 18 seconds). Accept a human duration string anywhere quotaResetMs is read:
-//   "<n><unit>" segments, units ms | s | m | h | d (case-insensitive, combinable: "1h30m",
-//   whitespace-separated: "2h 15m 30s"). Bare numbers (and bare numeric strings, for yml
-//   ergonomics) stay milliseconds — back-compat. Returns the parsed non-negative integer ms,
-// or undefined when unparseable.
-const QUOTA_DURATION_UNIT_MS: Record<string, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
-export function parseQuotaResetMs(input: unknown): number | undefined {
-	if (typeof input === "number") return Number.isFinite(input) && input >= 0 ? Math.floor(input) : undefined;
-	if (typeof input !== "string") return undefined;
-	const trimmed = input.trim();
-	if (!trimmed) return undefined;
-	// Bare numeric string: milliseconds (parity with the number form).
-	if (/^\d+$/.test(trimmed)) return parseInt(trimmed, 10);
-	let total = 0;
-	let matched = false;
-	let rest = trimmed;
-	while (rest) {
-		const ws = rest.match(/^\s+/);
-		if (ws) {
-			rest = rest.slice(ws[0].length);
-			continue;
-		}
-		const m = rest.match(/^(\d+)\s*(ms|s|m|h|d)/i);
-		if (!m) return undefined; // unparseable remainder -> reject the whole input
-		const unitMs = QUOTA_DURATION_UNIT_MS[m[2].toLowerCase()];
-		if (unitMs === undefined) return undefined;
-		total += parseInt(m[1], 10) * unitMs;
-		matched = true;
-		rest = rest.slice(m[0].length);
-	}
-	return matched && total >= 0 ? total : undefined;
-}
+
 
 // Read quotaResetMs directly from the raw config (settings.json blocks or swarm.yml — resolved by
 // readSwarmRawConfig with the same precedence). `readSwarmSettings()` strips unknown fields
@@ -951,8 +948,13 @@ export function formatPreflightError(err: PreflightError): string {
 export async function checkTmuxSession(session: string): Promise<{ ok: boolean; message?: string }> {
 	if (!session || session === "unknown")
 		return { ok: false, message: "tmux session name is unknown (no swarm started yet; run /swarm init)." };
+	if (process.env.PI_SWARM_TERMINAL_MANAGER === "herdr") {
+		return { ok: true };
+	}
 	if (!process.env.TMUX && !process.env.PI_SWARM_TMUX_OK) {
 		return { ok: false, message: `No $TMUX env var set — the swarm normally runs inside tmux. Session requested: ${session}.` };
 	}
 	return { ok: true };
 }
+
+export const checkTerminalSession = checkTmuxSession;

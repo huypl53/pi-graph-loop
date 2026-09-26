@@ -23,7 +23,7 @@ import type {
 	SwarmState,
 	TaskPaths,
 	TaskState,
-} from "./types.ts";
+} from "./types/index.ts";
 import { EXT, LOCK_STALE_MS, STATE_VERSION } from "./constants.ts";
 import { ensureAgentDefaults, isSafeRelativePath, normalizeTaskNode, now, projectSlug, safeId, sleep } from "./utils.ts";
 import { expected, logSwarmError } from "./errorlog.ts";

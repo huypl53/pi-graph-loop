@@ -56,3 +56,6 @@ Session.vim
 engineer
 .agents/plugins
 .agentkit
+
+# nested swarm test-state traces (extension scratch dirs)
+extensions/*/.pi/swarm/

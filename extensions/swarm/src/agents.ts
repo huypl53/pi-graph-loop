@@ -34,7 +34,6 @@ import { responseMissingRecords, unackedRequiresAckRecords, deliverMessageLocked
 // restart simply strands the entry — see docs/swarm/operations.md v1 limitation). Persistent state
 // lives on SwarmState.recentSpawns[] (readState back-fills `[]`); the map below is a hint to cancel
 // pending timers when the follow-up call clears the entry, NOT the source of truth.
-const ORPHAN_TIMERS = new Map<string, NodeJS.Timeout>();
 
 // Pure helper for tests / shared code: how many orphan-watch entries are currently armed in state.
 // Reflects the persistent ledger (NOT the in-process timer map) so it survives a process restart.
@@ -83,7 +82,7 @@ export async function fireOrphanWarning(p: Paths, agentId: string, spawnEntry: R
 		return { fired: true, kind: "orphan_warning" as const };
 	});
 	// Best-effort: drop the in-process timer handle too (the persistent entry is already gone).
-	ORPHAN_TIMERS.delete(agentId);
+	orphanTimers().delete(agentId);
 	return cleared;
 }
 
@@ -110,7 +109,7 @@ export function armOrphanWatch(p: Paths, st: SwarmState, agentId: string, ts: st
 	// Don't keep the Node event loop alive solely for orphan watches; the timer is best-effort and
 	// the persistent entry in state is the source of truth across restarts.
 	if (typeof (timer as any)?.unref === "function") (timer as any).unref();
-	ORPHAN_TIMERS.set(agentId, timer);
+	orphanTimers().set(agentId, timer);
 	void trace(p, "agent.spawn.orphan_watch_start", { agentId, deadlineAt, timeoutMs: ORPHAN_SPAWN_WARNING_TIMEOUT_MS }).catch(() => {});
 }
 
@@ -120,11 +119,11 @@ export function armOrphanWatch(p: Paths, st: SwarmState, agentId: string, ts: st
 // (intentional termination BEFORE killAgentPane). No-op if the agent has no entry (reuse path,
 // pre-policy swarm, or already cleared). Caller MUST hold the swarm lock and pass the live state
 // reference; the trace is best-effort and never throws.
-export type OrphanClearReason = "swarm_send_message" | "swarm_assign_task" | "swarm_stop_agent" | "preflight_message";
+import type { OrphanClearReason } from "./types/agents.ts";
+export type { OrphanClearReason } from "./types/agents.ts";
+import { clearOrphanWatch, orphanTimers } from "./orphan-watch.ts";
+export { clearOrphanWatch } from "./orphan-watch.ts";
 // Issue 16: distinguish why a clear happened. The `by` field stays the call site for back-compat
-// with existing test assertions; the new `kind` field carries "preflight" vs "delivery" for ops
-// observability.
-export type OrphanClearKind = "preflight" | "delivery";
 
 // Issue 16: compare a RecentSpawn stamp against a caller's session identity. Returns false when
 // the entry lacks a stamp (legacy pre-Issue-16 state — never preempt so we don't accidentally
@@ -141,35 +140,6 @@ export function isSameRootLeader(
 	if (spawn.spawnedBySessionStartedAt && caller.sessionStartedAt && spawn.spawnedBySessionStartedAt !== caller.sessionStartedAt)
 		return false; // pid recycled
 	return true;
-}
-
-export async function clearOrphanWatch(
-	p: Paths,
-	st: SwarmState,
-	agentId: string,
-	reason: OrphanClearReason,
-	kind: OrphanClearKind = "delivery",
-) {
-	if (!Array.isArray(st.recentSpawns) || st.recentSpawns.length === 0) return { cleared: false, reason: "empty" };
-	const idx = st.recentSpawns.findIndex((s) => s.agentId === agentId);
-	if (idx === -1) return { cleared: false, reason: "not-found" };
-	const [removed] = st.recentSpawns.splice(idx, 1);
-	const t = ORPHAN_TIMERS.get(agentId);
-	if (t) {
-		clearTimeout(t);
-		ORPHAN_TIMERS.delete(agentId);
-	}
-	await trace(p, "agent.spawn.orphan_cleared", {
-		agentId,
-		by: reason,
-		reason: kind,
-		clearedBy: currentAgentId(),
-		spawnedAt: removed.spawnedAt,
-		deadlineAt: removed.deadlineAt,
-		spawnedByPid: removed.spawnedByPid,
-		spawnedBySessionStartedAt: removed.spawnedBySessionStartedAt,
-	}).catch(() => {});
-	return { cleared: true, reason, kind, removed };
 }
 
 // Kickoff preamble injected on spawn/restart when the agent's mailbox holds messages that are not yet

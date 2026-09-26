@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { capturePane, isTmuxRunning, tmux } from "../tmux.ts";
+import { isRootHostPane } from "../terminal/index.ts";
 import { currentAgentId, currentModel, currentProvider } from "../session.ts";
 import { ensureDirs, identityPath, paths, readState, taskPaths, readTaskState, trace, withLock, writeState } from "../state.ts";
 import { logSwarmError } from "../errorlog.ts";
@@ -703,12 +704,14 @@ export function registerAgentsTools(pi: ExtensionAPI) {
 					if (!agent) throw new Error(`Unknown swarm agent: ${params.agentId}`);
 					// Issue 12 C6 micro-fix: principle-based root-pane reject guard. Fires when the
 					// resolved tmux target equals the root record's tmuxTarget (typically "unknown"),
+					// or when the target dynamically matches the current host pane,
 					// so a future refactor cannot silently route raw keystrokes into the root host
 					// pane. Principle-based (target equality, not id) so ghost agents mis-stamped to "unknown"
 					// are also rejected. Read-only — no state mutation on rejection.
 					const root = st.agents["root"];
 					const rootTarget = root?.tmuxTarget;
-					if (agent.tmuxTarget && rootTarget && agent.tmuxTarget === rootTarget) {
+					const isHost = agent.tmuxTarget ? await isRootHostPane(pi, agent.tmuxTarget) : false;
+					if ((agent.tmuxTarget && rootTarget && agent.tmuxTarget === rootTarget) || isHost) {
 						await trace(p, "agent.send_keys.rejected", {
 							agentId: agent.id,
 							resolvedTarget: agent.tmuxTarget,

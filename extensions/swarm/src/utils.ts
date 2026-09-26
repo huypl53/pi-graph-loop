@@ -10,8 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import type { SwarmAgent, TaskNode } from "./types.ts";
-import { trace } from "./state.ts";
+import type { SwarmAgent, TaskNode } from "./types/index.ts";
 
 export function now() {
 	return new Date().toISOString();

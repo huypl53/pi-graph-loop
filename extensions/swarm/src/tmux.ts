@@ -1,29 +1,22 @@
-// === swarm/tmux.ts — auto-extracted from index.ts (verbatim bodies) ===
-import {
-	defineTool,
-	CONFIG_DIR_NAME,
-	truncateHead,
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	formatSize,
-	type ExtensionAPI,
-} from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
-import { join, dirname, relative, sep } from "node:path";
-import type { Paths } from "./types.ts";
-import { safeId, sleep } from "./utils.ts";
-import { logSwarmError } from "./errorlog.ts";
+// === swarm/tmux.ts — Backward-compatible facade delegating to TerminalDriver ===
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { Paths } from "./types/index.ts";
+import { safeId } from "./utils.ts";
+import { tmuxDriver, getTerminalDriver, type TerminalPaneInfo, isPiLikeCommand, isHereToken, HERE_TOKENS } from "./terminal/index.ts";
 
-export async function tmux(pi: ExtensionAPI, args: string[], timeout = 10_000) {
-	const result = await pi.exec("tmux", args, { timeout });
-	if (result.code !== 0) throw new Error(`tmux ${args.join(" ")} failed (${result.code}): ${result.stderr || result.stdout}`);
-	return result.stdout;
+export { isPiLikeCommand, isHereToken, HERE_TOKENS };
+export type TmuxPaneInfo = TerminalPaneInfo;
+
+export async function tmux(pi: ExtensionAPI, args: string[], timeout = 10_000): Promise<string> {
+	return tmuxDriver.tmux(pi, args, timeout);
 }
 
-export async function capturePane(pi: ExtensionAPI, p: Paths, agentId: string, target: string, label: string) {
+export async function capturePane(pi: ExtensionAPI, p: Paths, agentId: string, target: string, label: string): Promise<string> {
 	const file = join(p.tmuxTraces, `${safeId(agentId)}-${safeId(label)}.txt`);
 	try {
-		const out = await tmux(pi, ["capture-pane", "-t", target, "-p", "-S", "-300"], 10_000);
+		const out = await getTerminalDriver().capturePane(pi, target, 300);
 		await writeFile(file, out, "utf8");
 		return file;
 	} catch (err: any) {
@@ -32,105 +25,33 @@ export async function capturePane(pi: ExtensionAPI, p: Paths, agentId: string, t
 	}
 }
 
-// Debounce contract for sending text into a pi TUI pane (user-reported drop class):
-// send-keys -l types the text into the pane's input buffer, but a pi instance that is still
-// booting/rendering (spawn kickoff ~2.5s after new-window; identity reload right after a pane
-// re-attach) can miss fast successive key batches — the literal text lands but the Enter fires
-// before the TUI registered the full input, so the prompt is never actually submitted. Mitigate
-// exactly like the tmux-pane-operator skill's tmux_run_capture.sh: wait before Enter, and for
-// long payloads paste in chunks with a small gap so the TUI input can settle between writes.
-const PANE_SEND_CHUNK_CHARS = 2_000;
-const PANE_SEND_CHUNK_GAP_MS = 120;
-const PANE_SEND_ENTER_DEBOUNCE_MS = 450;
-
-export async function sendToPane(pi: ExtensionAPI, target: string, text: string) {
-	if (text.length <= PANE_SEND_CHUNK_CHARS) {
-		await tmux(pi, ["send-keys", "-t", target, "-l", "--", text], 10_000);
-	} else {
-		// Chunk large injections (long kickoffs with mailbox + identity prompts) with a gap between
-		// chunks; send-keys -l has practical size limits and TUIs need time to ingest each batch.
-		for (let i = 0; i < text.length; i += PANE_SEND_CHUNK_CHARS) {
-			if (i > 0) await sleep(PANE_SEND_CHUNK_GAP_MS);
-			await tmux(pi, ["send-keys", "-t", target, "-l", "--", text.slice(i, i + PANE_SEND_CHUNK_CHARS)], 10_000);
-		}
-	}
-	await sleep(PANE_SEND_ENTER_DEBOUNCE_MS);
-	await tmux(pi, ["send-keys", "-t", target, "Enter"], 10_000);
+export async function sendToPane(pi: ExtensionAPI, target: string, text: string): Promise<void> {
+	return getTerminalDriver().sendText(pi, target, text);
 }
 
 export function isTmuxRunning(pi: ExtensionAPI, target: string): Promise<boolean> {
-	// `display-message -p -t target` falls back to the session's active window/pane if the window
-	// has been killed but the session is alive, causing false "tmuxAlive: true" reports for stopped agents.
-	// `list-panes -t target` fails strictly if the target window/pane does not exist.
-	return tmux(pi, ["list-panes", "-t", target], 3_000)
-		.then(() => true)
-		.catch(() => false);
-}
-
-// Issue D (pane-alive-but-not-pi): `pane_current_command` values that mean "a pi process is (probably)
-// running in this pane". pi runs under node; a pane still on the shell prompt (zsh/bash/fish...) is NOT
-// pi. Unknown-but-plausible values default to pi-like (fail-open) so this guard never blocks delivery
-// to an exotic-but-valid setup; only clearly-shell panes are rejected.
-// UAT finding (task-swarm-uat-v2): a denylist cannot enumerate every non-pi foreground command (live
-// repro: a pane running `sleep` was marked delivered). Flip the default to ALLOWLIST: pi runs as
-// `node`, `pi` (symlink / packaged binary), or `bun` (and empty, treated as unresolved/fail-open).
-// Everything else — shells, sleep, cat, unknown binaries — is refused and stays retryable.
-const PI_COMMANDS = new Set(["node", "pi", "bun"]);
-
-export function isPiLikeCommand(command: string): boolean {
-	const c = (command || "").trim().replace(/^-/, ""); // login shells appear as "-zsh"
-	return !c || PI_COMMANDS.has(c);
+	return getTerminalDriver().isTargetAlive(pi, target);
 }
 
 export async function isPanePiLike(pi: ExtensionAPI, target: string): Promise<{ piLike: boolean; command: string }> {
-	try {
-		const out = await tmux(pi, ["display-message", "-p", "-t", target, "#{pane_current_command}"], 3_000);
-		const command = out.trim();
-		if (command && !PI_COMMANDS.has(command)) return { piLike: false, command };
-		return { piLike: true, command };
-	} catch (err) {
-		// Unresolvable target: isTmuxRunning already gates liveness; fail-open here — but the
-		// failure (dead pane mid-check) is worth a durable line at the default cwd.
-		await logSwarmError(process.cwd(), "tmux", "is_pane_pi_like.failed", err, { target });
-		return { piLike: true, command: "" };
-	}
+	const res = await getTerminalDriver().inspectProcess(pi, target);
+	return { piLike: res.piLike, command: res.command };
 }
 
-// Pure predicate (unit-testable without tmux): does this pane_current_command value look like pi?
-
-// Tokens that mean "adopt the pane this command/tool is running in". Lets an operator register the
-// CURRENT pi pane without first discovering its tmux target: `/swarm register here <id> [role]`.
-export const HERE_TOKENS = new Set(["here", "self", "current", "."]);
-
-export function isHereToken(raw: string): boolean {
-	return HERE_TOKENS.has((raw || "").trim().toLowerCase());
-}
-
-// Detect the tmux pane the current process lives in. Returns null when not inside tmux (no $TMUX) or
-// when tmux can't describe the active pane. Used to resolve the "here" register token and to flag the
-// current pane in `/swarm panes`.
 export async function currentPaneTarget(
 	pi: ExtensionAPI,
 ): Promise<{ target: string; paneId: string; session: string; window: string; pane: string } | null> {
-	if (!process.env.TMUX) return null;
-	try {
-		const out = await tmux(pi, ["display-message", "-p", "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}"], 3_000);
-		const parts = out.trim().split("\t");
-		const session = parts[0];
-		const window = parts[1];
-		const pane = parts[2];
-		const paneId = parts[3];
-		if (!session || !paneId) return null;
-		return { target: `${session}:${window}.${pane}`, paneId, session, window, pane };
-	} catch (err) {
-		// Not under tmux / detached: expected in headless lanes — log only as durable breadcrumb.
-		await logSwarmError(process.cwd(), "tmux", "current_pane_target.failed", err);
-		return null;
-	}
+	const cur = await getTerminalDriver().detectCurrentPane(pi);
+	if (!cur || !cur.paneId || !cur.session || !cur.window || !cur.pane) return null;
+	return {
+		target: cur.target,
+		paneId: cur.paneId,
+		session: cur.session,
+		window: cur.window,
+		pane: cur.pane,
+	};
 }
 
-// Resolve a register target: magic "here" tokens expand to the current pane's target; anything else is
-// returned trimmed as-is. Throws a clear, actionable error when "here" is used outside tmux.
 export async function resolveRegisterTarget(pi: ExtensionAPI, raw: string): Promise<string> {
 	const trimmed = (raw || "").trim();
 	if (isHereToken(trimmed)) {
@@ -144,48 +65,6 @@ export async function resolveRegisterTarget(pi: ExtensionAPI, raw: string): Prom
 	return trimmed;
 }
 
-export interface TmuxPaneInfo {
-	target: string;
-	paneId: string;
-	session: string;
-	window: string;
-	pane: string;
-	command: string;
-	title: string;
-	active: boolean; // active pane within its window
-	current: boolean; // this pane (matches currentPaneTarget)
-}
-
-// List every tmux pane across all sessions with a copy-pasteable target. Powers `/swarm panes` so the
-// operator can discover the exact target for `/swarm register <target> ...`. Returns [] if tmux is
-// unavailable or there are no sessions/panes.
 export async function listAllPanes(pi: ExtensionAPI): Promise<TmuxPaneInfo[]> {
-	const fmt = "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_title}\t#{pane_active}";
-	let out: string;
-	try {
-		out = await tmux(pi, ["list-panes", "-a", "-F", fmt], 5_000);
-	} catch (err) {
-		// tmux unavailable / no server: expected in headless environments — durable breadcrumb.
-		await logSwarmError(process.cwd(), "tmux", "list_all_panes.failed", err);
-		return [];
-	}
-	const cur = await currentPaneTarget(pi);
-	const rows: TmuxPaneInfo[] = [];
-	for (const line of out
-		.split("\n")
-		.map((l) => l.trim())
-		.filter(Boolean)) {
-		const parts = line.split("\t");
-		const session = parts[0];
-		const window = parts[1];
-		const pane = parts[2];
-		const paneId = parts[3];
-		const command = parts[4] || "";
-		const title = parts[5] || "";
-		const active = parts[6] === "1";
-		if (!session || !paneId) continue;
-		const target = `${session}:${window}.${pane}`;
-		rows.push({ target, paneId, session, window, pane, command, title, active, current: Boolean(cur && cur.paneId === paneId) });
-	}
-	return rows;
+	return tmuxDriver.listPanes(pi);
 }

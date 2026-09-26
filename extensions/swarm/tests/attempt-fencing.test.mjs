@@ -103,13 +103,31 @@ const readNode = (taskId, nodeId) => readTask(taskId).nodes[nodeId];
 // Register two worker agents so swarm_assign_task can target them by explicit agentId.
 // Simplest reliable path: write minimal agent identity cards + state via register tool.
 async function ensureWorker(agentId, roleKind) {
-	await awaitAs(agentId, "swarm_register_agent", {
-		tmuxTarget: "unknown",
-		role: `test ${roleKind}`,
-		roleKind,
-		id: agentId,
-		inject: false,
-	});
+	if (tools.swarm_register_agent) {
+		await awaitAs(agentId, "swarm_register_agent", {
+			tmuxTarget: "unknown",
+			role: `test ${roleKind}`,
+			roleKind,
+			id: agentId,
+			inject: false,
+		});
+	} else {
+		const { registerAgent } = await import(join(here, "..", "src/agents.ts"));
+		const { paths, ensureDirs, withLock, readState, writeState } = await import(join(here, "..", "src/state.ts"));
+		const p = paths(scratch);
+		await ensureDirs(p);
+		await withLock(p, async () => {
+			const st = await readState(p, scratch);
+			await registerAgent(pi, scratch, p, st, {
+				tmuxTarget: "unknown",
+				role: `test ${roleKind}`,
+				roleKind,
+				id: agentId,
+				inject: false,
+			});
+			await writeState(p, st);
+		});
+	}
 }
 
 // ---- setup: create a task with a linear plan -> implement graph with a rework edge implement<-plan

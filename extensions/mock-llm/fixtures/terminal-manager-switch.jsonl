@@ -1,0 +1,24 @@
+# terminal-manager-switch: pluggable terminal manager end-to-end (Phase 8 of
+# plans/260926-0218-swarm-refactor-terminal-manager).
+#
+# Multi-agent spawning + terminal injection through the TerminalDriver seam
+# (src/terminal/index.ts getTerminalDriver / TmuxDriver / HerdrDriver / MockTerminalDriver).
+#
+# Pattern 2 (seeded world + single-actor root script) per the mock-llm-scenarios skill:
+# the engine (spawn preflight, driver-backed liveness probe, sendKeys injection guard,
+# capture-pane driver routing) runs for real on the seeded state; the scripted root turns
+# only observe + assert. The lane harness sets PI_SWARM_TERMINAL_MANAGER + TMUX/HERDR env
+# so the driver resolution is the thing under test, and asserts:
+#   T1  getTerminalDriver() resolves from PI_SWARM_TERMINAL_MANAGER (tmux | herdr | default tmux)
+#   T2  spawn: agent record carries driver-appropriate tmuxTarget + tmuxAlive probe result
+#   T3  injection: kickoff/identity prompt reaches the pane via driver sendText/sendKeys
+#       (root-pane reject guard intact: targets == root's tmuxTarget are refused)
+#   T4  capture: capturePane routes through the active driver and persists to traces/tmux/
+#   T5  settle: worker acks + task update flow through mailbox delivery as usual
+#
+# Turn 1 — root inspects driver state + spawns the scripted worker.
+# Turn 2 — root injects keys to the worker pane (terminal injection) and verifies capture.
+# Turn 3 — root settles after confirming worker ack + mailbox delivery.
+{"name":"tm-switch inspect driver + spawn worker","events":[{"type":"text","delayMs":15,"text":"Checking the active terminal manager and spawning a scripted worker through the TerminalDriver seam.","chunks":["Checking the active terminal manager ","and spawning a scripted worker ","through the TerminalDriver seam."]},{"type":"toolcall","delayMs":10,"name":"swarm_list_agents","id":"la-0","arguments":{}},{"type":"toolcall","delayMs":15,"name":"swarm_spawn_agent","id":"sp-1","arguments":{"id":"tm-switch-worker","role":"worker exercising the pluggable terminal manager; observe and settle"}}]}
+{"name":"tm-switch inject keys + capture pane","events":[{"type":"text","delayMs":15,"text":"Worker pane is up. Sending an identity-reload style injection into the pane and capturing it through the driver.","chunks":["Worker pane is up. ","Sending an injection into the pane ","and capturing it through the driver."]},{"type":"toolcall","delayMs":15,"name":"swarm_send_keys","id":"sk-1","arguments":{"agentId":"tm-switch-worker","keys":"C-c","literal":false,"enter":false}},{"type":"toolcall","delayMs":15,"name":"swarm_capture_agent_pane","id":"cap-1","arguments":{"agentId":"tm-switch-worker"}}]}
+{"name":"tm-switch settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Terminal-manager lane complete: spawn, injection, and capture all routed through the resolved TerminalDriver.","chunks":["Terminal-manager lane complete: ","spawn, injection, and capture ","all routed through the resolved TerminalDriver."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

@@ -25,7 +25,7 @@ Implementation modules:
 - `extensions/swarm/src/mailbox.ts` — mailbox append/read helpers
 - `extensions/swarm/src/agents.ts` — lifecycle operations
 - `extensions/swarm/src/reconcile.ts` — repair sweeps and PM notifications
-- `extensions/swarm/src/hooks.ts` — session hooks and mailbox pump
+- `extensions/swarm/src/hooks.ts` — facade: session hooks + root pump lifecycle (canonical logic in `src/hooks/`)
 - `extensions/swarm/src/command.ts` — `/swarm` command surface
 - `extensions/swarm/src/tools/` — tool registrations grouped by domain
 
@@ -183,10 +183,10 @@ Required examples in this issue family:
 
 | Change | Primary module(s) |
 | --- | --- |
-| spawn/restart/register/pause/role changes | `src/agents.ts`, `src/identity.ts`, `src/hooks.ts` |
+| spawn/restart/register/pause/role changes | `src/agents.ts`, `src/identity.ts`, `src/hooks/session.ts` (registration), `src/hooks/settled.ts` (settled-path spawns) |
 | model pool, rotation, preflight, config discoverability | `src/pool.ts` |
 | task cancellation / supersession / late-update fencing | `src/tools/tasks.ts`, `src/taskgraph.ts`, `src/mailbox.ts`, `src/types.ts` |
-| lifecycle-notification fencing (stall + closure predicates) | `src/taskgraph.ts` (predicates), `src/hooks.ts`, `src/reconcile.ts`, `src/command.ts`, `src/tools/tasks.ts` (emitter sites) |
+| lifecycle-notification fencing (stall + closure predicates) | `src/taskgraph.ts` (predicates), `src/hooks/turns.ts` (turn_end resolve), `src/hooks/settled.ts` (settled emit), `src/reconcile.ts`, `src/command.ts`, `src/tools/tasks.ts` (emitter sites) |
 | mailbox append/read/inject/ack | `src/mailbox.ts`, `src/delivery.ts`, `src/reconcile.ts` |
 | graph transitions/closure/validation | `src/taskgraph.ts` |
 | slash command UX | `src/command.ts` |

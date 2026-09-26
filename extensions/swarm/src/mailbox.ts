@@ -12,7 +12,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { MessageRecord, MessageResponseStatus, MessageStatus, Paths, SwarmMessage, SwarmState, TaskState } from "./types.ts";
-import type { OrphanClearReason } from "./agents.ts";
+import type { OrphanClearReason } from "./types/agents.ts";
 import {
 	PI_SWARM_MINIMAL_PROTOCOL,
 	SEND_SETTLE_MS,
@@ -27,7 +27,6 @@ import { capturePane, isPanePiLike, sendToPane, tmux } from "./tmux.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { ensureRoot } from "./identity.ts";
 import { now, safeId, sleep } from "./utils.ts";
-import { pumpRootMailbox, reconcile } from "./reconcile.ts";
 
 export function upsertMessageRecord(state: SwarmState, msg: SwarmMessage, status: MessageStatus, patch: Partial<MessageRecord> = {}) {
 	const ts = now();
@@ -679,13 +678,12 @@ export async function deliverMessageLocked(
 	// the watch (we still want to warn if the spawn was orphaned). This covers BOTH
 	// swarm_send_message and swarm_assign_task (which calls deliverMessageLocked internally with
 	// the assignment message), so no edit to tools/tasks.ts is required. clearOrphanWatch is
-	// best-effort and idempotent. Dynamic import avoids a circular top-level import with
-	// agents.ts (agents.ts -> mailbox.ts for responseMissingRecords; mailbox.ts -> agents.ts for
-	// clearOrphanWatch only inside this code path). The function is small and Node ESM caches the
-	// resolution, so the per-call overhead is negligible.
+	// best-effort and idempotent. clearOrphanWatch lives in orphan-watch.ts (Phase 7 cycle-break);
+	// the dynamic import keeps delivery's hot path free of the module-load edge and Node ESM caches
+	// the resolution, so the per-call overhead is negligible.
 	if (delivery?.delivered) {
 		try {
-			const { clearOrphanWatch } = await import("./agents.ts");
+			const { clearOrphanWatch } = await import("./orphan-watch.ts");
 			await clearOrphanWatch(p, st, m.to, params.clearReason ?? "swarm_send_message");
 		} catch (err) {
 			// Best-effort: never fail delivery on watchdog bookkeeping — but a recurring failure would

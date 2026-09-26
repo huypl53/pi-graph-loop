@@ -29,11 +29,29 @@ src/agents.ts        spawn/reuse/reload
 src/nudges/goal-epoch.ts       swarm-level idle epoch + goal-floor emission
 src/nudges/graph-advance.ts    graph-advance / stall / artifact / heartbeat GC nudges
 src/nudges/status-predicates.ts pure predicates over TaskState["status"]
-src/surface.ts                 root-facing message surface machinery
+src/surface.ts                 facade — root-facing message surface machinery (canonical logic in src/surface/)
+  src/surface/session.ts         orchSession per-pid surface session gate
+  src/surface/warnings.ts        runtimeTaskWarnings extractor
+  src/surface/actionable.ts      isActionableRootMessage + task/node ref parsing
+  src/surface/staleness.ts       staleSurfaceReason + suppression-trace dedup
+  src/surface/ranking.ts         candidate sort keys + group keys
+  src/surface/pump.ts            pumpRootMailbox (R10-1 pump; R30 batch delivery)
+  src/surface/pump-phases.ts     in-lock maintenance phases (GC, stale-open, stall nets)
+  src/surface/pump-decision.ts   migration back-fill + dedupe gate + busy defer + census
+  src/surface/coalesce.ts        R13 bypass + groupKey coalescing + receipt write-back
+  src/surface/pump-shared.ts     fingerprintMessage helper
 src/tasks-index.ts             PM-facing rollup + task indexer
 src/reconcile-core.ts          reconcile runner (entry points)
 src/reconcile.ts               **barrel re-export** — backward-compat surface for hooks/command/tools/tests
-src/hooks.ts         event hooks + root mailbox pump
+src/hooks.ts         facade — event hooks + root pump lifecycle (canonical logic in src/hooks/)
+  src/hooks/streaks.ts           rootEditStreak + swapChain + engineRetryIncidents (shared state)
+  src/hooks/pump-manager.ts      stopRootPump / armRootPumpWatchdog / surfaceAgentPending
+  src/hooks/pool-swap.ts         turn_end model-pool auto-swap (engine-retry gate + chain cap)
+  src/hooks/turns.ts             SWARM_RESOLVE_TOOLS + turn_start / turn_end goal-resolve
+  src/hooks/session.ts           session_start / before_agent_start / agent_start
+  src/hooks/settled.ts           agent_settled (transient suppression, response-missing, ack-debt)
+  src/hooks/tools.ts             tool_execution_start/end + tool_result delegation guard
+  src/hooks/shutdown-input.ts    session_shutdown + input (steering intercept / Issue 86 interrupt)
 src/command.ts       /swarm slash command
 src/tools/*.ts       the tool registrations, grouped by domain
 src/pool.ts          model slot picker + quota bench

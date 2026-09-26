@@ -1,6 +1,6 @@
 // === swarm/constants.ts — auto-extracted from index.ts (verbatim bodies) ===
 import { join, dirname, relative, sep } from "node:path";
-import type { TaskNodeStatus } from "./types.ts";
+import type { TaskNodeStatus } from "./types/index.ts";
 
 export const EXT = "swarm";
 

@@ -99,7 +99,9 @@ export async function logSwarmError(
 					console.error(
 						`[swarm:errorlog] budget exhausted (${maxEntries()} entries this process); further internal errors are dropped`,
 					);
-				} catch {}
+				} catch {
+					expected("console_breadcrumb_never_throws"); // self-silent by contract: diagnostics-of-diagnostics
+				}
 			}
 			return;
 		}
@@ -124,7 +126,9 @@ export async function logSwarmError(
 		// The ONE sanctioned silent swallow: the diagnostics channel itself failed.
 		try {
 			console.error(`[swarm:errorlog] failed to persist internal error (source=${source} op=${op})`);
-		} catch {}
+		} catch {
+			expected("console_breadcrumb_never_throws"); // self-silent by contract: nothing left to route to
+		}
 	}
 }
 

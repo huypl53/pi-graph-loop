@@ -63,7 +63,7 @@ import { logSwarmError, traceLogged } from "../errorlog.ts";
 import { readPoolHealth, slotKey, withPoolLock, writePoolHealth } from "../pool.ts";
 import { isStallNudgeEligibleTaskStatus } from "./status-predicates.ts";
 import { updateIdleEpochLocked } from "./goal-epoch.ts";
-import { traceStaleSuppressedOnce } from "../surface.ts";
+import { traceStaleSuppressedOnce } from "../surface/staleness.ts";
 
 export async function sendGraphAdvanceNudgeLocked(
 	pi: ExtensionAPI,

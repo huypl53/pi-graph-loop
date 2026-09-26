@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, real
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import type { Paths, SwarmAgent, SwarmState } from "./types.ts";
+import type { Paths, SwarmAgent, SwarmState } from "./types/index.ts";
 import {
 	ERR_ROOT_AUTHORITY_REQUIRED,
 	ERR_ROOT_LEADER_DENIED,
@@ -15,6 +15,7 @@ import { currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { identityPath, mailboxPath, paths, trace } from "./state.ts";
 import { now, safeId } from "./utils.ts";
 import { tmux } from "./tmux.ts";
+export { isRootHostPane } from "./terminal/index.ts";
 
 // Centralized authority check used by every server-side mutation that depends on identity. Phase 1
 // deliberately keeps this strict (root-only); expanded admin roles live in a later roadmap
@@ -198,9 +199,7 @@ export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 		`- Report completion, blockers, and role conflicts to the coordinating agent named in your task or to the root.\n\n` +
 		`## Peer Discovery\n\n` +
 		`- Use \`swarm_list_agents\` to verify peer IDs and status.\n` +
-		(PI_SWARM_MINIMAL_PROTOCOL === 1
-			? ``
-			: `- Use \`swarm_agent_identity\` to inspect your own or a peer's durable role card.\n`) +
+		(PI_SWARM_MINIMAL_PROTOCOL === 1 ? `` : `- Use \`swarm_agent_identity\` to inspect your own or a peer's durable role card.\n`) +
 		`- If a target peer does not exist, report the missing peer instead of repeatedly sending messages.\n\n` +
 		`## Review Expectations\n\n` +
 		`- Be explicit about findings, risks, assumptions, and evidence paths.\n` +

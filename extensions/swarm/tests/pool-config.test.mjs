@@ -37,6 +37,11 @@ const ok = (name, cond) => {
 	}
 };
 
+process.env.TMUX ||= "/tmp/tmux-test,1234,0";
+process.env.OPENAI_API_KEY ||= "mock-key";
+process.env.ZAI_CODING_CN_API_KEY ||= "mock-key";
+process.env.ANTHROPIC_API_KEY ||= "mock-key";
+
 const dir = await mkdtemp(join(tmpdir(), "pool-config-test-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
 const settingsFile = join(dir, ".pi", "settings.json");
