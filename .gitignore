@@ -59,3 +59,5 @@ engineer
 
 # nested swarm test-state traces (extension scratch dirs)
 extensions/*/.pi/swarm/
+# nested extension-run artifacts (test transcripts + traces produced by headless lanes)
+extensions/*/.pi/

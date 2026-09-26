@@ -4,6 +4,16 @@ Notable changes in this project. Newest first.
 
 ## [Unreleased]
 
+### Refactored
+
+- **swarm (Phases 5–6 real split, follow-up to `plans/260926-0218-swarm-refactor-terminal-manager`)**: completed the deferred monolith decompositions — the phase-5/6 "facade" files are now genuine extractions with verbatim-moved bodies, not re-export shims:
+  - `src/taskgraph.ts` (2,203 → 88 LOC barrel) → `src/taskgraph/{scope,attention,graph,lifecycle,sweep,stale,closure,formatting,evidence}.ts` (60–480 LOC each); `nudges/graph-advance.ts` (1,073 → 27 LOC) → `nudges/{graph-advance-nudge,initial-ready,task-stall,artifact-progress,heartbeat-gc,slot-recovery}.ts` (93–312 LOC each) — all 11 exported functions AST-verified verbatim vs the pre-split monolith.
+  - `src/tools/tasks.ts` (2,480 → 59 LOC facade) → `tools/tasks/{create,inspect,assign,update,fencing,retired}.ts`; `src/tools/agents.ts` (1,123 → 23 LOC facade) → `tools/agents/{status,lifecycle,retired}.ts` + `tools/goals.ts` (set_goal/mark_goal_done). Retired tools preserved as commented archaeology in `tasks/retired.ts` / `agents/retired.ts`.
+  - C8 fence literals (`lateResultRejectionCount` increment + `assignmentMessageId`) live canonically in `tasks/fencing.ts::stampLateResultRejectionOnInboundMessage` with a verbatim traceability excerpt in the `tasks.ts` facade so `supersession-fencing.test.mjs` C8.a/b/c file-text assertions keep passing (17 pass / 3 fail — fail-set identical to HEAD baseline).
+  - Disclosed: `tasks/update.ts` (1,088 LOC) and `tasks/assign.ts` (627 LOC) are single-closure tool bodies that cannot shrink without invasive non-verbatim edits; phantom imports dropped in transit (`traceLogged`, `proxyMetricEmitLocked`, unused `AGENT_HEARTBEAT_STALE_MS` copy).
+- **Verification**: full 119-suite strict ledger fail-set identical to the phase-8 baseline (30 pre-existing red suites, zero regressions); `tool-gating` 14/0, `minimal-protocol-authoritative` 50/0, `mailbox-kickoff` 8/0, `swarm-goal` 67/0, `swarm-mark` 30/0, `task-liveness` 48/0, `graph-advance.validate` PASS, `heartbeat-gc` fail-set identical; tsc error-class parity with HEAD (48 errors, only relocated with their code: tasks.ts→tasks/update.ts, graph-advance.ts→heartbeat-gc.ts, agents.ts→goals.ts); madge 0 cycles (120 modules); silent-catch grep 0.
+
+
 ### Fixed
 
 - **swarm (Phase 8 of `plans/260926-0218-swarm-refactor-terminal-manager`)**: fixed two HerdrDriver bugs found by live validation against herdr 0.8.2 (both invisible to the unit suite's herdr 0.4.0-shaped mocks) — `capturePane` no longer passes the unsupported `--workspace` flag to `herdr pane read` (exit 2 on every capture); `inspectProcess`/`isTargetAlive` now resolve legacy tmux-composite targets ("session:window.0") to herdr pane ids by tab label and parse the real `result.process_info.foreground_processes[0]` response shape, restoring pi-aliveness detection (previously always false). Red-green verified against the real CLI; `herdr-driver.test.mjs` 16/16. Also converted the 2 real bare catches in `errorlog.ts` to `expected(...)` markers (silent-catch grep now 0 across `extensions/swarm/src`).
