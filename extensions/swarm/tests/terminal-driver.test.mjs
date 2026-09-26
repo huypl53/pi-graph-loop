@@ -80,6 +80,9 @@ test("TmuxDriver isSameTarget matches identical and normalized targets", () => {
 });
 
 console.log("\n=== Host Pane Detection Tests ===");
+// H2: driver resolution consults swarm.yml terminalManager (repo yml says herdr) — pin
+// tmux for these tmux-mock tests so they exercise the TmuxDriver path deterministically.
+process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
 await asyncTest("isRootHostPane detects matching host pane", async () => {
 	const fakePi = {
 		exec: async (cmd, args) => {

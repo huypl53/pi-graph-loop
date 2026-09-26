@@ -267,12 +267,17 @@ await asyncTest("spawnAgent creates tab in dedicated agents workspace (G4 herdr-
 	assertOk(lastArg.startsWith("--") || lastArg.includes("="), `tab create must be options-only; last arg was: ${lastArg}`);
 
 	// Step 2: `pane run` launches the command in the root pane parsed from step 1.
+	// (H3 2026-09-26: pane run TYPES words into the shell — quoting inside a single word is
+	// destroyed, so no `sh -c` wrapper. The command's own words are passed directly; typed as
+	// one line, env-prefix assignments scope to the pi invocation.)
 	const paneRunCall = mockPi.calls.find((c) => c.args[0] === "pane" && c.args[1] === "run");
 	assertOk(paneRunCall, "paneRunCall must exist");
 	equal(paneRunCall.args[2], "w1:p3", "pane run must target the root pane from tab create");
-	assertOk(paneRunCall.args.includes("sh"), "pane run wraps the command in sh -c");
-	assertOk(paneRunCall.args.includes("-c"), "pane run uses sh -c");
-	assertOk(paneRunCall.args.includes("pi --agent worker"), "pane run carries the launch command");
+	const cmdWords = paneRunCall.args.slice(3);
+	assertOk(cmdWords.length >= 1 && cmdWords[0] === "pi", "pane run words are the command itself (first word pi)");
+	assertOk(paneRunCall.args.includes("--agent"), "pane run carries command args");
+	assertOk(!paneRunCall.args.includes("sh"), "pane run must NOT wrap in sh -c (typing destroys quoting)");
+	assertOk(!paneRunCall.args.includes("-c"), "pane run must NOT use -c");
 
 	// G4: driver must have called workspace list + workspace create (ensureAgentsWorkspace).
 	const wsListCall = mockPi.calls.find((c) => c.args[0] === "workspace" && c.args[1] === "list");
@@ -384,9 +389,23 @@ console.log("\n=== Terminal Driver Resolution & Preflight Tests ===");
 
 test("getTerminalDriver defaults safely to tmuxDriver", () => {
 	delete process.env.PI_SWARM_TERMINAL_MANAGER;
-	const driver = getTerminalDriver();
-	equal(driver.id, "tmux");
-	equal(driver, tmuxDriver);
+	// H2: config (swarm.yml terminalManager) is consulted when env is unset. Run from a
+	// config-neutral cwd so the default branch is exercised regardless of the repo's own yml.
+	const prevCwd = process.cwd();
+	process.chdir("/tmp");
+	try {
+		const driver = getTerminalDriver();
+		equal(driver.id, "tmux");
+		equal(driver, tmuxDriver);
+	} finally {
+		process.chdir(prevCwd);
+	}
+});
+
+test("getTerminalDriver resolves Herdr from swarm.yml terminalManager (H2)", () => {
+	delete process.env.PI_SWARM_TERMINAL_MANAGER;
+	const driver = getTerminalDriver(); // repo cwd: .pi/swarm.yml declares terminalManager: herdr
+	equal(driver.id, "herdr");
 });
 
 test("getTerminalDriver resolves Herdr from environment variable", () => {
