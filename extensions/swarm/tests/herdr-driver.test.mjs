@@ -195,7 +195,7 @@ await asyncTest("isAvailable checks herdr binary version", async () => {
 	equal(mockPi.calls[0].args[0], "--version");
 });
 
-await asyncTest("spawnAgent creates tab with workspace confinement, isolated env, and bound exec command", async () => {
+await asyncTest("spawnAgent creates tab with workspace confinement, isolated env (herdr 0.8.2 two-step contract)", async () => {
 	const mockPi = createMockPi();
 	const driver = new HerdrDriver("w1");
 	const res = await driver.spawnAgent(mockPi, {
@@ -209,6 +209,7 @@ await asyncTest("spawnAgent creates tab with workspace confinement, isolated env
 	equal(res.window, "w1:t2");
 	equal(res.target, "w1:p3");
 
+	// Step 1: `tab create` is options-only — no positional command on 0.8.2.
 	const spawnCall = mockPi.calls.find((c) => c.args[0] === "tab" && c.args[1] === "create");
 	assertOk(spawnCall, "spawnCall must exist");
 	assertOk(spawnCall.args.includes("--workspace"));
@@ -216,7 +217,17 @@ await asyncTest("spawnAgent creates tab with workspace confinement, isolated env
 	assertOk(spawnCall.args.includes("--env"));
 	assertOk(spawnCall.args.includes("PI_SWARM_AGENT_ID=worker-test"));
 	assertOk(spawnCall.args.includes("PI_SWARM_IS_ROOT=0"));
-	assertOk(spawnCall.args.includes("exec pi --agent worker"), "command must be bound with exec");
+	// 0.8.2 contract: tab create MUST NOT carry the launch command as a positional.
+	const lastArg = spawnCall.args[spawnCall.args.length - 1];
+	assertOk(lastArg.startsWith("--") || lastArg.includes("="), `tab create must be options-only; last arg was: ${lastArg}`);
+
+	// Step 2: `pane run` launches the command in the root pane parsed from step 1.
+	const paneRunCall = mockPi.calls.find((c) => c.args[0] === "pane" && c.args[1] === "run");
+	assertOk(paneRunCall, "paneRunCall must exist");
+	equal(paneRunCall.args[2], "w1:p3", "pane run must target the root pane from tab create");
+	assertOk(paneRunCall.args.includes("sh"), "pane run wraps the command in sh -c");
+	assertOk(paneRunCall.args.includes("-c"), "pane run uses sh -c");
+	assertOk(paneRunCall.args.includes("pi --agent worker"), "pane run carries the launch command");
 });
 
 await asyncTest("listPanes queries panes scoped to workspace", async () => {

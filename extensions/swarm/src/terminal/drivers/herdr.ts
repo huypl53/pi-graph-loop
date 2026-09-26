@@ -170,29 +170,41 @@ export class HerdrDriver implements TerminalDriver {
 	}
 
 	async spawnAgent(pi: ExtensionAPI, opts: SpawnAgentOptions): Promise<{ session: string; window: string; target: string }> {
-		const boundCommand = opts.command.trim().startsWith("exec ") ? opts.command.trim() : `exec ${opts.command.trim()}`;
+		// herdr 0.8.2 contract: `tab create` is options-only (no positional command).
+		// Launch path is two-step: (1) `tab create [--workspace] [--label] [--cwd] --env …`
+		// returns the new tab + root_pane ids; (2) `pane run <PANE_ID> <COMMAND>...`
+		// runs the launch command in that root pane. The 0.4.x contract (positional
+		// command on `tab create`) is rejected by 0.8.2 with `unknown option: <cmd>`.
 		const ws = this.getWorkspaceId() || opts.session;
-		const args = ["tab", "create"];
-		if (ws) args.push("--workspace", ws);
-		if (opts.window) args.push("--label", opts.window);
-		if (opts.cwd) args.push("--cwd", opts.cwd);
-		args.push("--env", `PI_SWARM_AGENT_ID=${opts.window}`, "--env", "PI_SWARM_IS_ROOT=0", boundCommand);
+		const createArgs = ["tab", "create"];
+		if (ws) createArgs.push("--workspace", ws);
+		if (opts.window) createArgs.push("--label", opts.window);
+		if (opts.cwd) createArgs.push("--cwd", opts.cwd);
+		createArgs.push("--env", `PI_SWARM_AGENT_ID=${opts.window}`, "--env", "PI_SWARM_IS_ROOT=0");
 		let res: any;
 		try {
-			res = await this.herdrJson(pi, args, 10_000);
+			res = await this.herdrJson(pi, createArgs, 10_000);
 		} catch (err: any) {
-			await logSwarmError(process.cwd(), "herdr", "spawn_agent.failed", err, { opts, args });
+			await logSwarmError(process.cwd(), "herdr", "spawn_agent.tab_create_failed", err, { opts, createArgs });
 			throw err;
 		}
 		const tabId = res?.result?.tab?.tab_id || res?.tab?.tab_id || res?.tab_id || res?.tab || opts.window;
 		const paneId = res?.result?.root_pane?.pane_id || res?.root_pane?.pane_id || res?.pane_id || res?.pane || tabId;
-		const target = paneId;
 		const session = res?.result?.tab?.workspace_id || ws || opts.session;
-		const window = tabId;
 		if (session && !this.workspaceId) {
 			this.workspaceId = session;
 		}
-		return { session, window, target };
+		// Step 2: launch the command in the root pane via `pane run`. The command is a
+		// shell line (env-prefix assignments + quoted pi invocation), so we wrap it in
+		// `sh -c <command> -- swarm-agent` — `pane run` takes argv, not a shell string.
+		const runArgs = ["pane", "run", paneId, "sh", "-c", opts.command.trim(), "--", "swarm-agent"];
+		try {
+			await this.herdr(pi, runArgs, 30_000);
+		} catch (err: any) {
+			await logSwarmError(process.cwd(), "herdr", "spawn_agent.pane_run_failed", err, { opts, runArgs });
+			throw err;
+		}
+		return { session, window: tabId, target: paneId };
 	}
 
 	async killAgent(pi: ExtensionAPI, target: TerminalTargetRef | string): Promise<{ killed: boolean; method: string }> {
@@ -230,12 +242,15 @@ export class HerdrDriver implements TerminalDriver {
 			const paneId = /^w\d+:p\d+$/.test(target) ? target : await this.resolvePaneIdByLabel(pi, target);
 			if (!paneId) return { piLike: false, command: "" };
 			const res = await this.herdrJson(pi, ["pane", "process-info", "--pane", paneId], 3_000);
-			// Real CLI 0.8.2 shape: result.process_info.foreground_processes[0] = {name, pid, cmdline, ...}.
-			// Keep the older scalar shapes as fallbacks.
+			// Real CLI 0.8.2 shape: result.process_info.foreground_processes[] = [{name, pid, cmdline, ...}, ...]
+			// ordered root → leaf. The leaf (last entry) is the actual user command; intermediate
+			// entries are shell wrappers (`sh -c <script>`). Keep the older scalar shapes as fallbacks.
 			const pinfo = res?.result?.process_info || res?.process_info || res?.result || res;
-			const fg = Array.isArray(pinfo?.foreground_processes) ? pinfo.foreground_processes[0] : undefined;
-			const proc = fg || pinfo?.foreground_process || pinfo?.process || pinfo;
-			const command = (proc?.command || proc?.name || proc?.process_name || proc?.foreground_process || "").trim();
+			const fgList = Array.isArray(pinfo?.foreground_processes) ? pinfo.foreground_processes : [];
+			const fgLeaf = fgList.length > 0 ? fgList[fgList.length - 1] : undefined;
+			const fgRoot = fgList.length > 0 ? fgList[0] : undefined;
+			const proc = fgLeaf || fgRoot || pinfo?.foreground_process || pinfo?.process || pinfo;
+			const command = (proc?.name || proc?.command || proc?.process_name || proc?.foreground_process || "").trim();
 			const rawPid = proc?.pid;
 			const pid = typeof rawPid === "number" ? rawPid : rawPid ? parseInt(rawPid, 10) : undefined;
 			const isPi = isPiLikeProcess(command);

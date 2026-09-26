@@ -107,11 +107,12 @@ args returned by `childPiArgs()` (`src/session.ts`). The default is
 (`swarm_send_message`, `swarm_update_task`, ...) loaded automatically. Override with
 `PI_SWARM_CHILD_ARGS="<args>"` to disable the extension load for tests / sandboxes, e.g.
 `PI_SWARM_CHILD_ARGS="--approve --no-extensions"`. See
+[`docs/swarm/operations.md` → "Terminal manager — herdr mode"](./docs/swarm/operations.md#terminal-manager--herdr-mode-082) — herdr 0.8.2 CLI contract, env vars, supported version.
 [`docs/swarm/operations.md` → "Child pi args"](./docs/swarm/operations.md#child-pi-args-default-loads-swarm-extension).
 
 Project-local swarm defaults can be set in `.pi/settings.json`:
 
-```json
+````json
 {
   "swarm": {
     "defaultModel": "gpt-5.4-mini",
@@ -155,7 +156,7 @@ Inside pi:
 /swarm pool preview-preflight                              # dry-run spawn gate (read-only)
 /swarm pool cooldown <provider/model> <ms>                  # bench a slot
 /swarm pool clear <provider/model>                          # clear a bench
-```
+````
 
 Useful tools:
 
