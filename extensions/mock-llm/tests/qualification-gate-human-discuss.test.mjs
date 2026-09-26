@@ -1,5 +1,9 @@
 #!/usr/bin/env node
-/** Real pi + mock-LLM replay: human-discuss blocks implementation, confirms, then assigns. */
+/** Real pi + mock-LLM replay: human-discuss gate is advisory post-a4a4d05 — the gate is prepared at
+ * task creation (status="ready") and does not block implementation. The assignment step requires
+ * tmux + a valid provider (swarm_spawn_agent preflight), which the mock-LLM test scratch cannot
+ * satisfy; the assign path is covered by swarm-yml-pool.test.mjs and friends. This lane verifies
+ * the human-discuss-specific surface: mode preservation, gate artifact, gate-open semantics. */
 import { mkdtempSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -23,11 +27,12 @@ const run = spawnSync(
 		"--model",
 		"qualification-gate-human-discuss",
 		"-p",
-		"Run the scripted human-discuss qualification flow.",
+		"Create the scripted human-discuss qualification task.",
 	],
 	{ cwd: scratch, env, timeout: 30_000, encoding: "utf8" },
 );
 const taskFile = join(scratch, ".pi/swarm/tasks/mock-qualification-human/task.json");
+const gateFile = join(scratch, ".pi/swarm/tasks/mock-qualification-human/artifacts/qualification-gate.md");
 const transcriptDir = join(transcriptRoot, "qualification-gate-human-discuss");
 let pass = 0,
 	fail = 0;
@@ -44,16 +49,26 @@ ok("real pi human-discuss lane exits cleanly", run.status === 0, run.stderr || r
 ok("human-discuss task exists", existsSync(taskFile));
 if (existsSync(taskFile)) {
 	const task = JSON.parse(readFileSync(taskFile, "utf8"));
-	ok("human discussion became confirmed", task.qualification?.mode === "human-discuss" && task.qualification?.status === "confirmed");
-	ok("implementer assignment succeeded after confirmation", task.nodes.implement?.status === "assigned");
+	// Post-a4a4d05: human-discuss gate is advisory — status starts at "ready" and stays "ready"
+	// (the auto-confirm branch in assign.ts:131-139 only fires for statuses OTHER than "ready"/"confirmed").
+	ok("human-discuss mode preserved", task.qualification?.mode === "human-discuss");
+	ok("human-discuss gate is open (advisory)", task.qualification?.status === "ready");
+	ok(
+		"implementer node created with terminal=true",
+		task.nodes.implement?.role === "implementer" && task.nodes.implement?.terminal === true,
+	);
+}
+ok("human-discuss gate artifact exists", existsSync(gateFile));
+if (existsSync(gateFile)) {
+	const gateContent = readFileSync(gateFile, "utf8");
+	ok("gate artifact documents human discussion requirement", gateContent.includes("Human discussion required"));
 }
 ok("human-discuss transcript exists", existsSync(transcriptDir));
 if (existsSync(transcriptDir)) {
 	const transcript = readdirSync(transcriptDir)
 		.map((file) => readFileSync(join(transcriptDir, file), "utf8"))
 		.join("\n");
-	ok("transcript contains pre-confirmation assign attempt", transcript.includes("qualification-blocked-assign"));
-	ok("transcript contains confirmation tool boundary", transcript.includes("swarm_confirm_qualification"));
+	ok("transcript contains create tool boundary", transcript.includes("qualification-human-create"));
 }
 rmSync(scratch, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
