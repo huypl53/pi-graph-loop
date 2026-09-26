@@ -53,6 +53,9 @@ export class HerdrDriver implements TerminalDriver {
 	// where spawned worker tabs live. Distinct from `workspaceId` (the ROOT's workspace).
 	// On stale-cache (workspace was closed externally), re-create via `workspace create`.
 	private agentsWorkspaceId?: string;
+	// H5: root tab of the agents workspace as returned by `workspace create` — closed after
+	// the first agent tab exists so no idle shell tab lingers in the swarm workspace.
+	private agentsWsRootTabId?: string;
 	// Track which pane ids belong to swarm-spawned agents so teardown can count only
 	// swarm panes (never touches foreign panes in the agents workspace).
 	private readonly swarmPaneIds = new Set<string>();
@@ -91,6 +94,7 @@ export class HerdrDriver implements TerminalDriver {
 			throw new Error("herdr workspace create returned no workspace_id");
 		}
 		this.agentsWorkspaceId = wsId;
+		this.agentsWsRootTabId = created?.result?.tab?.tab_id || created?.tab?.tab_id || undefined;
 		return wsId;
 	}
 
@@ -240,6 +244,22 @@ export class HerdrDriver implements TerminalDriver {
 		const session = res?.result?.tab?.workspace_id || agentsWs;
 		// Track this pane as a swarm-spawned agent so teardown can count only swarm panes.
 		if (paneId) this.swarmPaneIds.add(paneId);
+		// H5 (live-found 2026-09-26): `workspace create` always spawns the workspace with an idle
+		// shell root tab (label '1') that the swarm never uses — it lingered forever. herdr closes
+		// the workspace when its LAST tab closes, but the ws survives losing the root tab while an
+		// agent tab exists (live-verified). Close the root tab right after the first agent tab is
+		// created so the workspace shows only real agents. Best-effort: failure to close is logged,
+		// not fatal (spawn already succeeded).
+		if (res?.result?.workspace?.active_tab_id || res?.result?.tab) {
+			const rootTabId = this.agentsWsRootTabId;
+			if (rootTabId && rootTabId !== tabId) {
+				try {
+					await this.herdr(pi, ["tab", "close", rootTabId], 5_000);
+				} catch (err: any) {
+					await logSwarmError(process.cwd(), "herdr", "spawn_agent.root_tab_close_failed", err, { rootTabId, tabId });
+				}
+			}
+		}
 		// Step 2: launch the command in the root pane via `pane run`. herdr 0.8.2 `pane run`
 		// TYPES the given words into the pane's shell as a single line (it is argv on the CLI
 		// side but is joined with spaces — shell quoting inside any single word is DESTROYED,
