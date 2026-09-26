@@ -44,6 +44,11 @@ pi --model gpt-5.4-mini --provider openai
 - use `extensions/swarm/README.md` for the implementation module map
 - update focused docs in `docs/swarm/` when adding or changing swarm features; do not treat `docs/swarm.md` as the only source of truth
 
+## changelog guidelines
+- maintain CHANGELOG.md adhering to Keep a Changelog principles with clear evidence and conventional categories (`feat`, `fix`, `refactor`, `test`, `chore`, `docs`)
+- follow the full instructions, format template, and release tagging workflow in [`docs/changelog-guide.md`](docs/changelog-guide.md) to avoid bloating this file
+- when cutting a release or moving a tag, ensure CHANGELOG.md is updated and committed before or with the tag
+
 ## Pi runtime contract (mandatory consultation)
 
 Before changing swarm code that touches Pi lifecycle, delivery, interrupt, or reload semantics

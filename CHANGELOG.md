@@ -2,7 +2,128 @@
 
 Notable changes in this project. Newest first.
 
-## Unreleased
+## [Unreleased]
+
+## [v0.0.3] - 2026-09-24
+
+### feat(swarm): auto-focus tmux window to busy worker (enabled by default)
+
+- **Context / Symptom**: Operators monitoring multi-agent execution in tmux had to manually switch windows or panes to observe active workers, losing track of subagents executing tools or waiting on long-running processes.
+- **Key Changes**:
+  - Implemented the auto-focus engine (`extensions/swarm/src/focus.ts`) with target candidate selection, active-window guard (`isCurrentActiveTmuxWindow`), and a 2.5-second anti-flapping cooldown.
+  - Automatically switches tmux focus to busy workers on `agent_start`, `tool_execution_start`, and worker `settled` events via `maybeAutoFocusOnBusy` in `extensions/swarm/src/hooks.ts`.
+  - Enabled by default (`autoFocusBusy: true`, `isAutoFocusEnabled`).
+  - Added CLI and interactive controls: `/swarm focus` (immediate window switch to active or specified agent) and `/swarm auto-focus [on|off|status|toggle]`, supported with tab completion.
+  - Respects environment override `PI_SWARM_AUTO_FOCUS=0` and cleanly excludes the root coordinator session from window theft.
+  - Recorded internal errors safely via `logSwarmError`.
+- **Verification**: `extensions/swarm/tests/auto-focus.test.mjs` (comprehensive 5-section suite testing focus triggers, window guard, and cooldowns), mock-LLM scenario `auto-focus-toggle.jsonl`.
+
+### feat(swarm): minimal agent protocol & inferred lifecycle (R31)
+
+- **Context / Symptom**: The legacy swarm protocol mandated explicit ACK tools (`swarm_ack_message`, `requiresAck: true`), leading to cognitive overload for LLMs, unacked ACK debt warnings in reconciler routines, and tool registration bloat (over 35 tools in namespace).
+- **Key Changes**:
+  - Transitioned to minimal agent protocol (`PI_SWARM_MINIMAL_PROTOCOL`, gate=1 enabled by default).
+  - Deprecated manual ACK requirements: defaulted `requiresAck` to `false`, removed ACK instructions from agent system prompts (`identity.ts`), and filtered out legacy ACK debt warnings in `swarm_reconcile` and `swarm_stop_agent`.
+  - Implemented inferred lifecycle and worker self-nudge on missing response (R31): Strike 1 directly self-nudges the worker without disturbing the root; Strike 2 escalates to root only if the worker settles without responding.
+  - Enhanced `swarm_send_message` to return a synchronous delivery receipt with message ID, timestamp, and status.
+  - Trimmed registered tools down to 14 core coordination tools (`swarm_send_message`, `swarm_check_mailbox`, `swarm_task_message`, `swarm_create_task`, `swarm_assign_task`, `swarm_update_task`, `swarm_task_status`, `swarm_validate_graph`, `swarm_print_graph`, `swarm_next_nodes`, `swarm_spawn_agent`, `swarm_agent_status`, `swarm_stop_agent`, `swarm_reconcile`), retiring 21 obsolete/redundant tools.
+- **Verification**: `extensions/swarm/tests/r31-worker-nudge-and-ack-debt-fix.test.mjs` (all 6 scenarios), `extensions/swarm/tests/minimal-protocol-authoritative.test.mjs`, `extensions/swarm/tests/tool-gating.validate.mjs`, `extensions/swarm/tests/delivery-receipt.test.mjs`, mock-LLM fixture `inferred-lifecycle-worker.jsonl`.
+
+### feat(swarm): root message coalescing & batching (R30)
+
+- **Context / Symptom**: Rapid worker turn updates and status notifications flooded the root coordinator with separate mailbox messages, triggering multiple consecutive `pi.sendMessage` calls at the L2 runtime boundary, causing turn churn and context token blowup.
+- **Key Changes**:
+  - Added message coalescing in `extensions/swarm/src/delivery.ts` and `surface.ts` (`coalesceAndBatchInboundMessages`).
+  - Coalesces pending root inbound messages into a single consolidated `swarm-batch-message` payload per tick.
+  - Enforces exactly one `pi.sendMessage` invocation per delivery tick when multiple messages are queued, keeping turn processing predictable.
+  - Retains all message IDs, attribution, and metadata within the batched container.
+  - Formalized R30 contract row F20 in `docs/swarm/pi-runtime-contract.md` and ADR `docs/swarm/adr/2026-09-24-root-message-batching-and-coalescing.md`.
+- **Verification**: `extensions/swarm/tests/r30-root-message-batching.test.mjs`, mock-LLM fixture `root-message-batching.jsonl`.
+
+### feat(swarm): static root identity injection & delegation streak advisory
+
+- **Context / Symptom**: Root coordinator agents suffered role amnesia after session compaction and frequently drifted into direct implementation (editing files directly) rather than delegating tasks to worker agents.
+- **Key Changes**:
+  - Injected static root orchestrator directives into `systemPrompt` during `before_agent_start` for root sessions (`hooks.ts`), ensuring instructions survive context compaction and preserve prompt cache hits.
+  - Added delegation streak guard via `tool_result` hook: monitors consecutive direct file modifications (`edit`, `write_to_file`) by root and appends a gentle delegation reminder when streak reaches 3.
+  - Automatically resets the edit streak whenever root uses any swarm coordination tool.
+- **Verification**: `extensions/swarm/tests/root-delegation-guard.test.mjs`, mock-LLM fixture `root-delegation-guard.jsonl`.
+
+### fix(swarm): empty pool escalation & worker spawn boot hardening
+
+- **Context / Symptom**: Newly spawned agents suffered false-positive liveness failures before their first heartbeat arrived, triggering false empty pool escalations to the user. In addition, historical stopped workers caused noisy diagnostics, and capped goals continued triggering escalations indefinitely.
+- **Key Changes**:
+  - Added worker spawn boot grace period: `DEFAULT_AGENT_BOOT_GRACE_MS` (3 minutes, overridable via `PI_SWARM_AGENT_SPAWN_BOOT_GRACE_MS`), treating newly spawned agents as alive during bootup in `agentIsEffectivelyAlive`.
+  - Added `bootFailedAgents` diagnostic guidance for agents that exceed the boot grace window without sending a heartbeat.
+  - Filtered out historical stopped agents (> 10m) from `poolDiag` in `evaluateIdleGoalNudgeLocked`.
+  - Enforced `maxNudges` cap on vacuous empty pool escalations to prevent endless escalation cycles.
+  - Switched `isTmuxRunning` from `display-message` to `list-panes` to prevent active-window fallback falsely reporting closed windows as alive, and immediately set `agent.tmuxAlive = false` upon killing panes.
+- **Verification**: `tests/r29-spawn-boot-grace-false-escalation.test.mjs`, `tests/pool-diag-historical-reproduce.test.mjs`, `tests/tmux-alive-fallback-reproduce.test.mjs`, `tests/vacuous-max-nudges-reproduce.test.mjs`, mock-LLM fixture `spawn-boot-grace-nudge.jsonl`.
+
+### fix(swarm): tmux command robustness & process allowlist
+
+- **Context / Symptom**: Leading dashes in prompt text (such as `--flag` arguments) were misparsed by tmux getopt as command-line switches in `tmux send-keys`. Furthermore, helper scripts invoking `pi` directly or running through `bun` were rejected by `isPanePiLike`.
+- **Key Changes**:
+  - Added `--` end-of-options delimiter to `sendToPane` and `sendKeys` in `extensions/swarm/src/tmux.ts` and `agents.ts`.
+  - Expanded `isPanePiLike` command allowlist regex to recognize `pi` wrapper binaries and `bun` execution environments.
+- **Verification**: `extensions/swarm/tests/send-keys-dash-prompt.test.mjs`, `extensions/swarm/tests/pane-pi-like.test.mjs`.
+
+### fix(swarm): long-running tool health checks & false idle alarm suppression
+
+- **Context / Symptom**: Workers executing prolonged commands (test runs, compilation, external fetches) were misidentified as idle, causing spurious idle epoch reminders and goal nudges.
+- **Key Changes**:
+  - Introduced active tool execution tracking (`activeToolExecution` / `lastToolCallAt`) into goal epoch evaluation to acknowledge ongoing work.
+  - Suppressed idle epoch and goal nudges whenever the root coordinator is active or processing tools (`ROOT_BUSY_ACTIVE_EXECUTION_MS`).
+- **Verification**: `extensions/swarm/tests/long-running-worker-nudge.test.mjs`, `extensions/swarm/tests/root-busy-no-goal-nudge.test.mjs`.
+
+### feat(swarm): task status goal exposure & automatic qualification advance
+
+- **Context / Symptom**: Operators could not view associated goal details from task queries, qualification gates required manual confirmation via a separate tool, and `swarm_stop_agent` was inadvertently omitted from the active tool registration list.
+- **Key Changes**:
+  - Restored `swarm_stop_agent` to the registered agent tool suite.
+  - Exposed goal metadata (`goalId`, goal text, origin) in `swarm_task_status` output.
+  - Retired `swarm_confirm_qualification` and enabled automatic progression of task qualification gates upon qualification check completion.
+- **Verification**: `extensions/swarm/tests/minimal-protocol-authoritative.test.mjs`, `extensions/swarm/tests/smoke.test.mjs`, `extensions/swarm/tests/tool-gating.validate.mjs`.
+
+### chore(package): prune package exports to swarm extension only
+
+- **Context / Symptom**: Package manifest exposed internal and non-swarm extensions to external consumers.
+- **Key Changes**:
+  - Scoped `pi.extensions` in `package.json` strictly to `./extensions/swarm/index.ts`.
+- **Verification**: Verified `package.json` extension manifest structure.
+
+### fix(swarm/pool): split model pool swap notification & prioritize yaml config
+
+- **Context / Symptom**: Model pool auto-swaps following a 429 quota/rate limit injected raw provider error JSON into the agent's LLM context, confusing the model and wasting turns. Additionally, hardcoded provider hints in tools conflicted with user settings in `swarm.yaml`.
+- **Key Changes**:
+  - Split swap nudge into two distinct messages: a user-facing visual warning (`swarm-pool-event`, display:true, followUp) noting the swap, and a clean prompt (`swarm-message`, continue-only, triggerTurn:true) without raw error noise.
+  - Prioritized `.pi/swarm.yml` config over tool parameter hints and removed obsolete provider hints from coordination tools.
+- **Verification**: `extensions/swarm/tests/pool-swap-nudge-content.test.mjs`, `extensions/swarm/tests/swarm-yaml-no-provider-hints.test.mjs`.
+
+## [v0.0.2] - 2026-09-16
+
+### fix(swarm): model pool retry rotation, settle nudge suppression, and goal check reset
+
+- **Context / Symptom**: In-flight pool retries caused transient settle notifications to flood the root coordinator, model pool failed to rotate promptly after consecutive errors, and goal idle streaks failed to reset when workers showed activity.
+- **Key Changes**:
+  - Configured model pool rotation to trigger after 2 consecutive retries on a failing slot.
+  - Suppressed transient settle nudges to root while model pool retry and auto-swap workflows are in progress.
+  - Reset goal check streaks immediately upon detecting agent activity.
+- **Verification**: `extensions/swarm/tests/idle-streak-reset.test.mjs`, `extensions/swarm/tests/pool-retry-settle-nudge.test.mjs`, `extensions/swarm/tests/pool-retry.test.mjs`, `extensions/swarm/tests/r28-stale-goal-nudge-order.test.mjs`.
+
+## [v0.0.1] - 2026-09-15
+
+### feat(swarm): monotonic goal nudge ordering, stuck-busy prevention, and sync wait guidance
+
+- **Context / Symptom**: Superseded goal nudges resurfaced out-of-order, stuck-busy escalation triggered prematurely while root was executing long tools, and long background waits triggered false idle alarms.
+- **Key Changes**:
+  - Added monotonic sequence guard for goal nudges to prevent out-of-order resurrection.
+  - Retired superseded and stale messages into `consumerReceipts` to prevent inflating wait times.
+  - Checked root active tool execution (`ROOT_BUSY_ACTIVE_EXECUTION_MS`) before escalating stuck-busy state.
+  - Suggested synchronous sleep/wait in goal idle nudges when waiting on background tasks.
+  - Added standalone `/swarm-mark` command with datetime suffix and audit trail, goal nudges subcommand with infinite nudge support (`-1`), and durable internal-error logging (`errors.jsonl`).
+  - Added `.pi/swarm.yml` YAML configuration support for the model pool and `/swarm deregister`.
+- **Verification**: `extensions/swarm/tests/r28-stale-goal-nudge-order.test.mjs`, mock-LLM scenario `r28-goal-stale-order-prevention.jsonl`.
 
 ### fix(swarm): pool hardening — success resets, swap-chain cap, pool lock, provider-strict swap, dedupe, backoff
 
