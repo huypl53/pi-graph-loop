@@ -4,6 +4,7 @@ import type { SwarmAgent, SwarmState } from "./types.ts";
 import { paths, readState, withLock, writeState, trace } from "./state.ts";
 import { tmux } from "./tmux.ts";
 import { logSwarmError } from "./errorlog.ts";
+import { getTerminalDriver } from "./terminal/index.ts";
 import { now } from "./utils.ts";
 
 export const AUTO_FOCUS_COOLDOWN_MS = 2_500;
@@ -123,15 +124,15 @@ export async function focusAgentWindow(
 	}
 
 	try {
-		await tmux(pi, ["select-window", "-t", winTarget], 5_000);
-		if (agent.tmuxTarget && agent.tmuxTarget !== "unknown") {
-			try {
-				await tmux(pi, ["select-pane", "-t", agent.tmuxTarget], 3_000);
-			} catch (err: any) {
-				// Non-fatal if pane selection fails as long as window was selected
-				await logSwarmError(cwd, "focus", "select_pane.failed", err, { target: agent.tmuxTarget });
-			}
-		}
+		// H6: was raw tmux select-window/select-pane; now driver-routed (TmuxDriver emits the
+		// identical argv; herdr maps to tab focus).
+		const res = await getTerminalDriver().focusWindow(pi, {
+			target: agent.tmuxTarget,
+			session: agent.tmuxSession,
+			window: agent.tmuxWindow,
+			paneId: agent.tmuxTarget,
+		});
+		if (!res.ok) return { ok: false, target: winTarget, error: res.error };
 		return { ok: true, target: winTarget };
 	} catch (err: any) {
 		const msg = String(err?.message || err);

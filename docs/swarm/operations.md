@@ -466,6 +466,14 @@ workers and makes teardown deterministic (one workspace to close when no workers
 - **herdr 0.8.2 commands used**: `workspace list`, `workspace create --label`,
   `workspace get`, `workspace close`, `pane list --workspace`.
 
+### Herdr focus for register-here targets
+
+A bare `/swarm focus` may receive a register-here record with `tmuxWindow=p1` and
+`tmuxTarget=wN:p1`. Herdr resolves that exact pane inside its recorded workspace, then focuses
+the owning tab id. If the workspace or pane does not match, focus fails without guessing a tab
+or changing the currently focused tab. The Tmux `select-window`/`select-pane` sequence is
+unchanged.
+
 ## Child pi args — default loads swarm extension
 
 Spawned workers inherit the parent's `pi` invocation. `childPiArgs()`

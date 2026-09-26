@@ -179,6 +179,12 @@ export class HerdrDriver implements TerminalDriver {
 		}
 	}
 
+	private async listTabs(pi: ExtensionAPI): Promise<Array<{ tab_id: string; label?: string; workspace_id?: string }>> {
+		const res = await this.herdrJson(pi, ["tab", "list"], 5_000);
+		const raw = Array.isArray(res) ? res : res?.result?.tabs || res?.tabs || [];
+		return raw.filter((t: any) => t?.tab_id);
+	}
+
 	async listPanes(pi: ExtensionAPI): Promise<TerminalPaneInfo[]> {
 		const args = ["pane", "list"];
 		const ws = this.getWorkspaceId();
@@ -448,12 +454,52 @@ export class HerdrDriver implements TerminalDriver {
 		}
 	}
 
+	private isHerdrTabId(value: string): boolean {
+		return /^w[A-Za-z0-9_-]+:t[A-Za-z0-9]+$/.test(value || "");
+	}
+
 	async focusWindow(pi: ExtensionAPI, target: TerminalTargetRef | string): Promise<{ ok: boolean; error?: string }> {
-		const tabId = typeof target === "string" ? target : target.window || target.target;
+		let tabId = typeof target === "string" ? target : target.window || target.target;
 		if (!tabId || tabId === "unknown") {
 			return { ok: false, error: "Target agent has no valid herdr tab or target" };
 		}
 		try {
+			if (!this.isHerdrTabId(tabId)) {
+				// /swarm register here stores the pane component in tmuxWindow (e.g. "p1") while
+				// tmuxTarget is the workspace-qualified Herdr pane id. Herdr tab focus requires
+				// the owning tab id, so resolve this exact pane in its workspace; never guess from
+				// the pane index or fall back to a similarly named/current tab.
+				const paneId = typeof target === "string" ? "" : target.target || target.paneId || "";
+				const paneWorkspace = paneId.match(/^(w[A-Za-z0-9_-]+):p[A-Za-z0-9]+$/)?.[1];
+				if (paneWorkspace) {
+					const requestedWorkspace =
+						typeof target === "string" || !target.session || target.session === "unknown" ? paneWorkspace : target.session;
+					if (requestedWorkspace !== paneWorkspace) {
+						return {
+							ok: false,
+							error: `Herdr pane ${paneId} does not belong to target workspace ${requestedWorkspace}`,
+						};
+					}
+					const paneRes = await this.herdrJson(pi, ["pane", "list", "--workspace", paneWorkspace], 5_000);
+					const panes = Array.isArray(paneRes) ? paneRes : paneRes?.result?.panes || paneRes?.panes || [];
+					const pane = panes.find((p: any) => {
+						const id = p?.pane_id || p?.paneId || p?.id;
+						const workspaceId = p?.workspace_id || p?.workspaceId;
+						return id === paneId && (!workspaceId || workspaceId === paneWorkspace);
+					});
+					const ownerTabId = pane?.tab_id || pane?.tabId;
+					if (!ownerTabId || !this.isHerdrTabId(ownerTabId) || !ownerTabId.startsWith(`${paneWorkspace}:t`)) {
+						return { ok: false, error: `Herdr pane ${paneId} has no owning tab in workspace ${paneWorkspace}` };
+					}
+					tabId = ownerTabId;
+				} else {
+					// String targets and non-pane object targets retain legacy label/composite resolution.
+					const segment = tabId.includes(":") ? tabId.split(":")[1]?.replace(/\.\d+$/, "") : tabId.replace(/\.\d+$/, "");
+					const tabs = await this.listTabs(pi);
+					const hit = tabs.find((t) => t.label === segment) || tabs.find((t) => t.tab_id === segment);
+					if (hit?.tab_id) tabId = hit.tab_id;
+				}
+			}
 			await this.herdr(pi, ["tab", "focus", tabId], 5_000);
 			return { ok: true };
 		} catch (err: any) {
