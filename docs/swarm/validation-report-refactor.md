@@ -162,3 +162,47 @@ still 0; bare-catch grep still clean.
 | Herdr lane output/state | `/tmp/p8-herdr-out.txt`, `/tmp/p8herdr/.pi/swarm/` |
 | Herdr bug repro/verify | `/tmp/p8-buga-repro.mjs`, `/tmp/p8-buga-repro2.mjs`, `/tmp/p8-bugb-repro.mjs`, `/tmp/p8-bug-verify.mjs`, `/tmp/p8-bug-verify2.mjs` |
 | Evidence summary | `/tmp/p8-evidence-summary.txt` |
+
+## 8. Phase 5/6 real-split follow-up (2026-09-26)
+
+The original phase-5/6 "decompositions" left re-export shims behind: `src/tools/tasks/*`, `src/tools/agents/*`,
+`src/taskgraph/*`, `src/nudges/*` were 4–14-line stubs re-exporting from four monoliths. This follow-up
+(user-approved) moved the real bodies:
+
+| Monolith | Before | After (facade) | Real submodules |
+|---|---|---|---|
+| `src/taskgraph.ts` | 2,203 | 88 | `taskgraph/{scope,attention,graph,lifecycle,sweep,stale,closure,formatting,evidence}.ts` (60–480) |
+| `src/nudges/graph-advance.ts` | 1,073 | 27 | `nudges/{graph-advance-nudge,initial-ready,task-stall,artifact-progress,heartbeat-gc,slot-recovery}.ts` (93–312) |
+| `src/tools/tasks.ts` | 2,480 | 59 | `tools/tasks/{create,inspect,assign,update,fencing,retired}.ts` |
+| `src/tools/agents.ts` | 1,123 | 23 | `tools/agents/{status,lifecycle,retired}.ts` + `tools/goals.ts` |
+
+Method: mechanical line-range extraction, bodies verbatim (11/11 graph-advance functions and the
+assign/update tool closures diff-verified against `git show 4fd2a26:`); hand-written import blocks per
+module; facades are pure barrels. C8 fence literals moved canonically into `tasks/fencing.ts` with a
+verbatim traceability excerpt in the facade (test reads the facade text).
+
+### Evidence
+
+- **Fail-set parity**: full 119-suite strict ledgers run twice mid-split and once at end — all identical to
+  the phase-8 fail-multiset (30 pre-existing red suites, zero regressions). Ledgers: `/tmp/p56-ledger/`,
+  `/tmp/p56-ledger2/`.
+- **Key suites**: `tool-gating` 14/0, `minimal-protocol-authoritative` 50/0, `mailbox-kickoff` 8/0,
+  `swarm-goal` 67/0, `swarm-mark` 30/0, `task-liveness` 48/0, `lifecycle-fencing` 28/0, `graph-advance.validate`
+  PASS, `r20-artifact-progress-nudge` 20/0, `graph-advance-nudge-rearm` 24/0, `supersession-fencing` 17/3
+  (identical fail-set), `attempt-fencing` identical crash-point parity, `heartbeat-gc` fail-set identical.
+- **tsc parity**: 48 error classes identical to HEAD (`/tmp/p56-tsc-head.txt` vs `/tmp/p56-tsc-raw6.txt`),
+  only relocated with their code (tasks.ts→tasks/update.ts, graph-advance.ts→heartbeat-gc.ts, agents.ts→goals.ts).
+- **madge**: 0 circular dependencies (120 modules).
+- **Silent-catch**: grep 0 across all new modules.
+- **Registration probe**: fake-pi registration of every new module registers exactly the expected tools
+  (`/tmp/p56/check-register2.mjs`).
+
+### Disclosures
+
+- `tasks/update.ts` (1,088 LOC) and `tasks/assign.ts` (627 LOC) are single-closure tool bodies; shrinking
+  them below 500 requires invasive non-verbatim edits and is out of scope for the refactor (same class as
+  the 12 pre-existing >500 LOC files).
+- Phantom imports dropped in transit: `traceLogged`, `proxyMetricEmitLocked` (unused in graph-advance.ts),
+  duplicated `AGENT_HEARTBEAT_STALE_MS` const.
+- `nudges/ack.ts` remains a documentation stub; the ack helpers live in `graph-advance-nudge.ts`
+  (`ackRootNudgeLocked` now exported for `initial-ready.ts`).

@@ -12,7 +12,7 @@ Decompose `taskgraph.ts` (2,203 LOC) into focused graph algorithm and state tran
 
 ## Requirements
 
-- [ ] Decompose `taskgraph.ts` into `src/taskgraph/`:
+- [x] Decompose `taskgraph.ts` into `src/taskgraph/`:
   - `taskgraph/index.ts`: backward-compatible facade re-exporting all functions.
   - `taskgraph/scope.ts`: scope resolution, pattern normalization, active lease collisions.
   - `taskgraph/attention.ts`: node attention scoring, staleness checks.
@@ -23,7 +23,7 @@ Decompose `taskgraph.ts` (2,203 LOC) into focused graph algorithm and state tran
   - `taskgraph/closure.ts`: node closure summaries, commit evidence resolution.
   - `taskgraph/formatting.ts`: Mermaid & ASCII graph formatting.
   - `taskgraph/evidence.ts`: proxy metric emissions, artifact rewrites.
-- [ ] Decompose `nudges/graph-advance.ts` into `src/nudges/`:
+- [x] Decompose `nudges/graph-advance.ts` into `src/nudges/`:
   - `nudges/graph-advance-nudge.ts`: `sendGraphAdvanceNudgeLocked`, `reconcileGraphAdvanceLocked`.
   - `nudges/initial-ready.ts`: initial ready nudges.
   - `nudges/task-stall.ts`: `evaluateTaskGraphStallNudgeLocked`, `resolveTaskStallLocked`.
@@ -31,10 +31,10 @@ Decompose `taskgraph.ts` (2,203 LOC) into focused graph algorithm and state tran
   - `nudges/heartbeat-gc.ts`: `agentHeartbeatGCLocked` (calls `driver.isTargetAlive()`).
   - `nudges/slot-recovery.ts`: `evaluateSlotRecoveryLocked`.
   - `nudges/ack.ts`: canonical `ackRootNudgeLocked` and `ackRootGraphAdvanceNudgesLocked`.
-- [ ] Audit & Protect `nudges/goal-epoch.ts`:
+- [x] Audit & Protect `nudges/goal-epoch.ts`:
   - Ensure `agentIsEffectivelyAlive` properly evaluates driver liveness and maintains `a.tmuxAlive` consistency to prevent false dead-worker escalations.
-- [ ] Convert `taskgraph.ts` and `nudges/graph-advance.ts` to clean re-export facades.
-- [ ] Verify `graph-advance.validate.mjs`, `task-liveness.test.mjs`, `functional.test.mjs`, `r29-spawn-boot-grace-false-escalation.test.mjs`.
+- [x] Convert `taskgraph.ts` and `nudges/graph-advance.ts` to clean re-export facades.
+- [x] Verify `graph-advance.validate.mjs`, `task-liveness.test.mjs`, `functional.test.mjs`, `r29-spawn-boot-grace-false-escalation.test.mjs`.
 
 ## Related Code Files
 
@@ -64,12 +64,12 @@ Decompose `taskgraph.ts` (2,203 LOC) into focused graph algorithm and state tran
 
 ## Todo
 
-- [ ] Extract `src/taskgraph/*.ts` modules
-- [ ] Convert `src/taskgraph.ts` to facade
-- [ ] Extract `src/nudges/*.ts` modules
-- [ ] Convert `src/nudges/graph-advance.ts` to facade
-- [ ] Verify `goal-epoch.ts` liveness integrity
-- [ ] Run test suite verification
+- [x] Extract `src/taskgraph/*.ts` modules
+- [x] Convert `src/taskgraph.ts` to facade
+- [x] Extract `src/nudges/*.ts` modules
+- [x] Convert `src/nudges/graph-advance.ts` to facade
+- [x] Verify `goal-epoch.ts` liveness integrity
+- [x] Run test suite verification
 
 ## Success Criteria
 
