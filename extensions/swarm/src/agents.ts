@@ -21,6 +21,7 @@ import {
 	SPAWN_SETTLE_MS,
 } from "./constants.ts";
 import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux } from "./tmux.ts";
+import { getTerminalDriver } from "./terminal/index.ts";
 import { childPiArgs, currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { pickSlot, poolStatus, preflightSpawn, formatPreflightError } from "./pool.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, shellQuote, sleep } from "./utils.ts";
@@ -249,7 +250,6 @@ export async function spawnAgent(
 			note: "no provider configured for model; fell back to DEFAULT_PROVIDER at spawn boundary",
 		}).catch(() => {});
 	const window = id;
-	const target = `${state.tmuxSession}:${window}.0`;
 	const envPrefix = [
 		`PI_SWARM_AGENT_ID=${shellQuote(id)}`,
 		`PI_SWARM_ID=${shellQuote(state.swarmId)}`,
@@ -257,17 +257,23 @@ export async function spawnAgent(
 		`PI_SWARM_DEFAULT_PROVIDER=${shellQuote(provider)}`,
 	].join(" ");
 	const cmd = `${envPrefix} pi --model ${shellQuote(model)} --provider ${shellQuote(provider)} ${childPiArgs()}`;
-
-	try {
-		await tmux(pi, ["has-session", "-t", state.tmuxSession], 5_000);
-		await tmux(pi, ["new-window", "-t", state.tmuxSession, "-c", cwd, "-n", window, cmd], 10_000);
-	} catch (err: any) {
-		if (String(err?.message || err).includes("can't find session")) {
-			await tmux(pi, ["new-session", "-d", "-s", state.tmuxSession, "-c", cwd, "-n", window, cmd], 10_000);
-		} else {
-			throw err;
-		}
-	}
+	// G2 (followup-g2-herdr-spawn-seam): spawn through the terminal driver seam so
+	// PI_SWARM_TERMINAL_MANAGER=herdr creates a herdr tab (and records its pane id)
+	// instead of a raw tmux window. TMUX mode keeps the identical command sequence
+	// (driver.spawnAgent issues the same has-session → new-window / new-session fallback).
+	const driver = getTerminalDriver();
+	const spawnRef = await driver.spawnAgent(pi, {
+		session: state.tmuxSession,
+		window,
+		command: cmd,
+		cwd,
+	});
+	// Driver return wins (herdr: { session=workspace, window=tab_id, target=pane_id });
+	// fall back to the legacy computed target when a driver reports nothing useful.
+	const target = spawnRef?.target && spawnRef.target !== "unknown" ? spawnRef.target : `${state.tmuxSession}:${window}.0`;
+	const tmuxSessionFinal = spawnRef?.session || state.tmuxSession;
+	const tmuxWindowFinal = spawnRef?.window || window;
+	const herdrPaneId = driver.id === "herdr" ? spawnRef?.target : undefined;
 
 	const ts = now();
 	const roleKindExplicit = Boolean(input.roleKind);
@@ -285,9 +291,10 @@ export async function spawnAgent(
 		health: "healthy",
 		lastSessionStartAt: ts,
 		lastAgentStartAt: ts,
-		tmuxSession: state.tmuxSession,
-		tmuxWindow: window,
+		tmuxSession: tmuxSessionFinal,
+		tmuxWindow: tmuxWindowFinal,
 		tmuxTarget: target,
+		...(herdrPaneId !== undefined ? { herdrPaneId } : {}),
 		model,
 		provider,
 		cwd,
