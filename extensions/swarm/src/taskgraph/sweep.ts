@@ -259,7 +259,10 @@ R12 P0 contract: the sweep no longer force-kills shared-pool workers, but a task
 (Idempotent within the sweep call: at most one nudge per close call. Not emitted on \`≥1 → ≥1\` or \`0 → 0\` transitions.)`,
 					idempotencyKey: key,
 					requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
-					requiresResponse: true,
+					// H1 Fix 1: pool-depleted nudges are informational — same parallel-debt defect as
+					// artifact-progress nudges (a requiresResponse nudge minted its own debt record;
+					// no reply targets it, so it lingered until TTL and re-armed reminders).
+					requiresResponse: false,
 					conversationId: `task:${taskId}:pool_depleted`,
 				}).catch((err: any) => {
 					// Best-effort nudge delivery: a transient mailbox failure must not block the
