@@ -240,10 +240,18 @@ export class HerdrDriver implements TerminalDriver {
 		const session = res?.result?.tab?.workspace_id || agentsWs;
 		// Track this pane as a swarm-spawned agent so teardown can count only swarm panes.
 		if (paneId) this.swarmPaneIds.add(paneId);
-		// Step 2: launch the command in the root pane via `pane run`. The command is a
-		// shell line (env-prefix assignments + quoted pi invocation), so we wrap it in
-		// `sh -c <command> -- swarm-agent` — `pane run` takes argv, not a shell string.
-		const runArgs = ["pane", "run", paneId, "sh", "-c", opts.command.trim(), "--", "swarm-agent"];
+		// Step 2: launch the command in the root pane via `pane run`. herdr 0.8.2 `pane run`
+		// TYPES the given words into the pane's shell as a single line (it is argv on the CLI
+		// side but is joined with spaces — shell quoting inside any single word is DESTROYED,
+		// live-verified 2026-09-26: `pane run <p> sh -c 'echo X:$0' -- probe` echoed
+		// `sh -c echo X:$0 -- probe` and ran `sh -c echo` = bare `echo`). So a compound
+		// `sh -c <command-string>` wrapper can never survive. Instead: pass the command's own
+		// words (env-prefix assignments + the pi invocation, all single-word-safe because
+		// spawnAgent's cmd builder shellQuotes every value) directly — typed as one line they
+		// form a valid shell command: `VAR='x' VAR2='y' pi --model 'm' … -- swarm-agent`,
+		// with the assignments scoped to the pi invocation by the shell itself.
+		const words = opts.command.trim().split(/\s+/);
+		const runArgs = ["pane", "run", paneId, ...words];
 		try {
 			await this.herdr(pi, runArgs, 30_000);
 		} catch (err: any) {
