@@ -341,11 +341,14 @@ export class HerdrDriver implements TerminalDriver {
 
 	async inspectProcess(pi: ExtensionAPI, target: string): Promise<{ piLike: boolean; command: string; pid?: number }> {
 		try {
-			// herdr pane ids are workspace-qualified ("wN:pM"). Swarm agent records may still carry legacy
-			// tmux-composite targets ("session:window.0", live-verified 2026-09-26: composite ids make
-			// `herdr pane process-info` exit 1 with pane_not_found). Resolve composites through `pane list`
-			// by matching the tab label (spawnAgent sets label = agent window/id) before probing.
-			const paneId = /^w\d+:p\d+$/.test(target) ? target : await this.resolvePaneIdByLabel(pi, target);
+			// herdr pane ids are workspace-qualified ("wN:pM") — but workspace ids are NOT
+			// limited to digits (live-verified 2026-09-26: "swarm-agents" workspace resolved to "wK";
+			// the digit-only regex misclassified wK:p5 as a tmux composite, fell to label-resolution,
+			// pane-list titles are null → piLike:false → engine marked live agents dead → all
+			// engine delivery/reconcile paths stalled). Accept letter/digit/underscore/hyphen
+			// workspace segments. Legacy tmux-composite targets ("session:window.0") still fail
+			// this test and resolve through `pane list` by tab label as before.
+			const paneId = /^w[A-Za-z0-9_-]+:p\d+$/.test(target) ? target : await this.resolvePaneIdByLabel(pi, target);
 			if (!paneId) return { piLike: false, command: "" };
 			const res = await this.herdrJson(pi, ["pane", "process-info", "--pane", paneId], 3_000);
 			// Real CLI 0.8.2 shape: result.process_info.foreground_processes[] = [{name, pid, cmdline, ...}, ...]
