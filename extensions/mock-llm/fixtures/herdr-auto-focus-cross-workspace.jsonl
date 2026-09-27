@@ -1,0 +1,19 @@
+# herdr-auto-focus-cross-workspace: exercises the Herdr busy-path cross-workspace guard.
+#
+# Scenario (task-202609270024-fix-herdr-auto-focus-foc):
+#   - Herdr is the selected driver; user's global focus is in a non-agents workspace.
+#   - Worker starts a tool execution → maybeAutoFocusOnBusy fires from the tool_execution_start hook.
+#   - Expected outcome (with fix): guard returns reason="user-focused-outside-agents-workspace",
+#     switched=false, ZERO herdr `tab focus` calls at the pi.exec seam. Global focus remains
+#     in the user's workspace.
+#
+# Without the fix (RED): maybeAutoFocusOnBusy yanks global focus to the agents workspace,
+# changing the user's focused workspace at the pi.exec seam.
+#
+# Turn 1: root inspects current swarm state + spawns a scripted worker.
+# Turn 2: worker starts a tool execution (busy-path trigger) — the guard must skip.
+# Turn 3: root observes the guard outcome via agent status.
+{"name":"af-guard inspect + spawn worker","events":[{"type":"text","delayMs":15,"text":"Inspecting current swarm state and spawning a scripted worker for the cross-workspace auto-focus guard lane.","chunks":["Inspecting current swarm state ","and spawning a scripted worker ","for the cross-workspace auto-focus guard lane."]},{"type":"toolcall","delayMs":10,"name":"swarm_list_agents","id":"la-0","arguments":{}},{"type":"toolcall","delayMs":15,"name":"swarm_spawn_agent","id":"sp-1","arguments":{"id":"af-guard-worker","role":"worker exercising the Herdr cross-workspace auto-focus guard; observe and settle"}}]}
+{"name":"af-guard worker busy-path trigger","events":[{"type":"text","delayMs":15,"text":"Worker is up. Starting a tool execution to trigger the busy-path auto-focus guard.","chunks":["Worker is up. ","Starting a tool execution ","to trigger the busy-path auto-focus guard."]},{"type":"toolcall","delayMs":15,"name":"swarm_send_keys","id":"sk-1","arguments":{"agentId":"af-guard-worker","keys":"echo","literal":true,"enter":true}}]}
+{"name":"af-guard observe guard outcome","events":[{"type":"text","delayMs":15,"text":"Tool execution triggered the busy path. Observing agent status to confirm the guard prevented cross-workspace focus stealing.","chunks":["Tool execution triggered the busy path. ","Observing agent status to confirm ","the guard prevented cross-workspace focus stealing."]},{"type":"toolcall","delayMs":10,"name":"swarm_agent_status","id":"as-1","arguments":{"agentId":"af-guard-worker"}}]}
+{"name":"af-guard settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Cross-workspace guard lane complete: busy-path auto-focus did not yank global focus.","chunks":["Cross-workspace guard lane complete: ","busy-path auto-focus ","did not yank global focus."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

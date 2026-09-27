@@ -73,6 +73,18 @@ export function isAutoFocusEnabled(st?: SwarmState | null): boolean {
 }
 
 /**
+ * Compare two workspace id strings for equality. Lenient on trim + case so callers
+ * don't need to normalize input; both undefined / empty / whitespace → equal (vacuously
+ * true, callers should already have handled undefined). Used by the cross-workspace
+ * focus guard.
+ */
+function isSameWorkspaceId(a: string | undefined, b: string | undefined): boolean {
+	if (!a && !b) return true;
+	if (!a || !b) return false;
+	return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/**
  * Check if the tmux window for the given agent is currently the active window of its session.
  * This prevents focus stealing when the user is working or viewing a different window.
  */
@@ -156,7 +168,7 @@ export async function maybeAutoFocusOnBusy(
 	pi: ExtensionAPI,
 	ctx: { cwd: string },
 	agentId: string,
-	options?: { force?: boolean; bypassCooldown?: boolean },
+	options?: { force?: boolean; bypassCooldown?: boolean; bypassActiveGuard?: boolean },
 ): Promise<{ switched: boolean; targetAgentId?: string; reason: string }> {
 	if (agentId === "root") return { switched: false, reason: "root_excluded" };
 
@@ -182,6 +194,44 @@ export async function maybeAutoFocusOnBusy(
 		const elapsed = Date.now() - new Date(st.lastFocusAt).getTime();
 		if (elapsed < AUTO_FOCUS_COOLDOWN_MS) {
 			return { switched: false, reason: "cooldown" };
+		}
+	}
+
+	// Herdr-only cross-workspace guard (task-202609270024-fix-herdr-auto-focus-foc):
+	// Herdr `tab focus` is GLOBAL — it yanks the user across workspaces. Under tmux,
+	// `select-window` is session-scoped, so this guard is a no-op. Skip with a stable
+	// distinct reason when the user's current global focus is outside the target agents
+	// workspace, unless `force` or `bypassActiveGuard` authorizes the operation.
+	// Explicit /swarm focus and the settle path (maybeAutoFocusBusyAgent) are unaffected.
+	if (!options?.force && !options?.bypassActiveGuard) {
+		const driver = getTerminalDriver();
+		if (driver.id === "herdr") {
+			const targetAgentsWorkspace = agent.tmuxSession || st.tmuxSession;
+			if (targetAgentsWorkspace) {
+				let currentFocusedWorkspace: string | undefined;
+				try {
+					currentFocusedWorkspace = await driver.getFocusedWorkspaceId(pi);
+				} catch (err: any) {
+					await logSwarmError(ctx.cwd, "focus", "cross_workspace_guard.query_failed", err, {
+						agentId,
+						targetAgentsWorkspace,
+					});
+					// Fail-open: a query failure must not silently swallow the busy-path focus.
+					// Logged durably; proceed to focusAgentWindow.
+					currentFocusedWorkspace = undefined;
+				}
+				if (
+					currentFocusedWorkspace &&
+					currentFocusedWorkspace !== targetAgentsWorkspace &&
+					!isSameWorkspaceId(currentFocusedWorkspace, targetAgentsWorkspace)
+				) {
+					return {
+						switched: false,
+						targetAgentId: agent.id,
+						reason: "user-focused-outside-agents-workspace",
+					};
+				}
+			}
 		}
 	}
 

@@ -268,6 +268,22 @@ export class TmuxDriver implements TerminalDriver {
 		}
 	}
 
+	/**
+	 * Tmux is single-session per host in practice; the "workspace" is the current session name.
+	 * `select-window` is session-scoped, so the busy-path cross-workspace guard is a no-op
+	 * under tmux — the guard short-circuits on driver.id === "tmux" before calling this.
+	 * Still implemented for interface completeness and to support tests that exercise the
+	 * guard under tmux mode (returns the current session name).
+	 *
+	 * Throws on query failure — callers own the fail-open policy and durable error logging.
+	 */
+	async getFocusedWorkspaceId(pi: ExtensionAPI): Promise<string | undefined> {
+		if (!process.env.TMUX) return undefined;
+		const out = await this.tmux(pi, ["display-message", "-p", "#{session_name}"], 3_000);
+		const session = out.trim();
+		return session || undefined;
+	}
+
 	getAttachCommands(target: TerminalTargetRef | string): AttachCommands {
 		let session = "";
 		let winTarget = "";

@@ -31,7 +31,7 @@ await mockLLM({
 
 assert.equal(registered.name, "mock-llm", "provider should register as mock-llm");
 assert.equal(registered.config.api, "mock-llm-stream");
-assert.equal(registered.config.models.length, 96, "expected 96 scenario models");
+assert.equal(registered.config.models.length, 97, "expected 97 scenario models");
 assert.deepEqual(
 	(await discoverModelConfigs()).map((model) => model.id).sort(),
 	[
@@ -69,6 +69,7 @@ assert.deepEqual(
 		"graph-advance-nudge-rearm",
 		"handoff-chain",
 		"heartbeat-gc-dead-pane",
+		"herdr-auto-focus-cross-workspace",
 		"herdr-h6-driver-mirroring",
 		"herdr-h6-focus-command",
 		"herdr-h6-live-root-spawn",
@@ -133,7 +134,7 @@ assert.deepEqual(
 		"wake-up-escalation-reminder",
 	].sort(),
 );
-assert.equal((await listFixtureDiscovery()).length, 96);
+assert.equal((await listFixtureDiscovery()).length, 97);
 
 function makeContext() {
 	return {
