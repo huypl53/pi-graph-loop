@@ -133,7 +133,14 @@ export async function focusAgentWindow(
 			window: agent.tmuxWindow,
 			paneId: agent.tmuxTarget,
 		});
-		if (!res.ok) return { ok: false, target: winTarget, error: res.error };
+		if (!res.ok) {
+			// a67e351 regression fix: driver.focusWindow logs internally at process.cwd(), which is
+			// the WRONG project when the swarm cwd differs (multi-root / scratch lanes). Re-log the
+			// failure durably at the CALLER's cwd so the no-silent-swallow census stays per-project.
+			const err = new Error(res.error || "focusWindow failed");
+			await logSwarmError(cwd, "focus", "select_window.failed", err, { target: winTarget });
+			return { ok: false, target: winTarget, error: res.error };
+		}
 		return { ok: true, target: winTarget };
 	} catch (err: any) {
 		const msg = String(err?.message || err);

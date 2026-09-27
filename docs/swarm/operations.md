@@ -428,8 +428,11 @@ terminal multiplexer with a JSON CLI). Set via `PI_SWARM_TERMINAL_MANAGER=herdr`
 - `tab create [--workspace W] [--label L] [--cwd C] --env K=V …` — options-only (0.8.2
   rejects positional commands; the 0.4.x contract of passing the launch command as a
   trailing positional no longer works and will fail with `unknown option: <cmd>`).
-- `pane run <PANE_ID> <COMMAND>...` — runs the launch command in the named pane. The
-  driver wraps shell-string commands in `sh -c <command> -- swarm-agent`.
+- `pane run <PANE_ID> <COMMAND>...` — runs the launch command in the named pane.
+  Post-H3 contract (typed words): the driver sends the command as typed words via
+  `pane send-text`-style entry rather than wrapping shell strings — there is NO
+  `sh -c <command> -- swarm-agent` wrapping. Commands must therefore be quoted such that
+  each word survives word-splitting as intended (see `spawnAgent` in the herdr driver).
 - `pane close <pane_id>` / `tab close <tab_id>` — both supported for cleanup.
 - `pane list [--workspace W]` — returns `{result: {panes: [{pane_id, tab_id, workspace_id, terminal_title, …}]}}`.
 - `pane process-info --pane <PANE_ID>` — returns
@@ -473,9 +476,11 @@ workers and makes teardown deterministic (one workspace to close when no workers
 
 ### Surface coverage (H6, 2026-09-26)
 
-All terminal-touching call sites route through `getTerminalDriver()` — no swarm code path
-execs `tmux` directly under herdr mode, and tmux mode emits the pre-driver argv byte-for-byte
-through `TmuxDriver`. The H6 audit closed the four residual raw-tmux sites:
+The audited H6 call sites listed below route through `getTerminalDriver()` — verified by
+R10-1 boundary counters at the fake `pi.exec` seam for these five named paths (see
+`extensions/swarm/tests/` driver boundary tests and the audit matrix scope note in
+`.pi/swarm-uat/runs/herdr-coverage-audit-20260928/coverage-matrix.md`). The claim is NOT
+"all" call sites repo-wide — only the audited paths are covered.
 
 | Site | Driver method |
 |------|---------------|
@@ -496,6 +501,36 @@ a tab or falling back to the currently focused tab. Tmux's `select-window` then 
 `extensions/swarm/tests/herdr-h6-driver-mirroring.test.mjs` and `scripts/uat/herdr-h6-red.mjs`
 (RED + GREEN evidence durably stored under
 `.pi/swarm/tasks/herdr-h6-driver-mirroring-20260926/artifacts/{red,green}-evidence/`).
+
+### Busy-path cross-workspace guard (herdr only)
+
+Herdr `tab focus` is **global** — it yanks the user's focused workspace across all workspaces.
+Under tmux, `select-window` is session-scoped, so the busy-path auto-focus (`maybeAutoFocusOnBusy`,
+fired from `agent_start` / `tool_execution_start` hooks) was bounded to the worker's tmux session.
+Under herdr, the same busy path could silently move the user from their current workspace into
+the `swarm-agents` workspace whenever a worker became busy.
+
+The guard (`extensions/swarm/src/focus.ts` `maybeAutoFocusOnBusy`) now:
+
+1. Resolves the target agents workspace from the busy agent's `tmuxSession`.
+2. Queries the user's current global focused workspace via `TerminalDriver.getFocusedWorkspaceId`
+   (herdr: `tab list` no-workspace-filter → focused tab's `workspace_id`; tmux: current session name;
+   mock: `currentPane.session`).
+3. If the focused workspace differs from the target agents workspace, AND neither `force` nor
+   `bypassActiveGuard` authorizes the operation, returns
+   `{ switched: false, reason: "user-focused-outside-agents-workspace" }` without calling
+   `focusAgentWindow`.
+
+Explicit `/swarm focus` (calls `focusAgentWindow` directly) and the settle path
+(`maybeAutoFocusBusyAgent`) are unaffected. Query failures fail-open with a durable
+`cross_workspace_guard.query_failed` error log at the caller's cwd.
+
+Evidence: `.pi/swarm-uat/runs/herdr-auto-focus-red-20260927T010942Z/` (pre-fix RED: 1
+`herdr tab focus` call, global focus moved from user to agents workspace) and
+`.pi/swarm-uat/runs/herdr-auto-focus-green-20260927T011443Z/` (post-fix GREEN: 0
+`herdr tab focus` calls, 1 `herdr tab list` guard query, global focus unchanged).
+Regression: `extensions/swarm/tests/herdr-auto-focus-cross-workspace.test.mjs` 7/7.
+Mock-LLM fixture: `extensions/mock-llm/fixtures/herdr-auto-focus-cross-workspace.jsonl`.
 
 ## Child pi args — default loads swarm extension
 

@@ -10,6 +10,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const mod = await import(join(here, "..", "index.ts"));
 const { default: factory, pickNextBusyAgent, maybeAutoFocusBusyAgent, focusAgentWindow, AUTO_FOCUS_COOLDOWN_MS } = mod;
 
+// The repo's own .pi/swarm.yml declares terminalManager: herdr; this suite mocks tmux argv and
+// must run driver-neutral. Pin tmux for THIS process only (env is process-local, never persisted).
+process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
+
 let fail = 0;
 const ok = (name, cond, extra) => {
 	if (cond) {

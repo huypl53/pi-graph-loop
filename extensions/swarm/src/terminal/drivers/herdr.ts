@@ -59,6 +59,10 @@ export class HerdrDriver implements TerminalDriver {
 	// Track which pane ids belong to swarm-spawned agents so teardown can count only
 	// swarm panes (never touches foreign panes in the agents workspace).
 	private readonly swarmPaneIds = new Set<string>();
+	// True once this driver has spawned/tracked at least one swarm pane. Distinguishes "all
+	// tracked panes died → close the workspace" (legit teardown) from "driver never owned a
+	// pane → never close" (foreign-only guard).
+	private everTrackedSwarmPanes = false;
 
 	private getAgentsWorkspaceLabel(): string {
 		return process.env.PI_SWARM_HERDR_WS_LABEL || "swarm-agents";
@@ -266,7 +270,10 @@ export class HerdrDriver implements TerminalDriver {
 		const paneId = res?.result?.root_pane?.pane_id || res?.root_pane?.pane_id || res?.pane_id || res?.pane || tabId;
 		const session = res?.result?.tab?.workspace_id || agentsWs;
 		// Track this pane as a swarm-spawned agent so teardown can count only swarm panes.
-		if (paneId) this.swarmPaneIds.add(paneId);
+		if (paneId) {
+			this.swarmPaneIds.add(paneId);
+			this.everTrackedSwarmPanes = true;
+		}
 		// H5 (live-found 2026-09-26): `workspace create` always spawns the workspace with an idle
 		// shell root tab (label '1') that the swarm never uses — it lingered forever. herdr closes
 		// the workspace when its LAST tab closes, but the ws survives losing the root tab while an
@@ -278,6 +285,10 @@ export class HerdrDriver implements TerminalDriver {
 			if (rootTabId && rootTabId !== tabId) {
 				try {
 					await this.herdr(pi, ["tab", "close", rootTabId], 5_000);
+					// One-shot semantics (audit-gap RED 2026-09-27): the root tab exists exactly once.
+					// Clear the recorded id after a successful close so later spawns never re-attempt
+					// closing an already-closed tab.
+					this.agentsWsRootTabId = undefined;
 				} catch (err: any) {
 					await logSwarmError(process.cwd(), "herdr", "spawn_agent.root_tab_close_failed", err, { rootTabId, tabId });
 				}
@@ -352,6 +363,12 @@ export class HerdrDriver implements TerminalDriver {
 	 */
 	private async maybeCloseAgentsWorkspace(pi: ExtensionAPI): Promise<void> {
 		if (!this.agentsWorkspaceId) return;
+		// Foreign-only guard (audit-gap RED 2026-09-27): if this driver instance never spawned or
+		// tracked a swarm pane, teardown must not close the shared agents workspace — it may hold
+		// foreign (user-created) panes. Uses the ever-tracked flag rather than the live set size:
+		// after the FINAL tracked pane dies the set is legitimately empty and the workspace must
+		// still close. A driver that never owned a pane never closes.
+		if (!this.everTrackedSwarmPanes) return;
 		// Prune the tracking set: remove pane ids that no longer exist.
 		// Use `pane list --workspace <wsId>` to get the authoritative pane set for the
 		// agents workspace, then intersect with our tracked set. This avoids false
