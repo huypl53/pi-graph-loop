@@ -35,13 +35,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 tmux-snapshots
-.pi/swarm/
-.pi/mock-llm/
-.pi/background-tasks/
-.pi/swarm-uat/runs/
-.pi/swarm-uat/*.sh
-.pi/tasks/
-.pi/fusion/
 **/__pycache__/
 
 # eval scaffolding / local skill bundles (local only)
@@ -49,10 +42,8 @@ tmux-snapshots
 .agents/skills/ak-*/
 .agents/skills-stale/
 Session.vim
-.pi/delegate/
 .worktrees
-.pi/swarm.yml
-.pi/validation/reconcile-offset/.pi
+.pi
 engineer
 .agents/plugins
 .agentkit
