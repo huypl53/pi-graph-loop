@@ -216,6 +216,11 @@ export class TmuxDriver implements TerminalDriver {
 		return out;
 	}
 
+	/** Tmux: pass-through — pane targets are session:window-qualified; the window IS the tab. */
+	async resolveOwningTabId(_pi: ExtensionAPI, target: string): Promise<string | undefined> {
+		return target || undefined;
+	}
+
 	async focusWindow(pi: ExtensionAPI, target: TerminalTargetRef | string): Promise<{ ok: boolean; error?: string }> {
 		const winTarget =
 			typeof target === "string"

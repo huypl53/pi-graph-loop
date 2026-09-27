@@ -507,7 +507,7 @@ a tab or falling back to the currently focused tab. Tmux's `select-window` then 
 (RED + GREEN evidence durably stored under
 `.pi/swarm/tasks/herdr-h6-driver-mirroring-20260926/artifacts/{red,green}-evidence/`).
 
-### Busy-path cross-workspace guard (herdr only)
+### Busy-path cross-workspace guard + auto-focus policy modes (herdr only)
 
 Herdr `tab focus` is **global** — it yanks the user's focused workspace across all workspaces.
 Under tmux, `select-window` is session-scoped, so the busy-path auto-focus (`maybeAutoFocusOnBusy`,
@@ -515,27 +515,62 @@ fired from `agent_start` / `tool_execution_start` hooks) was bounded to the work
 Under herdr, the same busy path could silently move the user from their current workspace into
 the `swarm-agents` workspace whenever a worker became busy.
 
-The guard (`extensions/swarm/src/focus.ts` `maybeAutoFocusOnBusy`) now:
+The guard (`extensions/swarm/src/focus.ts` `maybeAutoFocusOnBusy`) resolves the target agents
+workspace from the busy agent's `tmuxSession`, queries the user's current global focused workspace
+via `TerminalDriver.getFocusedWorkspaceId`, and applies the configured **auto-focus policy**
+(`st.autoFocusPolicy`, default `follow`) when the user is outside the agents workspace:
 
-1. Resolves the target agents workspace from the busy agent's `tmuxSession`.
-2. Queries the user's current global focused workspace via `TerminalDriver.getFocusedWorkspaceId`
-   (herdr: `tab list` no-workspace-filter → focused tab's `workspace_id`; tmux: current session name;
-   mock: `currentPane.session`).
-3. If the focused workspace differs from the target agents workspace, AND neither `force` nor
-   `bypassActiveGuard` authorizes the operation, returns
-   `{ switched: false, reason: "user-focused-outside-agents-workspace" }` without calling
-   `focusAgentWindow`.
+| Policy | Busy-path behavior (user outside agents workspace) | Use case |
+|---|---|---|
+| `follow` (default) | Pull the user **iff the root is idle** (not mid-turn: no busy/tool_running root status, no root tool/heartbeat within 5s). Root mid-turn ⇒ skip with `root-busy-hold`. Unknown root state counts as idle (fail-open). | Normal swarm work: follow worker activity without losing your place mid-turn. |
+| `steal` | Always pull (pre-`05d7df9` behavior; guard dropped). | User explicitly wants every worker event to steal focus. |
+| `suppress` | Never pull — skip with `user-focused-outside-agents-workspace` (the `05d7df9` behavior). | User wants to stay in their own workspace and use `/swarm focus` manually. |
 
-Explicit `/swarm focus` (calls `focusAgentWindow` directly) and the settle path
-(`maybeAutoFocusBusyAgent`) are unaffected. Query failures fail-open with a durable
-`cross_workspace_guard.query_failed` error log at the caller's cwd.
+Switch policies with `/swarm auto-focus follow|steal|suppress` (traces `swarm.auto_focus.policy_set`;
+also sets auto-focus enabled). `force` / `bypassActiveGuard` are unchanged. The guard is herdr-only:
+tmux is policy-neutral (`select-window` is session-scoped). Explicit `/swarm focus` (calls
+`focusAgentWindow` directly) and the settle path are unaffected. Query failures fail-open with a
+durable `cross_workspace_guard.query_failed` error log at the caller's cwd.
 
-Evidence: `.pi/swarm-uat/runs/herdr-auto-focus-red-20260927T010942Z/` (pre-fix RED: 1
-`herdr tab focus` call, global focus moved from user to agents workspace) and
-`.pi/swarm-uat/runs/herdr-auto-focus-green-20260927T011443Z/` (post-fix GREEN: 0
-`herdr tab focus` calls, 1 `herdr tab list` guard query, global focus unchanged).
-Regression: `extensions/swarm/tests/herdr-auto-focus-cross-workspace.test.mjs` 7/7.
-Mock-LLM fixture: `extensions/mock-llm/fixtures/herdr-auto-focus-cross-workspace.jsonl`.
+#### Skip observability (focus.skip)
+
+Every auto-focus skip on every driver emits a durable `focus.skip` trace in
+`.pi/swarm/traces/events.jsonl` with `{ path: "busy" | "settle", agentId, reason }` and a stable
+reason enum: `root_excluded | disabled | root_or_unknown_agent | already_focused |
+already-focused-live | cooldown | user-focused-outside-agents-workspace | root-busy-hold |
+active_window_mismatch | no_busy_agent | switch_failed`. Successful switches still trace
+`tmux.focus.switch`. This makes focus-decision bugs diagnosable from artifacts alone.
+
+#### Live-focus check (D2) and settle-path pane matching (D3)
+
+The busy path's `already_focused` skip no longer trusts the sticky `lastFocusedAgentId` alone:
+when live driver focus can be queried (herdr), the skip fires only when the user is genuinely
+on the agent's tab (`already-focused-live`); stale sticky state from manual navigation away no
+longer permanently suppresses the busy path. Under tmux without a live signal the legacy sticky
+skip is preserved (anti-flap).
+
+On the settle path, `isCurrentActiveTmuxWindow` resolves register-here pane targets
+(`tmuxWindow = "p9"`) to their owning herdr tab via the new `TerminalDriver.resolveOwningTabId`
+(herdr: `pane list --workspace <ws>` — the same pane→owning-tab mapping `focusWindow` has used
+since `a67e351`; tmux/mock: pass-through). A registered-here agent whose tab IS focused now
+matches instead of skipping with `active_window_mismatch` forever.
+
+#### Settle-path per-target cooldown (D4)
+
+The settle path uses a 250ms **per-target** cooldown (`st.lastFocusByTarget`) instead of the
+global 2.5s busy-path cooldown. Workers settling near-simultaneously hand focus off to DIFFERENT
+targets, which are never blocked; only identical-target re-fires within 250ms are debounced.
+The busy path keeps the global 2.5s anti-flap cooldown.
+
+Evidence: `.pi/swarm-uat/runs/herdr-auto-focus-red-20260927T010942Z/` (pre-guard RED) and
+`.pi/swarm-uat/runs/herdr-auto-focus-green-20260927T011443Z/` (post-guard GREEN) for the original
+guard; regressions for the policy/observability/parity work:
+`extensions/swarm/tests/herdr-auto-focus-cross-workspace.test.mjs` (7/7),
+`auto-focus-policy.test.mjs` (10 cases), `auto-focus-skip-tracing.test.mjs`,
+`auto-focus-live-focus-check.test.mjs`, `herdr-pane-to-tab-matching.test.mjs`,
+`auto-focus-cooldown-handoff.test.mjs`. Mock-LLM fixtures:
+`extensions/mock-llm/fixtures/herdr-auto-focus-cross-workspace.jsonl`,
+`herdr-autofocus-parity-laneA.jsonl`, `herdr-autofocus-parity-laneB.jsonl`.
 
 ## Child pi args — default loads swarm extension
 

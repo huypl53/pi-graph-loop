@@ -1,0 +1,8 @@
+# herdr-autofocus-parity-laneA: busy-path follow-mode end-to-end (task herdr-autofocus-parity-20260927).
+# D1/D2/D5: worker becomes busy → maybeAutoFocusOnBusy evaluates the follow policy
+# (root idle ⇒ legitimate pull; root mid-turn ⇒ root-busy-hold skip with a focus.skip trace;
+# stale already_focused superseded by the live-focus check).
+# Turn 1: worker reports work to root and keeps running (busy-path trigger).
+{"name":"laneA-worker-busy","events":[{"type":"toolcall","delayMs":20,"name":"swarm_send_message","id":"laneA-report-1","arguments":{"to":"root","body":"Lane A: starting heavy work phase; busy-path auto-focus policy should evaluate now.","requiresAck":false}}]}
+# Turn 2: worker settles so the lane observes the resulting focus decision in swarm traces.
+{"name":"laneA-worker-settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Lane A work phase complete; settling."},{"type":"stop","delayMs":5,"reason":"stop"}]}

@@ -1,0 +1,9 @@
+# herdr-autofocus-parity-laneB: settle-path pane→tab handoff end-to-end (task herdr-autofocus-parity-20260927).
+# D3: a registered-here agent (tmuxWindow = pane component "p9") settles while its owning tab
+# IS focused → isCurrentActiveTmuxWindow must resolve pane→owning tab via
+# driver.resolveOwningTabId (a67e351 parity) and hand off to the next busy agent instead of
+# skipping with active_window_mismatch. focus.skip traces (D5) make any skip diagnosable.
+# Turn 1: registered-here worker reports completion and settles (settle-path trigger).
+{"name":"laneB-reg-settle","events":[{"type":"toolcall","delayMs":20,"name":"swarm_send_message","id":"laneB-done-1","arguments":{"to":"root","body":"Lane B: registered-here agent finished; settle path should hand focus to the next busy worker.","requiresAck":false}}]}
+# Turn 2: settle.
+{"name":"laneB-reg-settled","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Lane B settled; awaiting next assignment."},{"type":"stop","delayMs":5,"reason":"stop"}]}

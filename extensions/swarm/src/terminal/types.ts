@@ -87,6 +87,15 @@ export interface TerminalDriver {
 	 */
 	resolvePaneId(pi: ExtensionAPI, target: string): Promise<string>;
 
+	/**
+	 * Resolve a target to the tab id that OWNS it. Tmux: pass-through (tmux pane targets are
+	 * already session:window-qualified; window is the focus unit). Herdr: pane→owning-tab via
+	 * `pane list --workspace <ws>` (mirrors the focusWindow a67e351 fix-up) — /swarm register
+	 * here agents store the pane component ("p9") in tmuxWindow, never the tab id. Mock:
+	 * pass-through. Returns undefined when no owning tab can be determined.
+	 */
+	resolveOwningTabId(pi: ExtensionAPI, target: string): Promise<string | undefined>;
+
 	inspectProcess(pi: ExtensionAPI, target: string): Promise<{ piLike: boolean; command: string; pid?: number }>;
 
 	sendText(pi: ExtensionAPI, target: string, text: string): Promise<void>;

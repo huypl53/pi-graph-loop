@@ -8,6 +8,47 @@ import { getTerminalDriver } from "./terminal/index.ts";
 import { now } from "./utils.ts";
 
 export const AUTO_FOCUS_COOLDOWN_MS = 2_500;
+// D4 (task herdr-autofocus-parity-20260927): the settle path uses a short PER-TARGET cooldown
+// instead of the global busy cooldown. 250ms is just enough to debounce identical-target
+// re-fires without silently dropping a legitimate handoff between workers settling <2.5s apart.
+export const AUTO_FOCUS_SETTLE_COOLDOWN_MS = 250;
+
+/**
+ * Stable auto-focus skip reasons (focus.skip trace, task herdr-autofocus-parity-20260927 D5).
+ * Every skip site emits exactly one focus.skip trace with one of these values so the
+ * events.jsonl census is diagnosable without forensics.
+ */
+export type FocusSkipReason =
+	| "root_excluded"
+	| "disabled"
+	| "root_or_unknown_agent"
+	| "already_focused"
+	| "already-focused-live"
+	| "cooldown"
+	| "user-focused-outside-agents-workspace"
+	| "root-busy-hold"
+	| "active_window_mismatch"
+	| "no_busy_agent"
+	| "switch_failed";
+
+/**
+ * D5: durably record one auto-focus skip. Never throws — a trace failure must not turn a
+ * skip into a crash; failures route through logSwarmError (no-silent-swallow mandate).
+ */
+async function traceFocusSkip(
+	p: ReturnType<typeof paths>,
+	cwd: string,
+	path: "busy" | "settle",
+	agentId: string,
+	reason: FocusSkipReason,
+	extra?: Record<string, unknown>,
+): Promise<void> {
+	try {
+		await trace(p, "focus.skip", { path, agentId, reason, ...extra });
+	} catch (err: any) {
+		await logSwarmError(cwd, "focus", "trace_skip.failed", err, { path, agentId, reason });
+	}
+}
 
 /**
  * Select the highest-priority busy agent to focus on.
@@ -95,7 +136,8 @@ export async function isCurrentActiveTmuxWindow(pi: ExtensionAPI, session: strin
 
 	try {
 		// H6: was raw tmux display-message; now driver-routed (TmuxDriver emits the identical argv).
-		const status = await getTerminalDriver().getFocusStatus(pi, session, { order: "name-first" });
+		const driver = getTerminalDriver();
+		const status = await driver.getFocusStatus(pi, session, { order: "name-first" });
 		if (!status.sessionAlive) return false;
 		const curWinName = status.activeWindowName;
 		const curWinIndex = status.activeWindowIndex;
@@ -109,6 +151,14 @@ export async function isCurrentActiveTmuxWindow(pi: ExtensionAPI, session: strin
 				if (agent.tmuxTarget === curPaneId || agent.tmuxTarget.endsWith(`:${curWinIndex}.0`)) return true;
 			}
 			if (agent.id && (agent.id === curWinName || agent.id === curWinIndex)) return true;
+			// D3 (task herdr-autofocus-parity-20260927): /swarm register here agents store the
+			// pane component ("p9") in tmuxWindow, which can never match a herdr tab id/label —
+			// herdr 0.8.2 tab rows expose no active_pane_id. Resolve pane→owning tab at the
+			// driver seam (a67e351 parity with focusWindow) and compare against the focused tab id.
+			if (agent.tmuxTarget && agent.tmuxTarget !== "unknown") {
+				const owningTab = await driver.resolveOwningTabId(pi, agent.tmuxTarget);
+				if (owningTab && (owningTab === curWinIndex || owningTab === curWinName)) return true;
+			}
 			return false;
 		}
 
@@ -162,6 +212,30 @@ export async function focusAgentWindow(
 }
 
 /**
+ * D1 (task herdr-autofocus-parity-20260927): is the root session mid-turn? In follow mode the
+ * busy path may pull the user into the agents workspace ONLY when root is idle. Root is
+ * considered mid-turn when it is runtimeStatus busy/tool_running, has a recent heartbeat, or
+ * sent a message within the heartbeat window — a conservative proxy for "an LLM turn is in
+ * flight". Unknown/absent root state counts as idle (fail-open matches the guard's fail-open).
+ */
+const ROOT_MID_TURN_HEARTBEAT_WINDOW_MS = 5_000;
+export function isRootMidTurn(st: SwarmState, nowMs = Date.now()): boolean {
+	const root = st.agents?.root;
+	if (!root) return false;
+	if (root.runtimeStatus === "busy" || root.runtimeStatus === "tool_running") return true;
+	const recent = (ts?: string) => {
+		if (!ts) return false;
+		const t = new Date(ts).getTime();
+		return Number.isFinite(t) && nowMs - t < ROOT_MID_TURN_HEARTBEAT_WINDOW_MS;
+	};
+	return recent(root.lastToolAt) || recent(root.lastHeartbeatAt);
+}
+
+function getAutoFocusPolicy(st: SwarmState): "follow" | "steal" | "suppress" {
+	return st.autoFocusPolicy === "steal" || st.autoFocusPolicy === "suppress" ? st.autoFocusPolicy : "follow";
+}
+
+/**
  * Automatically focus on a specific worker agent when it becomes busy (agent_start / tool_execution_start).
  */
 export async function maybeAutoFocusOnBusy(
@@ -170,39 +244,82 @@ export async function maybeAutoFocusOnBusy(
 	agentId: string,
 	options?: { force?: boolean; bypassCooldown?: boolean; bypassActiveGuard?: boolean },
 ): Promise<{ switched: boolean; targetAgentId?: string; reason: string }> {
-	if (agentId === "root") return { switched: false, reason: "root_excluded" };
+	if (agentId === "root") {
+		const pRoot = paths(ctx.cwd);
+		await traceFocusSkip(pRoot, ctx.cwd, "busy", agentId, "root_excluded");
+		return { switched: false, reason: "root_excluded" };
+	}
 
 	const p = paths(ctx.cwd);
 	const st = await readState(p, ctx.cwd);
 
 	if (!isAutoFocusEnabled(st) && !options?.force) {
+		await traceFocusSkip(p, ctx.cwd, "busy", agentId, "disabled");
 		return { switched: false, reason: "disabled" };
 	}
 
 	const agent = st.agents[agentId];
 	if (!agent || agent.roleKind === "root") {
+		await traceFocusSkip(p, ctx.cwd, "busy", agentId, "root_or_unknown_agent");
 		return { switched: false, reason: "root_or_unknown_agent" };
 	}
 
-	// Don't switch if already focused on this agent
-	if (st.lastFocusedAgentId === agentId) {
-		return { switched: false, reason: "already_focused" };
+	// D2 (task herdr-autofocus-parity-20260927): the sticky lastFocusedAgentId comparison is
+	// superseded by a live-focus check. Manual navigation away from a previously auto-focused
+	// agent used to make this skip permanently wrong. Compare the DRIVER's current global
+	// focus target against the busy agent instead. Under herdr, `tab list` exposes the focused
+	// tab; under tmux/mock the workspace-level check below degrades to the legacy sticky check
+	// only when a live query is impossible (tmux is session-scoped, so the sticky check remains
+	// a safe anti-flap there).
+	if (st.lastFocusedAgentId === agentId && !options?.force) {
+		const driver = getTerminalDriver();
+		let liveFocusTabId: string | undefined;
+		try {
+			const status = await driver.getFocusStatus(pi, agent.tmuxSession || st.tmuxSession, { order: "name-first" });
+			liveFocusTabId = status.activeWindowIndex || status.activeWindowName;
+		} catch (err: any) {
+			await logSwarmError(ctx.cwd, "focus", "live_focus_check.query_failed", err, { agentId });
+		}
+		if (liveFocusTabId) {
+			// Live query succeeded: decide on LIVE focus, not sticky state.
+			let owningTab: string | undefined;
+			try {
+				owningTab = await driver.resolveOwningTabId(pi, agent.tmuxTarget || agent.tmuxWindow || "");
+			} catch (err: any) {
+				await logSwarmError(ctx.cwd, "focus", "live_focus_check.owning_tab_failed", err, { agentId });
+			}
+			const isLiveFocused = owningTab
+				? owningTab === liveFocusTabId
+				: liveFocusTabId === agent.tmuxWindow || liveFocusTabId === agent.id;
+			if (isLiveFocused) {
+				await traceFocusSkip(p, ctx.cwd, "busy", agentId, "already-focused-live");
+				return { switched: false, reason: "already-focused-live" };
+			}
+			// Live check shows the user is elsewhere — fall through and re-focus.
+		} else {
+			// No live signal (tmux without display info / query failure): keep legacy sticky skip.
+			await traceFocusSkip(p, ctx.cwd, "busy", agentId, "already_focused");
+			return { switched: false, reason: "already_focused" };
+		}
 	}
 
 	// Cooldown check (prevent rapid window flapping)
 	if (st.lastFocusAt && !options?.bypassCooldown) {
 		const elapsed = Date.now() - new Date(st.lastFocusAt).getTime();
 		if (elapsed < AUTO_FOCUS_COOLDOWN_MS) {
+			await traceFocusSkip(p, ctx.cwd, "busy", agentId, "cooldown", { elapsedMs: elapsed });
 			return { switched: false, reason: "cooldown" };
 		}
 	}
 
-	// Herdr-only cross-workspace guard (task-202609270024-fix-herdr-auto-focus-foc):
-	// Herdr `tab focus` is GLOBAL — it yanks the user across workspaces. Under tmux,
-	// `select-window` is session-scoped, so this guard is a no-op. Skip with a stable
-	// distinct reason when the user's current global focus is outside the target agents
-	// workspace, unless `force` or `bypassActiveGuard` authorizes the operation.
-	// Explicit /swarm focus and the settle path (maybeAutoFocusBusyAgent) are unaffected.
+	// Cross-workspace guard — D1 policy switch (task herdr-autofocus-parity-20260927).
+	// Herdr-only (herdr `tab focus` is GLOBAL; tmux `select-window` is session-scoped, guard
+	// is a no-op under tmux). Policies:
+	//   follow   (default): the guard is a MID-TURN VETO — root idle ⇒ allow the pull;
+	//             root mid-turn ⇒ skip with "root-busy-hold".
+	//   steal:    guard dropped entirely (pre-05d7df9 behavior).
+	//   suppress: guard always vetoes with "user-focused-outside-agents-workspace" (05d7df9).
+	// force/bypassActiveGuard unchanged; explicit /swarm focus unaffected.
 	if (!options?.force && !options?.bypassActiveGuard) {
 		const driver = getTerminalDriver();
 		if (driver.id === "herdr") {
@@ -220,16 +337,21 @@ export async function maybeAutoFocusOnBusy(
 					// Logged durably; proceed to focusAgentWindow.
 					currentFocusedWorkspace = undefined;
 				}
-				if (
+				const userOutsideAgentsWorkspace =
 					currentFocusedWorkspace &&
 					currentFocusedWorkspace !== targetAgentsWorkspace &&
-					!isSameWorkspaceId(currentFocusedWorkspace, targetAgentsWorkspace)
-				) {
-					return {
-						switched: false,
-						targetAgentId: agent.id,
-						reason: "user-focused-outside-agents-workspace",
-					};
+					!isSameWorkspaceId(currentFocusedWorkspace, targetAgentsWorkspace);
+				if (userOutsideAgentsWorkspace) {
+					const policy = getAutoFocusPolicy(st);
+					if (policy === "suppress") {
+						await traceFocusSkip(p, ctx.cwd, "busy", agentId, "user-focused-outside-agents-workspace", { policy });
+						return { switched: false, targetAgentId: agent.id, reason: "user-focused-outside-agents-workspace" };
+					}
+					if (policy === "follow" && isRootMidTurn(st)) {
+						await traceFocusSkip(p, ctx.cwd, "busy", agentId, "root-busy-hold", { policy });
+						return { switched: false, targetAgentId: agent.id, reason: "root-busy-hold" };
+					}
+					// policy === "steal", or "follow" with root idle: allow the pull.
 				}
 			}
 		}
@@ -237,7 +359,9 @@ export async function maybeAutoFocusOnBusy(
 
 	const res = await focusAgentWindow(pi, agent, ctx.cwd);
 	if (!res.ok) {
-		return { switched: false, targetAgentId: agent.id, reason: res.error || "switch_failed" };
+		const reason = res.error || "switch_failed";
+		await traceFocusSkip(p, ctx.cwd, "busy", agent.id, "switch_failed", { error: res.error });
+		return { switched: false, targetAgentId: agent.id, reason };
 	}
 
 	const ts = now();
@@ -245,6 +369,7 @@ export async function maybeAutoFocusOnBusy(
 		const latestSt = await readState(p, ctx.cwd);
 		latestSt.lastFocusAt = ts;
 		latestSt.lastFocusedAgentId = agent.id;
+		latestSt.lastFocusByTarget = { ...(latestSt.lastFocusByTarget || {}), [agent.id]: ts };
 		latestSt.updatedAt = ts;
 		await writeState(p, latestSt);
 	});
@@ -276,25 +401,45 @@ export async function maybeAutoFocusBusyAgent(
 
 	// 1. Feature flag check
 	if (!isAutoFocusEnabled(st) && !options?.force) {
+		await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, "disabled");
 		return { switched: false, reason: "disabled" };
 	}
 
-	// 2. Cooldown check (prevent rapid window flapping)
-	if (st.lastFocusAt && !options?.bypassCooldown) {
-		const elapsed = Date.now() - new Date(st.lastFocusAt).getTime();
-		if (elapsed < AUTO_FOCUS_COOLDOWN_MS) {
-			return { switched: false, reason: "cooldown" };
+	// 2. Cooldown check — D4 (task herdr-autofocus-parity-20260927): the settle path uses a
+	// PER-TARGET cooldown instead of the global busy cooldown. Workers finishing near-
+	// simultaneously hand off focus to DIFFERENT targets, and a global 2.5s cooldown silently
+	// dropped every handoff after the first. 250ms per-target just debounces identical-target
+	// re-fires.
+	const settlingAgentEarly = st.agents[settlingAgentId];
+	if (settlingAgentEarly && !options?.bypassCooldown) {
+		const candidateSession = settlingAgentEarly.tmuxSession || st.tmuxSession;
+		const nextCandidate = pickNextBusyAgent(st, settlingAgentId, candidateSession);
+		if (nextCandidate) {
+			const lastForTarget = st.lastFocusByTarget?.[nextCandidate.id];
+			if (lastForTarget) {
+				const elapsed = Date.now() - new Date(lastForTarget).getTime();
+				if (elapsed < AUTO_FOCUS_SETTLE_COOLDOWN_MS) {
+					await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, "cooldown", {
+						targetAgentId: nextCandidate.id,
+						elapsedMs: elapsed,
+						cooldownMs: AUTO_FOCUS_SETTLE_COOLDOWN_MS,
+					});
+					return { switched: false, reason: "cooldown" };
+				}
+			}
 		}
 	}
 
 	// Guard: Root is the human coordinating session, never a worker window.
 	// Auto-focus operates strictly between worker windows within the shared worker tmux session.
 	if (settlingAgentId === "root") {
+		await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, "root_excluded");
 		return { switched: false, reason: "root_excluded" };
 	}
 
 	const settlingAgent = st.agents[settlingAgentId];
 	if (!settlingAgent || settlingAgent.roleKind === "root") {
+		await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, "root_or_unknown_agent");
 		return { switched: false, reason: "root_or_unknown_agent" };
 	}
 
@@ -304,6 +449,7 @@ export async function maybeAutoFocusBusyAgent(
 	if (!options?.bypassActiveGuard) {
 		const isActive = await isCurrentActiveTmuxWindow(pi, session, settlingAgent);
 		if (!isActive) {
+			await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, "active_window_mismatch");
 			return { switched: false, reason: "active_window_mismatch" };
 		}
 	}
@@ -311,12 +457,17 @@ export async function maybeAutoFocusBusyAgent(
 	// 4. Candidate selection (strictly within the same worker session)
 	const targetAgent = pickNextBusyAgent(st, settlingAgentId, session);
 	if (!targetAgent) {
+		await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, "no_busy_agent");
 		return { switched: false, reason: "no_busy_agent" };
 	}
 
 	// 5. Execute switch
 	const res = await focusAgentWindow(pi, targetAgent, ctx.cwd);
 	if (!res.ok) {
+		await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, "switch_failed", {
+			targetAgentId: targetAgent.id,
+			error: res.error,
+		});
 		return { switched: false, targetAgentId: targetAgent.id, reason: res.error || "switch_failed" };
 	}
 
@@ -326,6 +477,7 @@ export async function maybeAutoFocusBusyAgent(
 		const latestSt = await readState(p, ctx.cwd);
 		latestSt.lastFocusAt = ts;
 		latestSt.lastFocusedAgentId = targetAgent.id;
+		latestSt.lastFocusByTarget = { ...(latestSt.lastFocusByTarget || {}), [targetAgent.id]: ts };
 		latestSt.updatedAt = ts;
 		await writeState(p, latestSt);
 	});

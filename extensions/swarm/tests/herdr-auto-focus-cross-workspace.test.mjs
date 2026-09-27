@@ -75,12 +75,16 @@ function fakePi({ herdrTabList, herdrWorkspaceList, tmuxDisplayMessage, herdrTab
 
 const count = (execs, bin, predicate) => execs.filter((e) => e.bin === bin && (!predicate || predicate(e))).length;
 
-const baseState = (scratch, agentsWsId, agentsTabId, agentsPaneId) => ({
+const baseState = (scratch, agentsWsId, agentsTabId, agentsPaneId, policy) => ({
 	version: 1,
 	swarmId: "af-test",
 	cwd: scratch,
 	tmuxSession: agentsWsId,
 	autoFocusBusy: true,
+	// task herdr-autofocus-parity-20260927 D1: default policy is "follow" (guard = mid-turn
+	// veto). The legacy always-veto behavior lives on as policy "suppress"; tests asserting the
+	// old skip reason opt into it explicitly.
+	autoFocusPolicy: policy || "follow",
 	agents: {
 		"af-worker": {
 			id: "af-worker",
@@ -105,34 +109,41 @@ const setMgr = (m) => (process.env.PI_SWARM_TERMINAL_MANAGER = m);
 
 console.log("=== Herdr cross-workspace guard: busy path ===");
 
-await asyncTest("RED→GREEN: herdr + user focused outside agents workspace → skip with distinct reason, 0 tab focus calls", async () => {
-	const scratch = join(tmpdir(), `swarm-af-guard-${process.pid}-${Date.now()}`);
-	mkdirSync(scratch, { recursive: true });
-	const p = paths(scratch);
-	const agentsWsId = "wA";
-	const agentsTabId = "wA:t1";
-	const agentsPaneId = "wA:p1";
-	const userWsId = "wU";
-	await writeState(p, baseState(scratch, agentsWsId, agentsTabId, agentsPaneId));
+await asyncTest(
+	"RED→GREEN: herdr + suppress policy + user focused outside agents workspace → skip with distinct reason, 0 tab focus calls",
+	async () => {
+		const scratch = join(tmpdir(), `swarm-af-guard-${process.pid}-${Date.now()}`);
+		mkdirSync(scratch, { recursive: true });
+		const p = paths(scratch);
+		const agentsWsId = "wA";
+		const agentsTabId = "wA:t1";
+		const agentsPaneId = "wA:p1";
+		const userWsId = "wU";
+		await writeState(p, baseState(scratch, agentsWsId, agentsTabId, agentsPaneId, "suppress"));
 
-	const { api, execs } = fakePi({
-		herdrTabList: [
-			{ tab_id: agentsTabId, workspace_id: agentsWsId, label: "af-worker", focused: false },
-			{ tab_id: "wU:t1", workspace_id: userWsId, label: "user-tab", focused: true },
-		],
-	});
-	setMgr("herdr");
-	const res = await maybeAutoFocusOnBusy(api, { cwd: scratch }, "af-worker");
-	strictEqual(res.switched, false, "must not switch when user is outside agents workspace");
-	strictEqual(res.reason, "user-focused-outside-agents-workspace", `reason must be the stable distinct skip reason, got: ${res.reason}`);
-	strictEqual(res.targetAgentId, "af-worker", "targetAgentId should still be reported for diagnostics");
-	strictEqual(
-		count(execs, "herdr", (e) => e.args[0] === "tab" && e.args[1] === "focus"),
-		0,
-		"ZERO herdr tab focus calls at pi.exec seam",
-	);
-	rmSync(scratch, { recursive: true, force: true });
-});
+		const { api, execs } = fakePi({
+			herdrTabList: [
+				{ tab_id: agentsTabId, workspace_id: agentsWsId, label: "af-worker", focused: false },
+				{ tab_id: "wU:t1", workspace_id: userWsId, label: "user-tab", focused: true },
+			],
+		});
+		setMgr("herdr");
+		const res = await maybeAutoFocusOnBusy(api, { cwd: scratch }, "af-worker");
+		strictEqual(res.switched, false, "must not switch when user is outside agents workspace");
+		strictEqual(
+			res.reason,
+			"user-focused-outside-agents-workspace",
+			`reason must be the stable distinct skip reason, got: ${res.reason}`,
+		);
+		strictEqual(res.targetAgentId, "af-worker", "targetAgentId should still be reported for diagnostics");
+		strictEqual(
+			count(execs, "herdr", (e) => e.args[0] === "tab" && e.args[1] === "focus"),
+			0,
+			"ZERO herdr tab focus calls at pi.exec seam",
+		);
+		rmSync(scratch, { recursive: true, force: true });
+	},
+);
 
 await asyncTest("GREEN: herdr + user already in agents workspace → normal busy auto-focus proceeds", async () => {
 	const scratch = join(tmpdir(), `swarm-af-guard-2-${process.pid}-${Date.now()}`);

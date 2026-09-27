@@ -5,6 +5,17 @@ import { sleep } from "../../utils.ts";
 import { expected, logSwarmError } from "../../errorlog.ts";
 import { PI_COMMANDS } from "./tmux.ts";
 
+/**
+ * Extract a workspace-qualified herdr pane id and its workspace segment when the target is a
+ * native herdr pane id ("wN:pM"). Shared by focusWindow and resolveOwningTabId (both must use
+ * the SAME pane→owning-tab mapping — a67e351 parity, task herdr-autofocus-parity-20260927 D3).
+ */
+export function splitHerdrPaneId(target: string): { paneId: string; workspace: string } | undefined {
+	const m = String(target || "").match(/^(w[A-Za-z0-9_-]+):(p[A-Za-z0-9]+)$/);
+	if (!m) return undefined;
+	return { paneId: m[0], workspace: m[1] };
+}
+
 export { PI_COMMANDS };
 
 /**
@@ -516,6 +527,35 @@ export class HerdrDriver implements TerminalDriver {
 		return /^w[A-Za-z0-9_-]+:t[A-Za-z0-9]+$/.test(value || "");
 	}
 
+	/**
+	 * D3 (task herdr-autofocus-parity-20260927): resolve a target to the herdr tab id that owns
+	 * it. Native herdr pane ids ("wN:pM") resolve via `pane list --workspace <ws>` — the exact
+	 * pane→owning-tab mapping focusWindow has used since a67e351. Anything else (already-a-tab-id,
+	 * legacy composite, label) returns undefined: callers fall back to their legacy matching.
+	 */
+	async resolveOwningTabId(pi: ExtensionAPI, target: string): Promise<string | undefined> {
+		if (this.isHerdrTabId(target)) return target;
+		const split = splitHerdrPaneId(target);
+		if (!split) return undefined;
+		try {
+			const paneRes = await this.herdrJson(pi, ["pane", "list", "--workspace", split.workspace], 5_000);
+			const panes = Array.isArray(paneRes) ? paneRes : paneRes?.result?.panes || paneRes?.panes || [];
+			const pane = panes.find((p: any) => {
+				const id = p?.pane_id || p?.paneId || p?.id;
+				const workspaceId = p?.workspace_id || p?.workspaceId;
+				return id === split.paneId && (!workspaceId || workspaceId === split.workspace);
+			});
+			const ownerTabId = pane?.tab_id || pane?.tabId;
+			if (ownerTabId && this.isHerdrTabId(ownerTabId) && ownerTabId.startsWith(`${split.workspace}:t`)) {
+				return ownerTabId;
+			}
+			return undefined;
+		} catch (err: any) {
+			await logSwarmError(process.cwd(), "herdr", "resolve_owning_tab.failed", err, { target });
+			return undefined;
+		}
+	}
+
 	async focusWindow(pi: ExtensionAPI, target: TerminalTargetRef | string): Promise<{ ok: boolean; error?: string }> {
 		let tabId = typeof target === "string" ? target : target.window || target.target;
 		if (!tabId || tabId === "unknown") {
@@ -528,7 +568,7 @@ export class HerdrDriver implements TerminalDriver {
 				// the owning tab id, so resolve this exact pane in its workspace; never guess from
 				// the pane index or fall back to a similarly named/current tab.
 				const paneId = typeof target === "string" ? "" : target.target || target.paneId || "";
-				const paneWorkspace = paneId.match(/^(w[A-Za-z0-9_-]+):p[A-Za-z0-9]+$/)?.[1];
+				const paneWorkspace = splitHerdrPaneId(paneId)?.workspace;
 				if (paneWorkspace) {
 					const requestedWorkspace =
 						typeof target === "string" || !target.session || target.session === "unknown" ? paneWorkspace : target.session;

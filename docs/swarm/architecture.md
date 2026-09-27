@@ -60,6 +60,14 @@ extension no longer registers tools or commands for them.
 
 ## Subsystems
 
+### 0. Focus / auto-focus observability
+Auto-focus (busy + settle paths, `src/focus.ts`) is fully traced: every switch emits
+`tmux.focus.switch`; every skip emits `focus.skip` with `{ path, agentId, reason }` and a stable
+reason enum — policy decisions (`follow`/`steal`/`suppress`, `root-busy-hold`), live-focus and
+pane-matching outcomes (`already-focused-live`, `active_window_mismatch`), and cooldowns are
+all durably visible in `traces/events.jsonl` for every terminal driver. See
+`docs/swarm/operations.md` "Busy-path cross-workspace guard + auto-focus policy modes".
+
 ### 1. Agent lifecycle
 Handles spawn, register/adopt, pause, resume, stop, restart, role changes, and
 identity reload.

@@ -118,6 +118,11 @@ export class MockTerminalDriver implements TerminalDriver {
 		return this.captured.get(target) || `[mock pane capture: ${target}]\n`;
 	}
 
+	/** Mock: pass-through — in-memory panes are single-window by construction. */
+	async resolveOwningTabId(_pi: ExtensionAPI, target: string): Promise<string | undefined> {
+		return target || undefined;
+	}
+
 	async focusWindow(_pi: ExtensionAPI, target: TerminalTargetRef | string): Promise<{ ok: boolean; error?: string }> {
 		const winTarget = typeof target === "string" ? target : target.target;
 		this.focusHistory.push(winTarget);

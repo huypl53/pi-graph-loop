@@ -75,7 +75,7 @@ export function parseGoalSetInterval(raw: string): { ok: true; ms: number } | { 
 export function scopedSwarmUsage(commandName: ScopedSwarmCommandName): string {
 	switch (commandName) {
 		case "swarm-agents":
-			return "Usage: /swarm-agents <list|status|spawn|register|panes|stop|restart|role|pause|resume|sendkey|attach|release|mailbox|identity|focus|auto-focus> ...";
+			return "Usage: /swarm-agents <list|status|spawn|register|panes|stop|restart|role|pause|resume|sendkey|attach|release|mailbox|identity|focus|auto-focus> ...  (/swarm auto-focus [on|off|toggle|status|follow|steal|suppress])";
 		case "swarm-tasks":
 			return "Usage: /swarm-tasks <list|graph|status|next|validate> ...";
 		case "swarm-msg":
