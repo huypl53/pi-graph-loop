@@ -43,6 +43,7 @@ export function isActionableRootMessage(
 	rec: {
 		id: string;
 		to: string;
+		from?: string;
 		requiresAck?: boolean;
 		status?: string;
 		ackedAt?: string;
@@ -95,6 +96,45 @@ export function isActionableRootMessage(
 		return { ok: false, reason: "superseded" };
 	}
 	if (rec.to !== "root") return { ok: false, reason: "wrong_recipient" };
+	// === self-echo-pump-suppression-20260927 — self-origin guard (DESIGN CORRECTION) ===
+	// The root pump must not treat the root's OWN outbound messages as actionable work
+	// (live incident 2026-09-27: root→root result echoes re-surfaced ~30s after authoring).
+	// BUT the engine's own re-trigger voice — stale-open, goal idle, graph-advance/stall,
+	// settle-stale, initial-ready, R20 artifact-progress nudges — is ALSO stamped
+	// from:"root" (the pump/nudge machinery runs in the root process, so
+	// deliverMessageLocked sees currentAgentId()==="root"). Those MUST stay actionable:
+	// they are precisely the re-trigger class R13's high-priority bypass exists to
+	// surface. Exempt only messages carrying a CANONICAL engine-nudge key:
+	//   - `:nudge:` in idempotencyKey/conversationId — covers every NOTIFY_KEY_*
+	//     template (task:...:nudge:{kind}:seq:n, goal:{id}:nudge:idle-streak:n) and the
+	//     r20:nudge: artifact-progress key;
+	//   - `goal:...:escalation:` — goal-epoch pool-empty escalations (not nudge-shaped).
+	// A bare `goal:` prefix would exempt ANY root-authored traffic in a goal conversation
+	// (e.g. `goal:some-id:chat`) — the exemption is keyed to the CANONICAL escalation form
+	// `goal:...:escalation:...` only.
+	// REWORK (review blocking finding) — requiresAck scope: the guard applies ONLY to
+	// ack-expected records (`requiresAck !== false`). windowMsgs (pump-decision.ts) uses
+	// this predicate as its INCLUSION filter, so a blanket guard excluded fresh
+	// root-authored informational echoes from the one-time informational surface path:
+	// neverDisplayed → surfaced once → pump.ts:250-255 stamps surfacedAt → the line-132
+	// dedupe retires it → census informational_already_consumed. That path CANNOT
+	// re-trigger: overdueRetrigger requires rec.requiresAck (pump-decision.ts:277-278
+	// `if (!rec?.requiresAck || rec.ackedAt) return false`), and a surfaced-but-unstamped
+	// echo (crash window) is deduped via surfacedAt once the stamp lands. So informational
+	// self-origin is safe to let through the inclusion filter; only ACK-EXPECTED self-origin
+	// (results, assignment echoes — the incident class) is suppressed. Placement: AFTER
+	// dead_letter/superseded (supersession traces still fire for self-origin records),
+	// BEFORE the R24 fingerprint logic. Read-only classification.
+	if (rec.from === "root" && rec.requiresAck !== false) {
+		const idem = String(rec.idempotencyKey || "");
+		const conv = String(rec.conversationId || "");
+		const isEngineNudge =
+			idem.includes(":nudge:") ||
+			conv.includes(":nudge:") ||
+			/^goal:[^:]*:escalation:/.test(idem) ||
+			/^goal:[^:]*:escalation:/.test(conv);
+		if (!isEngineNudge) return { ok: false, reason: "self_origin" };
+	}
 
 	// Task-scoped predicate (covers terminal task, cancelled, terminal node, reassigned node).
 	// Parse task/node reference from conversationId, falling back to the canonical

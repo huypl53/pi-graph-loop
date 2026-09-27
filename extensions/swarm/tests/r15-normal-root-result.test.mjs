@@ -247,36 +247,51 @@ async function seedNormalResultShape({ busy = true, workerId = "fs-planner", tas
 	clearEvents(scratch);
 
 	// Enqueue the normal-priority result via the production path.
-	await withLock(p, async () => {
-		const st = await readState(p, scratch);
-		await deliverMessageLocked(
-			{
-				exec: async () => ({ code: 0, stdout: "", stderr: "" }),
-				setModel: async () => true,
-				sendMessage: () => {},
-				getAllTools: () => [],
-				getActiveTools: () => [],
-				setActiveTools: () => {},
-				registerTool: () => {},
-				registerCommand: () => {},
-				on: () => {},
-			},
-			scratch,
-			p,
-			st,
-			{
-				to: "root",
-				priority: "normal",
-				subject: `Result: implement of ${taskId} done`,
-				body: `Node \`implement\` of task ${taskId} completed successfully. No further action required.`,
-				requiresAck: true,
-				requiresResponse: false,
-				conversationId: `task:${taskId}:implement:nudge:result:seq:1`,
-				idempotencyKey: `task:${taskId}:implement:nudge:result:seq:1`,
-			},
-		);
-		await writeState(p, st);
-	});
+	// self-echo-pump-suppression-20260927: stamp from=workerId for the seeded result —
+	// deliverMessageLocked reads currentAgentId() from the ambient env, which is "root"
+	// in this harness. A production worker result never carries from:"root" (worker sessions
+	// run under their own PI_SWARM_AGENT_ID), and the pump's self_origin guard now correctly
+	// classifies such a message non-actionable. Set the env around the seed to preserve the
+	// intended worker→root shape this scenario audits (R15 normal-priority surfacing).
+	const prevAgentId = process.env.PI_SWARM_AGENT_ID;
+	const prevIsRoot = process.env.PI_SWARM_IS_ROOT;
+	process.env.PI_SWARM_AGENT_ID = workerId;
+	process.env.PI_SWARM_IS_ROOT = "";
+	try {
+		await withLock(p, async () => {
+			const st = await readState(p, scratch);
+			await deliverMessageLocked(
+				{
+					exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+					setModel: async () => true,
+					sendMessage: () => {},
+					getAllTools: () => [],
+					getActiveTools: () => [],
+					setActiveTools: () => {},
+					registerTool: () => {},
+					registerCommand: () => {},
+					on: () => {},
+				},
+				scratch,
+				p,
+				st,
+				{
+					to: "root",
+					priority: "normal",
+					subject: `Result: implement of ${taskId} done`,
+					body: `Node \`implement\` of task ${taskId} completed successfully. No further action required.`,
+					requiresAck: true,
+					requiresResponse: false,
+					conversationId: `task:${taskId}:implement:nudge:result:seq:1`,
+					idempotencyKey: `task:${taskId}:implement:nudge:result:seq:1`,
+				},
+			);
+			await writeState(p, st);
+		});
+	} finally {
+		process.env.PI_SWARM_AGENT_ID = prevAgentId;
+		process.env.PI_SWARM_IS_ROOT = prevIsRoot;
+	}
 }
 
 /**

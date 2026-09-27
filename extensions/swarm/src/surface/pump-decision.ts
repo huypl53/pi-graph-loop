@@ -151,6 +151,7 @@ export async function decideSurfaceLocked(
 		task_missing: 0,
 		node_missing: 0,
 		wrong_recipient: 0,
+		self_origin: 0,
 		retrigger_budget_exhausted: 0,
 		informational_already_consumed: 0,
 	};
