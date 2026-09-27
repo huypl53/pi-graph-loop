@@ -161,6 +161,20 @@ export async function handleObservabilityCommand(
 		}
 
 		let enabled: boolean;
+		// D1 policy modes (task herdr-autofocus-parity-20260927): /swarm auto-focus follow|steal|suppress
+		if (sub === "follow" || sub === "steal" || sub === "suppress") {
+			const policy = sub as "follow" | "steal" | "suppress";
+			await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				st.autoFocusPolicy = policy;
+				st.autoFocusBusy = true;
+				st.updatedAt = now();
+				await writeState(p, st);
+				await trace(p, "swarm.auto_focus.policy_set", { policy, by: currentAgentId() });
+			});
+			ctx.ui.notify(`Auto-focus policy: ${policy.toUpperCase()} (auto-focus ENABLED)`, "info");
+			return;
+		}
 		if (sub === "toggle") {
 			const st = await readState(p, ctx.cwd);
 			enabled = !isAutoFocusEnabled(st);
@@ -169,7 +183,10 @@ export async function handleObservabilityCommand(
 		} else if (["off", "disable", "false", "0"].includes(sub)) {
 			enabled = false;
 		} else {
-			ctx.ui.notify("Usage: /swarm focus [agentId|busy|status] | /swarm auto-focus [on|off|toggle|status]", "warning");
+			ctx.ui.notify(
+				"Usage: /swarm focus [agentId|busy|status] | /swarm auto-focus [on|off|toggle|status|follow|steal|suppress]",
+				"warning",
+			);
 			return;
 		}
 

@@ -279,8 +279,19 @@ export type SwarmState = {
 	poolScaffoldGlobalNotifiedAt?: string;
 	// Auto-focus busy agent in tmux when an agent settles. Toggled via /swarm auto-focus.
 	autoFocusBusy?: boolean;
+	// Auto-focus policy (task herdr-autofocus-parity-20260927, D1):
+	//   "follow"   (default) busy-path MAY pull the user into the agents workspace iff root is idle;
+	//                       root mid-turn ⇒ skip with "root-busy-hold".
+	//   "steal"    always pull (pre-05d7df9 behavior; cross-workspace guard dropped).
+	//   "suppress" never pull (05d7df9 behavior; guard always vetoes).
+	// Toggled via /swarm auto-focus follow|steal|suppress. tmux driver: policy-neutral (guard is herdr-only).
+	autoFocusPolicy?: "follow" | "steal" | "suppress";
 	lastFocusAt?: string;
 	lastFocusedAgentId?: string;
+	// D4: ISO timestamp of the last auto-focus per target agent id. The settle path uses this
+	// per-target cooldown (250ms, handoff-priority) instead of the global busy-path cooldown so
+	// near-simultaneous settles between different workers never silently drop a handoff.
+	lastFocusByTarget?: Record<string, string>;
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;
