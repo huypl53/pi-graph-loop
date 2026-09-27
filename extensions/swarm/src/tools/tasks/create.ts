@@ -213,7 +213,7 @@ export function registerCreateTaskTool(pi: ExtensionAPI): void {
 						return { taskId, task, tp, ready, actionable, autoClosed: autoClosed.closed };
 					});
 					return textResult(
-						`Created task ${result.taskId} at ${relative(ctx.cwd, result.tp.root)}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}${result.autoClosed?.length ? `\nAuto-closed root terminal nodes: ${result.autoClosed.join(", ")}` : ""}`,
+						`Created task ${result.taskId} at ${relative(ctx.cwd, result.tp.root)}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}${result.autoClosed?.length ? `\nAuto-closed root terminal nodes: ${result.autoClosed.join(", ")}` : ""}\nHint: use task-role-staffing.`,
 						{
 							taskId: result.taskId,
 							task: result.task,
