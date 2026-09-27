@@ -5,11 +5,42 @@ import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, graphJsonSummary, printGraphText } from "../../taskgraph.ts";
+import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, graphJsonSummary } from "../../taskgraph.ts";
 import { paths, readState, readTaskByRef, taskPaths, traceTask } from "../../state.ts";
 import { now, textResult } from "../../utils.ts";
 import { runtimeTaskWarnings } from "../../reconcile.ts";
 import { wrapSwarmToolInvocation } from "../wrapper.ts";
+
+// === tool-output-slim §4 — summary view (compact graph verdict + pointers) ===
+function taskSummaryView(
+	task: ReturnType<typeof graphJsonSummary> extends infer T ? any : any,
+	ready: string[],
+	current: string[],
+	runtimeWarnings?: string[],
+) {
+	const progress = { done: 0, inProgress: 0, ready: 0, pending: 0 };
+	for (const n of Object.values(task.nodes)) {
+		const s = (n as any).status;
+		if (s === "done" || s === "failed" || s === "skipped" || s === "cancelled") progress.done++;
+		else if (s === "in_progress") progress.inProgress++;
+		else if (s === "assigned" || s === "ready") progress.ready++;
+		else progress.pending++;
+	}
+	const summary: Record<string, unknown> = {
+		taskId: task.taskId,
+		title: task.title,
+		status: task.status,
+		progress,
+		current: current.map((nodeId) => ({
+			node: nodeId,
+			assignee: (task.nodes as any)[nodeId]?.assignee || null,
+			status: (task.nodes as any)[nodeId]?.status,
+		})),
+		ready,
+	};
+	if (runtimeWarnings?.length) summary.warnings = runtimeWarnings;
+	return summary;
+}
 
 export function registerTaskStatusTool(pi: ExtensionAPI): void {
 	pi.registerTool(
@@ -23,6 +54,12 @@ export function registerTaskStatusTool(pi: ExtensionAPI): void {
 				taskId: Type.String({ description: "Task id." }),
 				includeArtifacts: Type.Optional(
 					Type.Boolean({ description: "List declared artifacts and whether they exist. Defaults to false." }),
+				),
+				detail: Type.Optional(
+					Type.Union([Type.Literal("summary"), Type.Literal("graph")], {
+						description:
+							"Output view. Defaults to 'summary' (compact progress + current/ready pointers). 'graph' returns the full nodes/edges/gates JSON summary.",
+					}),
 				),
 				runtime: Type.Optional(
 					Type.Boolean({ description: "Include agent/message/liveness warnings from swarm state. Defaults to false." }),
@@ -48,7 +85,14 @@ export function registerTaskStatusTool(pi: ExtensionAPI): void {
 						taskId,
 						includeArtifacts: Boolean(params.includeArtifacts),
 						runtime: Boolean(params.runtime),
+						detail: params.detail === "graph" ? "graph" : "summary",
 					});
+					// === tool-output-slim §4 — summary/graph split ===
+					if (params.detail !== "graph") {
+						const summaryView = taskSummaryView(task, ready, current, runtimeWarnings);
+						if (artifacts) summaryView.artifacts = artifacts;
+						return textResult(JSON.stringify(summaryView), { ...summaryView, closure });
+					}
 					const closureBlock = closure
 						? `\n\nClosure: storedStatus=${closure.storedStatus} derivedStatus=${closure.derivedStatus} closed=${closure.closedNodes}/${closure.nodeClosure.length} open=${closure.openNodes} stale=${closure.staleNodes}` +
 							(closure.openAssignments.length
@@ -59,11 +103,10 @@ export function registerTaskStatusTool(pi: ExtensionAPI): void {
 								: "") +
 							(closure.blocking.length ? `\n  Task blockers: ${closure.blocking.join("; ")}` : "")
 						: "";
-					const text =
-						printGraphText(task, ready, current, artifacts) +
-						(runtimeWarnings?.length ? `\n\nRuntime warnings:\n${runtimeWarnings.map((w) => `  ⚠ ${w}`).join("\n")}` : "") +
-						closureBlock;
-					return textResult(text, { task: summary, taskId, artifacts, runtimeWarnings, closure });
+					// detail:"graph" — the legacy JSON graph summary (nodes/edges/gates arrays), which is
+					// also what main's `details` carried. printGraphText remains available via the
+					// /swarm graph command surface, not this tool.
+					return textResult(JSON.stringify(summary), { task: summary, taskId, artifacts, runtimeWarnings, closure });
 				});
 			},
 		}),

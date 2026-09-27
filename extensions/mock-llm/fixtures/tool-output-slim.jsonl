@@ -1,0 +1,31 @@
+# tool-output-slim: scripted agent turns exercising the slim tool I/O surfaces end-to-end.
+# Lane: scratch cwd seeded with root mailbox (2 unread informational + 1 read), 3 agents
+# (1 stopped with a dead letter), one 8-node task. Run:
+#   pi --provider mock-llm --model tool-output-slim -e ./extensions/mock-llm -e ./extensions/swarm
+# (from the seeded scratch cwd, with PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1)
+# NOTE: do NOT pass -e ./extensions/swarm on top of the repo's global packages entry —
+# double registration aborts extension load. Either flag alone is enough.
+# Transcript assertions: check_mailbox default scan is headers-only ≤2,050B with age/unread;
+# fullBody:true returns complete bodies minus transport fields; agent_status default is the
+# attention/census view (census+attention+hint, paneAlive/driver/target/slot); targeted query
+# returns the full row; task_status default is the compact summary (progress/current/ready).
+# Tester extension (swarm-tool-output-slim-20260928 / node test): turn 3 adds coverage for the
+# two changed code paths the implementer's fixture did not reach end-to-end —
+# (a) the §5 root-note trim on swarm_send_message (root recipient →
+#     "(root: mailbox-only — durable in mailbox, no time-bound surface guarantee; normal)"), and
+# (b) the worker unread ledger path (PI_SWARM_AGENT_ID=worker-01 scan with
+#     pendingOnly:true + markDelivered:true → headers-only rows keyed off
+#     st.delivered["worker-01"]; after marking, a second pendingOnly scan returns 0).
+# Tester extension (swarm-tool-output-slim-20260928 / node test): turn 1 adds a
+# pendingOnly+markDelivered scan (markDelivered path + ledger-keyed pendingOnly filter), turn 3 adds
+# coverage for the two changed code paths the implementer's fixture did not reach end-to-end —
+# (a) the §5 root-note trim on swarm_send_message (root recipient →
+#     "(root: mailbox-only — durable in mailbox, no time-bound surface guarantee; normal)"), and
+# (b) the worker unread ledger path — run a SECOND lane in the same scratch with
+#     PI_SWARM_AGENT_ID=worker-01: the turn-1 scans key off st.delivered["worker-01"]
+#     (worker side) instead of surfacedAt (root side), and the markDelivered scan durably
+#     appends the returned ids to the worker ledger.
+{"name":"slim scan turn","events":[{"type":"text","delayMs":15,"text":"I’m polling the swarm with the compact scan and reading one message in full.","chunks":["I’m polling the swarm with the compact scan ","and reading one message in full."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"slim-mb-1","arguments":{"limit":20}},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"slim-mb-2","arguments":{"limit":5,"fullBody":true}},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"slim-mb-3","arguments":{"limit":10,"pendingOnly":true,"markDelivered":true}}]}
+{"name":"slim status turn","events":[{"type":"text","delayMs":15,"text":"Now the attention census, one full row, and the task summary.","chunks":["Now the attention census, ","one full row, and the task summary."]},{"type":"toolcall","delayMs":15,"name":"swarm_agent_status","id":"slim-st-1","arguments":{}},{"type":"toolcall","delayMs":10,"name":"swarm_agent_status","id":"slim-st-2","arguments":{"agentId":"worker-stopped"}},{"type":"toolcall","delayMs":10,"name":"swarm_list_agents","id":"slim-la-1","arguments":{}},{"type":"toolcall","delayMs":10,"name":"swarm_task_status","id":"slim-ts-1","arguments":{"taskId":"slim-lane-task"}}]}
+{"name":"slim root-note turn","events":[{"type":"text","delayMs":15,"text":"Filing a durable note to the root mailbox to check the trimmed root-note text.","chunks":["Filing a durable note to the root mailbox ","to check the trimmed root-note text."]},{"type":"toolcall","delayMs":15,"name":"swarm_send_message","id":"slim-sm-1","arguments":{"to":"root","subject":"Root-note trim probe","body":"Informational probe of the §5 root-note trim; no response required."}}]}
+{"name":"slim settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Slim views confirmed: budgets hold and legacy shapes remain reachable via fullBody/view/detail.","chunks":["Slim views confirmed: budgets hold ","and legacy shapes remain reachable via fullBody/view/detail."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

@@ -1081,8 +1081,22 @@ export function registerUpdateTaskTool(pi: ExtensionAPI): void {
 							},
 						);
 					}
+					// tool-output-slim §6: the model-visible text carries only a one-line summary
+					// (files: N (+X −Y)); the full diffstat table stays in details.attestation.stat
+					// and the task trace. Status line + RESPONSE_REQUIRED/supersession texts untouched.
 					const diffSuffix = (result as any).diffStat
-						? `\n\nAttestation diffstat:\n${(result as any).diffStat.available ? (result as any).diffStat.stat : `(git diff unavailable: ${(result as any).diffStat.note || "unknown"})`}`
+						? (() => {
+								const d = (result as any).diffStat;
+								if (!d.available) return `\n\nAttestation diffstat: (unavailable: ${d.note || "unknown"})`;
+								const lines = String(d.stat || "")
+									.split("\n")
+									.filter(Boolean);
+								const totalLine = lines.find((l: string) => /changed|insertion|deletion/i.test(l)) || "";
+								const filesChanged = Number((totalLine.match(/^(\d+) files? changed/i) || [])[1] || 0) || lines.length;
+								const ins = (totalLine.match(/(\d+) insertion/i) || [])[1] || "?";
+								const del = (totalLine.match(/(\d+) deletion/i) || [])[1] || "?";
+								return `\n\nAttestation diffstat: files: ${filesChanged} (+${ins} \u2212${del}) (full diffstat in details)`;
+							})()
 						: "";
 					return textResult(
 						`Updated node ${params.nodeId} of ${result.task.taskId}: ${result.prevStatus} -> ${result.newStatus}${params.outcome ? ` (outcome=${params.outcome})` : ""}.${result.cancelled ? " Task marked cancelled; all assignments released." : ""}${result.reopened?.length ? ` Reopened rework nodes: ${result.reopened.join(", ")}.` : ""}${params.note ? ` Note: ${params.note}` : ""}${diffSuffix}`,
