@@ -48,7 +48,24 @@ export function inferRoleKind(id: string, role: string) {
 	if (idHas("tester") || idHas("qa")) return "tester";
 	if (idHas("observer")) return "observer";
 	if (idHas("implementer") || idHas("coder") || idHas("developer")) return "implementer";
-	if (text.includes("root")) return "root";
+	// === self-echo-pump-suppression-20260927 — root role-TEXT fallback hardened ===
+	// A bare `text.includes("root")` promoted ANY node whose role text merely MENTIONS
+	// "root" (e.g. "unread ledger split root-vs-worker semantics", "per root's plan") to
+	// kind "root", so swarm_assign_task took the DELIBERATE root-branch on a false
+	// premise and auto-routed worker nodes to the root pseudo-agent (live incident:
+	// review + implement nodes, 2026-09-27). Require an explicit ownership signal
+	// instead: the text must START with "root" or contain an ownership phrase
+	// ("root pseudo-agent", "root-owned", "root closes", "assigned to root").
+	// Descriptive mentions like "root-vs-worker" or "root's plan" no longer hijack the
+	// classification; a genuine reviewer/tester signal still wins via the checks below,
+	// and explicitly pinned roleKind records never reach this text fallback.
+	const textOwnership =
+		/^root[\s:]/.test(text) ||
+		text.includes("root pseudo-agent") ||
+		text.includes("root-owned") ||
+		text.includes("root closes") ||
+		text.includes("assigned to root");
+	if (textOwnership) return "root";
 	if (text.includes("planner") || text.includes("plan")) return "planner";
 	if (text.includes("reviewer") || text.includes("review")) return "reviewer";
 	if (text.includes("auditor") || text.includes("audit")) return "auditor";

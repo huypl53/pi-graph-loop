@@ -1,0 +1,4 @@
+# Root-pump self-echo regression: seeded root-authored echoes must not be re-triggered;
+# the worker→root result control must remain surfaceable (R24). Seed the scratch lane
+# with msg-lane-self-result, msg-lane-self-info, and msg-lane-worker-result before pi starts.
+{"name":"self-echo root pump observation","stopReason":"stop","events":[{"type":"text","delayMs":50,"text":"The root pump should surface the worker result control once, suppress both root-authored echoes as self_origin, and avoid re-triggering either self echo. Inspect the mailbox and suppression census."},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"echo-mailbox","arguments":{"limit":20,"pendingOnly":false,"markDelivered":false}},{"type":"toolcall","delayMs":15,"name":"swarm_audit","id":"echo-audit","arguments":{"mode":"events","event":"notification.batch.suppressed","limit":20,"json":true}},{"type":"stop","delayMs":5,"reason":"stop"}]}
