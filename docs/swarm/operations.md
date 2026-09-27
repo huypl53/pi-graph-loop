@@ -139,33 +139,38 @@ Un-cancelling is not supported in this release. To work on the same goal again, 
 
 ### Inspect or change agent roles
 
-### Model pool auto-scaffold on first root session (Issue 20)
+### Model pool auto-scaffold on first root session (Issue 20 + v4.2 dual scaffold)
 
-On the root's first `session_start` in a swarm, the extension checks every config
-source (`.pi/settings.json` swarm/`extensions.swarm` blocks, then `.pi/swarm.yml`).
-When NO source declares `modelPool`:
+On the root's first `session_start` in a swarm, the extension checks both config
+sources (`~/.pi/agent/swarm.yml` global, then `.pi/swarm.yml` project). When NO
+source declares `modelPool`:
 
-- settings.json has a `swarm`/`extensions.swarm` block → the placeholder slot
-  `[{ "model": null, "provider": null }]` merges into that JSON block, preserving
-  every other top-level key (unchanged behavior);
-- no JSON block exists (fresh project) → a **commented placeholder is written to
-  `.pi/swarm.yml`** — the comment-friendly default home (swarm.yml feature).
-  settings.json is not created or touched.
+- **Project scaffold**: a **commented placeholder is written to `.pi/swarm.yml`** —
+  the comment-friendly default home. The template documents the full config surface
+  (modelPool slots with every optional field, rotation policy, defaultModel/defaultProvider)
+  as commented examples; the file parses to `null` (declares nothing) until the user
+  fills it in.
+- **Global scaffold**: a **commented placeholder is written to `~/.pi/agent/swarm.yml`**
+  on first registration only. Same comments-only template. Never overwrites a corrupt
+  global (the scaffold returns `skipped: "corrupt"` in that case).
 
 The write is atomic (`state.ts:atomicWriteFile`) so a torn write is impossible.
 
-Four skip paths surface as their own return values but emit **no notify** and
+Three skip paths surface as their own return values but emit **no notify** and
 leave every config file untouched:
 
-- `modelpool_present` — any source (JSON block or `.pi/swarm.yml`) already declares
+- `modelpool_present` — any source (global or project yml) already declares
   `modelPool` (even `[]`, or a corrupt-but-present yml — never clobber what we
   cannot parse; traced as `pool.scaffold_skipped_yml_unparseable` for the yml case).
 - `no_pi_dir` — `.pi/` directory is absent. We deliberately do NOT `mkdir -p`
   to create a pi directory inside a non-pi project. The `.pi/swarm/...` trace
   pipeline is also skipped (it would mkdir the chain we just refused to create).
-- `settings_unparseable` — `.pi/settings.json` exists but is not valid JSON.
-  Traced as `pool.scaffold_skipped_unparseable`; the file is left as-is for the
+- `corrupt` — the yml file exists but is not valid YAML. Traced as
+  `pool.scaffold_skipped_yml_unparseable`; the file is left as-is for the
   user to repair manually.
+
+The durable `poolScaffoldNotifiedAt` (project) and `poolScaffoldGlobalNotifiedAt`
+(global) flags keep the notifies one-shot per swarm.
 
 The one-shot `ctx.ui.notify` fires **only** when (a) `modelpool_present` /
 `no_pi_dir` / `settings_unparseable` did NOT skip AND (b) the durable flag

@@ -58,16 +58,15 @@ delete process.env.OPENAI_API_KEY; // the scratch auth.json provides openai's ke
 
 // === F2: validate checks slot resolvability via the registry probe ===
 await writeFile(
-	settingsPath,
-	JSON.stringify({
-		swarm: {
-			modelPool: [
-				{ model: "glm-5.3", provider: "ccs" }, // resolvable model, NO api key -> slot_no_credential
-				{ model: "gpt-5.4-mini", provider: "openai" }, // fully resolvable
-				{ model: "nonexistent-model", provider: "ccs" }, // not in registry -> slot_unresolvable
-			],
-		},
-	}),
+	ymlPath,
+	`modelPool:
+  - model: glm-5.3
+    provider: ccs
+  - model: gpt-5.4-mini
+    provider: openai
+  - model: nonexistent-model
+    provider: ccs
+`,
 );
 
 {
@@ -87,22 +86,22 @@ await writeFile(
 	ok("F2: no probe → structural validation only, still works", Array.isArray(v.errors));
 }
 
-// === F1: empty yml + JSON pool → validate warns swarm_yml_empty ===
+// === F1: empty yml → validate warns swarm_yml_empty ===
 await writeFile(ymlPath, "");
 {
 	const v = validateSwarmSettings(scratch, { registryProbe });
 	ok(
-		"F1: empty yml + JSON config → swarm_yml_empty warning",
+		"F1: empty yml → swarm_yml_empty warning",
 		v.warnings.some((w) => w.kind === "swarm_yml_empty"),
 	);
 	ok(
 		"F1: warning names .pi/swarm.yml",
 		v.warnings.some((w) => w.kind === "swarm_yml_empty" && /swarm\.yml/.test(w.message)),
 	);
-	ok("F1: ok not flipped by the empty-yml warning (JSON pool drives ok)", v.ok === false); // false due to F2 errors, not the warning
+	ok("F1: ok not flipped by the empty-yml warning (empty yml = no pool = ok)", v.ok === true);
 }
-// F1b: empty yml + NO JSON pool → scaffold fills the commented placeholder
-await rm(settingsPath, { force: true });
+// F1b: empty yml → scaffold fills the commented placeholder
+await rm(ymlPath, { force: true });
 {
 	const res = await ensurePoolScaffold(scratch);
 	ok("F1b: empty yml is treated as fresh-scaffold (wrote placeholder into it)", res.wrote === true && res.path === ymlPath);

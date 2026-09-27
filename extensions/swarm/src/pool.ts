@@ -18,7 +18,20 @@ import type {
 } from "./types/index.ts";
 import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
 import { currentModel, currentProvider } from "./session.ts";
-import { parseQuotaResetMs, readSwarmRawConfig, readSwarmSettings, readSwarmYml, swarmYmlPath, type SwarmConfigSource } from "./config.ts";
+import {
+	parseQuotaResetMs,
+	readSwarmRawConfig,
+	readSwarmSettings,
+	readSwarmYml,
+	swarmYmlPath,
+	mergeSwarmConfig,
+	findGlobalSwarmYaml,
+	findSwarmYamlFile,
+	readGlobalSwarmYml,
+	GLOBAL_AGENT_DIR,
+	getGlobalAgentDir,
+	type SwarmConfigSource,
+} from "./config.ts";
 import { atomicWriteFile, trace } from "./state.ts";
 import { expected, logSwarmError, traceLogged } from "./errorlog.ts";
 
@@ -53,7 +66,7 @@ function missingProviderCredential(provider: string): string | undefined {
 	try {
 		const home = process.env.HOME || "";
 		if (home) {
-			const auth = JSON.parse(readFileSync(join(home, ".pi", "agent", "auth.json"), "utf8")) as Record<string, any>;
+			const auth = JSON.parse(readFileSync(join(getGlobalAgentDir(), "auth.json"), "utf8")) as Record<string, any>;
 			const entry = auth?.[provider];
 			if (entry && typeof entry === "object" && entry.type === "api_key" && String(entry.key || entry.apiKey || "").trim())
 				return undefined;
@@ -294,13 +307,21 @@ export function classifySwarmSettings(cwd = process.cwd()): SettingsShape {
 
 // Validation errors caught by `/swarm pool validate` and `preflightSpawn`. Each carries a stable
 // `kind` so the formatter can render an actionable suggestion; `field` is purely informational.
-export type PoolValidationError = { kind: string; field?: string; message: string };
+// `source` attributes the error to its config layer (v4.2).
+export type PoolValidationError = { kind: string; field?: string; message: string; source?: "global" | "project" | "merged" | "default" };
 
 // Validate a settings shape WITHOUT mutating the file. Returns [] on success; otherwise an array
 // of structured errors suitable for `/swarm pool validate` rendering. Read-only. `warnings` are
-// advisory (never flip ok): the both_sources_present warning fires when settings.json declares a
-// swarm block AND .pi/swarm.yml exists with recognized config — precedence means the JSON wins, so
-// the operator should know their yml edits are being masked.
+// advisory (never flip ok).
+//
+// v4.2 changes:
+//   - YAML-only: settings.json swarm blocks are no longer read; stale_swarm_json_block warning
+//     fires unconditionally when settings.json carries a swarm block (self-extinguishing).
+//   - Per-layer corrupt reporting: global_swarm_yml_unreadable / global_swarm_yml_eacces /
+//     project_swarm_yml_unreadable / project_swarm_yml_eacces. No both_* aggregation kind.
+//   - Per-key + per-slot provenance in output.
+//   - Unknown-key warning (plain list, no suggestions) for both layers.
+//   - inheritGlobal: false → global_inheritance_disabled warning.
 //
 // Follow-up 2026-09-05 (user report): `opts.registryProbe` (mirrors ctx.modelRegistry.find)
 // enables LIVE resolvability checks per slot: `slot_unresolvable` when the provider/model pair
@@ -314,75 +335,166 @@ export function validateSwarmSettings(
 	const warnings: PoolValidationError[] = [];
 	let shape: SettingsShape;
 
-	const swarmJsonFile = join(cwd, CONFIG_DIR_NAME, "swarm.json");
-	if (existsSync(swarmJsonFile)) {
-		warnings.push({
-			kind: "swarm_json_unsupported",
-			field: ".pi/swarm.json",
-			message:
-				".pi/swarm.json is not supported — swarm configuration uses .pi/swarm.yaml (or .pi/swarm.yml). Please remove or rename it to .pi/swarm.yaml.",
-		});
-	}
-
-	const resolved = readSwarmRawConfig(cwd);
-	if (resolved.corrupt.includes("settings.json")) {
-		shape = { kind: "empty" };
-		errors.push({ kind: "settings_unreadable", message: `Could not parse .pi/settings.json: corrupt JSON` });
-		return { ok: false, errors, warnings, shape };
-	}
-	if (resolved.corrupt.includes("swarm.yml")) {
-		shape = { kind: "empty" };
-		errors.push({
-			kind: "swarm_yml_unreadable",
-			message: `Could not parse .pi/swarm.yml: corrupt YAML (comments are fine; check indentation/colons)`,
-		});
-		return { ok: false, errors, warnings, shape };
-	}
-	const cfg = resolved.cfg;
-	if (!cfg) {
-		shape = { kind: "empty" };
-		warnings.push({
-			kind: "swarm_yaml_missing",
-			field: ".pi/swarm.yaml",
-			message:
-				"No swarm configuration found (.pi/swarm.yaml or .pi/swarm.yml). Run /swarm pool help or create .pi/swarm.yaml to configure defaultModel and defaultProvider.",
-		});
-		return { ok: true, errors, warnings, shape }; // empty is valid (use defaults)
-	}
-	const source = resolved.source!;
-
-	// Both-sources warning: settings.json declares a swarm block AND swarm.yml carries config.
-	// Follow-up F1: an EMPTY (0-byte / comments-only) swarm.yml is also worth flagging — the user
-	// created the file (clear intent to migrate) but it declares nothing, so the JSON config keeps
-	// winning silently. swarm_yml_empty steers them to either fill it or delete it.
-	if (source !== "swarm.yml" && existsSync(swarmYmlPath(cwd))) {
-		let ymlCfg: any = null;
+	// v4.2: stale_swarm_json_block fires ALWAYS when settings.json carries a non-empty swarm block.
+	const settingsFile = join(cwd, CONFIG_DIR_NAME, "settings.json");
+	if (existsSync(settingsFile)) {
 		try {
-			ymlCfg = readSwarmYml(cwd);
-		} catch {
-			/* corrupt already reported above */
-		}
-		if (ymlCfg && (Array.isArray(ymlCfg.modelPool) || ymlCfg.defaultModel || ymlCfg.defaultProvider || ymlCfg.rotation)) {
-			warnings.push({
-				kind: "both_sources_present",
-				field: ".pi/swarm.yml",
-				message: `Both .pi/settings.json (swarm block) and .pi/swarm.yml declare swarm config — settings.json (${source}) wins and the .pi/swarm.yml contents are ignored. Move your config into one file.`,
-			});
-		} else if (!ymlCfg) {
-			warnings.push({
-				kind: "swarm_yml_empty",
-				field: ".pi/swarm.yml",
-				message: `.pi/swarm.yml exists but declares no config (empty or comments-only) — settings.json (${source}) remains in effect. Fill it in (see /swarm pool help) or remove it to silence this warning.`,
-			});
+			const raw = JSON.parse(readFileSync(settingsFile, "utf8")) as Record<string, any>;
+			const fromExt = raw?.extensions?.swarm;
+			const fromTop = raw?.swarm;
+			const hasSwarmBlock =
+				(fromExt && typeof fromExt === "object" && Object.keys(fromExt).length > 0) ||
+				(fromTop && typeof fromTop === "object" && Object.keys(fromTop).length > 0);
+			if (hasSwarmBlock) {
+				warnings.push({
+					kind: "stale_swarm_json_block",
+					field: ".pi/settings.json",
+					message: `.pi/settings.json contains a swarm block that is no longer read by swarm. Remove it or move its contents to .pi/swarm.yml. See docs/swarm/tools.md.`,
+					source: "default",
+				});
+			}
+		} catch (err: any) {
+			// Corrupt settings.json — pi core handles its own errors; swarm ignores.
+			// Documented expected branch: settings.json is not a swarm config source in v4.2,
+			// so a corrupt file is irrelevant to swarm. Logged once via expected() for the census.
+			expected("settings_json_corrupt_ignored_by_swarm", err);
 		}
 	}
+
+	// v4.2: use mergeSwarmConfig for layered merge with per-layer corrupt reporting.
+	const resolved = mergeSwarmConfig(cwd, { freshGlobal: true });
+
+	// Per-layer corrupt reporting (no aggregation kind).
+	for (const c of resolved.corrupt) {
+		const isEacces = c.errCode === "EACCES";
+		const kind = isEacces
+			? c.layer === "global"
+				? "global_swarm_yml_eacces"
+				: "project_swarm_yml_eacces"
+			: c.layer === "global"
+				? "global_swarm_yml_unreadable"
+				: "project_swarm_yml_unreadable";
+		const label = c.layer === "global" ? "~/.pi/agent/swarm.yml" : ".pi/swarm.yml";
+		errors.push({
+			kind,
+			field: c.file,
+			message: isEacces
+				? `Cannot read ${label}: permission denied`
+				: `Could not parse ${label}: corrupt YAML (comments are fine; check indentation/colons)`,
+			source: c.layer,
+		});
+	}
+	if (resolved.corrupt.length > 0) {
+		shape = { kind: "empty" };
+		return { ok: false, errors, warnings, shape };
+	}
+
+	const cfg = resolved.cfg;
+	// v4.2: unknown-key warning (plain list, no suggestions) for both layers.
+	// MUST fire before the empty-cfg early return, because unknown keys are stripped from cfg.
+	const RECOGNIZED = new Set(["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal"]);
+	const projFile = findSwarmYamlFile(cwd);
+	if (projFile) {
+		try {
+			const projYml = readSwarmYml(cwd);
+			if (projYml) {
+				for (const key of Object.keys(projYml)) {
+					if (!RECOGNIZED.has(key)) {
+						warnings.push({
+							kind: "unknown_top_level_key",
+							field: key,
+							message: `[project] unknown key '${key}' in ${projFile.file} — ignored`,
+							source: "project",
+						});
+					}
+				}
+			} else {
+				// yml parses to null (empty/comments-only)
+				warnings.push({
+					kind: "swarm_yml_empty",
+					field: ".pi/swarm.yml",
+					message: `.pi/swarm.yml exists but declares no config (empty or comments-only) — fill it in (see /swarm pool help) or remove it to silence this warning.`,
+					source: "project",
+				});
+			}
+		} catch {
+			/* corrupt already reported */
+		}
+	}
+	const globalFile = findGlobalSwarmYaml();
+	if (globalFile) {
+		try {
+			const globalYml = readGlobalSwarmYml(true);
+			if (globalYml) {
+				for (const key of Object.keys(globalYml)) {
+					if (!RECOGNIZED.has(key)) {
+						warnings.push({
+							kind: "unknown_top_level_key",
+							field: key,
+							message: `[global] unknown key '${key}' in ${globalFile.file} — ignored`,
+							source: "global",
+						});
+					}
+				}
+			}
+		} catch {
+			/* corrupt already reported */
+		}
+	}
+
+	if (!cfg || Object.keys(cfg).length === 0) {
+		shape = { kind: "empty" };
+		// Only emit swarm_yaml_missing if neither global nor project yml exists.
+		const projExists = existsSync(swarmYmlPath(cwd));
+		const globalExists = findGlobalSwarmYaml() !== null;
+		if (!projExists && !globalExists) {
+			warnings.push({
+				kind: "swarm_yaml_missing",
+				field: ".pi/swarm.yaml",
+				message:
+					"No swarm configuration found (.pi/swarm.yaml or .pi/swarm.yml, or ~/.pi/agent/swarm.yml). Run /swarm pool help or create .pi/swarm.yaml to configure defaultModel and defaultProvider.",
+				source: "default",
+			});
+		}
+		return { ok: true, errors, warnings, shape };
+	}
+
+	// v4.2: inheritGlobal: false → global_inheritance_disabled warning.
+	if (resolved.globalInheritDisabled) {
+		warnings.push({
+			kind: "global_inheritance_disabled",
+			field: "inheritGlobal",
+			message: `Project has inheritGlobal: false — ~/.pi/agent/swarm.yml is ignored for this project`,
+			source: "project",
+		});
+	}
+
+	const source = resolved.source;
 	const slots = Array.isArray(cfg.modelPool) ? cfg.modelPool : null;
 	const rotation = cfg.rotation && typeof cfg.rotation === "object" ? cfg.rotation : null;
+	// v4.2: source attribution for slot/rotation errors.
+	const poolSource =
+		resolved.sources.modelPool?.layer === "global"
+			? "global"
+			: resolved.sources.modelPool?.layer === "project.swarm.yml"
+				? "project"
+				: "merged";
+	const rotationSource =
+		resolved.sources.rotation?.layer === "global"
+			? "global"
+			: resolved.sources.rotation?.layer === "project.swarm.yml"
+				? "project"
+				: "merged";
 	if (slots) {
 		const seen = new Set<string>();
 		slots.forEach((s: any, idx: number) => {
 			if (!s || typeof s !== "object") {
-				errors.push({ kind: "slot_not_object", field: `modelPool[${idx}]`, message: `modelPool[${idx}] must be an object` });
+				errors.push({
+					kind: "slot_not_object",
+					field: `modelPool[${idx}]`,
+					message: `modelPool[${idx}] must be an object`,
+					source: poolSource,
+				});
 				return;
 			}
 			const model = typeof s.model === "string" ? s.model.trim() : "";
@@ -392,6 +504,7 @@ export function validateSwarmSettings(
 					kind: "slot_empty_model",
 					field: `modelPool[${idx}].model`,
 					message: `Slot #${idx + 1} has an empty model name`,
+					source: poolSource,
 				});
 			if (s.weight !== undefined) {
 				if (typeof s.weight !== "number" || !Number.isFinite(s.weight) || s.weight < 0) {
@@ -399,12 +512,13 @@ export function validateSwarmSettings(
 						kind: "slot_bad_weight",
 						field: `modelPool[${idx}].weight`,
 						message: `Slot #${idx + 1} weight must be a non-negative number (0 = fallback-only)`,
+						source: poolSource,
 					});
 				}
 			}
 			const key = `${provider || "(default)"}/${model}`;
 			if (seen.has(key) && model)
-				errors.push({ kind: "slot_duplicate", field: `modelPool[${idx}]`, message: `Duplicate slot: ${key}` });
+				errors.push({ kind: "slot_duplicate", field: `modelPool[${idx}]`, message: `Duplicate slot: ${key}`, source: poolSource });
 			if (model) seen.add(key);
 			// Issue 21: validate the optional quotaResetMs field. Reject non-numeric / negative / NaN
 			// values so a typo is caught at validate time rather than silently treated as 0.
@@ -417,6 +531,7 @@ export function validateSwarmSettings(
 					kind: "slot_bad_quota_reset",
 					field: `modelPool[${idx}].${fname}`,
 					message: `Slot #${idx + 1} ${fname} must be a duration ("30m", "2h", "1h30m", "1d") or a non-negative number of milliseconds (floor for quota benches; 24h cap still applies)`,
+					source: poolSource,
 				});
 			}
 			if (s.quotaReset === undefined && s.quotaResetMs !== undefined && parseQuotaResetMs(s.quotaResetMs) !== undefined) {
@@ -424,6 +539,7 @@ export function validateSwarmSettings(
 					kind: "quota_reset_alias",
 					field: `modelPool[${idx}].quotaResetMs`,
 					message: `Slot #${idx + 1} uses the legacy field name quotaResetMs — rename it to quotaReset (same semantics, duration-friendly). The alias keeps working.`,
+					source: poolSource,
 				});
 			}
 			// Issue 22: validate the optional roles allow-list (warning-grade, informational — the
@@ -433,6 +549,7 @@ export function validateSwarmSettings(
 					kind: "slot_bad_roles",
 					field: `modelPool[${idx}].roles`,
 					message: `Slot #${idx + 1} roles must be a string array of role-kind names (see completion.ts ROLE_KINDS for the closed set: root, planner, reviewer, tester, implementer, worker, observer)`,
+					source: poolSource,
 				});
 			}
 			// Follow-up F2 (2026-09-05): live resolvability probe — only when a registry probe is
@@ -445,12 +562,14 @@ export function validateSwarmSettings(
 						kind: "slot_unresolvable",
 						field: `modelPool[${idx}]`,
 						message: `Slot #${idx + 1} ${provider}/${model} is not resolvable: no such model registered under that provider (pi auth / --list-models to inspect). Spawns targeting it would fail.`,
+						source: poolSource,
 					});
 				} else if (missingProviderCredential(provider)) {
 					errors.push({
 						kind: "slot_no_credential",
 						field: `modelPool[${idx}]`,
 						message: `Slot #${idx + 1} provider '${provider}' has no stored API key — a spawned pi would exit with 'No API key found for ${provider}'. Authenticate it (pi auth) or set ${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY.`,
+						source: poolSource,
 					});
 				}
 			}
@@ -462,6 +581,7 @@ export function validateSwarmSettings(
 				kind: "rotation_bad_strategy",
 				field: "rotation.strategy",
 				message: `rotation.strategy must be one of weighted | round-robin | sticky (got ${JSON.stringify(rotation.strategy)})`,
+				source: rotationSource,
 			});
 		}
 		if (
@@ -472,6 +592,7 @@ export function validateSwarmSettings(
 				kind: "rotation_bad_cooldown",
 				field: "rotation.cooldownMs",
 				message: `rotation.cooldownMs must be a non-negative number of milliseconds`,
+				source: rotationSource,
 			});
 		}
 		if (
@@ -482,6 +603,7 @@ export function validateSwarmSettings(
 				kind: "rotation_bad_maxretries",
 				field: "rotation.maxRetries",
 				message: `rotation.maxRetries must be a positive integer (>= 1)`,
+				source: rotationSource,
 			});
 		}
 	}

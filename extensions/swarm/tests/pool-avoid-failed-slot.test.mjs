@@ -23,7 +23,20 @@ function check(name, condition, details = "") {
 const failedSlotKey = "ccs/glm-4.7";
 
 async function writeConfig(dir, slots, rotation) {
-	await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: { modelPool: slots, rotation } }));
+	const yaml = `modelPool:
+${slots
+	.map(
+		(s) => `  - model: ${s.model}
+    provider: ${s.provider}
+    weight: ${s.weight}`,
+	)
+	.join("\n")}
+rotation:
+  strategy: ${rotation.strategy}
+  cooldownMs: ${rotation.cooldownMs}
+  maxRetries: ${rotation.maxRetries}
+`;
+	await writeFile(join(dir, ".pi", "swarm.yml"), yaml);
 }
 
 async function resetPoolHealth(p) {

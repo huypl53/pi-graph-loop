@@ -1,0 +1,21 @@
+# global-config-validate-provenance: exercise /swarm pool validate with both global and project yml present.
+#
+# Fixture design (v4.2 rework): assertions live OUTSIDE the replay. The scripted turns trigger
+# real tool calls (bash running validateSwarmSettings directly via node -e) whose results the
+# next turn's narration honestly references. This avoids fixture theater — the lane replays
+# real code execution, not the fixture author's claims.
+#
+# Setup (seeded by the lane before replay):
+#   ~/.pi/agent/swarm.yml: modelPool=[gpt-5.4-mini/openai/w50], rotation={weighted, 900000}
+#   .pi/swarm.yml: modelPool=[glm-5.1/zai-coding-cn/w100], defaultModel=glm-5.1
+#   .pi/settings.json: {swarm: {modelPool: [{model: "old-model"}]}} (stale)
+#   PI_SWARM_TERMINAL_MANAGER=tmux
+#
+# Scripted turns:
+#   1. Root session_start fires — scaffold runs, sees both yml present, no-op.
+#   2. Agent runs bash to invoke validateSwarmSettings directly and capture real output.
+#   3. Agent narrates the REAL output (not pre-scripted claims).
+
+{"name":"root-session-start","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Root session starting. Both global and project yml present — scaffold no-ops."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"agent-runs-real-validate","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Running real validateSwarmSettings via bash to capture actual output."},{"type":"toolcall","delayMs":15,"name":"bash","id":"validate-call-1","arguments":{"command":"node -e \"import('./extensions/swarm/src/pool.ts').then(async ({validateSwarmSettings}) => { const v = validateSwarmSettings(process.cwd()); console.log(JSON.stringify({ok: v.ok, errors: v.errors.map(e => ({kind: e.kind, source: e.source})), warnings: v.warnings.map(w => ({kind: w.kind, source: w.source}))}, null, 2)); })\""}}]}
+{"name":"agent-narrates-real-output","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Real validate output captured. The lane asserts on the actual JSON above, not on this narration."},{"type":"stop","delayMs":5,"reason":"stop"}]}

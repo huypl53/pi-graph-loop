@@ -1,33 +1,81 @@
-// === swarm/config.ts — raw swarm config resolution across settings.json + swarm.yml ===
+// === swarm/config.ts — raw swarm config resolution across global yml + project yml ===
 //
 // Single source of truth for reading the RAW swarm config block (the object that carries
 // modelPool / rotation / defaultModel / defaultProvider) before session.ts's parsers
-// normalize it. Two file sources, strict precedence:
+// normalize it. Two file sources, layered merge (per-top-level-key winner-takes-all):
 //
-//   1. `.pi/settings.json` → `extensions.swarm` block   (highest — runtime parity with pi core)
-//   2. `.pi/settings.json` → top-level `swarm` block
-//   3. `.pi/swarm.yml`     → top-level keys, no `swarm:` wrapper (the filename is the namespace)
+//   1. `~/.pi/agent/swarm.yml` (or `.yaml`)  ← global base layer (NEW in v4.2)
+//   2. `.pi/swarm.yml`     (or `.yaml`)      ← project-local override layer
 //
-// swarm.yml exists because pi core parses settings.json with bare JSON.parse (no comments,
-// no JSONC, no YAML — settings-manager.js), and a comment there would make pi silently drop
-// the whole project settings block. swarm.yml is swarm-owned: comments allowed anywhere.
-// docs/swarm-task-graph.md sanctioned YAML with an explicit dependency (yaml@2.9.0 in
-// package.json — not transitive reliance on pi's own dep tree).
+// YAML-only: `.pi/settings.json` swarm blocks are no longer read (see v4.2 spec §3).
+// Per-key merge: project key wins when present, global key fills when absent. modelPool
+// is whole-array replacement (project array wins entirely when present).
 //
-// Error contract mirrors the JSON readers: callers decide how loud to be.
-//   - readSwarmRawConfig: missing files → { cfg: null, source: null }; corrupt settings.json
-//     or corrupt swarm.yml → the corrupt piece is skipped (its source resolves to null) but a
-//     `corrupt: ["settings.json"|"swarm.yml"]` list tells validateSwarmSettings what happened.
-//   - readSwarmYml: returns null when absent, THROWS on corrupt YAML (so /swarm pool validate
-//     can surface swarm_yml_unreadable while runtime readers degrade silently to {}).
+// inheritGlobal: false in project yml disables global inheritance (global still READ
+// for corrupt visibility, never applied). inheritGlobal is project-only; ignored in global.
+//
+// Error contract:
+//   - readSwarmRawConfig: missing files → { cfg: null, source: null }; corrupt files →
+//     the corrupt piece is skipped but reported via corrupt[] with {layer, file, errCode}.
+//   - readSwarmYml / readGlobalSwarmYml: return null when absent, THROW on corrupt YAML
+//     (so /swarm pool validate can surface the per-layer corrupt kinds).
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { parse as parseYaml } from "yaml";
 import { logSwarmError } from "./errorlog.ts";
 import type { ModelSlot, RotationConfig, RotationStrategy, SwarmSettings } from "./types/index.ts";
 
-export type SwarmConfigSource = "extensions.swarm" | "swarm" | "swarm.yml" | "swarm.yaml";
+export type SwarmConfigSource = "swarm.yml" | "swarm.yaml" | "global-swarm.yml" | "global-swarm.yaml";
+
+export type ConfigKey = "modelPool" | "rotation" | "defaultModel" | "defaultProvider" | "terminalManager" | "inheritGlobal";
+
+export type SourceLayer = "global" | "project.swarm.yml" | "default";
+
+export type SourceInfo = {
+	layer: SourceLayer;
+	file?: string;
+	value?: unknown;
+};
+
+export type CorruptReport = {
+	layer: "global" | "project";
+	file: string;
+	errCode?: string;
+};
+
+export type ResolvedConfig = {
+	cfg: Record<string, any>;
+	sources: Partial<Record<ConfigKey, SourceInfo>>;
+	corrupt: CorruptReport[];
+	globalInheritDisabled: boolean;
+};
+
+// === Global file paths ===
+// HOME is read at call time (not module load) so tests can override HOME between fixtures.
+export function getGlobalAgentDir(): string {
+	return join(process.env.HOME || homedir(), ".pi", "agent");
+}
+export function getGlobalSwarmYmlPrimary(): string {
+	return join(getGlobalAgentDir(), "swarm.yml");
+}
+export function getGlobalSwarmYmlAlias(): string {
+	return join(getGlobalAgentDir(), "swarm.yaml");
+}
+// Back-compat: module-level constants computed at import time. Tests that override HOME
+// should use the get*() functions instead.
+export const GLOBAL_AGENT_DIR = join(process.env.HOME || homedir(), ".pi", "agent");
+export const GLOBAL_SWARM_YML_PRIMARY = join(GLOBAL_AGENT_DIR, "swarm.yml");
+export const GLOBAL_SWARM_YML_ALIAS = join(GLOBAL_AGENT_DIR, "swarm.yaml");
+
+export function findGlobalSwarmYaml(): { file: string; source: "global-swarm.yaml" | "global-swarm.yml" } | null {
+	const alias = getGlobalSwarmYmlAlias();
+	const primary = getGlobalSwarmYmlPrimary();
+	if (existsSync(alias)) return { file: alias, source: "global-swarm.yaml" };
+	if (existsSync(primary)) return { file: primary, source: "global-swarm.yml" };
+	return null;
+}
 
 export function findSwarmYamlFile(cwd: string): { file: string; source: "swarm.yaml" | "swarm.yml" } | null {
 	const yaml = join(cwd, CONFIG_DIR_NAME, "swarm.yaml");
@@ -43,7 +91,7 @@ export function swarmYmlPath(cwd: string): string {
 	return join(cwd, CONFIG_DIR_NAME, "swarm.yml");
 }
 
-// Read + parse `.pi/swarm.yaml` or `.pi/swarm.yml`. null when absent; THROWS on unparseable YAML.
+// Read + parse `.pi/swarm.yaml` or `.pi/swarm.yml`. null when absent; THROWS on corrupt YAML.
 export function readSwarmYml(cwd: string): Record<string, any> | null {
 	const found = findSwarmYamlFile(cwd);
 	if (!found) return null;
@@ -52,53 +100,152 @@ export function readSwarmYml(cwd: string): Record<string, any> | null {
 	return doc as Record<string, any>;
 }
 
-// Resolve the winning raw config. Precedence: extensions.swarm > swarm > swarm.yaml / swarm.yml.
-// Never throws; corrupt sources are reported via `corrupt` for the validate path.
+// === Global yml memo (simple per-process, no TTL) ===
+let globalYmlMemo: Record<string, any> | null | undefined = undefined;
+let globalYmlMemoHome: string | undefined = undefined;
+
+export function readGlobalSwarmYml(fresh = false): Record<string, any> | null {
+	const currentHome = process.env.HOME || homedir();
+	// Bust memo if HOME changed (tests override HOME)
+	if (!fresh && globalYmlMemo !== undefined && globalYmlMemoHome === currentHome) return globalYmlMemo;
+	globalYmlMemoHome = currentHome;
+	const found = findGlobalSwarmYaml();
+	if (!found) {
+		globalYmlMemo = null;
+		return null;
+	}
+	try {
+		const doc = parseYaml(readFileSync(found.file, "utf8"));
+		if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+			globalYmlMemo = null;
+			return null;
+		}
+		globalYmlMemo = doc as Record<string, any>;
+		return globalYmlMemo;
+	} catch (err: any) {
+		throw err;
+	}
+}
+
+// Test-only helper: clear the global yml memo. Exposed so tests that override HOME
+// between fixtures can force a fresh read.
+export function _clearGlobalYmlMemoForTests() {
+	globalYmlMemo = undefined;
+	globalYmlMemoHome = undefined;
+}
+
+const RECOGNIZED_KEYS: ConfigKey[] = ["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal"];
+
+// Layered merge: global (lowest yml precedence) + project (highest yml precedence).
+// Per-top-level-key winner-takes-all. modelPool is whole-array replacement.
+// inheritGlobal is project-only; ignored in global.
+// corrupt[] is populated regardless of inheritGlobal (global always read for visibility).
+export function mergeSwarmConfig(cwd: string, opts: { freshGlobal?: boolean } = {}): ResolvedConfig {
+	const result: ResolvedConfig = {
+		cfg: {},
+		sources: {},
+		corrupt: [],
+		globalInheritDisabled: false,
+	};
+
+	// Step 1: read project yml
+	let projYml: Record<string, any> | null = null;
+	let projFile: string | null = null;
+	try {
+		projYml = readSwarmYml(cwd);
+		projFile = swarmYmlPath(cwd);
+	} catch (err: any) {
+		const found = findSwarmYamlFile(cwd);
+		if (found) {
+			result.corrupt.push({ layer: "project", file: found.file, errCode: err?.code });
+			void logSwarmError(cwd, "config", "project_swarm_yml.parse_failed", err, { errCode: err?.code });
+		}
+	}
+
+	// Step 2: read global yml ALWAYS (memoized). corrupt[] populated regardless of inheritGlobal.
+	let globalYml: Record<string, any> | null = null;
+	let globalFile: string | null = null;
+	try {
+		globalYml = readGlobalSwarmYml(opts.freshGlobal === true);
+		const found = findGlobalSwarmYaml();
+		globalFile = found?.file ?? null;
+	} catch (err: any) {
+		const found = findGlobalSwarmYaml();
+		if (found) {
+			result.corrupt.push({ layer: "global", file: found.file, errCode: err?.code });
+			void logSwarmError(cwd, "config", "global_swarm_yml.read_failed", err, { errCode: err?.code });
+		}
+	}
+
+	// Step 3: determine inheritGlobal from project (project-only key; ignored in global)
+	const inheritDisabled = projYml?.inheritGlobal === false;
+	if (inheritDisabled) {
+		result.globalInheritDisabled = true;
+	}
+
+	// Step 4: apply global layer ONLY when not opted out
+	if (globalYml && !inheritDisabled) {
+		for (const key of RECOGNIZED_KEYS) {
+			if (key === "inheritGlobal") continue; // ignored in global
+			if (globalYml[key] !== undefined) {
+				result.cfg[key] = globalYml[key];
+				result.sources[key] = { layer: "global", file: globalFile ?? undefined };
+			}
+		}
+	}
+
+	// Step 5: apply project layer (highest yml precedence)
+	if (projYml) {
+		for (const key of RECOGNIZED_KEYS) {
+			if (projYml[key] !== undefined) {
+				result.cfg[key] = projYml[key];
+				result.sources[key] = { layer: "project.swarm.yml", file: projFile ?? undefined };
+			}
+		}
+		// inheritGlobal attribution
+		if (projYml.inheritGlobal === undefined) {
+			result.sources.inheritGlobal = { layer: "default", value: true };
+		} else if (projYml.inheritGlobal !== false) {
+			result.sources.inheritGlobal = { layer: "project.swarm.yml", file: projFile ?? undefined, value: true };
+		} else {
+			result.sources.inheritGlobal = { layer: "project.swarm.yml", file: projFile ?? undefined, value: false };
+		}
+	} else {
+		result.sources.inheritGlobal = { layer: "default", value: true };
+	}
+
+	return result;
+}
+
+// Back-compat wrapper: returns the merged cfg + provenance + corrupt list.
 export function readSwarmRawConfig(cwd: string): {
 	cfg: Record<string, any> | null;
 	source: SwarmConfigSource | null;
-	corrupt: Array<"settings.json" | "swarm.yml">;
+	sources: Partial<Record<ConfigKey, SourceInfo>>;
+	corrupt: CorruptReport[];
+	globalInheritDisabled: boolean;
 } {
-	const corrupt: Array<"settings.json" | "swarm.yml"> = [];
+	const resolved = mergeSwarmConfig(cwd);
 
-	// --- settings.json blocks ---
-	let raw: Record<string, any> | null = null;
-	const settingsFile = join(cwd, CONFIG_DIR_NAME, "settings.json");
-	if (existsSync(settingsFile)) {
-		try {
-			raw = JSON.parse(readFileSync(settingsFile, "utf8")) as Record<string, any>;
-		} catch (err) {
-			corrupt.push("settings.json");
-			raw = null;
-			// Corrupt config is REPORTED to callers (validate path) — but the raw-read path also
-			// silently falls back to defaults. Leave one durable line per discovery.
-			void logSwarmError(cwd, "config", "settings.parse_failed", err, { file: settingsFile });
-		}
-	}
-	if (raw) {
-		const fromExt = raw?.extensions?.swarm;
-		if (fromExt && typeof fromExt === "object") return { cfg: fromExt, source: "extensions.swarm", corrupt };
-		const fromTop = raw?.swarm;
-		if (fromTop && typeof fromTop === "object") return { cfg: fromTop, source: "swarm", corrupt };
-		// A parseable settings.json WITHOUT a swarm block does NOT win over swarm.yml —
-		// yml is the dedicated swarm home; a settings.json that never mentions swarm
-		// must not silently mask it. Fall through to the yml read below.
+	// Determine highest-precedence source for back-compat
+	let source: SwarmConfigSource | null = null;
+	const projFile = findSwarmYamlFile(cwd);
+	const globalFile = findGlobalSwarmYaml();
+	// If any project key is set, project wins for `source`
+	const projectKeys = Object.values(resolved.sources).filter((s) => s.layer === "project.swarm.yml");
+	if (projectKeys.length > 0 && projFile) {
+		source = projFile.source;
+	} else if (globalFile) {
+		source = globalFile.source;
 	}
 
-	// --- swarm.yaml / swarm.yml (throws → treat as corrupt, reported not raised) ---
-	let yml: Record<string, any> | null = null;
-	const foundYaml = findSwarmYamlFile(cwd);
-	const ymlSource = foundYaml?.source || "swarm.yml";
-	try {
-		yml = readSwarmYml(cwd);
-	} catch (err) {
-		corrupt.push("swarm.yml");
-		yml = null;
-		void logSwarmError(cwd, "config", "swarm_yml.parse_failed", err);
-	}
-	if (yml && Object.keys(yml).length) return { cfg: yml, source: ymlSource, corrupt };
-
-	return { cfg: null, source: null, corrupt };
+	return {
+		cfg: Object.keys(resolved.cfg).length > 0 ? resolved.cfg : null,
+		source,
+		sources: resolved.sources,
+		corrupt: resolved.corrupt,
+		globalInheritDisabled: resolved.globalInheritDisabled,
+	};
 }
 
 // Quota-reset duration format (user request 2026-09-05): quotaResetMs is normally minutes or
@@ -115,7 +262,6 @@ export function parseQuotaResetMs(input: unknown): number | undefined {
 	if (typeof input !== "string") return undefined;
 	const trimmed = input.trim();
 	if (!trimmed) return undefined;
-	// Bare numeric string: milliseconds (parity with the number form).
 	if (/^\d+$/.test(trimmed)) return parseInt(trimmed, 10);
 	let total = 0;
 	let matched = false;
@@ -127,7 +273,7 @@ export function parseQuotaResetMs(input: unknown): number | undefined {
 			continue;
 		}
 		const m = rest.match(/^(\d+)\s*(ms|s|m|h|d)/i);
-		if (!m) return undefined; // unparseable remainder -> reject the whole input
+		if (!m) return undefined;
 		const unitMs = QUOTA_DURATION_UNIT_MS[m[2].toLowerCase()];
 		if (unitMs === undefined) return undefined;
 		total += parseInt(m[1], 10) * unitMs;
@@ -145,11 +291,6 @@ export function parseModelPool(raw: unknown): ModelSlot[] | undefined {
 		const model = typeof (s as any).model === "string" ? (s as any).model.trim() : "";
 		if (!model) continue;
 		const weight = typeof (s as any).weight === "number" && Number.isFinite((s as any).weight) ? Math.max(0, (s as any).weight) : 1;
-		// Quota-reset duration format (2026-09-05): quotaReset (canonical) / quotaResetMs
-		// (legacy alias) may be a duration string ("30m", "2h", "1h30m") or a bare number
-		// (ms). quotaReset wins when both are set. Parse to ms here so every downstream
-		// consumer (pickSlot quotas, poolStatus display, effectiveBenchMs) sees a number.
-		// Malformed values are dropped (undefined) — validateSwarmSettings reports them.
 		const qrmRaw = (s as any).quotaReset !== undefined ? (s as any).quotaReset : (s as any).quotaResetMs;
 		const qrm = qrmRaw === undefined ? undefined : parseQuotaResetMs(qrmRaw);
 		slots.push({
@@ -157,9 +298,6 @@ export function parseModelPool(raw: unknown): ModelSlot[] | undefined {
 			provider: typeof (s as any).provider === "string" && (s as any).provider.trim() ? (s as any).provider.trim() : undefined,
 			weight,
 			label: typeof (s as any).label === "string" ? (s as any).label.trim() || undefined : undefined,
-			// Issue 22 roles-filter: forward the optional per-slot roleKind allow-list. Absent / empty
-			// preserved verbatim so slotMatchesRole can detect "no filter set". Malformed shapes become
-			// undefined (no filter applied); validateSwarmSettings reports slot_bad_roles for visibility.
 			roles:
 				Array.isArray((s as any).roles) && (s as any).roles.every((r: any) => typeof r === "string" && r.length > 0)
 					? (s as any).roles.map((r: string) => r.trim()).filter(Boolean)

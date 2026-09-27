@@ -1,0 +1,28 @@
+# global-config-merge-behavior: exercise per-key merge rule end-to-end.
+#
+# Fixture design (v4.2 rework): assertions live OUTSIDE the replay. Each scenario triggers a real
+# bash call that invokes mergeSwarmConfig directly and captures the actual resolved config. The
+# lane asserts on the real JSON output, not on pre-scripted narration.
+#
+# Scenarios A-D (v4.2):
+#   A: global has 3-slot pool + rotation; project has 1-slot pool. → project array replaces global.
+#   B: same global; project has inheritGlobal: false + full pool. → global fully skipped.
+#   C: global is corrupt; project has valid pool. → global_swarm_yml_unreadable + project still applied.
+#   D: fresh machine (no global, no project); first root session. → dual scaffold fires.
+
+{"name":"A-session-start","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Scenario A: global 3-slot pool + rotation; project 1-slot pool."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"A-real-merge","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Running real mergeSwarmConfig for scenario A."},{"type":"toolcall","delayMs":15,"name":"bash","id":"merge-A-1","arguments":{"command":"node -e \"import('./extensions/swarm/src/config.ts').then(async ({mergeSwarmConfig}) => { const r = mergeSwarmConfig(process.cwd(), {freshGlobal: true}); console.log(JSON.stringify({slots: r.cfg.modelPool?.length, rotation: r.cfg.rotation, sources: {modelPool: r.sources.modelPool, rotation: r.sources.rotation}}, null, 2)); })\""}}]}
+{"name":"A-result","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Real merge output captured. Lane asserts: slots=1 (project replaced global), rotation from global."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+
+{"name":"B-session-start","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Scenario B: project has inheritGlobal: false + full 2-slot pool."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"B-real-merge","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Running real mergeSwarmConfig for scenario B."},{"type":"toolcall","delayMs":15,"name":"bash","id":"merge-B-1","arguments":{"command":"node -e \"import('./extensions/swarm/src/config.ts').then(async ({mergeSwarmConfig}) => { const r = mergeSwarmConfig(process.cwd(), {freshGlobal: true}); console.log(JSON.stringify({slots: r.cfg.modelPool?.length, globalInheritDisabled: r.globalInheritDisabled, sources: {modelPool: r.sources.modelPool}}, null, 2)); })\""}}]}
+{"name":"B-result","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Real merge output captured. Lane asserts: slots=2 (project), globalInheritDisabled=true."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+
+{"name":"C-session-start","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Scenario C: global yml is corrupt; project has valid pool."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"C-real-merge","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Running real mergeSwarmConfig for scenario C."},{"type":"toolcall","delayMs":15,"name":"bash","id":"merge-C-1","arguments":{"command":"node -e \"import('./extensions/swarm/src/config.ts').then(async ({mergeSwarmConfig}) => { const r = mergeSwarmConfig(process.cwd(), {freshGlobal: true}); console.log(JSON.stringify({slots: r.cfg.modelPool?.length, corrupt: r.corrupt}, null, 2)); })\""}}]}
+{"name":"C-result","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Real merge output captured. Lane asserts: corrupt=[{layer:global}], project pool still resolvable."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+
+{"name":"D-fresh-session-start","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Scenario D: fresh machine — no global, no project yml. First root session triggers dual scaffold."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"D-real-scaffold","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Running real ensurePoolScaffold + ensureGlobalPoolScaffold for scenario D."},{"type":"toolcall","delayMs":15,"name":"bash","id":"scaffold-D-1","arguments":{"command":"node -e \"import('./extensions/swarm/src/pool-scaffold.ts').then(async ({ensurePoolScaffold, ensureGlobalPoolScaffold}) => { const p = await ensurePoolScaffold(process.cwd()); const g = await ensureGlobalPoolScaffold(); console.log(JSON.stringify({project: {wrote: p.wrote, path: p.path}, global: {wrote: g.wrote, path: g.path}}, null, 2)); })\""}}]}
+{"name":"D-result","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Real scaffold output captured. Lane asserts: both wrote=true, both paths exist, both parse to null."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"D-second-session-no-notify","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Second root session — scaffold flags are already stamped, no notify fires."},{"type":"stop","delayMs":5,"reason":"stop"}]}

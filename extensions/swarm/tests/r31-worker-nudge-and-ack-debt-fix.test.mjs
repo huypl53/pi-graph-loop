@@ -9,7 +9,14 @@
  *    - First settle with missing response: nudge WORKER directly in its own pane,
  *      do NOT block worker (keep idle) and do NOT notify root.
  *    - Second settle / unresponsiveness: escalate to root and mark response_missing.
+ *
+ * HERMETICITY (v4.2-adjacent): v4.2 makes config resolution cwd+global aware; herdr detection in
+ * terminal/index.ts reads config from process.cwd(). If this test runs from the repo root, the
+ * repo's own .pi/swarm.yml (terminalManager: herdr) leaks into the driver selection and the mocked
+ * pi.exec (which only handles tmux) never gets called. Pin env to tmux BEFORE any imports that
+ * touch the terminal driver so the test is hermetic regardless of where it runs.
  */
+process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
 
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";

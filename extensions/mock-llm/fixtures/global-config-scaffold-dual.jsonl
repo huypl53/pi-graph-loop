@@ -1,0 +1,21 @@
+# global-config-scaffold-dual: exercise dual scaffold (project + global) on first root session.
+#
+# Fixture design (v4.2 rework): assertions live OUTSIDE the replay. Each turn triggers a real
+# bash call that invokes the scaffold functions directly and captures actual file state. The
+# lane asserts on the real output, not on pre-scripted narration.
+#
+# Setup (seeded by the lane before replay):
+#   No .pi/swarm.yml, no ~/.pi/agent/swarm.yml (fresh machine).
+#   No .pi/settings.json swarm block.
+#
+# Scripted turns:
+#   1. Root session_start fires — dual scaffold writes both templates.
+#   2. Agent runs bash to verify both files exist and parse to null.
+#   3. Agent runs bash to verify second session_start does NOT re-scaffold (flags are one-shot).
+
+{"name":"first-root-session-start","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"First root session on fresh machine. Dual scaffold fires."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"agent-real-scaffold-check","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Running real scaffold + file existence check."},{"type":"toolcall","delayMs":15,"name":"bash","id":"scaffold-check-1","arguments":{"command":"node -e \"import('node:fs').then(async ({existsSync, readFileSync}) => { import('./extensions/swarm/src/pool-scaffold.ts').then(async ({ensurePoolScaffold, ensureGlobalPoolScaffold}) => { const p = await ensurePoolScaffold(process.cwd()); const g = await ensureGlobalPoolScaffold(); const projectExists = existsSync(p.path); const globalExists = existsSync(g.path); const projectParses = projectExists ? (await import('yaml')).parse(readFileSync(p.path, 'utf8')) : null; const globalParses = globalExists ? (await import('yaml')).parse(readFileSync(g.path, 'utf8')) : null; console.log(JSON.stringify({project: {wrote: p.wrote, exists: projectExists, parsesToNull: projectParses === null}, global: {wrote: g.wrote, exists: globalExists, parsesToNull: globalParses === null}}, null, 2)); }); });\""}}]}
+{"name":"scaffold-result","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Real scaffold output captured. Lane asserts: both wrote=true, both exist, both parse to null."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"second-root-session-start","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Second root session — poolScaffoldNotifiedAt and poolScaffoldGlobalNotifiedAt are already stamped. No notify fires."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"agent-real-second-scaffold-check","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Running real second scaffold check — should be no-op."},{"type":"toolcall","delayMs":15,"name":"bash","id":"scaffold-check-2","arguments":{"command":"node -e \"import('./extensions/swarm/src/pool-scaffold.ts').then(async ({ensurePoolScaffold, ensureGlobalPoolScaffold}) => { const p = await ensurePoolScaffold(process.cwd()); const g = await ensureGlobalPoolScaffold(); console.log(JSON.stringify({project: {wrote: p.wrote, skipped: p.skipped}, global: {wrote: g.wrote, skipped: g.skipped}}, null, 2)); })\""}}]}
+{"name":"second-scaffold-result","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Real second scaffold output captured. Lane asserts: both wrote=false (one-shot flags prevent re-scaffold)."},{"type":"stop","delayMs":5,"reason":"stop"}]}
