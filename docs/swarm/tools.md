@@ -360,7 +360,7 @@ mail tools for discussion without advancing a graph.
 
 | Tool | What it does | Key inputs / operating notes |
 | --- | --- | --- |
-| `swarm_create_task` | Creates a durable graph, task markdown, event stream, artifact directory, and qualification-gate artifact. | `title`, `goal`; supports feature-dev defaults or custom `nodes`, `edges`, gates, allowed files, validation commands, shared context, and `qualificationMode: auto\|human-discuss` (defaults to `auto`). |
+| `swarm_create_task` | Creates a durable graph, task markdown, event stream, artifact directory, and qualification-gate artifact. | `title`, `goal`; supports feature-dev defaults or custom `nodes`, `edges`, gates, allowed files, validation commands, shared context, and `qualificationMode: auto\|human-discuss` (defaults to `auto`). The successful result text ends with a concise hint naming the `task-role-staffing` skill (see `extensions/swarm/role-skills/task-role-staffing/SKILL.md`). |
 | `swarm_confirm_qualification` | Records root's human-discuss confirmation and unlocks implementation assignment. | Root-only; requires a concise note of the user-confirmed outcome/trade-off. |
 | `swarm_task_status` | Summarizes task/node/gate state. Default `detail:"summary"` returns compact JSON: `progress` buckets, `current` rows, `ready` ids, `warnings`. | Set `detail:"graph"` for the full nodes/edges/gates JSON; `includeArtifacts=true` and/or `runtime=true` for evidence and liveness warnings. |
 | `swarm_validate_graph` | Validates graph structure and optionally runtime consistency. | Supply `taskId` or direct task file path; `runtime=true` checks agents/messages. |

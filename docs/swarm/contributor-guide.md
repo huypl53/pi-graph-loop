@@ -251,6 +251,15 @@ is surfaced by generated identity only to root, reviewer, and auditor. See
 [`tools.md`](./tools.md#normal-graph-execution) for the `auto` and `human-discuss`
 task-creation modes.
 
+## Task-role staffing skill
+
+The package-shipped task-role staffing playbook is
+`extensions/swarm/role-skills/task-role-staffing/SKILL.md`. It is a root-only
+reference doc (not wired into identity) that explains how to staff a freshly
+created task with role-specific agents using the existing `swarm_spawn_agent`
+and `swarm_assign_task` tools. The `swarm_create_task` result text ends with a
+concise hint naming this skill.
+
 ## Documentation update checklist
 
 When you change behavior, update docs in this order:
