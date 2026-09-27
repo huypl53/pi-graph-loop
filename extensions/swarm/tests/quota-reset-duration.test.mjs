@@ -59,21 +59,27 @@ const ok = (name, cond, extra = "") => {
 // === Integration: validate accepts duration strings, flags malformed ones ===
 const scratch = await mkdtemp(join(tmpdir(), "quota-dur-"));
 await mkdir(join(scratch, ".pi"), { recursive: true });
-const settingsPath = join(scratch, ".pi", "settings.json");
+const ymlPath = join(scratch, ".pi", "swarm.yml");
 
 await writeFile(
-	settingsPath,
-	JSON.stringify({
-		swarm: {
-			modelPool: [
-				{ model: "a", provider: "ccs", quotaResetMs: "30m" }, // valid duration
-				{ model: "b", provider: "ccs", quotaResetMs: 900000 }, // valid number (back-compat)
-				{ model: "c", provider: "ccs", quotaResetMs: "1h30m" }, // combined
-				{ model: "d", provider: "ccs", quotaResetMs: "30x" }, // bad unit
-				{ model: "e", provider: "ccs", quotaResetMs: "fast" }, // nonsense
-			],
-		},
-	}),
+	ymlPath,
+	`modelPool:
+  - model: a
+    provider: ccs
+    quotaResetMs: 30m
+  - model: b
+    provider: ccs
+    quotaResetMs: 900000
+  - model: c
+    provider: ccs
+    quotaResetMs: 1h30m
+  - model: d
+    provider: ccs
+    quotaResetMs: 30x
+  - model: e
+    provider: ccs
+    quotaResetMs: fast
+`,
 );
 {
 	const v = validateSwarmSettings(scratch);
@@ -99,19 +105,24 @@ await writeFile(
 {
 	const scratch2 = await mkdtemp(join(tmpdir(), "quota-rename-"));
 	await mkdir(join(scratch2, ".pi"), { recursive: true });
-	const sp = join(scratch2, ".pi", "settings.json");
+	const sp = join(scratch2, ".pi", "swarm.yml");
 	await writeFile(
 		sp,
-		JSON.stringify({
-			swarm: {
-				modelPool: [
-					{ model: "new", provider: "ccs", quotaReset: "45m" },
-					{ model: "alias", provider: "ccs", quotaResetMs: 900000 },
-					{ model: "both", provider: "ccs", quotaReset: "1h", quotaResetMs: 60000 },
-					{ model: "bad", provider: "ccs", quotaReset: "18min" },
-				],
-			},
-		}),
+		`modelPool:
+  - model: new
+    provider: ccs
+    quotaReset: 45m
+  - model: alias
+    provider: ccs
+    quotaResetMs: 900000
+  - model: both
+    provider: ccs
+    quotaReset: 1h
+    quotaResetMs: 60000
+  - model: bad
+    provider: ccs
+    quotaReset: 18min
+`,
 	);
 	const v = validateSwarmSettings(scratch2);
 	ok(
@@ -148,7 +159,14 @@ await writeFile(
 // === Integration: bench floor honors duration strings from raw config ===
 {
 	_clearQuotaResetCacheForTests();
-	await writeFile(settingsPath, JSON.stringify({ swarm: { modelPool: [{ model: "a", provider: "ccs", quotaResetMs: "2h" }] } }));
+	await writeFile(
+		ymlPath,
+		`modelPool:
+  - model: a
+    provider: ccs
+    quotaResetMs: 2h
+`,
+	);
 	const rotation = { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 };
 	const bench = effectiveBenchMs({ model: "a", provider: "ccs" }, rotation, scratch);
 	ok("effectiveBenchMs: '2h' string floors bench at 7_200_000", bench === 7_200_000, `got ${bench}`);

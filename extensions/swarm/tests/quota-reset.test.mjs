@@ -110,17 +110,22 @@ async function loadPoolFresh() {
 
 // Seed the scratch dir with a model pool. Each fixture may overwrite this to change quotaResetMs.
 async function seedSettings(pool) {
-	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: {
-				defaultModel: "glm-5.1",
-				defaultProvider: "zai-coding-cn",
-				modelPool: pool,
-				rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
-			},
-		}),
-	);
+	const yaml = `defaultModel: glm-5.1
+defaultProvider: zai-coding-cn
+modelPool:
+${pool
+	.map(
+		(s) => `  - model: ${s.model}
+    provider: ${s.provider}
+    weight: ${s.weight ?? 1}${s.quotaResetMs ? `\n    quotaResetMs: ${s.quotaResetMs}` : ""}`,
+	)
+	.join("\n")}
+rotation:
+  strategy: weighted
+  cooldownMs: 900000
+  maxRetries: 2
+`;
+	await writeFile(join(dir, ".pi", "swarm.yml"), yaml);
 }
 
 // Seed a SwarmAgent with optional activeTaskIds.
@@ -378,18 +383,21 @@ async function seedAgent(agentId, opts = {}) {
 	await mkdir(join(envDir, ".pi"), { recursive: true });
 	// No quotaResetMs in per-slot config — env var should provide the floor.
 	await writeFile(
-		join(envDir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: {
-				defaultModel: "glm-5.1",
-				defaultProvider: "zai-coding-cn",
-				modelPool: [
-					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-					{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-				],
-				rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
-			},
-		}),
+		join(envDir, ".pi", "swarm.yml"),
+		`defaultModel: glm-5.1
+defaultProvider: zai-coding-cn
+modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    weight: 50
+  - model: gpt-5.4-mini
+    provider: openai
+    weight: 30
+rotation:
+  strategy: weighted
+  cooldownMs: 900000
+  maxRetries: 2
+`,
 	);
 	process.chdir(envDir);
 

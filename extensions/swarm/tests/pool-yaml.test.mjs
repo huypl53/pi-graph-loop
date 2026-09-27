@@ -1,19 +1,15 @@
-// .pi/swarm.yml — YAML config source for the swarm model pool.
+// .pi/swarm.yml — YAML config source for the swarm model pool (v4.2: YAML-only)
 //
 // Run: node extensions/swarm/tests/pool-yaml.test.mjs
 //
-// Red-first suite for the swarm.yml feature (task task-pool-yaml-config).
-// Cases R1–R7 mirror artifacts/plan.md §Reproduction and are expected to FAIL
-// before the implementation lands (observed red on 2026-09-04, then green).
-//
 // Covers:
 //   R1  readSwarmSettings resolves modelPool/rotation/defaultModel from .pi/swarm.yml
-//   R2  effectiveConfig slots from yml; precedence: JSON swarm block wins over yml
+//   R2  effectiveConfig slots from yml
 //   R3  classifySwarmSettings reports source "swarm.yml"
-//   R4  ensurePoolScaffold scaffolds .pi/swarm.yml (not settings.json) when no source declares a pool
-//   R4b scaffold skips when yml already declares a pool; JSON-block merge parity preserved
-//   R5  both-sources warning in validateSwarmSettings (ok unaffected)
-//   R6  corrupt yml -> validate ok:false, kind swarm_yml_unreadable; readers degrade to {}
+//   R4  ensurePoolScaffold scaffolds .pi/swarm.yml when no source declares a pool
+//   R4b scaffold skips when yml already declares a pool
+//   R5  (removed in v4.2: both-sources warning — JSON no longer read)
+//   R6  corrupt yml -> validate ok:false, kind project_swarm_yml_unreadable; readers degrade to {}
 //   R7  quotaResetMs readable from yml slots (effectiveBenchMs path)
 //
 // Read-only except the scratch dir (mkdtemp). Never touches the real project .pi/.
@@ -39,10 +35,8 @@ const ok = (name, cond) => {
 const scratch = await mkdtemp(join(tmpdir(), "pool-yaml-test-"));
 await mkdir(join(scratch, ".pi"), { recursive: true });
 const ymlPath = join(scratch, ".pi", "swarm.yml");
-const settingsPath = join(scratch, ".pi", "settings.json");
 
 const writeYml = (text) => writeFile(ymlPath, text);
-const writeSettings = (obj) => writeFile(settingsPath, JSON.stringify(obj, null, 2));
 
 const sampleYml = `# swarm model pool — comments allowed
 modelPool:
@@ -61,10 +55,8 @@ defaultModel: glm-5.1
 defaultProvider: zai-coding-cn
 `;
 
-// Fresh scratch per case where it matters; helper restores the baseline.
 const resetScratch = async () => {
 	await rm(ymlPath, { force: true });
-	await rm(settingsPath, { force: true });
 	_clearQuotaResetCacheForTests();
 };
 
@@ -81,7 +73,7 @@ await writeYml(sampleYml);
 	ok("R1: defaultProvider from yml", s.defaultProvider === "zai-coding-cn");
 }
 
-// === R2: effectiveConfig from yml; JSON precedence ===
+// === R2: effectiveConfig from yml ===
 await resetScratch();
 await writeYml(sampleYml);
 {
@@ -89,20 +81,6 @@ await writeYml(sampleYml);
 	const cfg = effectiveConfig();
 	ok("R2: effectiveConfig slots from yml", cfg.slots.length === 2);
 	ok("R2: rotation defaults applied", cfg.rotation.strategy === "weighted");
-}
-// JSON swarm block wins over yml
-await writeSettings({ swarm: { modelPool: [{ model: "json-model", provider: "p1" }] } });
-{
-	process.chdir(scratch);
-	const s = readSwarmSettings(scratch);
-	ok("R2: settings.json swarm block wins over yml", s.modelPool?.length === 1 && s.modelPool[0].model === "json-model");
-	// extensions.swarm still wins over top-level swarm even when yml exists
-	await writeSettings({
-		swarm: { modelPool: [{ model: "top", provider: "p" }] },
-		extensions: { swarm: { modelPool: [{ model: "ext", provider: "p" }] } },
-	});
-	const s2 = readSwarmSettings(scratch);
-	ok("R2: extensions.swarm precedence preserved over yml", s2.modelPool?.[0]?.model === "ext");
 }
 
 // === R3: classify reports source swarm.yml ===
@@ -128,7 +106,6 @@ await resetScratch();
 	ok("R4: scaffold wrote", res.wrote === true);
 	ok("R4: scaffold path is .pi/swarm.yml", res.path === ymlPath);
 	ok("R4: yml file exists", existsSync(ymlPath));
-	ok("R4: settings.json NOT created", !existsSync(settingsPath));
 	const text = await readFile(ymlPath, "utf8");
 	ok(
 		"R4: scaffold documents full surface (commented), no active null",
@@ -143,29 +120,10 @@ await writeYml(sampleYml);
 	const res = await ensurePoolScaffold(scratch);
 	ok("R4b: skip when yml declares a pool", res.wrote === false && res.skipped === "modelpool_present");
 }
-// R4b: settings.json has swarm block (no pool) -> placeholder merges into JSON block (parity)
-await resetScratch();
-await writeSettings({ theme: "dark", swarm: { rotation: { strategy: "weighted" } } });
-{
-	const res = await ensurePoolScaffold(scratch);
-	ok("R4b: JSON-block merge preserved (wrote)", res.wrote === true);
-	ok("R4b: JSON-block merge path is settings.json", res.path === settingsPath);
-	ok("R4b: no yml written when JSON block exists", !existsSync(ymlPath));
-}
 
-// === R5: both-sources warning ===
-await resetScratch();
-await writeYml(sampleYml);
-await writeSettings({ swarm: { modelPool: [{ model: "json-model", provider: "p1" }] } });
-{
-	const v = validateSwarmSettings(scratch);
-	ok("R5: ok stays true with valid JSON + yml present", v.ok === true);
-	ok("R5: warnings array exists", Array.isArray(v.warnings));
-	ok(
-		"R5: both-sources warning emitted naming swarm.yml",
-		Array.isArray(v.warnings) && v.warnings.some((w) => w.kind === "both_sources_present" && /swarm\.yml/.test(w.message)),
-	);
-}
+// === R5: (removed in v4.2 — JSON no longer read) ===
+// v4.2: settings.json swarm blocks are no longer read. The both-sources warning is removed.
+// This test case is intentionally omitted.
 
 // === R6: corrupt yml ===
 await resetScratch();
@@ -174,8 +132,8 @@ await writeYml("modelPool: [unclosed\n  this is : : not valid yaml :::\n\t- ?");
 	const v = validateSwarmSettings(scratch);
 	ok("R6: validate ok:false on corrupt yml", v.ok === false);
 	ok(
-		"R6: error kind swarm_yml_unreadable",
-		v.errors.some((e) => e.kind === "swarm_yml_unreadable"),
+		"R6: error kind project_swarm_yml_unreadable",
+		v.errors.some((e) => e.kind === "project_swarm_yml_unreadable"),
 	);
 	const s = readSwarmSettings(scratch);
 	ok("R6: readers degrade to {}", JSON.stringify(s) === "{}");
@@ -201,7 +159,7 @@ rotation:
 }
 
 // cleanup
-process.chdir("/"); // leave scratch before rm (portable)
+process.chdir("/");
 await rm(scratch, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

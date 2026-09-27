@@ -68,11 +68,11 @@ try {
 	ok("parsed defaultModel from swarm.yaml", rawYaml.cfg?.defaultModel === "custom-model", `cfg=${JSON.stringify(rawYaml.cfg)}`);
 	rmSync(yamlFile, { force: true });
 
-	// --- Check 3: warn user when no swarm.yaml / swarm.yml is configured ---
+	// --- Check 3: v4.2 — no warning when no swarm.yaml / swarm.yml is configured (it's normal) ---
 	const emptyValidation = validateSwarmSettings(scratch);
 	ok(
-		"validateSwarmSettings warns when no swarm.yaml/swarm.yml exists",
-		emptyValidation.warnings.some((w) => w.kind === "swarm_yaml_missing"),
+		"validateSwarmSettings does NOT warn when no swarm.yaml/swarm.yml exists (v4.2: normal state)",
+		!emptyValidation.warnings.some((w) => w.kind === "swarm_yaml_missing"),
 		`warnings=${JSON.stringify(emptyValidation.warnings)}`,
 	);
 
@@ -114,14 +114,14 @@ try {
 		`notified=${JSON.stringify(notified)}, resText=${resText}`,
 	);
 
-	// --- Check 5: .pi/swarm.json is flagged as unsupported / warned against ---
+	// --- Check 5: v4.2 — .pi/swarm.json is ignored (not read) ---
 	const jsonFile = join(piDir, "swarm.json");
 	writeFileSync(jsonFile, JSON.stringify({ defaultModel: "bad" }));
 	const jsonValidation = validateSwarmSettings(scratch);
 	ok(
-		"validateSwarmSettings warns against .pi/swarm.json",
-		jsonValidation.warnings.some((w) => w.kind === "swarm_json_unsupported" || w.kind === "swarm_json_deprecated"),
-		`warnings=${JSON.stringify(jsonValidation.warnings)}`,
+		"validateSwarmSettings ignores .pi/swarm.json (v4.2: not read)",
+		!jsonValidation.errors.some((e) => e.kind === "swarm_json_unsupported"),
+		`errors=${JSON.stringify(jsonValidation.errors)}`,
 	);
 	rmSync(jsonFile, { force: true });
 } finally {

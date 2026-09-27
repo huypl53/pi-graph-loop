@@ -19,7 +19,7 @@ import { logSwarmError } from "../errorlog.ts";
 import { ensureRoot, heartbeatRootLeader } from "../identity.ts";
 import { resetIdleEpochState } from "../reconcile.ts";
 import { applySwarmToolGating } from "../tools/gating.ts";
-import { ensurePoolScaffold } from "../pool-scaffold.ts";
+import { ensurePoolScaffold, ensureGlobalPoolScaffold } from "../pool-scaffold.ts";
 import { maybeAutoFocusOnBusy } from "../focus.ts";
 import { engineRetryIncidentsMap } from "./streaks.ts";
 import { surfaceAgentPending } from "./pump-manager.ts";
@@ -89,6 +89,31 @@ export function registerSessionHooks(
 				}
 			} catch (err: any) {
 				await trace(p, "pool.scaffold_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+			}
+			// === v4.2: global pool scaffold (one-shot via poolScaffoldGlobalNotifiedAt) ===
+			// Mirrors the project-side scaffold above but for ~/.pi/agent/swarm.yml. Never overwrites
+			// a corrupt global (ensureGlobalPoolScaffold returns wrote=false in that case). The
+			// durable flag suppresses the notify on subsequent session_starts and /reload.
+			try {
+				const globalResult = await ensureGlobalPoolScaffold();
+				if (globalResult.wrote) {
+					await withLock(p, async () => {
+						const locked = await readState(p, ctx.cwd);
+						if (!locked.poolScaffoldGlobalNotifiedAt) {
+							locked.poolScaffoldGlobalNotifiedAt = now();
+							await writeState(p, locked);
+						}
+					});
+					if (ctx.hasUI && globalResult.notify) {
+						try {
+							ctx.ui.notify(globalResult.notify, "info");
+						} catch {
+							/* notify is best-effort */
+						}
+					}
+				}
+			} catch (err: any) {
+				await trace(p, "pool.global_scaffold_error", { error: String((err as Error)?.message || err) }).catch(() => {});
 			}
 			// === Follow-up F3 (2026-09-05): launch-time pool health warning ===
 			// The PM launches a session whose spawn pool may be entirely dead (unresolvable models /

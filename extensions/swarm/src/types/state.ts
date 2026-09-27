@@ -272,6 +272,11 @@ export type SwarmState = {
 	// "next session_start should scaffold + notify". Setting this to a non-empty string suppresses the
 	// notify on every subsequent session_start and /reload until the swarm dir is cleared (clean slate).
 	poolScaffoldNotifiedAt?: string;
+	// One-shot notify flag for the global pool scaffold (~/.pi/agent/swarm.yml). Same semantics as
+	// `poolScaffoldNotifiedAt` but for the global layer: first registration scaffolds + notifies once,
+	// subsequent reloads are silent. Lives on the same state file because it's root-only and
+	// fires from the root session_start hook (mirrors the project-side flag).
+	poolScaffoldGlobalNotifiedAt?: string;
 	// Auto-focus busy agent in tmux when an agent settles. Toggled via /swarm auto-focus.
 	autoFocusBusy?: boolean;
 	lastFocusAt?: string;

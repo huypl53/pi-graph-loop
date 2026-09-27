@@ -57,19 +57,18 @@ export const POOL_MAX_RETRIES = 2; // consecutive failures before cooldown
 // Placeholder written into `.pi/settings.json` when `swarm.modelPool` (or
 // `extensions.swarm.modelPool` — runtime precedence) is absent. Deliberately
 // `null` so validateSwarmSettings flags it (`slot_empty_model`) and the user
-// is steered toward replacing it with a real slot. The shape follows
-// ModelSlot (extra fields omitted) so the JSON parses cleanly; the type
-// assertion narrows `null` past ModelSlot's `model: string` invariant.
-export const POOL_SCAFFOLD_PLACEHOLDER = [{ model: null as any, provider: null as any }];
+// v4.2: POOL_SCAFFOLD_PLACEHOLDER removed (spec §12 File 4). JSON scaffold is gone —
+// swarm is YAML-only. No external imports exist; grep-verified before deletion.
 
 // === swarm.yml scaffold (swarm.yml feature) ===
-// Commented YAML placeholder written to `.pi/swarm.yml` when NO source (settings.json swarm
-// block or swarm.yml) declares a modelPool and settings.json has no swarm block to merge into.
-// `model: null` keeps `slot_empty_model` steering parity with the JSON placeholder — validate
-// flags it and the operator is steered to fill real values. Comments teach the format.
+// Commented YAML placeholder written to `.pi/swarm.yml` when NO source (global yml or project
+// yml) declares a modelPool. Parses to null (comments-only) — the scaffold cannot create a
+// project-pool-over-global conflict because the template declares nothing.
+// v4.2: header updated for yml-only + global layer.
 export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model pool configuration (YAML, comments welcome)
-# This file is read by the swarm extension only; pi core ignores it (pi core reads .pi/settings.json).
-# Precedence: extensions.swarm > swarm (in .pi/settings.json) > this file.
+# This file is read by the swarm extension only; pi core ignores it.
+# Precedence: env vars > this file (project) > ~/.pi/agent/swarm.yml (global) > defaults
+# To disable global inheritance: set \`inheritGlobal: false\` at the top level.
 # Full reference: docs/swarm/tools.md#configuration
 #
 # Everything below is a commented example — uncomment and edit what you need.
@@ -96,16 +95,53 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 # --- Singleton default (optional — used when no modelPool is declared) --------
 # defaultModel: glm-5.1
 # defaultProvider: zai-coding-cn
+
+# --- Global opt-out (optional) -----------------------------------------------
+# inheritGlobal: false           # ignore ~/.pi/agent/swarm.yml for this project
+`;
+
+// === Global yml scaffold (v4.2) ===
+// Commented YAML placeholder written to `~/.pi/agent/swarm.yml` on first registration.
+// Parses to null (comments-only) — the invariant test scaffold_globalTemplateParsesNull
+// verifies this. Never overwrites a corrupt global (ensureGlobalPoolScaffold checks first).
+export const POOL_SCAFFOLD_GLOBAL_YML_PLACEHOLDER = `# ~/.pi/agent/swarm.yml — swarm global config (YAML, comments welcome)
+# This file is the GLOBAL base layer for swarm config. It applies to every project unless
+# the project's .pi/swarm.yml sets \`inheritGlobal: false\`.
+# Precedence: env vars > .pi/swarm.yml (project) > this file (global) > defaults
+# Full reference: docs/swarm/tools.md#configuration
+#
+# Everything below is a commented example — uncomment and edit what you need.
+# After editing, run /swarm pool validate in any project to check your config.
+
+# --- Model pool: the slots spawned agents rotate through ----------------------
+# modelPool:
+#   - model: glm-5.1             # pi model id (required)
+#     provider: zai-coding-cn    # provider id (recommended)
+#     weight: 10                 # optional, default 1; 0 = fallback-only
+#   - model: gpt-5.4-mini
+#     provider: openai
+
+# --- Rotation policy (optional; defaults shown) -------------------------------
+# rotation:
+#   strategy: weighted
+#   cooldownMs: 900000
+#   maxRetries: 2
+
+# --- Singleton default (optional) ---------------------------------------------
+# defaultModel: glm-5.1
+# defaultProvider: zai-coding-cn
 `;
 
 // One-shot notify text surfaced to the root TUI on first scaffold into swarm.yaml / swarm.yml.
 export const POOL_SCAFFOLD_YML_NOTIFY_TEXT =
-	"Created swarm configuration placeholder — fill in your model/provider in .pi/swarm.yaml (or .pi/swarm.yml). See docs/swarm/tools.md.";
+	"Created swarm.modelPool placeholder in .pi/swarm.yml — fill in your model/provider. See docs/swarm/tools.md.";
 
-// One-shot notify text surfaced to the root TUI on first scaffold.
-// Stable so tests + locale passes can match/swap it without touching hooks.ts.
-export const POOL_SCAFFOLD_NOTIFY_TEXT =
-	"Created swarm.modelPool placeholder in .pi/settings.json — fill in your model/provider. See docs/swarm/tools.md.";
+// One-shot notify text surfaced to the root TUI on first global scaffold.
+export const POOL_SCAFFOLD_GLOBAL_YML_NOTIFY_TEXT =
+	"Created swarm global config placeholder in ~/.pi/agent/swarm.yml — fill in your model/provider for cross-project defaults. See docs/swarm/tools.md.";
+
+// v4.2: POOL_SCAFFOLD_NOTIFY_TEXT removed (spec §12 File 4). JSON scaffold is gone —
+// swarm is YAML-only. No external imports exist; grep-verified before deletion.
 
 // Stable doc anchor the notify links to. Kept as a constant so the deep-link
 // can be updated in one place.

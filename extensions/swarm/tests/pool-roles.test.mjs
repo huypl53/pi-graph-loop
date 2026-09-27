@@ -33,19 +33,26 @@ const ok = (name, cond, info) => {
 const dir = await mkdtemp(join(tmpdir(), "pool-roles-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
 await writeFile(
-	join(dir, ".pi", "settings.json"),
-	JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1",
-			defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
-				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-			],
-			rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-		},
-	}),
+	join(dir, ".pi", "swarm.yml"),
+	`defaultModel: glm-5.1
+defaultProvider: zai-coding-cn
+modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    weight: 50
+    roles: [implementer, tester]
+  - model: gpt-5.4-mini
+    provider: openai
+    weight: 30
+    roles: []
+  - model: claude-sonnet-4
+    provider: anthropic
+    weight: 0
+rotation:
+  strategy: round-robin
+  cooldownMs: 900000
+  maxRetries: 2
+`,
 );
 process.chdir(dir);
 const p = paths(dir);
@@ -127,13 +134,17 @@ async function resetHealth() {
 	await resetHealth();
 	// Temporarily rewrite settings: ONLY role-scoped slots, weight>0, role=implementer only.
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: {
-				modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", weight: 10, roles: ["implementer"] }],
-				rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
-			},
-		}),
+		join(dir, ".pi", "swarm.yml"),
+		`modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    weight: 10
+    roles: [implementer]
+rotation:
+  strategy: weighted
+  cooldownMs: 900000
+  maxRetries: 2
+`,
 	);
 	const none = await pickSlot(p, { roleKind: "reviewer" });
 	ok("all-filtered: pickSlot returns undefined for excluded roleKind", none === undefined, JSON.stringify(none));
@@ -143,19 +154,26 @@ async function resetHealth() {
 	ok("all-filtered: legacy no-roleKind pick still works (no filter)", Boolean(legacy));
 	// Restore the mixed fixture.
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: {
-				defaultModel: "glm-5.1",
-				defaultProvider: "zai-coding-cn",
-				modelPool: [
-					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
-					{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
-					{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-				],
-				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-			},
-		}),
+		join(dir, ".pi", "swarm.yml"),
+		`defaultModel: glm-5.1
+defaultProvider: zai-coding-cn
+modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    weight: 50
+    roles: [implementer, tester]
+  - model: gpt-5.4-mini
+    provider: openai
+    weight: 30
+    roles: []
+  - model: claude-sonnet-4
+    provider: anthropic
+    weight: 0
+rotation:
+  strategy: round-robin
+  cooldownMs: 900000
+  maxRetries: 2
+`,
 	);
 	await resetHealth();
 }
@@ -165,19 +183,25 @@ async function resetHealth() {
 // ===========================================================================
 {
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", roles: "implementer" }] },
-		}),
+		join(dir, ".pi", "swarm.yml"),
+		`modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    roles: implementer
+`,
 	);
 	const v = validateSwarmSettings(dir);
 	const bad = v.errors.find((e) => e.kind === "slot_bad_roles");
 	ok("case L: slot_bad_roles error reported for non-array roles", Boolean(bad), JSON.stringify(v.errors));
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", roles: ["ok", 42] }] },
-		}),
+		join(dir, ".pi", "swarm.yml"),
+		`modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    roles:
+      - ok
+      - 42
+`,
 	);
 	const v2 = validateSwarmSettings(dir);
 	ok(
@@ -186,28 +210,37 @@ async function resetHealth() {
 	);
 	// Well-formed roles -> no error.
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: { modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", roles: ["implementer"] }] },
-		}),
+		join(dir, ".pi", "swarm.yml"),
+		`modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    roles: [implementer]
+`,
 	);
 	const v3 = validateSwarmSettings(dir);
 	ok("case L: well-formed roles produce no slot_bad_roles", !v3.errors.some((e) => e.kind === "slot_bad_roles"));
 	// Restore mixed fixture.
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: {
-				defaultModel: "glm-5.1",
-				defaultProvider: "zai-coding-cn",
-				modelPool: [
-					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
-					{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
-					{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-				],
-				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-			},
-		}),
+		join(dir, ".pi", "swarm.yml"),
+		`defaultModel: glm-5.1
+defaultProvider: zai-coding-cn
+modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    weight: 50
+    roles: [implementer, tester]
+  - model: gpt-5.4-mini
+    provider: openai
+    weight: 30
+    roles: []
+  - model: claude-sonnet-4
+    provider: anthropic
+    weight: 0
+rotation:
+  strategy: round-robin
+  cooldownMs: 900000
+  maxRetries: 2
+`,
 	);
 }
 
@@ -343,18 +376,21 @@ registerSwarmCommand(fakePi);
 	ok("case F: (all) shown for empty-roles slot", /roles=\[\(all\)\]/.test(listText), listText);
 	// Without any roles configured: NO roles= fragment in any row.
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: {
-				defaultModel: "glm-5.1",
-				defaultProvider: "zai-coding-cn",
-				modelPool: [
-					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-					{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-				],
-				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-			},
-		}),
+		join(dir, ".pi", "swarm.yml"),
+		`defaultModel: glm-5.1
+defaultProvider: zai-coding-cn
+modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    weight: 50
+  - model: gpt-5.4-mini
+    provider: openai
+    weight: 30
+rotation:
+  strategy: round-robin
+  cooldownMs: 900000
+  maxRetries: 2
+`,
 	);
 	notifications.length = 0;
 	await commandHandlers["swarm"]("pool list", { ...ctx });
@@ -362,19 +398,26 @@ registerSwarmCommand(fakePi);
 	ok("case F: no roles= fragment when no slot has roles", !plainText.includes("roles="), plainText);
 	// Restore mixed fixture.
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: {
-				defaultModel: "glm-5.1",
-				defaultProvider: "zai-coding-cn",
-				modelPool: [
-					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
-					{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
-					{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-				],
-				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-			},
-		}),
+		join(dir, ".pi", "swarm.yml"),
+		`defaultModel: glm-5.1
+defaultProvider: zai-coding-cn
+modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    weight: 50
+    roles: [implementer, tester]
+  - model: gpt-5.4-mini
+    provider: openai
+    weight: 30
+    roles: []
+  - model: claude-sonnet-4
+    provider: anthropic
+    weight: 0
+rotation:
+  strategy: round-robin
+  cooldownMs: 900000
+  maxRetries: 2
+`,
 	);
 }
 
@@ -407,13 +450,17 @@ registerSwarmCommand(fakePi);
 	// filter yields a slot — the exact fallback sequence spawnAgent performs, traced as
 	// pool.role_filter_all_filtered_fallback at the callsite.
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: {
-				modelPool: [{ model: "glm-5.1", provider: "zai-coding-cn", weight: 10, roles: ["implementer"] }],
-				rotation: { strategy: "weighted", cooldownMs: 900_000, maxRetries: 2 },
-			},
-		}),
+		join(dir, ".pi", "swarm.yml"),
+		`modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    weight: 10
+    roles: [implementer]
+rotation:
+  strategy: weighted
+  cooldownMs: 900000
+  maxRetries: 2
+`,
 	);
 	await resetHealth();
 	const filtered = await pickSlot(p, { roleKind: "reviewer" });
@@ -422,19 +469,26 @@ registerSwarmCommand(fakePi);
 	ok("case H: unfiltered retry yields a slot (spawn fallback path)", Boolean(fallback) && fallback.slot.model === "glm-5.1");
 	// Restore mixed fixture for case I.
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: {
-				defaultModel: "glm-5.1",
-				defaultProvider: "zai-coding-cn",
-				modelPool: [
-					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, roles: ["implementer", "tester"] },
-					{ model: "gpt-5.4-mini", provider: "openai", weight: 30, roles: [] },
-					{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-				],
-				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-			},
-		}),
+		join(dir, ".pi", "swarm.yml"),
+		`defaultModel: glm-5.1
+defaultProvider: zai-coding-cn
+modelPool:
+  - model: glm-5.1
+    provider: zai-coding-cn
+    weight: 50
+    roles: [implementer, tester]
+  - model: gpt-5.4-mini
+    provider: openai
+    weight: 30
+    roles: []
+  - model: claude-sonnet-4
+    provider: anthropic
+    weight: 0
+rotation:
+  strategy: round-robin
+  cooldownMs: 900000
+  maxRetries: 2
+`,
 	);
 }
 

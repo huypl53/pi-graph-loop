@@ -53,11 +53,13 @@ Singleton default (optional — used when no modelPool is declared):
 defaultModel: <your-model>
 defaultProvider: <your-provider>
 
-Configuration files:
-  .pi/swarm.yaml (or .pi/swarm.yml) is the primary swarm configuration file.
-  Legacy settings.json (under \`swarm\` or \`extensions.swarm\`) is also supported.
-  Precedence: extensions.swarm > swarm (settings.json) > .pi/swarm.yaml / .pi/swarm.yml.
-  Note: .pi/swarm.json is NOT supported.
+Configuration files (v4.2: YAML-only):
+  Project: .pi/swarm.yaml (or .pi/swarm.yml) — per-project pool + singleton.
+  Global:  ~/.pi/agent/swarm.yml (or ~/.pi/agent/swarm.yaml) — shared base across all projects.
+  Precedence (low → high): defaults → global yml → project yml → env vars.
+  Per-key merge: project wins; modelPool is whole-array replacement (project array fully replaces global).
+  Opt-out: set inheritGlobal: false in project yml (global is still READ for corrupt visibility but never applied).
+  Note: settings.json (swarm block) and .pi/swarm.json are NOT read.
 
 Discover: /swarm pool show    Validate: /swarm pool validate    Preflight probe: /swarm pool preview-preflight
 See: docs/swarm/operations.md (Model pool configuration)`;
@@ -115,6 +117,17 @@ export async function handlePoolCommand(cmd: "pool", rest: string[], ctx: any, p
 		const lines: string[] = [];
 		const singleton = implicitSingletonPool();
 		const status = await poolStatus(p);
+		// v4.2: per-key provenance from mergeSwarmConfig
+		const { mergeSwarmConfig } = await import("../config.ts");
+		const resolved = mergeSwarmConfig(ctx.cwd, { freshGlobal: true });
+		const src = resolved.sources || {};
+		// fmtSrc handles BOTH shapes: SourceInfo object ({layer, file}) for per-key provenance
+		// AND plain layer-name string ("global"|"project"|"merged"|"default") for error/warning source.
+		const fmtSrc = (s?: { layer: string; file: string } | string) => {
+			if (!s) return "defaults";
+			if (typeof s === "string") return s === "default" ? "defaults" : s;
+			return `${s.layer} (${s.file})`;
+		};
 		if (status.slots.length) {
 			lines.push(
 				`Model pool: configured (${status.slots.length} slot${status.slots.length === 1 ? "" : "s"}, source=${shapeSource})`,
@@ -130,16 +143,32 @@ export async function handlePoolCommand(cmd: "pool", rest: string[], ctx: any, p
 				if (s.roles && s.roles.length) {
 					lines.push(`    roles=[${s.roles.join(", ")}]`);
 				}
+				// Per-slot provenance: which config layer contributed this slot
+				const slotSrc = src.modelPool?.[status.slots.indexOf(s)];
+				if (slotSrc) {
+					lines.push(`    source: ${fmtSrc(slotSrc)}`);
+				}
 			}
 			lines.push(
 				`Rotation: strategy=${status.rotation.strategy}, cooldown=${Math.round(status.rotation.cooldownMs / 60000)}min, maxRetries=${status.rotation.maxRetries}`,
 			);
+			if (src.rotation) {
+				lines.push(`  rotation source: ${fmtSrc(src.rotation)}`);
+			}
 		} else {
 			lines.push(`Model pool: not configured — using implicit singleton (source=${singleton.source})`);
 			lines.push(
 				`  ${singleton.slots[0].provider || "(default)"}/${singleton.slots[0].model}  weight=1  (fallback-only when pool is empty)`,
 			);
 			lines.push(`Rotation: not configured (strategy defaults to weighted)`);
+			if (src.defaultModel || src.defaultProvider) {
+				lines.push(`  singleton source: defaultModel=${fmtSrc(src.defaultModel)}, defaultProvider=${fmtSrc(src.defaultProvider)}`);
+			}
+		}
+		// v4.2: show inheritGlobal state
+		if (resolved.globalInheritDisabled) {
+			lines.push("");
+			lines.push(`Note: global config layer is disabled (inheritGlobal: false in project yml)`);
 		}
 		lines.push("");
 		lines.push("Discover config: /swarm pool help  |  Validate: /swarm pool validate");
@@ -150,6 +179,17 @@ export async function handlePoolCommand(cmd: "pool", rest: string[], ctx: any, p
 	if (sub === "validate") {
 		const v = validateSwarmSettings(ctx.cwd, { registryProbe: ctx.modelRegistry as any });
 		const lines: string[] = [];
+		// v4.2: per-key provenance from mergeSwarmConfig
+		const { mergeSwarmConfig } = await import("../config.ts");
+		const resolved = mergeSwarmConfig(ctx.cwd, { freshGlobal: true });
+		const src = resolved.sources || {};
+		// fmtSrc handles BOTH shapes: SourceInfo object ({layer, file}) for per-key provenance
+		// AND plain layer-name string ("global"|"project"|"merged"|"default") for error/warning source.
+		const fmtSrc = (s?: { layer: string; file: string } | string) => {
+			if (!s) return "defaults";
+			if (typeof s === "string") return s === "default" ? "defaults" : s;
+			return `${s.layer} (${s.file})`;
+		};
 		if (v.ok) {
 			lines.push("Config validation: PASSED");
 			if (v.shape.kind === "empty") lines.push("  - No swarm config (using defaults).");
@@ -160,7 +200,17 @@ export async function handlePoolCommand(cmd: "pool", rest: string[], ctx: any, p
 			} else if (v.shape.kind === "explicit-pool") lines.push(`  - Explicit pool with ${(v.shape as any).slots} slot(s).`);
 			else if (v.shape.kind === "both") lines.push(`  - Both: ${(v.shape as any).slots} pool slot(s) + singleton fallback.`);
 			lines.push("  - No duplicates, all weights/cooldownMs/maxRetries are well-formed.");
-			for (const w of v.warnings || []) lines.push(`  ! ${w.field || "config"}: ${w.message}`);
+			// v4.2: per-key provenance summary
+			if (Object.keys(src).length > 0) {
+				lines.push("  - Config sources:");
+				for (const [key, s] of Object.entries(src)) {
+					lines.push(`    ${key}: ${fmtSrc(s as any)}`);
+				}
+			}
+			if (resolved.globalInheritDisabled) {
+				lines.push(`  - Global config layer: disabled (inheritGlobal: false)`);
+			}
+			for (const w of v.warnings || []) lines.push(`  ! ${w.field || "config"}: ${w.message} [source: ${fmtSrc(w as any)}]`);
 			await trace(p, "pool.validate", {
 				by: currentAgentId(),
 				ok: true,
@@ -170,10 +220,23 @@ export async function handlePoolCommand(cmd: "pool", rest: string[], ctx: any, p
 			ctx.ui.notify(lines.join("\n"), (v.warnings || []).length ? "warning" : "info");
 		} else {
 			lines.push(`Config validation: FAILED (${v.errors.length} issue${v.errors.length === 1 ? "" : "s"})`);
-			for (const e of v.errors) lines.push(`  \u2717 ${e.field || "config"}: ${e.message}`);
+			for (const e of v.errors) lines.push(`  \u2717 ${e.field || "config"}: ${e.message} [source: ${fmtSrc(e.source)}]`);
+			// v4.2 fix: warnings must render in BOTH ok:true and ok:false branches. A stale_swarm_json_block
+			// advisory is independent of structural errors — the user needs to see it even when ok flips false.
+			if ((v.warnings || []).length > 0) {
+				lines.push("");
+				lines.push(`  Warnings (${v.warnings.length}):`);
+				for (const w of v.warnings || []) lines.push(`  ! ${w.field || "config"}: ${w.message} [source: ${fmtSrc(w.source)}]`);
+			}
 			lines.push("");
 			lines.push("Fix in .pi/swarm.yaml (or .pi/swarm.yml), then run /swarm pool validate again.");
-			await trace(p, "pool.validate", { by: currentAgentId(), ok: false, shape: v.shape.kind, errors: v.errors.length });
+			await trace(p, "pool.validate", {
+				by: currentAgentId(),
+				ok: false,
+				shape: v.shape.kind,
+				errors: v.errors.length,
+				warnings: (v.warnings || []).length,
+			});
 			ctx.ui.notify(lines.join("\n"), "warning");
 		}
 		return;

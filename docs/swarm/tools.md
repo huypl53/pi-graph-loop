@@ -55,20 +55,26 @@ was a separate persistence layer and is no longer part of the core surface.
 
 ## Configuration
 
-### Config sources and precedence
+### Config sources and precedence (v4.2: YAML-only)
 
-The swarm model pool reads three config sources with strict precedence:
+The swarm model pool reads two YAML config sources with strict precedence (low → high):
 
-1. `.pi/settings.json` → `extensions.swarm` block (highest — runtime parity with pi core)
-2. `.pi/settings.json` → top-level `swarm` block
-3. `.pi/swarm.yml` → top-level keys, no `swarm:` wrapper (the filename is the namespace)
+1. **Global**: `~/.pi/agent/swarm.yml` (or `~/.pi/agent/swarm.yaml`) — shared base across all projects
+2. **Project**: `.pi/swarm.yml` (or `.pi/swarm.yml`) — per-project overrides
 
-`.pi/swarm.yml` is the comment-friendly home: pi core parses `settings.json` with bare
-`JSON.parse` (comments would make pi silently drop the whole project block), so swarm owns
-this dedicated YAML file. Comments are allowed anywhere in it.
+Plus environment variables (highest precedence) for runtime overrides.
+
+**Merge rule**: per-top-level-key winner-takes-all. The project yml wins for any key it
+declares; the global yml fills in keys the project doesn't declare. The `modelPool` key
+is a special case: it's a **whole-array replacement** — the project's array fully replaces
+the global array (no per-slot merge).
+
+**Opt-out**: set `inheritGlobal: false` in the project yml to disable the global layer
+entirely. The global yml is still READ (so corrupt global is visible in validate) but
+never applied to the resolved config.
 
 ```yaml
-# .pi/swarm.yml
+# .pi/swarm.yml (project)
 modelPool:
   - model: glm-5.1            # pi model id (required)
     provider: zai-coding-cn   # provider id (recommended)
@@ -84,14 +90,22 @@ rotation:
   maxRetries: 2
 # defaultModel: glm-5.1      # implicit-singleton fallback config
 # defaultProvider: zai-coding-cn
+# inheritGlobal: false       # opt out of the global layer entirely
 ```
 
-When settings.json declares a swarm block AND `.pi/swarm.yml` carries recognized config,
-`/swarm pool validate` emits a **warning** (never an error): the JSON wins and the yml
-contents are ignored. An **empty** (0-byte / comments-only) swarm.yml also warns
-(`swarm_yml_empty`) — the file exists but declares nothing, so the JSON config keeps winning.
-Corrupt YAML is reported as `swarm_yml_unreadable` (`ok:false`);
-all readers degrade to defaults exactly like corrupt JSON does today.
+**Corrupt YAML** is reported per-layer:
+- `global_swarm_yml_unreadable` / `global_swarm_yml_eacces` — global layer corrupt
+- `project_swarm_yml_unreadable` / `project_swarm_yml_eacces` — project layer corrupt
+
+All readers degrade to defaults exactly like corrupt JSON did in earlier versions.
+
+**Stale settings.json**: if `.pi/settings.json` has a non-empty `swarm` or `extensions.swarm`
+block, `/swarm pool validate` emits a `stale_swarm_json_block` advisory warning. The block
+is no longer read; the warning is self-extinguishing when the block is removed.
+
+**Unknown keys**: `/swarm pool validate` emits an `unknown_top_level_key` warning listing
+any unrecognized top-level keys in either yml file. No Levenshtein suggestions — just the
+plain list with the source file.
 
 `/swarm pool validate` (and the root's launch-time pool-health check) also runs **live
 resolvability checks** per slot when the model registry is available in the session:
@@ -99,19 +113,34 @@ resolvability checks** per slot when the model registry is available in the sess
 for a provider without a stored API key. The root session surfaces a warning at launch when
 the pool config has errors (or an advisory when warnings exist), traced as `pool.launch_health`.
 
-### Model pool auto-scaffold on first root session (Issue 20)
+### Per-key + per-slot provenance
+
+`/swarm pool show` and `/swarm pool validate` render per-key + per-slot provenance so you
+can see which config layer contributed each value:
+
+```
+Model pool: configured (2 slots, source=swarm.yml)
+  zai-coding-cn/glm-5.1     w=10  ok  failures=0
+    source: project (.pi/swarm.yml)
+  openai/gpt-5.4-mini       w=5   ok  failures=0
+    source: global (~/.pi/agent/swarm.yml)
+Rotation: strategy=weighted, cooldown=15min, maxRetries=2
+  rotation source: project (.pi/swarm.yml)
+```
+
+### Model pool auto-scaffold on first root session (Issue 20 + v4.2 dual scaffold)
 
 When the root (`PI_SWARM_IS_ROOT=1`) starts a session and NO source declares
-`modelPool`, the extension writes a **comments-only teaching template into
-`.pi/swarm.yml`** — the full config surface (modelPool slots with every optional
-field, rotation policy, defaultModel/defaultProvider) documented as commented
-examples; the file parses to `null` (declares nothing) until the user fills it
-in. settings.json is not created. If settings.json already has a `swarm` /
-`extensions.swarm` block without `modelPool`, the JSON placeholder merges into
-that block instead (unchanged behavior). An **empty** swarm.yml (0 bytes /
-comments-only) is treated as not-yet-declared: the scaffold (re)writes the
-idempotent template bytes into it when no other source declares a pool; the
-durable `poolScaffoldNotifiedAt` flag keeps the notify one-shot.
+`modelPool`, the extension writes a **comments-only teaching template** into BOTH:
+
+1. **Project**: `.pi/swarm.yml` — the full config surface (modelPool slots with every
+   optional field, rotation policy, defaultModel/defaultProvider) documented as commented
+   examples; the file parses to `null` (declares nothing) until the user fills it in.
+2. **Global**: `~/.pi/agent/swarm.yml` — same comments-only template, written on first
+   registration only (never overwrites a corrupt global).
+
+Both templates parse to `null` (comments-only). The durable `poolScaffoldNotifiedAt` and
+`poolScaffoldGlobalNotifiedAt` flags keep the notifies one-shot per swarm.
 
 A one-shot TUI notify fires ONLY when (a) the scaffold actually wrote AND
 (b) the durable flag `SwarmState.poolScaffoldNotifiedAt` is absent. After the

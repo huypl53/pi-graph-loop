@@ -5,6 +5,13 @@
 // explicit targets, 'here' resolution inside/outside tmux, and pane listing with the current flag.
 //
 // Run: node extensions/swarm/register-here.test.mjs
+//
+// HERMETICITY (v4.2-adjacent): v4.2 makes config resolution cwd+global aware; herdr detection in
+// terminal/index.ts reads config from process.cwd(). If this test runs from the repo root, the
+// repo's own .pi/swarm.yml (terminalManager: herdr) leaks into the driver selection and the mocked
+// pi.exec (which only handles tmux) never gets called. Pin env to tmux BEFORE any imports that
+// touch the terminal driver so the test is hermetic regardless of where it runs.
+process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
