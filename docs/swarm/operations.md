@@ -1970,3 +1970,65 @@ barrel, never executing the pump's own call sites in `surface.ts`.
 static import check). **Contract rule (pi-runtime-contract §10 F19):** any change touching
 pump-callable identifiers must ship a guard that executes the pump path itself or a
 static import-integrity check.
+
+## Operator: tool-output-slim — verdicts and pointers, not state dumps (2026-09-27)
+
+Task `swarm-tool-output-slim-20260928`. Model-facing output of the four hot polling tools was
+re-cut to verdicts + exceptions (serialization only; durable state, pump/ledger semantics, and
+the `withLock` lifecycle-derivation block in `swarm_check_mailbox` are untouched).
+
+### When this matters
+
+Session-log measurement (biggest root session): `swarm_check_mailbox` 173KB, `swarm_agent_status`
+134KB, `swarm_list_agents` 291KB of model-visible tool content; worst single calls 19–37KB. Polling
+tools re-fed stale, already-read state into context every cycle — the "agent fluctuation" symptom.
+
+### What changed
+
+- `swarm_check_mailbox` — scan/read split. Default scan: slim rows (`id, from, subject, age,
+  unread, requiresResponse, preview` ≤300B). `fullBody:true` returns complete bodies. Envelope
+  noise (`swarmId`, `to`, `priority`, `type`, `schemaVersion`, `requiresAck`, `idempotencyKey`,
+  `headers`) moved to `details`. 20-message scan: 18,905B → ~2,023B.
+- `swarm_agent_status` — default `view:"attention"`: `census` + `attention` rows for non-healthy-idle
+  agents only, each with a `why` sentence. Nonzero-only counters. `unackedMessages`/`ackMissing`
+  removed from the default view (dead under minimal protocol). `view:"full"` (or `verbose:true`,
+  or a targeted `agentId` query) restores the legacy 24-field rows. 11-agent view: 7,311B → 393B.
+- `swarm_list_agents` — compact phonebook rows (`roleFirstLine` ≤60B, `roleKind`, `status`,
+  `driver`, `target`, `slot`). The full-agent-array `details` dump (measured 5.9MB across one
+  session) is gone; `details` now carries the same compact rows.
+- `swarm_task_status` — default `detail:"summary"` compact JSON (progress buckets, current, ready,
+  warnings); `detail:"graph"` returns the nodes/edges/gates JSON that `details` always carried.
+- `swarm_send_message` — root mailbox-only note shortened (R15 honest wording preserved verbatim
+  in essence: durable in mailbox; no time-bound surface guarantee); long rationale lives here and
+  in the Pi runtime contract. Pi-runtime-contract §10 consulted — no claim changed, no row needed.
+- `swarm_update_task` — model-visible attestation is one line (`files: N (+X −Y)`); the full
+  diffstat table stays in `details` and the task trace.
+
+### Driver vocabulary
+
+Status surfaces use `paneAlive` / `driver` (`"tmux" | "herdr" | "mock"`) / `target` instead of
+`tmuxAlive`/`tmuxTarget` — correct for mixed tmux+herdr fleets (per-agent driver derivation via
+the terminal driver manager).
+
+### unread semantics (root vs worker)
+
+- Worker: `unread` keys off the shared `st.delivered[agentId]` ledger (the same ledger
+  `pendingOnly` uses; read-only in the scan path).
+- Root: `unread` keys off the durable `surfacedAt` stamp on the message record — NOT
+  `st.delivered.root` and NOT the pump's per-pid ledger. A root message surfaced by the pump (or
+  stamped via the informational-consume path) reads `unread:false`. Validation note: in a fresh
+  lane the pump can surface seeded messages ~130ms before a scripted scan, so `unread:0` there is
+  correct-by-design (tester verdict in test-evidence.md, trace-confirmed:
+  `notification.batch.surfaced` → `mailbox.poll` → `surfacedAt` stamp).
+
+### Verify commands
+
+- `node extensions/swarm/tests/tool-output-budget.test.mjs` — 58 assertions incl. byte budgets
+  (scan ≤2,050B @20 msgs; attention ≤500B @11 agents; phonebook ≤2,500B @11; summary ≤800B).
+- Mock-LLM lane: `pi --provider mock-llm --model tool-output-slim` in a seeded scratch cwd
+  (fixture `extensions/mock-llm/fixtures/tool-output-slim.jsonl`, 4 turns). WARNING: do NOT also
+  pass `-e extensions/swarm` — the global packages entry already loads it; double registration
+  aborts the extension.
+- Pre-existing suite failures (identical on main, stash-verified): cancellation 41/1,
+  minimal-protocol-shadow 24/7, reconcile-reinject 16/4, root-wake 31/3, functional/attestation
+  env crashes.

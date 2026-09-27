@@ -14,7 +14,7 @@ import type { MessageResponseStatus } from "../types.ts";
 import { currentAgentId } from "../session.ts";
 import { enqueueAndDeliver, readMailbox, validateResultMessage } from "../mailbox.ts";
 import { mailboxPath, paths, readState, trace, withLock, writeState } from "../state.ts";
-import { now, safeId, textResult } from "../utils.ts";
+import { humanAge, now, safeId, textResult } from "../utils.ts";
 import { pumpRootMailbox, reconcile } from "../reconcile.ts";
 import { heartbeatRootLeader, requireRootAuthority } from "../identity.ts";
 import { tmux } from "../tmux.ts";
@@ -28,6 +28,90 @@ import {
 	TRACE_LIFECYCLE_DERIVED_SHADOW,
 } from "../constants.ts";
 import { deriveLifecycleFromTrigger } from "../mailbox.ts";
+
+// === tool-output-slim §1 helpers — check_mailbox scan/read split ==============================
+
+// Read-only unread computation for the envelope. DOES NOT write any ledger.
+//   worker: same st.delivered[agentId] ledger pendingOnly already uses.
+//   root:   st.messages[id].surfacedAt (stamped by pump receipts + the root markDelivered path).
+// NEVER reads or writes st.delivered.root; never touches rootPumpSessions (pump decoupling).
+function computeUnreadForTool(st: any, agentId: string, messages: Array<any>): number {
+	if (agentId === "root") {
+		return messages.filter((m) => {
+			const rec = st.messages?.[m.id];
+			return rec && rec.to === "root" && !rec.surfacedAt;
+		}).length;
+	}
+	const delivered = new Set(st.delivered?.[agentId] || []);
+	return messages.filter((m) => !delivered.has(m.id)).length;
+}
+
+// Compact scan row: keep id/from/subject/age/unread/requiresResponse/preview
+// (+ conversationId/replyTo only when set). Drop transport fields from the model view.
+function slimMailboxRow(m: any, st: any, agentId: string, previewLen: number): any {
+	let unread: boolean;
+	if (agentId === "root") {
+		const rec = st?.messages?.[m.id];
+		unread = Boolean(rec && rec.to === "root" && !rec.surfacedAt);
+	} else {
+		const delivered = new Set(st?.delivered?.[agentId] || []);
+		unread = !delivered.has(m.id);
+	}
+	const row: any = {
+		id: m.id,
+		from: m.from,
+		subject: m.subject,
+		age: humanAge(m.createdAt),
+		unread,
+		requiresResponse: Boolean(m.requiresResponse) === true ? true : undefined,
+	};
+	if (previewLen > 0) {
+		const body = typeof m.body === "string" ? m.body : "";
+		const needsTrunc = body.length > previewLen;
+		row.preview = needsTrunc ? `${body.slice(0, previewLen)}\n…[+${body.length - previewLen} chars — fullBody:true]` : body;
+	}
+	if (m.conversationId) row.conversationId = m.conversationId;
+	if (m.replyTo) row.replyTo = m.replyTo;
+	if (row.requiresResponse === undefined) delete row.requiresResponse;
+	return row;
+}
+
+// Full-body row: legacy envelope minus the transport fields that never belonged in the model view.
+function fullMailboxRow(m: any): any {
+	const {
+		swarmId: _s,
+		to: _to,
+		priority: _p,
+		type: _t,
+		schemaVersion: _sv,
+		requiresAck: _ra,
+		idempotencyKey: _ik,
+		headers: _h,
+		...rest
+	} = m;
+	return rest;
+}
+
+// Serialize the lock result into the model-visible view. Default = compact scan;
+// fullBody:true = complete bodies. `details` keeps the raw full messages for programmatic use.
+function serializeMailboxView(result: any, opts: { fullBody: boolean; previewLen: number }) {
+	const { agentId, unread, matchedCount, returnedCount, messages } = result;
+	if (opts.fullBody) {
+		const full: Record<string, unknown> = {
+			agentId,
+			unread,
+			returned: returnedCount,
+			messages: messages.map(fullMailboxRow),
+		};
+		if (matchedCount !== returnedCount) full.matched = matchedCount;
+		return full;
+	}
+	const rows = messages.map((m: any) => slimMailboxRow(m, result.__st, agentId, opts.previewLen));
+	const compact: Record<string, unknown> = { agentId, unread, returned: returnedCount, messages: rows };
+	// matched only when pagination actually hid something (returned !== matched)
+	if (matchedCount !== returnedCount) compact.matched = matchedCount;
+	return compact;
+}
 
 export function registerMessagesTools(pi: ExtensionAPI) {
 	pi.registerTool(
@@ -89,17 +173,13 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 					// without a live pane get the genuine-warning phrasing.
 					const mailboxOnlyNote = mailboxOnly
 						? msg.to === "root"
-							? // R15 P0 (2026-09-01): the previous text claimed a bounded ~5s surface; the
-								// root's own pump defers while the root is busy
-								// (reconcile.ts:1617-1626) and the busy-suppression at reconcile.ts:1665
-								// drops the message from the surface plan entirely. The bounded promise
-								// is false for any worker result arriving while the root is
-								// mid-turn, which is the dominant real-world case. Be honest: the
-								// message is durably in the mailbox; no time-bound surface is
-								// promised; the surface fires when the root's own
-								// `agent_settled` or its next idle watchdog tick processes the
-								// mailbox (R10-1 counter at the real pi.sendMessage boundary).
-								" (mailbox-only delivery — NORMAL for the root: no tmux pane by design; durable in mailbox; no time-bound surface guarantee; surfaces when the root's own agent_settled fires or its next idle watchdog tick processes the mailbox)"
+							? // R15 P0 (2026-09-01): the pump defers while the root is busy and busy-suppression
+								// may drop the message from the surface plan entirely. Be honest but compact: the
+								// message is durably in the mailbox; no time-bound surface is promised; the
+								// surface fires when the root's own agent_settled fires or its next idle watchdog
+								// tick processes the mailbox (R10-1 counter at the real pi.sendMessage boundary).
+								// Full narrative lives in docs/swarm/operations.md (root mailbox-only note).
+								" (root: mailbox-only — durable in mailbox, no time-bound surface guarantee; normal)"
 							: " (mailbox-only delivery; recipient has no live tmux pane — will surface via reconcile/pump once it restarts)"
 						: "";
 					return textResult(
@@ -292,12 +372,31 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 					Type.Boolean({ description: "Only return messages not marked delivered in swarm state. Defaults to false." }),
 				),
 				markDelivered: Type.Optional(Type.Boolean({ description: "Mark returned messages as delivered/read. Defaults to false." })),
+				fullBody: Type.Optional(
+					Type.Boolean({
+						description:
+							"Return complete message bodies (legacy envelope minus transport fields). Defaults to false (compact scan rows; use bodyPreview to include previews).",
+					}),
+				),
+				bodyPreview: Type.Optional(
+					Type.Number({
+						description:
+							"Include body previews in scan rows, truncated to this many chars (clamped 50\u20132000). Omitted = headers-only scan. Truncated previews end with \u2026[+N chars \u2014 fullBody:true] so the model can discover the escape hatch.",
+					}),
+				),
 			}),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_check_mailbox", async () => {
 					const p = paths(ctx.cwd);
 					const agentId = safeId(params.agentId || currentAgentId());
 					const limit = Math.max(1, Math.min(100, params.limit || 20));
+					// tool-output-slim §1: fullBody keeps the legacy envelope (minus transport fields);
+					// the default scan is a headers-only compact view (id/from/subject/age/unread) so a
+					// 20-message poll stays under the 2,000B context budget. bodyPreview (clamped
+					// 50–2000) opts the scan rows into body previews; fullBody:true reads complete bodies.
+					const fullBody = params.fullBody === true;
+					const bodyPreviewGiven = typeof params.bodyPreview === "number";
+					const previewLen = Math.max(50, Math.min(2000, Math.round(params.bodyPreview ?? 300)));
 					const result = await withLock(p, async () => {
 						const st = await readState(p, ctx.cwd);
 						// DELIBERATELY DECOUPLED from the root auto-pump: check_mailbox keys "already read" on the
@@ -385,13 +484,18 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 						if (lifecycleDirty || params.markDelivered) await writeState(p, st);
 						return {
 							agentId,
-							mailbox: relative(ctx.cwd, mailboxPath(p, agentId)),
+							unread: computeUnreadForTool(st, agentId, messages),
 							matchedCount,
 							returnedCount: messages.length,
 							messages,
+							__st: st,
 						};
 					});
-					return textResult(JSON.stringify(result, null, 2), result);
+					// tool-output-slim §1: serialization happens AFTER the withLock returns — the lock
+					// block above is untouched except for the read-only unread computation inside the
+					// returned envelope. Default scan: compact rows, no pretty-print, no raw bodies.
+					const compact = serializeMailboxView(result, { fullBody, previewLen: bodyPreviewGiven ? previewLen : 0 });
+					return textResult(JSON.stringify(compact), { ...compact, messages: result.messages });
 				});
 			},
 		}),
