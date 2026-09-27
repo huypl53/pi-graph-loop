@@ -99,6 +99,19 @@ export interface TerminalDriver {
 
 	getFocusStatus(pi: ExtensionAPI, session: string, opts?: { order?: "name-first" | "index-first" }): Promise<FocusStatus>;
 
+	/**
+	 * Return the workspace id where the user is currently focused GLOBALLY (not scoped to a
+	 * particular session). Herdr: workspace_id of the tab with `focused: true` from
+	 * `herdr tab list` (no workspace filter). Tmux: the current session name (tmux is
+	 * single-session per host in practice). Mock: currentPane.session. Returns undefined
+	 * when no global focus can be determined.
+	 *
+	 * Used by the busy-path auto-focus guard to detect cross-workspace focus stealing
+	 * (Herdr `tab focus` is global; tmux `select-window` is session-scoped, so the guard
+	 * is a no-op under tmux).
+	 */
+	getFocusedWorkspaceId(pi: ExtensionAPI): Promise<string | undefined>;
+
 	getAttachCommands(target: TerminalTargetRef | string): AttachCommands;
 
 	isSameTarget(targetA: string, targetB: string): boolean;

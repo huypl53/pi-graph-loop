@@ -607,6 +607,22 @@ export class HerdrDriver implements TerminalDriver {
 		}
 	}
 
+	/**
+	 * Return the workspace_id where the user is currently focused GLOBALLY. Herdr `tab list`
+	 * (no workspace filter) returns tabs across all workspaces with `focused: true` on the
+	 * globally focused one. This is the cross-workspace signal the busy-path auto-focus guard
+	 * needs to detect focus stealing.
+	 *
+	 * Throws on query failure — callers (the busy-path cross-workspace guard) own the
+	 * fail-open policy and the durable error logging at the correct project cwd.
+	 */
+	async getFocusedWorkspaceId(pi: ExtensionAPI): Promise<string | undefined> {
+		const res = await this.herdrJson(pi, ["tab", "list"], 3_000);
+		const tabs = Array.isArray(res) ? res : res?.result?.tabs || res?.tabs || [];
+		const focused = tabs.find((t: any) => t.focused || t.active || t.is_active);
+		return focused?.workspace_id || focused?.workspaceId || undefined;
+	}
+
 	getAttachCommands(target: TerminalTargetRef | string): AttachCommands {
 		const targetStr = typeof target === "string" ? target : target.target || target.paneId || "";
 		const session = typeof target === "string" ? "" : target.session || "";

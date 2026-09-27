@@ -134,6 +134,10 @@ export class MockTerminalDriver implements TerminalDriver {
 		};
 	}
 
+	async getFocusedWorkspaceId(_pi: ExtensionAPI): Promise<string | undefined> {
+		return this.currentPane?.session || undefined;
+	}
+
 	getAttachCommands(target: TerminalTargetRef | string): AttachCommands {
 		const paneTarget = typeof target === "string" ? target : target.target;
 		const session = typeof target === "string" ? target.split(":")[0] || "mock-session" : target.session || "mock-session";
