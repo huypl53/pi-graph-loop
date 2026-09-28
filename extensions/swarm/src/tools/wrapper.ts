@@ -10,10 +10,11 @@
 // coverage is guaranteed and the existing registration / pi.getAllTools() counts are untouched.
 // Telemetry failure is best-effort and never propagates.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { PI_SWARM_MINIMAL_PROTOCOL, TRACE_TOOL_INVOKED } from "../constants.ts";
+import { PI_SWARM_MINIMAL_PROTOCOL, SWARM_GUEST_ID, TRACE_TOOL_INVOKED } from "../constants.ts";
 import { paths, trace } from "../state.ts";
 import { currentAgentId } from "../session.ts";
 import { logSwarmError } from "../errorlog.ts";
+import { applySwarmToolGating } from "./gating.ts";
 
 export type ToolInvocationClass = "success" | "error" | "thrown";
 
@@ -26,6 +27,16 @@ export async function wrapSwarmToolInvocation<T>(
 	toolName: string,
 	exec: () => Promise<T>,
 ): Promise<T> {
+	if (currentAgentId() === SWARM_GUEST_ID) {
+		try {
+			if (pi) applySwarmToolGating(pi);
+		} catch (err) {
+			await logSwarmError(cwd, "wrapper", "guest_regating_failed", err, { tool: toolName });
+		}
+		throw new Error(
+			`SWARM_GUEST_DENIED: Swarm tools are disabled for anonymous guest sessions. Register this pane first using /swarm register here <id> [role].`,
+		);
+	}
 	const start = Date.now();
 	let cls: ToolInvocationClass = "success";
 	let errClass: string | undefined;

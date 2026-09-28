@@ -87,6 +87,7 @@ export function applySwarmToolGating(pi: ExtensionAPI): void {
 	if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
 		// Phase 1 path (unchanged): guest drops swarm tools; everyone else keeps them.
 		if (currentAgentId() === SWARM_GUEST_ID) {
+			for (const n of active) if (n.startsWith(SWARM_TOOL_PREFIX)) next.delete(n);
 			for (const n of swarm) next.delete(n);
 		} else {
 			for (const n of swarm) next.add(n);
@@ -98,6 +99,7 @@ export function applySwarmToolGating(pi: ExtensionAPI): void {
 		const isOrch = me === "root";
 		if (currentAgentId() === SWARM_GUEST_ID) {
 			// Guest loses swarm tools entirely (same as gate=0).
+			for (const n of active) if (n.startsWith(SWARM_TOOL_PREFIX)) next.delete(n);
 			for (const n of swarm) next.delete(n);
 		} else if (isAdmin) {
 			// Admin sees all registered swarm tools.

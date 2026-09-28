@@ -57,6 +57,22 @@ export function registerSessionHooks(
 		// command is unaffected, so a guest can still opt in via `/swarm register here <role>`. Re-applied on
 		// opt-in (command.ts) so an in-session identity change re-enables the swarm tools immediately.
 		applySwarmToolGating(pi);
+		// Sibling extensions (e.g. toolset managers, tbox/tool-masking) may run their
+		// session_start handlers after swarm and force-restore all extension tools.
+		// Schedule a deferred re-gate on the next event-loop tick so the active set
+		// is re-asserted before any interactive or prompt activity begins.
+		const deferGating = () => {
+			try {
+				applySwarmToolGating(pi);
+			} catch (err) {
+				void logSwarmError(ctx.cwd, "gating", "deferred_session_start_gating_failed", err);
+			}
+		};
+		if (typeof setImmediate === "function") {
+			setImmediate(deferGating);
+		} else {
+			setTimeout(deferGating, 0);
+		}
 		// === Issue 20: pool-scaffold on root session_start ===
 		// Runs ONLY for the root identity (PM). The durable `poolScaffoldNotifiedAt` flag on
 		// SwarmState makes the notify write-once-per-swarm: subsequent session_starts (and /reload
@@ -249,7 +265,20 @@ export function registerSessionHooks(
 		}
 	});
 
+	pi.on("session_tree", async (_event, ctx) => {
+		try {
+			applySwarmToolGating(pi);
+		} catch (err) {
+			void logSwarmError(ctx.cwd, "gating", "session_tree_gating_failed", err);
+		}
+	});
+
 	pi.on("before_agent_start", async (event, ctx) => {
+		try {
+			applySwarmToolGating(pi);
+		} catch (err) {
+			void logSwarmError(ctx.cwd, "gating", "before_agent_start_gating_failed", err);
+		}
 		const agentId = currentAgentId();
 		if (agentId === "root") {
 			return {

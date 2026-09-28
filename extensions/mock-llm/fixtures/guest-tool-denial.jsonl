@@ -1,0 +1,3 @@
+# guest-tool-denial: exercises guest session attempting to invoke a swarm tool and receiving SWARM_GUEST_DENIED
+{"name": "guest attempts swarm_list_agents", "events": [{"type": "toolcall", "delayMs": 10, "name": "swarm_list_agents", "id": "call-guest-1", "arguments": {}}, {"type": "stop", "delayMs": 5, "reason": "toolUse"}]}
+{"name": "guest acknowledges tool denial", "events": [{"type": "text", "delayMs": 10, "text": "Swarm tools are disabled for guest sessions. Please register with /swarm register here <id> [role].", "chunks": ["Swarm tools are disabled ", "for guest sessions. ", "Please register with /swarm register here <id> [role]."]}, {"type": "stop", "delayMs": 5, "reason": "stop"}]}
