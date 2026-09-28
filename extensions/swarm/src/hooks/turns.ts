@@ -15,6 +15,8 @@ import { SWARM_GUEST_ID } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
 import { paths, readState, trace, withLock, writeState } from "../state.ts";
 import { resetIdleEpochState } from "../reconcile.ts";
+import { applySwarmToolGating } from "../tools/gating.ts";
+import { logSwarmError } from "../errorlog.ts";
 
 // === R16 (2026-09-02): turn-end resolve-action detector (module-scope export) ===
 // A turn_end{stop, role=assistant} is a RESOLVE only if the root ADVANCED the goal
@@ -73,6 +75,11 @@ export function registerTurnHooks(pi: ExtensionAPI) {
 	// drop the epoch (and pending boundary); turn_end (below) re-arms it via the next pump tick's
 	// fresh allIdleSinceAt, so the interval is measured from the END of the root's work.
 	pi.on("turn_start", async (_event, ctx) => {
+		try {
+			applySwarmToolGating(pi);
+		} catch (err) {
+			void logSwarmError(ctx.cwd, "gating", "turn_start_gating_failed", err);
+		}
 		if (currentAgentId() !== "root") return;
 		const p = paths(ctx.cwd);
 		try {
