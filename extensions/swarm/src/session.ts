@@ -1,6 +1,8 @@
 // === swarm/session.ts — auto-extracted from index.ts (verbatim bodies) ===
+import { fileURLToPath } from "node:url";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, SWARM_GUEST_ID } from "./constants.ts";
 import { readSwarmSettings } from "./config.ts";
+import { shellQuote } from "./utils.ts";
 
 export { readSwarmSettings } from "./config.ts";
 
@@ -43,11 +45,17 @@ export function currentProvider(model = currentModel()) {
 	return settings.defaultProvider || process.env.PI_SWARM_DEFAULT_PROVIDER || providerForModel(model) || DEFAULT_PROVIDER;
 }
 
+export function defaultSwarmExtensionPath(): string {
+	return fileURLToPath(new URL("../index.ts", import.meta.url));
+}
+
 export function childPiArgs() {
 	// Default loads the swarm extension so spawned agents have swarm tools (swarm_send_message,
-	// swarm_update_task, etc.). The path is repo-canonical ("extensions/swarm/index.ts") so it
-	// resolves regardless of cwd — the root pi must be running from the repo root for the
-	// extension to load (same precondition as parent-load). Tests or unusual projects override
-	// via PI_SWARM_CHILD_ARGS, e.g. PI_SWARM_CHILD_ARGS="--approve --no-extensions".
-	return process.env.PI_SWARM_CHILD_ARGS || "--approve -e extensions/swarm/index.ts";
+	// swarm_update_task, etc.). The path is resolved to the absolute location of this extension's
+	// entry point so it resolves regardless of the target agent's working directory.
+	// Tests or unusual projects override via PI_SWARM_CHILD_ARGS, e.g. PI_SWARM_CHILD_ARGS="--approve --no-extensions".
+	if (process.env.PI_SWARM_CHILD_ARGS) return process.env.PI_SWARM_CHILD_ARGS;
+	const extPath = defaultSwarmExtensionPath();
+	return `--approve -e ${shellQuote(extPath)}`;
 }
+
