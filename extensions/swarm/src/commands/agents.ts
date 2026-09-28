@@ -61,7 +61,7 @@ export async function handleAgentsCommand(cmd: string, rest: string[], ctx: any,
 			ctx.ui.notify("Usage: /swarm spawn <id> [role]", "warning");
 			return;
 		}
-		const agent = await withLock(p, async () => {
+		const { agent } = await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
 			const a = await spawnAgent(pi, ctx.cwd, p, st, { id: safeId(id), role });
 			await writeState(p, st);

@@ -103,14 +103,26 @@ export class TmuxDriver implements TerminalDriver {
 	}
 
 	async spawnAgent(pi: ExtensionAPI, opts: SpawnAgentOptions): Promise<{ session: string; window: string; target: string }> {
-		const target = opts.target || `${opts.session}:${opts.window}.0`;
+		let target = opts.target || `${opts.session}:${opts.window}.0`;
 		try {
 			await this.tmux(pi, ["has-session", "-t", opts.session], 5_000);
-			await this.tmux(pi, ["new-window", "-t", opts.session, "-c", opts.cwd, "-n", opts.window, opts.command], 10_000);
+			const out = await this.tmux(
+				pi,
+				["new-window", "-P", "-F", "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}", "-t", opts.session, "-c", opts.cwd, "-n", opts.window, opts.command],
+				10_000,
+			);
+			const parts = (out || "").trim().split("\t");
+			if (!opts.target && parts[0]) target = parts[0];
 		} catch (err: any) {
 			if (String(err?.message || err).includes("can't find session")) {
 				try {
-					await this.tmux(pi, ["new-session", "-d", "-s", opts.session, "-c", opts.cwd, "-n", opts.window, opts.command], 10_000);
+					const out = await this.tmux(
+						pi,
+						["new-session", "-d", "-P", "-F", "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}", "-s", opts.session, "-c", opts.cwd, "-n", opts.window, opts.command],
+						10_000,
+					);
+					const parts = (out || "").trim().split("\t");
+					if (!opts.target && parts[0]) target = parts[0];
 				} catch (sessionErr: any) {
 					await logSwarmError(process.cwd(), "tmux", "spawn_agent.new_session_failed", sessionErr, { opts });
 					throw sessionErr;

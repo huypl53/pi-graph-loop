@@ -102,10 +102,10 @@ PI_SWARM_IS_ROOT=1 pi --model glm-5.1 --provider zai-coding-cn -e extensions/swa
 ```
 
 Workers spawned by the swarm extension inherit the parent's `pi` invocation plus the
-args returned by `childPiArgs()` (`src/session.ts`). The default is
-`--approve -e extensions/swarm/index.ts` so workers have swarm tools
-(`swarm_send_message`, `swarm_update_task`, ...) loaded automatically. Override with
-`PI_SWARM_CHILD_ARGS="<args>"` to disable the extension load for tests / sandboxes, e.g.
+args returned by `childPiArgs()` (`src/session.ts`). The default loads the swarm extension
+using its resolved absolute path so workers have swarm tools
+(`swarm_send_message`, `swarm_update_task`, ...) loaded automatically regardless of workspace cwd.
+Override with `PI_SWARM_CHILD_ARGS="<args>"` to disable the extension load for tests / sandboxes, e.g.
 `PI_SWARM_CHILD_ARGS="--approve --no-extensions"`. See
 [`docs/swarm/operations.md` → "Terminal manager — herdr mode"](./docs/swarm/operations.md#terminal-manager--herdr-mode-082) — herdr 0.8.2 CLI contract, env vars, supported version.
 [`docs/swarm/operations.md` → "Child pi args"](./docs/swarm/operations.md#child-pi-args-default-loads-swarm-extension).
