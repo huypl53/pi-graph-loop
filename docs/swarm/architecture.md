@@ -143,6 +143,34 @@ Primary code:
 - `src/reconcile.ts`
 - `src/tools/tasks*.ts`
 
+### 3b. Sequential issue auto-run (`/swarm issues`)
+Human-gated strictly sequential issue queue. The root-only command surface
+(`src/commands/issues.ts`) starts a run that atomically activates one issue at a time:
+immutable snapshot capture (`src/issues/snapshot.ts`), a linked worker task + fenced goal,
+and a durable queue entry in `SwarmState.issueRun`. Goal fencing (`isFencedLinkedGoal`)
+composes on top of goal-write authority so tool routes refuse linked-goal mutation while
+the run holds it; only the controller (`fenceActiveLinkedGoal`, via 3a cores with
+`via:"issue-controller"` provenance) may clear it. Advancement is gated by the safe-idle
+scan (`computeSafeIdle`: assignment holders first — ANY agent record holding a
+non-terminal task blocks, explicitly including stopped/stale/retired; vacuous pool
+advances), runs inside the existing pump maintenance phase (`runPumpMaintenancePhasesLocked`
+→ `observeLinkedTaskLocked`), and is provenance-guarded + replay-deduped. Terminal-unsuccessful
+linked work freezes the run (paused, later issues untouched) until human abandon/stop.
+Root notices (activation/terminal) and compact context hints (activation + per-issue-linked
+assignment attempt, id/title + skill name only, no ack/response debt) ride the durable
+mailbox via `deliverMessageLocked` with idempotency keys (`issues-activate:` /
+`issues-terminal:` / `issues-hint:activate|attempt:`). Agents read context via the
+read-only `swarm-issues` discoverable skill (`issue-skills/`, registered through the real
+`resources_discover` handler; validator imports the canonical `validateIssuesSource`).
+
+Primary code:
+- `src/issues/controller.ts` (activate/observe/fence/safe-idle + hints)
+- `src/issues/state.ts` / `src/issues/source.ts` / `src/issues/snapshot.ts`
+- `src/commands/issues.ts` (root-gated human subcommands)
+- `src/surface/pump-phases.ts` (idempotent issue-run tick)
+- `src/tools/tasks/assign.ts` (attempt-hint site)
+- `issue-skills/swarm-issues/` (SKILL.md + two read-only scripts)
+
 ### 4. Retention / garbage collection
 Handles bounded terminal-message pruning and delivered-ledger capping.
 

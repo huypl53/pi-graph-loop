@@ -1,0 +1,2 @@
+{"name":"root run context","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Sequential issue run context acknowledged — one active issue at a time, later items stay queued.","chunks":["Sequential issue run ","context acknowledged."]}]}
+{"name":"root observation hand-off","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Linked task observation handed to the issue controller; awaiting exactly-one next activation.","chunks":["Linked task observation ","handed off."]}]}

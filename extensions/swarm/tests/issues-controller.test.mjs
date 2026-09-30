@@ -218,4 +218,60 @@ try {
 	// best-effort
 }
 
+// ============================================================================
+// Phase-5 revert-only RED controls (plan §1). Each control temporarily reverts the
+// named production behavior and MUST FAIL while the revert is active; with the revert
+// removed it documents the mutation it detects. Red-verified during phase-05 implement
+// (evidence in the phase-05 implementation report); kept as standing discriminators.
+
+// R-DUP: revert = drop the idempotent-replay guard (entry.status==="active" && linked →
+// return existing linkage). Under the revert, a replay of the same activation proceeds to
+// re-create the task/goal — the control detects entry mutation + notice re-fire on replay.
+await t("R-DUP (RED control): replay of an active activation returns the same linkage and never re-fires", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "issues-ctl-"));
+	const swarmRoot = join(cwd, ".pi", "swarm");
+	mkdirSync(swarmRoot, { recursive: true });
+	writeFileSync(join(swarmRoot, "issues.yml"), "issues:\n  - id: a\n    title: A\n    content: Do A.\n    docs: []\n");
+	const p = paths(cwd);
+	await ensureDirs(p);
+	const st = await readState(p, cwd);
+	const run = getIssueRun(st);
+	run.status = "running";
+	run.runId = "run-dup";
+	run.queue = [{ issueId: "a", title: "A", sourceHash: "h0", status: "queued" }];
+	await writeState(p, st);
+	const noticeSpy = { sent: [] };
+	const deps = {
+		pi: { exec: async () => ({ code: 0, stdout: "", stderr: "" }) },
+		deliverMessageLocked: async (_pi, _cwd, _p, _st, msg) => {
+			noticeSpy.sent.push(msg.idempotencyKey);
+			return { msg: { id: "m-" + noticeSpy.sent.length } };
+		},
+	};
+	const source = { id: "a", title: "A", content: "Do A.", docs: [] };
+	const r1 = await activateIssueLocked(p, { cwd }, st, "run-dup", source, deps);
+	const before = JSON.stringify(getIssueRun(st).queue[0]);
+	// production replay guard: same activation again → same ids, entry untouched, notice deduped.
+	// Under the dropped guard the replay re-creates the linked task and rewrites the entry.
+	const r2 = await activateIssueLocked(p, { cwd }, st, "run-dup", source, deps);
+	const after = JSON.stringify(getIssueRun(st).queue[0]);
+	assert.equal(r2.taskId, r1.taskId, "replay must return the SAME linked task");
+	assert.equal(after, before, "active entry must be untouched on replay");
+	assert.equal(noticeSpy.sent.filter((k) => k === "issues-activate:run-dup:a").length, 1, "activation notice deduped");
+	assert.equal(noticeSpy.sent.filter((k) => k === "issues-hint:activate:run-dup:a").length, 1, "activation hint deduped");
+	rmSync(cwd, { recursive: true, force: true });
+});
+
+// R-IDLE: revert = computeSafeIdle treats stale/retired holders as safe (drops the
+// tmuxAlive/heartbeat staleness check). Under the revert a dead holder with a non-terminal
+// assignment yields safe=true — the control detects unsafe advancement.
+await t("R-IDLE (RED control): stale holder with a held assignment never reports safe", () => {
+	const nowMs = Date.now();
+	const st = baseState([agent("worker-stale", { held: ["task-held"], tmuxAlive: false })]);
+	st.agents["worker-stale"].lastHeartbeatAt = new Date(nowMs - 16 * 60_000).toISOString();
+	const g = computeSafeIdle(st, nowMs);
+	assert.equal(g.safe, false, "stale/retired holder must block advancement");
+	assert.ok(g.blockers.some((b) => b.startsWith("worker-stale")), "blocker names the holder");
+});
+
 console.log(process.exitCode ? "\nissues-controller: FAIL" : `\nissues-controller: PASS (${passed} assertions)`);

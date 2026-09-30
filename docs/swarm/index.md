@@ -7,6 +7,10 @@ Use it when you need to understand, extend, or debug swarm without reading one l
 ## Start here by goal
 
 ### I want to use swarm
+- **Sequential issue auto-run** (`/swarm issues`): human-gated strictly sequential issue
+  queue with linked task/goal/snapshot per issue, goal fencing, safe-idle advancement, and
+  read-only agent context via the `swarm-issues` skill. See [tools.md](./tools.md) and
+  [operations.md](./operations.md).
 - [Architecture overview](./architecture.md) — mental model, runtime, invariants
 - [Runtime flows](./flows/flow.md) — interactive message / task / pump / reconcile flows with clickable payload-backed edges (use the local workbench to inspect the actual `SwarmMessage` envelope, `MessageRecord`, `task.json`, scope-conflict error, pump-tick surfaced set, etc.)
 - [Operations guide](./operations.md) — quickstart, runtime files, debugging, validation entrypoints

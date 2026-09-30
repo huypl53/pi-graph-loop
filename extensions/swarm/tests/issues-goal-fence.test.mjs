@@ -189,4 +189,39 @@ try {
 	// best-effort
 }
 
+// ============================================================================
+// Phase-5 revert-only RED controls (plan §1). Each control is red-verified by injecting
+// the named revert into src/tools/goals.ts or src/issues/controller.ts, observing FAIL,
+// then restoring. Standing discriminators; evidence in the phase-05 implementation report.
+
+// R-FENCE-CLEAR: revert = mark_goal_done fence drops the entry-status check (fences only
+// while entry.status === "active"). Under the revert a blocked/failed linked goal awaiting
+// human disposition can be cleared by the tool route — the control detects the early release.
+await t("R-FENCE-CLEAR (RED control): terminal-unsuccessful linked goal stays fenced for the tool route", async () => {
+	const w = makeWorld();
+	w.st.issueRun.queue[0].status = "failed"; // awaiting human abandon/stop disposition
+	const { isFencedLinkedGoal } = await import(join(src, "issues", "controller.ts"));
+	assert.equal(isFencedLinkedGoal(w.st, LINKED_GOAL_ID), true, "failed linked goal must stay fenced (disposition pending)");
+});
+
+// R-FENCE-REPLACE: revert = set_goal replace-path drops both pre-lock and in-lock fence checks.
+// Under the revert `swarm_set_goal` replaces the linked goal silently — the control detects
+// the missing fenced_linked_goal rejection on the replace path.
+await t("R-FENCE-REPLACE (RED control): replace of the linked goal is fenced with the canonical reason", async () => {
+	const { cwd } = makeWorld();
+	const setTool = getGoalTool("swarm_set_goal");
+	await assert.rejects(() => setTool.execute("x", { text: "replacement" }, undefined, undefined, { cwd }), /fenced_linked_goal/);
+});
+
+// R-FENCE-ABU: revert = approvedByUser bypasses the fence in the mark_goal_done route
+// (fence check gated on `!params.approvedByUser`). Under the revert the approval flag clears
+// the linked goal — the control detects the bypass.
+await t("R-FENCE-ABU (RED control): approvedByUser must not clear the linked goal", async () => {
+	const { cwd } = makeWorld();
+	const doneTool = getGoalTool("swarm_mark_goal_done");
+	const res = await doneTool.execute("x", { goalId: LINKED_GOAL_ID, approvedByUser: true }, undefined, undefined, { cwd });
+	assert.equal(res.details?.refused, true, "approval flag must not bypass the fence");
+	assert.equal(res.details?.reason, "fenced_linked_goal");
+});
+
 console.log(process.exitCode ? "\nissues-goal-fence: FAIL" : `\nissues-goal-fence: PASS (${passed} assertions)`);

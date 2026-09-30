@@ -30,6 +30,13 @@ src/nudges/goal-epoch.ts       swarm-level idle epoch + goal-floor emission
 src/nudges/graph-advance.ts    graph-advance / stall / artifact / heartbeat GC nudges
 src/nudges/status-predicates.ts pure predicates over TaskState["status"]
 src/surface.ts                 facade — root-facing message surface machinery (canonical logic in src/surface/)
+src/issues/controller.ts       sequential issue auto-run: activate/observe/fence/safe-idle + context hints
+src/issues/state.ts            issueRun queue guards/updates (activate, terminal, pause/resume)
+src/issues/source.ts           issues.yml parsing/validation (canonical validateIssuesSource)
+src/issues/snapshot.ts         immutable activation snapshots (bounded, sha256-recorded)
+src/commands/issues.ts         root-gated human subcommands (validate/status/start/pause/resume/abandon/stop)
+src/tools/tasks/assign.ts      swarm_assign_task (+ phase-4 issue-linked attempt hint site)
+issue-skills/swarm-issues/     discoverable read-only skill (SKILL.md + validate/show scripts)
   src/surface/session.ts         orchSession per-pid surface session gate
   src/surface/warnings.ts        runtimeTaskWarnings extractor
   src/surface/actionable.ts      isActionableRootMessage + task/node ref parsing

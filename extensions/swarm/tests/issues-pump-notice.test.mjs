@@ -120,4 +120,25 @@ await t("P1: freeze silence at L3 — terminal notice surfaces, later issue emit
 	rmSync(cwd, { recursive: true, force: true });
 });
 
+// R-NOTICE — Phase-5 revert-only RED control (plan §1): revert = classifier drops
+// failure/blocked reasons (only plain text actionable). Under the revert the terminal
+// failure/blocked notice does not surface to root — the control detects the dropped notice.
+await t("R-NOTICE (RED control): terminal blocked/failure notice is actionable at the real classifier", async () => {
+	const cwd = seedWorld();
+	const p = paths(cwd);
+	await ensureDirs(p);
+	const ctx = { cwd, ui: { notify: () => {} } };
+	await handleIssuesCommand("issues", ["start"], ctx, p, {});
+	const st = await readState(p, cwd);
+	const run = getIssueRun(st);
+	await observeLinkedTaskLocked(p, { cwd }, st, { taskId: run.queue[0].taskId, status: "blocked" }, { deliverMessageLocked });
+	await writeState(p, st);
+	const recs = readMailboxRecords(p);
+	const terminal = recs.filter((r) => String(r.idempotencyKey || "").startsWith("issues-terminal:"));
+	assert.equal(terminal.length, 1, "terminal notice delivered");
+	const verdict = isActionableRootMessage(terminal[0], taskIndex, Date.now(), {}, false, p);
+	assert.equal(verdict.ok, true, `blocked notice must surface to root (reason=${verdict.reason})`);
+	rmSync(cwd, { recursive: true, force: true });
+});
+
 console.log(process.exitCode ? "\nissues-pump-notice: FAIL" : `\nissues-pump-notice: PASS (${passed})`);
