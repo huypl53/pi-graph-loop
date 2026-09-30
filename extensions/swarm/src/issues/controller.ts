@@ -194,7 +194,7 @@ export async function activateIssueLocked(
 	try {
 		await d.deliverMessageLocked(d.pi, ctx.cwd, p, st, {
 			to: "root",
-			body: `[issues] activated "${source.id}" (run ${runId}, task ${task.taskId ?? task.id}). Approved issue context: use the swarm-issues skill when it ships (Phase 4).`,
+			body: `[issues] activated "${source.id}" (run ${runId}, task ${task.taskId ?? task.id}).`,
 			subject: `[issues] activated ${source.id}`,
 			priority: "normal",
 			idempotencyKey: `issues-activate:${runId}:${source.id}`,
@@ -203,7 +203,56 @@ export async function activateIssueLocked(
 		await logSwarmError(ctx.cwd, "issues-controller", "activation_notice_failed", err, { issueId: source.id, runId });
 	}
 
+	// 6. Phase-4 root activation context hint — compact, durable-deduped (plan §6).
+	// Body carries ONLY issue id/title + skill name (never snapshot content). Dedupe rides the
+	// existing deliverMessageLocked idempotency index; stale fencing: live linkage must be
+	// active-in-running at send time. Informational: no ack/response debt.
+	try {
+		await deliverIssueHint(d, ctx.cwd, p, st, {
+			to: "root",
+			idempotencyKey: `issues-hint:activate:${runId}:${source.id}`,
+			issueId: source.id,
+			issueTitle: source.title,
+		});
+	} catch (err: unknown) {
+		await logSwarmError(ctx.cwd, "issues-controller", "activation_hint_failed", err, { issueId: source.id, runId });
+	}
+
 	return { taskId: task.taskId ?? task.id, goalId: set.goalId ?? set.goal?.id, snapshotPath: snap.path };
+}
+
+// === Phase-4 context hints (plan §6) ===
+// One compact hint per activation (root) and per issue-linked assignment attempt (worker).
+// Pure helpers exported for the focused suite; delivery rides deliverMessageLocked only.
+export function issueHintBody(issueId: string, issueTitle: string): string {
+	return `[issues] Active issue "${issueId}" — ${issueTitle}. Context: swarm-issues skill (show-active-issue.mjs).`;
+}
+
+export function hintAllowedForRun(
+	run: { status?: string; activeIssueId?: string; queue?: Array<{ issueId: string; status: string }> } | undefined,
+	issueId: string,
+): boolean {
+	if (!run || run.status !== "running" || run.activeIssueId !== issueId) return false;
+	const entry = (run.queue ?? []).find((q) => q.issueId === issueId);
+	return entry?.status === "active";
+}
+
+async function deliverIssueHint(
+	d: ControllerDeps,
+	cwd: string,
+	p: Paths,
+	st: any,
+	opts: { to: string; idempotencyKey: string; issueId: string; issueTitle: string },
+): Promise<void> {
+	await d.deliverMessageLocked(d.pi, cwd, p, st, {
+		to: opts.to,
+		body: issueHintBody(opts.issueId, opts.issueTitle),
+		subject: `[issues] context: ${opts.issueId}`,
+		priority: "normal",
+		requiresAck: false,
+		requiresResponse: false,
+		idempotencyKey: opts.idempotencyKey,
+	});
 }
 
 /**
