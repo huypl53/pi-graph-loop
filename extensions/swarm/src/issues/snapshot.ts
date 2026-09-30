@@ -151,7 +151,11 @@ function applyAggregateCap(docs: SnapshotDoc[], maxTotal: number): { docs: Snaps
  * Atomic write; idempotent on identical sourceHash; hard error on hash conflict.
  * Caller (Phase 3 controller) holds the swarm lock; this primitive is lock-agnostic.
  */
-export async function captureIssueSnapshot(root: string, runId: string, issue: IssueSource, runIdSafe = runId): Promise<CaptureResult> {
+export async function captureIssueSnapshot(root: string, runId: string, issue: IssueSource, runIdSafe = runId, docRoot?: string): Promise<CaptureResult> {
+	// docRoot: base for resolving `docs` entries. Phase-3b amendment (2026-10-01, planned):
+	// the plan contract is "docs resolve within project root" (cwd), while snapshot storage
+	// lives under .pi/swarm/issues/snapshots. Default keeps the Phase-2 signature/behavior.
+	const docBase = docRoot ?? root;
 	// Defensive: runId/issueId become path segments — reuse the safe charset rule upstream.
 	if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(runIdSafe) || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(issue.id)) {
 		return { ok: false, code: "unsafe_id", message: `runId "${runIdSafe}" / issueId "${issue.id}" are not snapshot-path safe` };
@@ -180,9 +184,10 @@ export async function captureIssueSnapshot(root: string, runId: string, issue: I
 	}
 
 	const rootReal = await realpath(root);
+	const docReal = await realpath(docBase);
 	const docs: SnapshotDoc[] = [];
 	for (const d of issue.docs) {
-		const r = await captureDoc(rootReal, d);
+		const r = await captureDoc(docReal, d);
 		if (!r.ok) return { ok: false, code: r.code, message: r.message };
 		docs.push(r.doc);
 	}

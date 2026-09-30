@@ -43,7 +43,7 @@ import { execFileSync } from "node:child_process";
 const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, "..", "src");
 
-const { paths, readState, withLock } = await import(join(srcDir, "state.ts"));
+const { paths, readState, withLock, writeState, trace } = await import(join(srcDir, "state.ts"));
 const { atomicWriteFile } = await import(join(srcDir, "state.ts"));
 
 let pass = 0,
@@ -272,12 +272,72 @@ function makePiSpy() {
 	const wDone = await runTool("swarm_mark_goal_done", { approvedByUser: true }, "goal");
 	const wCreate = await runTool("swarm_create_task", { title: "parity", goal: "parity work" }, "task");
 	const c = await runCoreLeg();
+	// Phase-3b fix residual (2026-10-01): updateTaskCore wrapper-vs-core parity leg — the 3a
+	// parity block originally covered set/done/create only. Drive swarm_update_task through the
+	// real tool, then the same params through updateTaskCore inside the caller's lock, and
+	// compare the durable node-status invariant.
+	async function runUpdateLeg(via) {
+		const cwd = base();
+		const p2 = paths(cwd);
+		const pi = makePiSpy();
+		process.env.PI_SWARM_AGENT_ID = "root";
+		process.env.PI_SWARM_IS_ROOT = "1";
+		(await import(join(srcDir, "tools", "tasks", "create.ts"))).registerCreateTaskTool(pi);
+		(await import(join(srcDir, "tools", "tasks", "update.ts"))).registerUpdateTaskTool(pi);
+		const created = await pi.calls.tools["swarm_create_task"].execute("id-c", { title: "parity upd", goal: "work" }, undefined, undefined, { cwd });
+		const createdText = typeof created === "string" ? created : (created?.text ?? JSON.stringify(created));
+		const taskId = (String(createdText).match(/task-[a-z0-9-]+/)?.[0]) ?? null;
+		if (!taskId) return { error: `create failed: ${String(createdText).slice(0, 120)}` };
+		const params = { taskId, nodeId: "plan", status: "in_progress" };
+		let err = null;
+		if (via === "wrapper") {
+			try {
+				await pi.calls.tools["swarm_update_task"].execute("id-u", params, undefined, undefined, { cwd });
+			} catch (e) {
+				err = String(e?.message || e);
+			}
+		} else {
+			const { updateTaskCore } = await import(join(srcDir, "primitives", "task-core.ts"));
+			try {
+				await withLock(p2, async () => {
+					await updateTaskCore(p2, { readState, writeState, trace, deliverMessageLocked: (await import(join(srcDir, "mailbox.ts"))).deliverMessageLocked, pi, cwd }, params, "root", true);
+				});
+			} catch (e) {
+				err = String(e?.message || e);
+			}
+		}
+		let nodeStatus = null;
+		try {
+			const t = JSON.parse(readFileSync(join(cwd, ".pi", "swarm", "tasks", taskId, "task.json"), "utf8"));
+			nodeStatus = t.nodes?.plan?.status ?? null;
+		} catch (e) {
+			err = err ?? String(e?.message || e);
+		}
+		return { err, nodeStatus };
+	}
+	const updW = await runUpdateLeg("wrapper");
+	const updC = await runUpdateLeg("core");
 	if (c.unavailable) {
 		ok("P4", "RED-EXPECTED", "direct core run matches wrapper run invariants", false, "cores absent (pre-extraction)");
 	} else {
 		const same = !wSet.error && wSet.goalText === c.goalText && wSet.maxNudges === c.maxNudges && (wSet.origin ?? "root") === (c.origin ?? "root");
 		const detail = `set=${JSON.stringify({ goalText: wSet.goalText, maxNudges: wSet.maxNudges, err: wSet.error })} doneErr=${wDone.error ?? "none"} createErr=${wCreate.error ?? "none"} core=${JSON.stringify({ goalText: c.goalText, maxNudges: c.maxNudges })} locks=${lockCountFailures.length ? "FAIL:" + lockCountFailures.join(",") : "ok"}`;
-		ok("P4", "RED-EXPECTED", "direct core run matches wrapper run invariants", same && lockCountFailures.length === 0 && !wDone.error && !wCreate.error, detail);
+		ok(
+			"P4",
+			"RED-EXPECTED",
+			"direct core run matches wrapper run invariants",
+			same && lockCountFailures.length === 0 && !wDone.error && !wCreate.error,
+			detail,
+			);
+		// updateTaskCore parity leg (3b fix residual): same node-status invariant via both routes
+		const updSame = !updW.err && !updC.err && updW.nodeStatus === updC.nodeStatus && updW.nodeStatus === "in_progress";
+		ok(
+			"P4-UPD",
+			"RED-EXPECTED",
+			"updateTaskCore matches swarm_update_task wrapper invariant",
+			updSame,
+			`w=${JSON.stringify(updW)} c=${JSON.stringify(updC)}`,
+		);
 	}
 }
 
@@ -319,7 +379,10 @@ function makePiSpy() {
 	for (const f of touched) {
 		const src = readSrc(f);
 		if (!src) continue;
-		for (const pat of ["/swarm issues", "issues-controller", "activateNextIssue", "swarm-issues skill", "issueHint", "issues.yml runtime-write"]) {
+		// Phase-3b amendment (2026-10-01, planned): "/swarm issues" + fence predicate strings in
+		// goals.ts/goal.ts are now SHIPPED 3b behavior, no longer 3b-exclusion violations. The
+		// boundary this CONTROL still guards is Phase 4 (skill/hints) — those strings stay banned.
+		for (const pat of ["swarm-issues skill", "issueHint", "issues.yml runtime-write"]) {
 			if (src.includes(pat)) bad.push(`${f.split("/").pop()}::${pat}`);
 		}
 	}
@@ -332,10 +395,14 @@ function makePiSpy() {
 	let classificationOk = false;
 	try {
 		const out = execFileSync(process.execPath, [join(here, "issues-sequencer.test.mjs")], { encoding: "utf8", timeout: 120_000 });
+		// Phase-3b amendment (2026-10-01, planned): the sequencer green-flipped — the preserved
+		// invariant is zero RED failures + zero CONTROL failures + all GREEN discriminators passing.
 		classificationOk =
-			out.includes("RED-EXPECTED failing (expected reproduction): IS-1, IS-6, IS-7, IS-8") &&
+			out.includes("RED-EXPECTED failing (expected reproduction): none") &&
 			out.includes("unexpectedly passing: none") &&
-			out.includes("CONTROL failing: none");
+			out.includes("CONTROL failing: none") &&
+			out.includes("[IS-1/GREEN]") &&
+			out.includes("[IS-8/GREEN]");
 	} catch {
 		classificationOk = false;
 	}

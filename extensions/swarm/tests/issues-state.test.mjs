@@ -275,11 +275,20 @@ await t("writeState/readState round-trip preserves a valid issueRun", async () =
 });
 
 // --- Phase 1 red-harness preservation ---
-await t("Phase 1 harness keeps its expected RED classification (IS-1/6/7/8 fail, controls pass)", () => {
+// Phase-3b amendment (2026-10-01, planned + approved): the sequencer harness now drives the
+// shipped /swarm issues surfaces — the former RED discriminators are GREEN contract tests
+// (IS-1/5/6/7/8), and IS-5 flipped from "must not route" to "must route". The preservation
+// invariant is unchanged: controls stay green, no harness defects, no classification drift.
+await t("Phase 1 harness green-flip holds: GREEN discriminators pass, controls pass (classification amended 2026-10-01)", () => {
 	const out = execFileSync(process.execPath, [join(here, "issues-sequencer.test.mjs")], { encoding: "utf8", timeout: 60_000 });
-	assert.match(out, /RED-EXPECTED failing \(expected reproduction\): IS-1, IS-6, IS-7, IS-8/);
-	assert.match(out, /CONTROL failing: none/);
+	assert.match(out, /RED-EXPECTED failing \(expected reproduction\): none/);
 	assert.match(out, /RED-EXPECTED unexpectedly passing: none/);
+	assert.match(out, /CONTROL failing: none/);
+	assert.match(out, /PASS {2}IS-1 {2,}GREEN/);
+	assert.match(out, /PASS {2}IS-5 {2,}CONTROL/);
+	assert.match(out, /PASS {2}IS-6 {2,}GREEN/);
+	assert.match(out, /PASS {2}IS-7 {2,}GREEN/);
+	assert.match(out, /PASS {2}IS-8 {2,}GREEN/);
 });
 
 try {
