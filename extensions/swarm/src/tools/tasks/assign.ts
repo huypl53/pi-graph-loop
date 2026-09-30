@@ -45,6 +45,7 @@ import {
 	writeTaskState,
 } from "../../state.ts";
 import { logSwarmError } from "../../errorlog.ts";
+import { issueHintBody } from "../../issues/controller.ts";
 import { clearOrphanWatch, findReusableAgent, isSameRootLeader, spawnAgent } from "../../agents.ts";
 import { ensureRoot, heartbeatRootLeader, requireRootAuthority } from "../../identity.ts";
 import { reconcile, resolveTaskStallLocked } from "../../reconcile.ts";
@@ -570,6 +571,28 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 							idempotencyKey,
 							clearReason: "swarm_assign_task",
 						});
+						// swarm-issues Phase 4: issue-linked assignment context hint (plan §6).
+						// One compact hint per attempt (node.attempts in the key → reassignment re-fires
+						// exactly once). Linkage resolves from swarm-state issueRun (task.json does NOT
+						// carry it); stale fencing: active issue + running run + active entry only.
+						// Informational: requiresAck/Response false (no response debt, R25/H1 policy).
+						try {
+							const run = st.issueRun;
+							const entry = run?.activeIssueId ? (run.queue ?? []).find((q) => q.taskId === task.taskId) : null;
+							if (entry && run.status === "running" && entry.status === "active") {
+								await deliverMessageLocked(pi, ctx.cwd, p, st, {
+									to: assignee.id,
+									body: issueHintBody(entry.issueId, entry.title),
+									subject: `[issues] context: ${entry.issueId}`,
+									priority: "normal",
+									requiresAck: false,
+									requiresResponse: false,
+									idempotencyKey: `issues-hint:attempt:${run.runId}:${entry.issueId}:${task.taskId}:${params.nodeId}:${node.attempts}`,
+								});
+							}
+						} catch (hintErr) {
+							await logSwarmError(ctx.cwd, "issues-assign", "attempt_hint_failed", hintErr, { taskId: task.taskId, nodeId: params.nodeId });
+						}
 						// Update attempt record with the actual message ID
 						const activeAttempt = node.attemptHistory?.find((a: any) => a.attemptId === attemptId);
 						if (activeAttempt) activeAttempt.assignmentMessageId = msg.id;

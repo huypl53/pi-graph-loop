@@ -25,6 +25,12 @@ export {
 } from "./src/focus.ts";
 
 export default function (pi: ExtensionAPI) {
+	// swarm-issues Phase 4: register the issue-skills directory via the real resources_discover
+	// event so the swarm-issues skill is a genuinely loaded extension skill (not identity prose).
+	// Module-relative path (NOT cwd) so registration works regardless of the project pi runs in.
+	pi.on("resources_discover", async (_event, _ctx) => {
+		return { skillPaths: [new URL("./issue-skills", import.meta.url).pathname] };
+	});
 	registerSwarmHooks(pi);
 	registerAgentsTools(pi);
 	registerMessagesTools(pi);
