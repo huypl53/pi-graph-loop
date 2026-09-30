@@ -2,6 +2,7 @@ import type { RecentSpawn, SwarmAgent } from "./agents.ts";
 import type { MessageRecord, RootReceiptEntry } from "./messages.ts";
 import type { ModelSlot, RotationConfig } from "./pool.ts";
 import type { TaskState } from "./tasks.ts";
+import type { IssueRun } from "../issues/state.ts";
 
 export type SwarmSettings = {
 	defaultModel?: string;
@@ -292,6 +293,10 @@ export type SwarmState = {
 	// per-target cooldown (250ms, handoff-priority) instead of the global busy-path cooldown so
 	// near-simultaneous settles between different workers never silently drop a handoff.
 	lastFocusByTarget?: Record<string, string>;
+	// swarm-issues Phase 2: lightweight issue-run state (never embeds snapshot bodies).
+	// Back-filled by backfillIssueRun (src/issues/state.ts) from readState; absent on
+	// pre-policy swarms means { status: "inactive", queue: [] } after backfill.
+	issueRun?: IssueRun;
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;

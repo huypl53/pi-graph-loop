@@ -27,6 +27,7 @@ import type {
 import { EXT, LOCK_STALE_MS, STATE_VERSION } from "./constants.ts";
 import { ensureAgentDefaults, isSafeRelativePath, normalizeTaskNode, now, projectSlug, safeId, sleep } from "./utils.ts";
 import { expected, logSwarmError } from "./errorlog.ts";
+import { backfillIssueRun } from "./issues/state.ts";
 import { tmux } from "./tmux.ts";
 
 export function paths(cwd: string): Paths {
@@ -162,7 +163,9 @@ export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 		const message = err instanceof Error ? err.message : String(err);
 		await backupCorruptFile(p.state);
 		await trace(p, "state.corrupt_recovered", { file: p.state, error: message });
-		return defaultState(cwd);
+		const fresh = defaultState(cwd);
+		backfillIssueRun(fresh);
+		return fresh;
 	}
 	st.messages ||= {};
 	st.delivered ||= {};
@@ -190,6 +193,11 @@ export async function readState(p: Paths, cwd: string): Promise<SwarmState> {
 	if (!st.idleNudgeState || typeof st.idleNudgeState !== "object" || Array.isArray(st.idleNudgeState)) {
 		st.idleNudgeState = {};
 	}
+	// swarm-issues Phase 2: lightweight issue-run backfill. Absent/partial/corrupt
+	// `issueRun` normalizes to { status: "inactive", queue: [] }; structurally-broken
+	// queue entries are dropped (never guessed at). Full semantics in
+	// src/issues/state.ts backfillIssueRun — which is pure and never writes fs here.
+	backfillIssueRun(st);
 	// === Binding C-1 (Issue 18 plan review): goal field back-fill ===
 	// The `goal` field on SwarmState is OPTIONAL. A pre-policy swarm-state.json file has no `goal` key
 	// (JSON parses absent keys to `undefined`), and undefined is the correct initial state — the pump
