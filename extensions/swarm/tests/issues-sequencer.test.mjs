@@ -164,15 +164,27 @@ function stateFile() {
 
 async function stateUnchanged() {
 	const st = await loadState();
-	return st.issueRun === undefined && st.goal === undefined;
+	// Phase-2 amendment (2026-10-01, planned + approved): src/issues/state.ts now back-fills a
+	// LIGHTWEIGHT `issueRun` ({ status: "inactive", queue: [] }) on every readState. The absence
+	// observable is therefore no longer "no issueRun key" but "issueRun present yet dormant":
+	// inactive + empty queue + no active issue + no goal. The invariant (no issue runner behavior
+	// from manual work) is unchanged.
+	const run = st.issueRun;
+	const dormant = run === undefined || (run.status === "inactive" && Array.isArray(run.queue) && run.queue.length === 0 && run.activeIssueId === undefined);
+	return dormant && st.goal === undefined;
 }
 
 async function noIssueArtifacts() {
 	const st = await loadState();
+	// Phase-2 amendment: dormant lightweight issueRun (inactive, empty queue) is the backfilled
+	// default and does NOT count as an issue artifact. Snapshot dir, separate legacy state file,
+	// and non-dormant runs all still do.
+	const run = st.issueRun;
+	const dormant = run === undefined || (run.status === "inactive" && Array.isArray(run.queue) && run.queue.length === 0 && run.activeIssueId === undefined);
 	return (
 		!existsSync(join(scratch, ".pi", "swarm", "issues")) &&
 		!existsSync(join(scratch, ".pi", "swarm", "issues-state.json")) &&
-		Object.keys(st).every((k) => !/issue/i.test(k))
+		dormant
 	);
 }
 
@@ -267,7 +279,7 @@ try {
 		"IS-1",
 		"RED-EXPECTED",
 		"human start of valid source creates exactly one linked run/task/goal",
-		handled === true && stAfter.issueRun !== undefined && (await noIssueArtifacts()) === false,
+		handled === true && stAfter.issueRun !== undefined && (await noIssueArtifacts()) === false,  // post-Phase-2: dormant issueRun is legal; non-dormant run or artifacts are not
 		"current production: no /swarm issues command, no run/task/goal written",
 	);
 	void stBefore;
