@@ -25,8 +25,11 @@ import {
 	POOL_SCAFFOLD_YML_NOTIFY_TEXT,
 	POOL_SCAFFOLD_YML_PLACEHOLDER,
 } from "./constants.ts";
-import { atomicWriteFile, paths as statePaths, trace } from "./state.ts";
-import { logSwarmError, traceLogged } from "./errorlog.ts";
+import { atomicWriteFile, ensureDirs, paths as statePaths, readState, trace, withLock, writeState } from "./state.ts";
+import { expected, logSwarmError, traceLogged } from "./errorlog.ts";
+import { now } from "./utils.ts";
+import { validateSwarmSettings } from "./pool.ts";
+import type { Paths } from "./types.ts";
 import {
 	findGlobalSwarmYaml,
 	GLOBAL_AGENT_DIR,
@@ -148,4 +151,90 @@ export async function ensureGlobalPoolScaffold(opts: { alreadyNotified?: boolean
 		source: "global-swarm.yml",
 	});
 	return { wrote: true, path: targetPath, notify: POOL_SCAFFOLD_GLOBAL_YML_NOTIFY_TEXT };
+}
+
+/**
+ * Run root pool scaffold and launch health check.
+ * Called on root session_start, when registering as root (/swarm register here root),
+ * or when explicitly initializing the swarm (/swarm init).
+ */
+export async function runRootPoolScaffoldAndHealth(ctx: any, p: Paths): Promise<void> {
+	await ensureDirs(p);
+	// 1. Project pool scaffold (.pi/swarm.yml)
+	try {
+		const result = await ensurePoolScaffold(ctx.cwd, {});
+		if (result.wrote) {
+			await withLock(p, async () => {
+				const locked = await readState(p, ctx.cwd);
+				if (!locked.poolScaffoldNotifiedAt) {
+					locked.poolScaffoldNotifiedAt = now();
+					await writeState(p, locked);
+				}
+			});
+			if (ctx.hasUI && result.notify) {
+				try {
+					ctx.ui.notify(result.notify, "info");
+				} catch (err: any) {
+					expected("ui_notify_failed", err);
+				}
+			}
+		}
+	} catch (err: any) {
+		await trace(p, "pool.scaffold_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+	}
+
+	// 2. Global pool scaffold (~/.pi/agent/swarm.yml)
+	try {
+		const globalResult = await ensureGlobalPoolScaffold();
+		if (globalResult.wrote) {
+			await withLock(p, async () => {
+				const locked = await readState(p, ctx.cwd);
+				if (!locked.poolScaffoldGlobalNotifiedAt) {
+					locked.poolScaffoldGlobalNotifiedAt = now();
+					await writeState(p, locked);
+				}
+			});
+			if (ctx.hasUI && globalResult.notify) {
+				try {
+					ctx.ui.notify(globalResult.notify, "info");
+				} catch (err: any) {
+					expected("ui_notify_failed", err);
+				}
+			}
+		}
+	} catch (err: any) {
+		await trace(p, "pool.global_scaffold_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+	}
+
+	// 3. Pool health validation check
+	try {
+		const validation = validateSwarmSettings(ctx.cwd, { registryProbe: ctx.modelRegistry as any });
+		if (!validation.ok) {
+			const lines = [`Swarm pool config has ${validation.errors.length} issue(s) — /swarm pool validate for details:`];
+			for (const e of validation.errors.slice(0, 3)) lines.push(`  \u2717 ${e.field || "config"}: ${e.message}`);
+			if (validation.errors.length > 3) lines.push(`  … and ${validation.errors.length - 3} more`);
+			if (ctx.hasUI) {
+				try {
+					ctx.ui.notify(lines.join("\n"), "warning");
+				} catch (err: any) {
+					expected("ui_notify_failed", err);
+				}
+			}
+			await trace(p, "pool.launch_health", {
+				ok: false,
+				errors: validation.errors.length,
+				warnings: validation.warnings.length,
+			}).catch(() => {});
+		} else if (validation.warnings.length && ctx.hasUI) {
+			const w = validation.warnings[0];
+			try {
+				ctx.ui.notify(`Swarm pool: ${w.message}`, "warning");
+			} catch (err: any) {
+				expected("ui_notify_failed", err);
+			}
+			await trace(p, "pool.launch_health", { ok: true, errors: 0, warnings: validation.warnings.length }).catch(() => {});
+		}
+	} catch (err: any) {
+		expected("pool_launch_health_failed", err);
+	}
 }

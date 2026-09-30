@@ -123,6 +123,7 @@ assert.deepEqual(
 		"response-missing-settle",
 		"response-required-death",
 		"root-delegation-guard",
+		"root-register-scaffold",
 		"settled-with-open-assignment",
 		"self-echo-pump",
 		"shared-context-a",
