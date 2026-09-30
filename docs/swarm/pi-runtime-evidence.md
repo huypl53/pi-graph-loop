@@ -431,6 +431,14 @@ includes recurring incident classes. Pinning each to a Pi contract anchor:
 | Stale `pi` after replacement | `ReplacedSessionContext` is the only safe handle | §1.3, §4.4 |
 | Tool "isError" return ignored | Must `throw` | §7 |
 
+**Phase-5 decision (2026-10-01, swarm-issues sequential auto-run):** no new evidence rows
+required. The issue-run feature reuses only already-mapped boundaries — durable mailbox
+appends via `deliverMessageLocked` (§1.1), no direct `pi.sendMessage` from the controller
+(root pump remains the sole L2 boundary), and the `resources_discover` skill registration
+consumed by pi's loader. Claims and counters live in `pi-runtime-contract.md` §10 F22
+(C-IS-1..8). Opt-in lane + live two-session tmux evidence recorded under
+`.pi/swarm/tasks/swarm-issues-phase-05/artifacts/`.
+
 ---
 
 ## 11. Open questions / `[GAP]` items

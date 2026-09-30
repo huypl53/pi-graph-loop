@@ -410,6 +410,34 @@ function makePiSpy() {
 }
 
 // ============================================================================
+// R-LOCK — Phase-5 revert-only RED control (plan §1): the controller must invoke cores
+// INSIDE the held lock. Revert = invoke the core after withLock resolves. Under the revert
+// the core's write races the still-held lock window; the control detects the ordering
+// violation by asserting the core completed strictly before lock release (revert → FAIL).
+{
+	const p = makeWorld();
+	const pathsObj = paths(p);
+	const events = [];
+	const runCore = async () => {
+		const { readState: rs, writeState: ws, trace: tr } = await import(join(srcDir, "state.ts"));
+		await goalCoreMod.setGoalCore(pathsObj, p, { id: "goal-rlock", text: "rlock probe", origin: "root" }, { readState: rs, writeState: ws, trace: tr, actor: "root", via: "tool" });
+		events.push("core-done");
+	};
+	await withLock(pathsObj, async () => {
+		events.push("lock-held");
+		await runCore();
+	});
+	events.push("lock-released");
+	ok(
+		"R-LOCK",
+		"RED-EXPECTED",
+		"controller core completes strictly inside the held lock (before release)",
+		events.indexOf("core-done") !== -1 && events.indexOf("core-done") < events.indexOf("lock-released") && events[0] === "lock-held",
+		`order=${events.join("→")} (revert-shim: core-after-release flips this FAIL)`,
+	);
+}
+
+// ============================================================================
 // Summary + exit policy
 const red = results.filter((r) => r.type === "RED-EXPECTED");
 const controls = results.filter((r) => r.type === "CONTROL");

@@ -346,6 +346,42 @@ prints the action directly so the operator never has to guess the fix.
 - `swarm_set_agent_paused`
 - `swarm_restart_agent`
 
+## Sequential issue auto-run operations
+
+**Human authority:** every mutation is a root-only slash command. Agents never start,
+pause, resume, abandon, or stop a run, and never mutate `issues.yml` or the active
+snapshot.
+
+**Author the queue:** write `.pi/swarm/issues.yml` (project `.pi/swarm/issues.yml`;
+also accepted at the project root by the validator skill script) with strictly
+sequential entries carrying ONLY `id` (kebab-case), `title`, `content` (what "done"
+means end to end), and optional repo-relative `docs`. Validate with
+`node <skill-dir>/issue-skills/swarm-issues/scripts/validate-issues.mjs [--strict]`
+(exit 0 valid / 1 invalid / 2 unreadable; `--json` mirrors the canonical implementation)
+or `/swarm issues validate`.
+
+**Run lifecycle:** `start` → one active issue (immutable snapshot at
+`.pi/swarm/issues/snapshots/<runId>/<issueId>.json`, hash-recorded in the queue entry)
+with a linked worker task + fenced goal. On linked done + safe idle, exactly one next
+issue activates. Terminal-unsuccessful linked work (blocked/failed/cancelled) freezes
+the run (`paused`); later issues emit nothing until a human disposition:
+`abandon <issue-id> <reason…>` (entry → cancelled, then `resume` advances) or `stop`
+(entry → cancelled, run → stopped; the child task is NEVER cancelled). After `stop`,
+`start` opens a FRESH run — restart after stop currently collides on the deterministic
+task id and pauses durably ("Task already exists"); treat stop as terminal for that
+queue (known limitation, phase-05).
+
+**Agent context (read-only):** the `swarm-issues` discoverable skill ships
+`show-active-issue.mjs` — renders the active issue's linkage-derived snapshot
+(hash-verified; refuses stale snapshots; compact default, `--full` bounded, `--json`).
+Context hints delivered to root/workers carry only issue id/title + skill name
+(informational, no ack/response debt; suppressed after stop/complete/supersession).
+
+**Fidelity of proofs:** command behavior is covered by focused suites; durable
+controller/pump transitions by the opt-in `RUN_SWARM_ISSUES_LANE=1` mock-llm lane (true
+root, isolated scratch + transcripts); live worker L4 hint consumption only by the
+two-session tmux lane. `npm run test:mockllm` alone does NOT prove the lane.
+
 ## Root leadership and recovery
 
 The swarm is intentionally strict-reject: one live root leadership record is the source of truth

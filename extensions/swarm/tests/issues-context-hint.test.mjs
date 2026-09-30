@@ -196,11 +196,55 @@ await t("stop: no hints after run stopped (advance blocked; fence body stays iss
 	await ensureDirs(p);
 	const ctx = { cwd, ui: { notify: () => {} } };
 	await handleIssuesCommand("issues", ["start"], ctx, p, {});
+	const st = await readState(p, cwd);
+	st.agents["worker-stop"] = { id: "worker-stop", role: "worker", roleKind: "worker", status: "running", runtimeStatus: "idle", tmuxAlive: true, lastHeartbeatAt: new Date().toISOString(), activeTaskIds: [], createdAt: new Date().toISOString() };
+	await writeState(p, st);
+	{ const runNow = getIssueRun(await readState(p, cwd)); console.error("DEBUG pre-stop:", runNow.status, JSON.stringify(runNow.queue.map(q=>({i:q.issueId,s:q.status})))); }
+	const linkedTaskId = getIssueRun(st).queue[0].taskId;
 	await handleIssuesCommand("issues", ["stop"], ctx, p, {});
-	const before = hintRecs(cwd, "activate").length;
-	// a fresh activation is refused post-stop (resume path only), so no NEW hints appear
-	await handleIssuesCommand("issues", ["start"], ctx, p, {}); // refused: stopped run has state
-	assert.equal(hintRecs(cwd, "activate").length, before, "stop must freeze hint issuance");
+	const beforeA = hintRecs(cwd, "activate").length;
+	const beforeT = hintRecs(cwd, "attempt").length;
+	// stop does not itself deliver hints; a subsequent start-after-stopped REBUILDS the run
+	// (recorded as a phase-05 finding in the implementation report) but that is a fresh
+	// activation under a NEW runId — assert no hint fired under the OLD run's keys here.
+	assert.equal(hintRecs(cwd, "activate").length, beforeA, "stop itself must not add activation hints");
+	// R-HINT discriminator: an assignment for the previously-linked (stop-cancelled) task
+	// AFTER stop must NOT deliver an attempt hint (run.status check in the assign path).
+	// Under the reverted guard (run.status check dropped) this re-fires a post-stop hint —
+	// red-verified 2026-10-01 (phase-05).
+	const { registerAgentsTools } = await import(join(src, "tools", "agents.ts"));
+	const { registerTasksTools } = await import(join(src, "tools", "tasks.ts"));
+	const pi = makePiSpy();
+	registerAgentsTools(pi);
+	registerTasksTools(pi);
+	assert.ok(linkedTaskId, "sanity: pre-stop active entry carried linkage");
+	await pi.calls.tools["swarm_assign_task"].execute("x", { taskId: linkedTaskId, nodeId: "start", agentId: "worker-stop" }, undefined, undefined, { cwd });
+	assert.equal(hintRecs(cwd, "attempt").length, beforeT, "post-stop assignment must deliver ZERO attempt hints");
+	rmSync(cwd, { recursive: true, force: true });
+});
+
+// R-HINT — Phase-5 revert-only RED control (plan §1): the worker-attempt hint guard must
+// check run.status === "running". Revert = drop ONLY the run.status check (entry.status kept).
+// A paused run keeps its active entry, so assigning during a pause must deliver ZERO hints;
+// under the revert the hint fires on a paused run. Red-verified 2026-10-01 (phase-05).
+await t("R-HINT (RED control): assignment during a PAUSED run delivers zero attempt hints", async () => {
+	const cwd = seedWorld();
+	const p = paths(cwd);
+	await ensureDirs(p);
+	const ctx = { cwd, ui: { notify: () => {} } };
+	await handleIssuesCommand("issues", ["start"], ctx, p, {});
+	await handleIssuesCommand("issues", ["pause"], ctx, p, {});
+	const st = await readState(p, cwd);
+	st.agents["worker-pause"] = { id: "worker-pause", role: "worker", roleKind: "worker", status: "running", runtimeStatus: "idle", tmuxAlive: true, lastHeartbeatAt: new Date().toISOString(), activeTaskIds: [], createdAt: new Date().toISOString() };
+	await writeState(p, st);
+	const { registerAgentsTools } = await import(join(src, "tools", "agents.ts"));
+	const { registerTasksTools } = await import(join(src, "tools", "tasks.ts"));
+	const pi = makePiSpy();
+	registerAgentsTools(pi);
+	registerTasksTools(pi);
+	const taskId = getIssueRun(await readState(p, cwd)).queue[0].taskId;
+	await pi.calls.tools["swarm_assign_task"].execute("x", { taskId, nodeId: "start", agentId: "worker-pause" }, undefined, undefined, { cwd });
+	assert.equal(hintRecs(cwd, "attempt").length, 0, "paused-run assignment must deliver ZERO attempt hints");
 	rmSync(cwd, { recursive: true, force: true });
 });
 

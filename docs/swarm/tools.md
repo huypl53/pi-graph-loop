@@ -238,6 +238,22 @@ needs structured parameters or machine-readable results.
 - `/swarm metrics` — root-only, read-only proxy metric snapshot (hung-but-alive,
   stale-open, supersession-churn); surfaces `SwarmState.proxyMetrics` without mutating state.
 
+### Issue run commands (human authority, root-only)
+
+- `/swarm issues validate` — validate `.pi/swarm/issues.yml` (read-only; zero mutation).
+- `/swarm issues status` — render the run queue, active linkage (task/goal/snapshot), blockers.
+- `/swarm issues start` — start the sequential auto-run (refused during an active goal/run).
+- `/swarm issues pause` / `resume` — pause preserves the active linkage; resume advances.
+- `/swarm issues abandon <issue-id> <reason…>` — explicit human disposition for a frozen run.
+- `/swarm issues stop` — stop the run; the linked child task is NEVER cancelled.
+All issue mutation authority is human-via-these-commands. There are NO issue-management Pi
+tools: the extension factory registers zero issue-named tools (enforced by `issues-sequencer`
+IS-4 at the real `pi.registerTool` boundary). Agents consume read-only context via the
+packaged `swarm-issues` skill (`resources_discover` → `issue-skills/`): its two scripts
+(`validate-issues.mjs`, `show-active-issue.mjs`) are strictly read-only, and compact
+context hints (activation + per-issue-linked assignment attempt) are informational
+durable-mailbox messages carrying only issue id/title + skill name.
+
 ### Lifecycle commands
 
 - `/swarm spawn <id> [role]`

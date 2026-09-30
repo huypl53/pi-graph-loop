@@ -251,6 +251,22 @@ is surfaced by generated identity only to root, reviewer, and auditor. See
 [`tools.md`](./tools.md#normal-graph-execution) for the `auto` and `human-discuss`
 task-creation modes.
 
+## Sequential issue auto-run (issues feature)
+
+- Mutation authority is HUMAN-ONLY root slash commands (`src/commands/issues.ts`); never
+  add issue-management Pi tools (IS-4 counts `pi.registerTool` at the real factory boundary).
+- All goal mutations go through 3a cores with `via:"issue-controller"` provenance; the
+  fence (`isFencedLinkedGoal`) composes in the tool routes (`tools/goals.ts`,
+  `commands/goal.ts`) and must keep approvedByUser non-bypassing.
+- Controller callers must sync core results onto their own `st` before `writeState`
+  (stale-write class: `delete st.goal` / `st.goal = set.goal`).
+- Hints/notices ride `deliverMessageLocked` only (durable L1), idempotency-keyed
+  (`issues-activate|issues-terminal|issues-hint:activate|issues-hint:attempt`), bodies
+  carry id/title + skill name only, `requiresAck/Response: false`.
+- Behavior changes require mock-llm fixture/scenario coverage or (when the surface is
+  human-slash-command-shaped) an honest fidelity split: command-tested vs seeded-lane
+  (`RUN_SWARM_ISSUES_LANE=1`) vs live-worker tmux lane.
+
 ## Task-role staffing skill
 
 The package-shipped task-role staffing playbook is
