@@ -38,7 +38,9 @@ export const ERR_ROOT_PANE_REJECTED = "ROOT_PANE_REJECTED";
 
 export const SEND_SETTLE_MS = 700;
 
-export const SPAWN_SETTLE_MS = 2_500;
+export const SPAWN_SETTLE_MS = process.env.PI_SWARM_SPAWN_SETTLE_MS !== undefined ? Number(process.env.PI_SWARM_SPAWN_SETTLE_MS) : 2_500;
+
+export const PANE_SEND_ENTER_DEBOUNCE_MS = 450;
 
 export const SYSTEM_START = "[PI-SWARM SYSTEM MESSAGE]";
 
@@ -92,6 +94,11 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 #   cooldownMs: 900000           # park a slot after an error, ms
 #   maxRetries: 2                # hand-offs to other slots before failing
 
+# --- Terminal manager (optional; default: tmux) -------------------------------
+# Selects the multiplexer used to spawn and manage agent panes.
+# Options: tmux | herdr
+# terminalManager: tmux
+
 # --- Singleton default (optional — used when no modelPool is declared) --------
 # defaultModel: glm-5.1
 # defaultProvider: zai-coding-cn
@@ -126,6 +133,11 @@ export const POOL_SCAFFOLD_GLOBAL_YML_PLACEHOLDER = `# ~/.pi/agent/swarm.yml —
 #   strategy: weighted
 #   cooldownMs: 900000
 #   maxRetries: 2
+
+# --- Terminal manager (optional; default: tmux) -------------------------------
+# Selects the multiplexer used to spawn and manage agent panes.
+# Options: tmux | herdr
+# terminalManager: tmux
 
 # --- Singleton default (optional) ---------------------------------------------
 # defaultModel: glm-5.1
