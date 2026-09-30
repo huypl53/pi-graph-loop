@@ -43,6 +43,10 @@ const ok = (name, condition, info = "") => {
 };
 ok("real pi lane exits cleanly", run.status === 0, run.stderr || run.stdout);
 ok(".pi/swarm.yml was scaffolded", existsSync(ymlPath));
+if (existsSync(ymlPath)) {
+	const content = readFileSync(ymlPath, "utf8");
+	ok(".pi/swarm.yml documents terminalManager", /#\s*terminalManager:/.test(content));
+}
 ok("mock transcript was emitted", existsSync(join(transcriptRoot, "root-register-scaffold")));
 if (existsSync(statePath)) {
 	const st = JSON.parse(readFileSync(statePath, "utf8"));

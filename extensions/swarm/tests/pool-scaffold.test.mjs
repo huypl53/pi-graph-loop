@@ -70,7 +70,10 @@ async function makeCase(name) {
 	ok("A: yml template has no active model: null", !/^\s*-?\s*model:\s*null\s*$/m.test(ymlText));
 	ok(
 		"A: yml template documents the full config surface",
-		/#\s*-\s*model:/.test(ymlText) && /#\s*rotation:/.test(ymlText) && /#\s*defaultModel:/.test(ymlText),
+		/#\s*-\s*model:/.test(ymlText) &&
+			/#\s*rotation:/.test(ymlText) &&
+			/#\s*defaultModel:/.test(ymlText) &&
+			/#\s*terminalManager:/.test(ymlText),
 	);
 	const yml = parseYaml(ymlText);
 	ok(
@@ -183,6 +186,7 @@ async function makeCase(name) {
 		ok("G: global yml exists", existsSync(join(testHome, ".pi", "agent", "swarm.yml")));
 		ok("G: result.notify matches the global constant", result.notify === POOL_SCAFFOLD_GLOBAL_YML_NOTIFY_TEXT);
 		const text = await readFile(join(testHome, ".pi", "agent", "swarm.yml"), "utf8");
+		ok("G: global template documents terminalManager", /#\s*terminalManager:/.test(text));
 		const parsed = parseYaml(text);
 		ok("G: global template parses to null (comments-only)", parsed === null || parsed === undefined);
 	} finally {
