@@ -30,6 +30,7 @@ import {
 	releaseNodeAssignment,
 	releaseTaskFromAllAgents,
 	resolveNodeScope,
+	failTaskTool,
 	suppressPriorAttemptForForceReopen,
 	sweepTaskWorkersLocked,
 } from "../taskgraph.ts";

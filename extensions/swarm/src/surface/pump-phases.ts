@@ -14,7 +14,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Paths, SwarmState } from "../types.ts";
 import { trace } from "../state.ts";
-import { logSwarmError } from "../errorlog.ts";
+import { logSwarmError, expected } from "../errorlog.ts";
 import {
 	agentHeartbeatGCLocked,
 	evaluateArtifactProgressNudgeLocked,
@@ -25,6 +25,7 @@ import {
 } from "../nudges/graph-advance.ts";
 import { evaluateIdleGoalNudgeLocked, updateIdleEpochLocked } from "../nudges/goal-epoch.ts";
 import { proxyMetricEmitLocked, staleOpenAssignmentScanLocked, staleOpenNudgeLocked } from "../taskgraph.ts";
+import { observeLinkedTaskLocked } from "../issues/controller.ts";
 
 export async function runPumpMaintenancePhasesLocked(
 	pi: ExtensionAPI,
@@ -144,5 +145,59 @@ export async function runPumpMaintenancePhasesLocked(
 		await evaluateSlotRecoveryLocked(pi, ctx.cwd, p, st, nowMs);
 	} catch (err: any) {
 		await trace(p, "pool.slot_recovered.error", { error: String((err as Error)?.message || err) }).catch(() => {});
+	}
+	// === swarm-issues Phase 3b (fix P0-A): single idempotent issue-run tick ===
+	// The plan's reconcileIssueRunTick design, piggybacked on this existing in-lock phase
+	// runner (NO new timers/intervals). Reads the active linked task's durable task.json once
+	// and hands terminal statuses to observeLinkedTaskLocked (which enforces provenance,
+	// safe-idle, freeze silence, and idempotent replays internally). Inactive/running-with-no-
+	// active runs are no-ops; non-issue swarms pay one getIssueRun check per tick.
+	// R10-1: no new pi.sendMessage call sites — notices stay on deliverMessageLocked (L1);
+	// the root pump remains the only L2 boundary.
+	try {
+		const run = (st as any).issueRun;
+		if (run && (run.status === "running" || run.status === "paused") && run.activeIssueId) {
+			const { taskPaths, readTaskState } = await import("../state.ts");
+			const entry = (run.queue ?? []).find((q: any) => q.issueId === run.activeIssueId);
+			if (entry?.taskId) {
+				// absent task.json (never linked / pre-creation) is the expected probe miss (ENOENT);
+				// anything else routes to the durable error log (no silent swallow)
+				let ts: any = null;
+				try {
+					ts = await readTaskState(taskPaths(p, entry.taskId).taskJson);
+				} catch (err: any) {
+					if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+						void expected("linked_task_json_not_yet_created");
+					} else {
+						await logSwarmError(p, "surface", "issues.tick_task_read_failed", err, { taskId: entry.taskId });
+					}
+				}
+				if (ts) {
+					const statuses = new Set<string>();
+					if (ts.status === "done" || ts.status === "failed" || ts.status === "cancelled") statuses.add(ts.status);
+					else {
+						const nodeStatuses = Object.values(ts.nodes ?? {}).map((n: any) => n?.status);
+						if (nodeStatuses.length > 0 && nodeStatuses.every((s) => s === "done")) statuses.add("done");
+						if (nodeStatuses.some((s) => s === "blocked")) statuses.add("blocked");
+						if (nodeStatuses.some((s) => s === "failed")) statuses.add("failed");
+						if (nodeStatuses.some((s) => s === "cancelled")) statuses.add("cancelled");
+					}
+					const terminal = statuses.has("done")
+						? "done"
+						: statuses.has("blocked")
+							? "blocked"
+							: statuses.has("failed")
+								? "failed"
+								: statuses.has("cancelled")
+									? "cancelled"
+									: undefined;
+					if (terminal) {
+						await observeLinkedTaskLocked(p, { cwd: ctx.cwd }, st, { taskId: entry.taskId, status: terminal });
+					}
+				}
+			}
+		}
+	} catch (err: any) {
+		await logSwarmError(p, "surface", "issues.tick_failed", err, { reason });
 	}
 }

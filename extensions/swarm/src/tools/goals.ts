@@ -13,6 +13,7 @@ import { requireRootAuthority } from "../identity.ts";
 import { resolveGoalNudgeIntervalMs } from "../reconcile.ts";
 import { wrapSwarmToolInvocation } from "./wrapper.ts";
 import { setGoalCore, markGoalDoneCore } from "../primitives/goal-core.ts";
+import { isFencedLinkedGoal } from "../issues/controller.ts";
 
 export function registerGoalTools(pi: ExtensionAPI): void {
 	pi.registerTool(
@@ -67,7 +68,21 @@ export function registerGoalTools(pi: ExtensionAPI): void {
 					const text = String(params.text || "").trim();
 					if (!isUpdate && !text) throw new Error("swarm_set_goal: text must be non-empty");
 					const requestedId = params.id ? safeId(String(params.id)) : `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
+					// swarm-issues Phase 3b: linked-goal fence (composes on top of classifyGoalClearAuthority;
+					// approvedByUser does not bypass it). Only the exact active linked goalId is fenced;
+					// standalone goals are never affected. Pre-lock, post-authority.
+					{
+						const pre = await readState(p, ctx.cwd);
+						if (isFencedLinkedGoal(pre, params.id ? safeId(String(params.id)) : undefined) && !params.update) {
+							// replacing the active linked goal (new id or no id) while the run holds it
+							throw new Error("swarm_set_goal: fenced_linked_goal — the goal is the active issue run's linked goal; only the issue controller may clear/replace it (/swarm issues status)");
+						}
+					}
 					const result = await withLock(p, async () => {
+						const preFence = await readState(p, ctx.cwd);
+						if (isFencedLinkedGoal(preFence, preFence.goal?.id) && !params.update) {
+							throw new Error("swarm_set_goal: fenced_linked_goal — the current goal is the active issue run's linked goal; only the issue controller may clear/replace it (/swarm issues status)");
+						}
 						return setGoalCore(p, ctx.cwd, params, {
 							readState,
 							writeState,
@@ -119,6 +134,18 @@ export function registerGoalTools(pi: ExtensionAPI): void {
 					const p = paths(ctx.cwd);
 					requireRootAuthority(currentAgentId(), "swarm_mark_goal_done");
 					const result = await withLock(p, async () => {
+						// swarm-issues Phase 3b: linked-goal fence — refuse non-controller clears of the
+						// active linked goal (approvedByUser does NOT bypass; standalone goals unaffected).
+						const preFence = await readState(p, ctx.cwd);
+						if (isFencedLinkedGoal(preFence, preFence.goal?.id)) {
+							return {
+								cleared: false,
+								refused: true,
+								reason: "fenced_linked_goal",
+								origin: "root" as const,
+								goalId: preFence.goal?.id,
+							};
+						}
 						return markGoalDoneCore(p, ctx.cwd, params, {
 							readState,
 							writeState,

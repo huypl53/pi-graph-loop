@@ -8,6 +8,7 @@ import { readState, trace, withLock, writeState } from "../state.ts";
 import type { Paths } from "../types.ts";
 import { now, safeId } from "../utils.ts";
 import { parseFlags, parseGoalMaxNudges, parseGoalSetInterval } from "./parser.ts";
+import { isFencedLinkedGoal } from "../issues/controller.ts";
 
 export async function handleGoalCommand(cmd: "goal", rest: string[], ctx: any, p: Paths, _pi: ExtensionAPI): Promise<void> {
 	if (currentAgentId() !== "root") {
@@ -205,6 +206,23 @@ export async function handleGoalCommand(cmd: "goal", rest: string[], ctx: any, p
 				return { updated: true, goal: s.goal };
 			}
 			if (s.goal) {
+				// swarm-issues Phase 3b: linked-goal fence (composes with the user-origin replace
+				// guard below; approvedByUser does not bypass the fence).
+				if (isFencedLinkedGoal(s, s.goal.id)) {
+					await trace(p, "goal.clear_refused", {
+						goalId: s.goal.id,
+						reason: "fenced_linked_goal",
+						actor: "root",
+						action: "replace",
+						via: "command",
+					});
+					return {
+						refused: true,
+						reason: "fenced_linked_goal",
+						origin: s.goal.origin ?? "root",
+						goalId: s.goal.id,
+					};
+				}
 				const guard = classifyGoalClearAuthority({
 					currentGoal: s.goal,
 					action: "replace",
@@ -297,6 +315,25 @@ export async function handleGoalCommand(cmd: "goal", rest: string[], ctx: any, p
 			if (!s.goal) return { cleared: true, noop: true };
 			if (goalIdArg && safeId(goalIdArg) !== s.goal.id) {
 				throw new Error(`goalId ${goalIdArg} does not match current goal ${s.goal.id}`);
+			}
+			// swarm-issues Phase 3b: linked-goal fence (before classifyGoalClearAuthority;
+			// --force-user-clear does NOT bypass the fence).
+			if (isFencedLinkedGoal(s, s.goal.id)) {
+				await trace(p, "goal.clear_refused", {
+					goalId: s.goal.id,
+					reason: "fenced_linked_goal",
+					actor: "root",
+					action: "clear",
+					via: "command",
+					approvedByUser: forceUserClear,
+				});
+				return {
+					cleared: false,
+					refused: true,
+					reason: "fenced_linked_goal",
+					origin: s.goal.origin ?? "root",
+					goalId: s.goal.id,
+				};
 			}
 			const guard = classifyGoalClearAuthority({
 				currentGoal: s.goal,
