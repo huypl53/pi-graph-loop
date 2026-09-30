@@ -10,6 +10,7 @@ import { buildSwarmStatusSummary } from "../reconcile.ts";
 import { currentAgentId } from "../session.ts";
 import { identityPath, readState, readTaskState, taskPaths, trace, withLock, writeState } from "../state.ts";
 import { listAllPanes } from "../tmux.ts";
+import { runRootPoolScaffoldAndHealth } from "../pool-scaffold.ts";
 import type { Paths } from "../types.ts";
 import { now, safeId } from "../utils.ts";
 import { parseFlags } from "./parser.ts";
@@ -22,6 +23,7 @@ export async function handleAgentsCommand(cmd: string, rest: string[], ctx: any,
 			await trace(p, "swarm.init", { by: currentAgentId() });
 			return s;
 		});
+		await runRootPoolScaffoldAndHealth(ctx, p);
 		ctx.ui.notify(`Swarm ${st.swarmId} ready: ${relative(ctx.cwd, p.state)}`, "info");
 		return;
 	}

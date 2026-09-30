@@ -4,6 +4,7 @@ import { SWARM_GUEST_ID } from "../constants.ts";
 import { expected } from "../errorlog.ts";
 import { startRootPump } from "../hooks.ts";
 import { claimRootLeader, ensureRoot } from "../identity.ts";
+import { runRootPoolScaffoldAndHealth } from "../pool-scaffold.ts";
 import { currentAgentId } from "../session.ts";
 import { readState, trace, withLock, writeState } from "../state.ts";
 import { currentPaneTarget, isHereToken } from "../tmux.ts";
@@ -66,6 +67,7 @@ export async function handleRegisterCommand(rest: string[], ctx: any, p: Paths, 
 				await writeState(p, st);
 			});
 			if (ctx.hasUI) ctx.ui.setStatus("swarm", "swarm:root");
+			await runRootPoolScaffoldAndHealth(ctx, p);
 			try {
 				await startRootPump(ctx, "register-root");
 			} catch (err: any) {

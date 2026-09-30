@@ -1,0 +1,2 @@
+{"name":"verify-root-register-scaffold","stopReason":"toolUse","events":[{"type":"toolcall","name":"swarm_agent_status","id":"root-scaffold-status","arguments":{}}]}
+{"name":"finish","stopReason":"stop","events":[{"type":"text","text":"Verified root session and agent status."}]}

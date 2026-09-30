@@ -19,7 +19,7 @@ import { logSwarmError } from "../errorlog.ts";
 import { ensureRoot, heartbeatRootLeader } from "../identity.ts";
 import { resetIdleEpochState } from "../reconcile.ts";
 import { applySwarmToolGating } from "../tools/gating.ts";
-import { ensurePoolScaffold, ensureGlobalPoolScaffold } from "../pool-scaffold.ts";
+import { ensurePoolScaffold, ensureGlobalPoolScaffold, runRootPoolScaffoldAndHealth } from "../pool-scaffold.ts";
 import { maybeAutoFocusOnBusy } from "../focus.ts";
 import { engineRetryIncidentsMap } from "./streaks.ts";
 import { surfaceAgentPending } from "./pump-manager.ts";
@@ -57,101 +57,9 @@ export function registerSessionHooks(
 		// command is unaffected, so a guest can still opt in via `/swarm register here <role>`. Re-applied on
 		// opt-in (command.ts) so an in-session identity change re-enables the swarm tools immediately.
 		applySwarmToolGating(pi);
-		// === Issue 20: pool-scaffold on root session_start ===
-		// Runs ONLY for the root identity (PM). The durable `poolScaffoldNotifiedAt` flag on
-		// SwarmState makes the notify write-once-per-swarm: subsequent session_starts (and /reload
-		// invocations) suppress the notify but the scaffold itself remains idempotent (writes the same
-		// payload if `modelPool` is still absent, no-ops if present). Errors are swallowed + traced so a
-		// scaffold failure never blocks session_start.
+		// === Issue 20 + v4.2: pool-scaffold on root session_start ===
 		if (agentId === "root") {
-			try {
-				const result = await ensurePoolScaffold(ctx.cwd, {});
-				if (result.wrote) {
-					await withLock(p, async () => {
-						const locked = await readState(p, ctx.cwd);
-						if (!locked.poolScaffoldNotifiedAt) {
-							locked.poolScaffoldNotifiedAt = now();
-							await writeState(p, locked);
-						}
-					});
-					// Notify ONLY when the durable flag was absent BEFORE this call. We re-read state here
-					// (outside the lock is safe — the lock above already stamped the flag, and the user-facing
-					// notify is one-shot idempotent by construction). If `ctx.hasUI` is false (print/json
-					// sessions) the notify is skipped but the file write + flag stamp still happen, so a later
-					// TUI session_start correctly sees the flag set and stays quiet.
-					if (ctx.hasUI && result.notify) {
-						try {
-							ctx.ui.notify(result.notify, "info");
-						} catch {
-							/* notify is best-effort */
-						}
-					}
-				}
-			} catch (err: any) {
-				await trace(p, "pool.scaffold_error", { error: String((err as Error)?.message || err) }).catch(() => {});
-			}
-			// === v4.2: global pool scaffold (one-shot via poolScaffoldGlobalNotifiedAt) ===
-			// Mirrors the project-side scaffold above but for ~/.pi/agent/swarm.yml. Never overwrites
-			// a corrupt global (ensureGlobalPoolScaffold returns wrote=false in that case). The
-			// durable flag suppresses the notify on subsequent session_starts and /reload.
-			try {
-				const globalResult = await ensureGlobalPoolScaffold();
-				if (globalResult.wrote) {
-					await withLock(p, async () => {
-						const locked = await readState(p, ctx.cwd);
-						if (!locked.poolScaffoldGlobalNotifiedAt) {
-							locked.poolScaffoldGlobalNotifiedAt = now();
-							await writeState(p, locked);
-						}
-					});
-					if (ctx.hasUI && globalResult.notify) {
-						try {
-							ctx.ui.notify(globalResult.notify, "info");
-						} catch {
-							/* notify is best-effort */
-						}
-					}
-				}
-			} catch (err: any) {
-				await trace(p, "pool.global_scaffold_error", { error: String((err as Error)?.message || err) }).catch(() => {});
-			}
-			// === Follow-up F3 (2026-09-05): launch-time pool health warning ===
-			// The PM launches a session whose spawn pool may be entirely dead (unresolvable models /
-			// missing credentials). Surfacing that NOW beats discovering it at the first spawn failure.
-			// Uses the live registry probe when available; without one, only structural checks run.
-			// Degrades silently (never blocks session_start); traced as pool.launch_health.
-			try {
-				const validation = validateSwarmSettings(ctx.cwd, { registryProbe: ctx.modelRegistry as any });
-				if (!validation.ok) {
-					const lines = [`Swarm pool config has ${validation.errors.length} issue(s) — /swarm pool validate for details:`];
-					for (const e of validation.errors.slice(0, 3)) lines.push(`  \u2717 ${e.field || "config"}: ${e.message}`);
-					if (validation.errors.length > 3) lines.push(`  … and ${validation.errors.length - 3} more`);
-					if (ctx.hasUI) {
-						try {
-							ctx.ui.notify(lines.join("\n"), "warning");
-						} catch {
-							/* best-effort */
-						}
-					}
-					await trace(p, "pool.launch_health", {
-						ok: false,
-						errors: validation.errors.length,
-						warnings: validation.warnings.length,
-					}).catch(() => {});
-				} else if (validation.warnings.length && ctx.hasUI) {
-					// Advisory-only: surface the first warning (e.g. both_sources_present / swarm_yml_empty)
-					// once at launch so the operator knows which file is actually in effect.
-					const w = validation.warnings[0];
-					try {
-						ctx.ui.notify(`Swarm pool: ${w.message}`, "warning");
-					} catch {
-						/* best-effort */
-					}
-					await trace(p, "pool.launch_health", { ok: true, errors: 0, warnings: validation.warnings.length }).catch(() => {});
-				}
-			} catch {
-				/* launch-health check must never break session_start */
-			}
+			await runRootPoolScaffoldAndHealth(ctx, p);
 		}
 		const ts = now();
 		await withLock(p, async () => {
