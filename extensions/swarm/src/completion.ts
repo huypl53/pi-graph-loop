@@ -16,6 +16,8 @@ import { listTasksIndexed } from "./reconcile.ts";
 import { paths, readState } from "./state.ts";
 import { safeId } from "./utils.ts";
 import { logSwarmError } from "./errorlog.ts";
+import { validateIssuesSource } from "./issues/source.ts";
+import { join } from "node:path";
 import type { Paths } from "./types.ts";
 
 const SUBCOMMANDS: { name: string; description: string }[] = [
@@ -47,6 +49,7 @@ const SUBCOMMANDS: { name: string; description: string }[] = [
 		description:
 			"show | set [-i <time>] [-n <count>] <text> | update [-i <time>] [-n <count>] [<text>] | nudges [<count>] | done [<goalId>]",
 	},
+	{ name: "issues", description: "Issue run (human-only): validate | status | start | pause | resume | abandon <id> <reason> | stop" },
 	{ name: "trace", description: "Show trace file path" },
 	{ name: "capture", description: "Capture an agent's tmux pane: <id>" },
 	{ name: "identity", description: "reload|show an agent's identity" },
@@ -97,6 +100,7 @@ const SCOPED_COMMANDS: Record<string, { name: string; description: string; canon
 
 const GRAPH_FORMATS = ["text", "mermaid", "json"];
 const GOAL_SUBS = ["show", "set", "update", "nudges", "max-nudges", "done"];
+const ISSUES_SUBS = ["validate", "status", "start", "pause", "resume", "abandon", "stop"];
 const PROTOCOL_SUBS = ["migrate"];
 const RUNTIME_FLAGS = ["runtime", "--runtime", "-r"];
 const ROLE_KINDS = ["root", "planner", "reviewer", "auditor", "tester", "implementer", "worker", "observer"];
@@ -343,6 +347,24 @@ export async function swarmArgumentCompletions(argumentPrefix: string): Promise<
 				return [];
 			case "goal":
 				if (tokens.length === 1) return simple(GOAL_SUBS, b, currentWord);
+				return [];
+			case "issues":
+				if (tokens.length === 1) return simple(ISSUES_SUBS, b, currentWord);
+				if (tokens.length === 2 && tokens[1] === "abandon") {
+					// Offer live issue ids from the validated queue (read-only mirror of loadSource).
+					try {
+						const { readFile } = await import("node:fs/promises");
+						const text = await readFile(join(p.root, "issues.yml"), "utf8");
+						const v = validateIssuesSource(text);
+						return v.ok
+							? v.issues
+									.filter((i) => startsWith(i.id, currentWord))
+									.map((i) => ({ value: `${b}${i.id}`, label: i.id, description: i.title }))
+							: [];
+					} catch {
+						return []; // no queue / unreadable — plain typing still works
+					}
+				}
 				return [];
 			case "protocol":
 				if (tokens.length === 1) return simple(PROTOCOL_SUBS, b, currentWord);
