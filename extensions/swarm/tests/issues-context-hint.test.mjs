@@ -134,7 +134,7 @@ async function assignLinkedTask(cwd, pi) {
 	const run = getIssueRun(st);
 	const taskId = run.queue[0].taskId;
 	const reg = pi.calls.tools;
-	await reg["swarm_assign_task"].execute("x", { taskId, nodeId: "start", agentId: "worker-a" }, undefined, undefined, { cwd });
+	await reg["swarm_assign_task"].execute("x", { taskId, nodeId: "plan", agentId: "worker-a" }, undefined, undefined, { cwd });
 	return taskId;
 }
 
@@ -162,7 +162,7 @@ await t("worker: exactly ONE hint per issue-linked assignment attempt; reassign 
 	// idempotent reuse of the same assignment must NOT re-fire (same attempts count)
 	// registerTasksTools already registered swarm_assign_task (duplicate registration would
 	// double the tool; the idempotent-reuse leg reuses the existing registration)
-	await pi.calls.tools["swarm_assign_task"].execute("x", { taskId, nodeId: "start", agentId: "worker-a" }, undefined, undefined, { cwd });
+	await pi.calls.tools["swarm_assign_task"].execute("x", { taskId, nodeId: "plan", agentId: "worker-a" }, undefined, undefined, { cwd });
 	recs = hintRecs(cwd, "attempt");
 	assert.equal(recs.length, 1, `idempotent reuse must not re-fire (got ${recs.length})`);
 	rmSync(cwd, { recursive: true, force: true });
@@ -218,7 +218,7 @@ await t("stop: no hints after run stopped (advance blocked; fence body stays iss
 	registerAgentsTools(pi);
 	registerTasksTools(pi);
 	assert.ok(linkedTaskId, "sanity: pre-stop active entry carried linkage");
-	await pi.calls.tools["swarm_assign_task"].execute("x", { taskId: linkedTaskId, nodeId: "start", agentId: "worker-stop" }, undefined, undefined, { cwd });
+	await pi.calls.tools["swarm_assign_task"].execute("x", { taskId: linkedTaskId, nodeId: "plan", agentId: "worker-stop" }, undefined, undefined, { cwd });
 	assert.equal(hintRecs(cwd, "attempt").length, beforeT, "post-stop assignment must deliver ZERO attempt hints");
 	rmSync(cwd, { recursive: true, force: true });
 });
@@ -243,7 +243,7 @@ await t("R-HINT (RED control): assignment during a PAUSED run delivers zero atte
 	registerAgentsTools(pi);
 	registerTasksTools(pi);
 	const taskId = getIssueRun(await readState(p, cwd)).queue[0].taskId;
-	await pi.calls.tools["swarm_assign_task"].execute("x", { taskId, nodeId: "start", agentId: "worker-pause" }, undefined, undefined, { cwd });
+	await pi.calls.tools["swarm_assign_task"].execute("x", { taskId, nodeId: "plan", agentId: "worker-pause" }, undefined, undefined, { cwd });
 	assert.equal(hintRecs(cwd, "attempt").length, 0, "paused-run assignment must deliver ZERO attempt hints");
 	rmSync(cwd, { recursive: true, force: true });
 });

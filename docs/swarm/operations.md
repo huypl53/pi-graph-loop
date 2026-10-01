@@ -171,6 +171,22 @@ command that actually succeeds from the observed state (verified end-to-end by
 Every matrix-named command was driven for real from its seeded state — the notice never names
 a command that would be refused.
 
+### Per-issue role-graph lifecycle (feature-dev workflow)
+
+By default each activated issue links a **feature-dev workflow graph** (the standard
+`swarm_create_task` template, not a new layout): `plan(planner) → implement(implementer) →
+test(tester) → review(reviewer) → commit(root, terminal)`, with `fix(implementer)` rework
+(`test→fix when:failed`, `review→fix when:rejected`, `fix→test when:implemented`) and the
+standard `reviewApproved`/`testsPassed` gates (independent). Node readiness is derived at
+assign time (`computeReadyNodes`); `swarm_assign_task` role-matches each node to idle agents.
+Issue observation remains **task-terminal-based**: the pump tick reads the linked task.json and
+marks the issue done only when ALL nodes are done (any blocked/failed/cancelled node freezes the
+run exactly as before — branched disposition notice, abandon/stop semantics unchanged). The B1
+linked-task cancel guard, goal fence, and safe-idle holder semantics are task-level and apply
+identically to multi-node graphs. Legacy behavior remains available via
+`issue-sequencer.workflow: single` (or `PI_SWARM_ISSUES_WORKFLOW=single`). Invalid workflow
+config fails fast at `/swarm issues start`.
+
 ### Advancement modes (auto | manual)
 
 The sequential issue auto-run supports two advancement modes (`issue-sequencer.advancement` in

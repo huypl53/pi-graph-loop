@@ -51,6 +51,7 @@ export type IssueRun = {
 	// the resolved mode at start for status display honesty.
 	advancement?: "waiting-manual";
 	advancementMode?: "auto" | "manual";
+	workflowMode?: "feature-dev" | "single";
 };
 
 export type Guard = { ok: true } | { ok: false; code: string; message: string };

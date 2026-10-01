@@ -140,9 +140,11 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 			}
 			// advancement-mode: fail-fast on invalid advancement config BEFORE any run mutation
 			let advancementMode: "auto" | "manual";
+			let workflowMode: "feature-dev" | "single";
 			try {
-				const { resolveIssueAdvancement } = await import("../issues/config.ts");
-				advancementMode = resolveIssueAdvancement(ctx.cwd);
+				const cfg = await import("../issues/config.ts");
+				advancementMode = cfg.resolveIssueAdvancement(ctx.cwd);
+				workflowMode = cfg.resolveIssueWorkflow(ctx.cwd);
 			} catch (err: unknown) {
 				ctx.ui.notify(`start refused: ${err instanceof Error ? err.message : String(err)}`, "error");
 				throw err;
@@ -152,6 +154,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 			run.runId = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 			run.startedAt = new Date().toISOString();
 			run.advancementMode = advancementMode;
+			run.workflowMode = workflowMode;
 			run.queue = v.issues.map<IssueQueueEntry>((i) => ({ issueId: i.id, title: i.title, sourceHash: sourceHashOf(i), status: "queued" }));
 			run.updatedAt = run.startedAt;
 			await writeState(p, st);

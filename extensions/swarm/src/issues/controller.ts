@@ -29,7 +29,7 @@ import { createTaskCore } from "../primitives/task-core.ts";
 import { markGoalDoneCore } from "../primitives/goal-core.ts";
 import { allEffectiveIdleAgents } from "../nudges/goal-epoch.ts";
 import { deliverMessageLocked } from "../mailbox.ts";
-import { shouldAutoAdvance } from "./config.ts";
+import { shouldAutoAdvance, resolveIssueWorkflow } from "./config.ts";
 import { logSwarmError } from "../errorlog.ts";
 
 export type ControllerDeps = {
@@ -159,11 +159,17 @@ export async function activateIssueLocked(
 		cwd: ctx.cwd,
 	}, {
 		title: `[issue ${source.id}] ${source.title}`,
-		nodes: {
-			start: { title: `Implement issue ${source.id}`, description: source.content.slice(0, 500) },
-		},
-		edges: [],
-		start: "start",
+		// workflow-graphs: feature-dev (default) omits nodes/edges/start entirely —
+		// createTaskCore → buildGraphFromInput → buildDefaultGraph synthesizes the STANDARD
+		// role graph (plan/implement/test/fix/review/commit, rework edges, both gates). No
+		// second layout invented. "single" keeps the legacy wrapper (escape hatch).
+		...(resolveIssueWorkflow(ctx.cwd) === "single"
+			? {
+					nodes: { start: { title: `Implement issue ${source.id}`, description: source.content.slice(0, 500) } },
+					edges: [] as any,
+					start: "start",
+				}
+			: {}),
 		issueRunId: runId,
 		issueId: source.id,
 		snapshotHash: snap.snapshotHash,
