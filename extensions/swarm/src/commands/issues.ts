@@ -22,7 +22,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const USAGE =
-	"Usage: /swarm issues validate | status | start | pause | resume | abandon <issue-id> <reason...> | stop";
+	"Usage: /swarm issues validate | status | start | pause | resume | abandon <issue-id> <reason...> | stop\n  advancement: auto (default) | manual — via .pi/swarm.yml issue-sequencer.advancement or PI_SWARM_ISSUES_ADVANCEMENT; manual holds each done issue for /swarm issues resume";
 
 /** Root-interactive gate. Mirrors the goal command's root check. */
 function requireRoot(ctx: any): boolean {
@@ -81,6 +81,16 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 		}
 		const blockers = safeIdleBlockers(st);
 		if (blockers.length) lines.push(`  safe-idle blockers: ${blockers.join(", ")}`);
+		// advancement-mode: render mode + waiting state explicitly (auto/unset renders nothing new)
+		try {
+			const { resolveIssueAdvancement } = await import("../issues/config.ts");
+			const mode = resolveIssueAdvancement(ctx.cwd);
+			if (mode === "manual") {
+				lines.push(run.advancement === "waiting-manual" ? `  advancement: manual (waiting — /swarm issues resume)` : `  advancement: manual`);
+			}
+		} catch (err: unknown) {
+			void err; // config errors surface via start/validate; status stays renderable
+		}
 		const done = run.queue.filter((q) => q.status === "done").length;
 		lines.push(`  queue: ${run.queue.length} (done ${done}, queued ${run.queue.filter((q) => q.status === "queued").length})`);
 		// source drift (queued entries only)
@@ -128,10 +138,20 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 				ctx.ui.notify(`start refused: issues.yml invalid (${v.errors.length} error(s))`, "warning");
 				return;
 			}
+			// advancement-mode: fail-fast on invalid advancement config BEFORE any run mutation
+			let advancementMode: "auto" | "manual";
+			try {
+				const { resolveIssueAdvancement } = await import("../issues/config.ts");
+				advancementMode = resolveIssueAdvancement(ctx.cwd);
+			} catch (err: unknown) {
+				ctx.ui.notify(`start refused: ${err instanceof Error ? err.message : String(err)}`, "error");
+				throw err;
+			}
 			const run = getIssueRun(st);
 			run.status = "running";
 			run.runId = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 			run.startedAt = new Date().toISOString();
+			run.advancementMode = advancementMode;
 			run.queue = v.issues.map<IssueQueueEntry>((i) => ({ issueId: i.id, title: i.title, sourceHash: sourceHashOf(i), status: "queued" }));
 			run.updatedAt = run.startedAt;
 			await writeState(p, st);
@@ -141,7 +161,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 				const source = v.issues.find((i) => i.id === first.issueId)!;
 				await activateIssueLocked(p, ctx, st, run.runId, source);
 				await writeState(p, st);
-				ctx.ui.notify(`Issue run ${run.runId} started: ${run.queue.length} queued; "${first.issueId}" active.`, "info");
+				ctx.ui.notify(`Issue run ${run.runId} started: ${run.queue.length} queued; "${first.issueId}" active${advancementMode === "manual" ? "; advancement: manual" : ""}.`, "info");
 			} catch (err: unknown) {
 				const st2 = await readState(p, ctx.cwd);
 				const r2 = getIssueRun(st2);
@@ -173,6 +193,35 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
 			const run = getIssueRun(st);
+			// advancement-mode: resume ALSO releases the manual wait (waiting-manual marker with
+			// status still "running"); guardResumeRun's paused leg stays untouched.
+			if (run.advancement === "waiting-manual") {
+				if (run.status !== "running") {
+					ctx.ui.notify(`resume refused: run is "${run.status}" (manual wait requires a running run)`, "warning");
+					return;
+				}
+				if (run.activeIssueId || !run.queue.some((q) => q.status === "queued")) {
+					ctx.ui.notify(`resume refused: nothing queued to advance (manual wait inconsistent)`, "warning");
+					return;
+				}
+				delete run.advancement;
+				run.updatedAt = new Date().toISOString();
+				try {
+					const { advanceNextIssueLocked } = await import("../issues/controller.ts");
+					await advanceNextIssueLocked(p, ctx, st);
+					await writeState(p, st);
+					const act = getIssueRun(st);
+					ctx.ui.notify(act.activeIssueId ? `Manual wait released; "${act.activeIssueId}" active.` : "Manual wait released.", "info");
+				} catch (err: unknown) {
+					const st2 = await readState(p, ctx.cwd);
+					const r2 = getIssueRun(st2);
+					r2.advancement = "waiting-manual";
+					r2.updatedAt = new Date().toISOString();
+					await writeState(p, st2);
+					ctx.ui.notify(`resume advanced to activation but it failed: ${err instanceof Error ? err.message : String(err)} — manual wait retained.`, "error");
+				}
+				return;
+			}
 			const g = guardResumeRun(st);
 			if (!g.ok) {
 				ctx.ui.notify(`resume refused: ${g.message}`, "warning");

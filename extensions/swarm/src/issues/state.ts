@@ -45,6 +45,12 @@ export type IssueRun = {
 	activeIssueId?: string;
 	startedAt?: string;
 	updatedAt?: string;
+	// advancement-mode: "waiting-manual" while manual mode holds the advance for the human;
+	// absent otherwise (auto/legacy). Cleared by resume only — stale markers after
+// stop/abandon are inert (resume guards refuse). advancementMode snapshots
+	// the resolved mode at start for status display honesty.
+	advancement?: "waiting-manual";
+	advancementMode?: "auto" | "manual";
 };
 
 export type Guard = { ok: true } | { ok: false; code: string; message: string };

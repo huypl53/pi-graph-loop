@@ -29,6 +29,7 @@ import { createTaskCore } from "../primitives/task-core.ts";
 import { markGoalDoneCore } from "../primitives/goal-core.ts";
 import { allEffectiveIdleAgents } from "../nudges/goal-epoch.ts";
 import { deliverMessageLocked } from "../mailbox.ts";
+import { shouldAutoAdvance } from "./config.ts";
 import { logSwarmError } from "../errorlog.ts";
 
 export type ControllerDeps = {
@@ -277,6 +278,24 @@ export async function observeLinkedTaskLocked(
 		if (!doneEntry) return { acted: false };
 		const idle = computeSafeIdle(st, Date.now());
 		if (!idle.safe) return { acted: false }; // still held — no-op
+		// advancement-mode seam: manual mode holds the advance for the human (exactly-once
+		// notice) — but ONLY when a queued successor exists; completion is not advancement
+		// (guardCompleteRun still fires on an exhausted queue, in both modes).
+		if (!shouldAutoAdvance(ctx.cwd) && run.queue.some((q) => q.status === "queued")) {
+			run.advancement = "waiting-manual";
+			run.updatedAt = new Date().toISOString();
+			await writeState(p, st);
+			const d: any = { pi: deps?.pi, deliverMessageLocked: deps?.deliverMessageLocked ?? deliverMessageLocked };
+			await d.deliverMessageLocked(d.pi as any, ctx.cwd, p, st, {
+				to: "root",
+				body: `[issues] "${doneEntry.issueId}" done — run ${run.runId} waiting in manual mode. Continue with /swarm issues resume.`,
+				subject: `[issues] manual advancement wait`,
+				idempotencyKey: `issues-manual-wait:${run.runId}:${doneEntry.issueId}`,
+				requiresAck: false,
+				requiresResponse: false,
+			} as any);
+			return { acted: true, effect: "held_for_manual" };
+		}
 		await advanceNextIssueLocked(p, ctx, st, deps);
 		return { acted: true, effect: "advanced" };
 	}
@@ -291,6 +310,24 @@ export async function observeLinkedTaskLocked(
 		const gm = guardMarkIssueTerminal(st, entry.issueId, "done");
 		if (!gm.ok) return { acted: false }; // already-terminal replay — no-op
 		await writeState(p, st);
+		// advancement-mode seam: manual mode holds the advance for the human (exactly-once
+		// notice) — but ONLY when a queued successor exists; completion is not advancement
+		// (guardCompleteRun still fires on an exhausted queue, in both modes).
+		if (!shouldAutoAdvance(ctx.cwd) && run.queue.some((q) => q.status === "queued")) {
+			run.advancement = "waiting-manual";
+			run.updatedAt = new Date().toISOString();
+			await writeState(p, st);
+			const d: any = { pi: deps?.pi, deliverMessageLocked: deps?.deliverMessageLocked ?? deliverMessageLocked };
+			await d.deliverMessageLocked(d.pi as any, ctx.cwd, p, st, {
+				to: "root",
+				body: `[issues] "${entry.issueId}" done — run ${run.runId} waiting in manual mode. Continue with /swarm issues resume.`,
+				subject: `[issues] manual advancement wait`,
+				idempotencyKey: `issues-manual-wait:${run.runId}:${entry.issueId}`,
+				requiresAck: false,
+				requiresResponse: false,
+			} as any);
+			return { acted: true, effect: "held_for_manual" };
+		}
 		// safe-idle: advance only when safe
 		const idle = computeSafeIdle(st, Date.now());
 		if (idle.safe) {
