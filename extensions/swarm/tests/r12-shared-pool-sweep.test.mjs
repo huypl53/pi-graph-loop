@@ -40,6 +40,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const { sweepTaskWorkersLocked } = await import(join(here, "..", "src/taskgraph.ts"));
 const { paths, withLock, readState, writeState } = await import(join(here, "..", "src/state.ts"));
 
+// Isolation contract (see header): this suite counts KILLS at the tmux boundary via a pi.exec
+// mock, so the terminal driver MUST resolve to tmux regardless of the repo root's real
+// .pi/swarm.yml (a repo-root `terminalManager: herdr` made the dedicated-worker kill emit herdr
+// tab-close instead of tmux kill-window → killCalls 0 → false FAIL on master only).
+process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
+
 const scratch = await mkdtemp(join(tmpdir(), `swarm-r12-shared-pool-${process.pid}-${Date.now()}`));
 await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 
