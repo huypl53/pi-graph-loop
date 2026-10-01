@@ -44,7 +44,7 @@ import {
 	supersedeTaskAssignmentMessages,
 	validateResultMessage,
 } from "../../mailbox.ts";
-import { ensureAgentDefaults, isSafeRelativePath, now, textResult } from "../../utils.ts";
+import { ensureAgentDefaults, isSafeRelativePath, now, safeId, textResult } from "../../utils.ts";
 import {
 	ensureDirs,
 	paths,
@@ -144,6 +144,25 @@ export function registerUpdateTaskTool(pi: ExtensionAPI): void {
 						}
 						if (params.force !== true) {
 							throw new Error(`CANCEL_REQUIRES_FORCE: cancelTask=true must accompany force=true (root-only operation).`);
+						}
+						// swarm-issues b1 (2026-10-01, incident run-mup15r16-epimos): root cancelled the
+						// ACTIVE linked task of a running issue run (work already delivered via commit);
+						// the run silently froze and the terminal notice recommended a command that was
+						// refused from that state. Refuse linkage-scoped (non-linked tasks unchanged;
+						// force:true still proceeds — downstream freeze semantics byte-identical).
+						const preLink = await readState(p, ctx.cwd);
+						const preRun = preLink.issueRun;
+						const linkedEntry =
+							preRun?.activeIssueId && preRun.status === "running"
+								? (preRun.queue ?? []).find(
+									(q) => q.issueId === preRun.activeIssueId && q.status === "active" && q.taskId === safeId(String(params.taskId)),
+								  )
+								: undefined;
+						if (linkedEntry) {
+							await trace(p, "task.cancel.linked_guard_refused", { taskId: params.taskId, runId: preRun.runId, issueId: linkedEntry.issueId, by: me });
+							throw new Error(
+								`LINKED_TASK_CANCEL_REFUSED: task ${params.taskId} is the ACTIVE linked task of running issue run ${preRun.runId} (issue "${linkedEntry.issueId}"). Cancelling instead of completing silently freezes the run. Complete the work: mark the terminal node done via swarm_update_task (status=done). If the run must end now, use /swarm issues stop (run-level stop; the child task is never cancelled). Note: this refusal also holds with force:true — a linked task of a running run is never cancellable; complete it or stop the run.`,
+							);
 						}
 					}
 					if (params.force === true && !isRootAuthority(me)) {
