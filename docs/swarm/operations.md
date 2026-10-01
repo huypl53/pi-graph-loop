@@ -137,6 +137,40 @@ After cancellation:
 
 Un-cancelling is not supported in this release. To work on the same goal again, create a new task.
 
+### Linked tasks of a running issue run (root completion rule)
+
+> **Never cancel the ACTIVE linked task of a running issue run.** Incident run-mup15r16-epimos
+> (2026-10-01): the worker delivered its work via commit, but the linked task was never marked
+> done; root cancelled the task — the run silently froze and the terminal notice recommended a
+> command that was refused from that state.
+
+`swarm_update_task(cancelTask=true)` on the ACTIVE linked task (entry `taskId` match, run
+`running`) is refused with `LINKED_TASK_CANCEL_REFUSED` and guidance. To finish an issue run
+linked task:
+
+1. **Complete it**: mark the terminal node done via `swarm_update_task(taskId=<id>,
+   nodeId=<terminal>, status=done, outcome=...)` — the issue-run controller observes the
+   transition and advances the run. Note: a done update with an `artifact` requires the
+   artifact file to be readable; see the `task-core` readFile regression guard.
+2. **End the run instead of the task**: `/swarm issues stop` performs the run-level stop
+   (the child task is never cancelled). Note: the linked-task cancel guard refuses `cancelTask`
+   on the ACTIVE linked task even with `force:true` — completing the terminal node or
+   stopping the run are the only exits; there is no force path around it.
+
+### Issue-run disposition matrix
+
+When an issue run pauses on a terminal linked task, the terminal notice names the disposition
+command that actually succeeds from the observed state (verified end-to-end by
+`tests/issues-cancel-guard.test.mjs`):
+
+| Observed entry state | Notice says | Why |
+| -------------------- | ----------- | --- |
+| `blocked` / `failed` | `/swarm issues abandon <issue-id> <reason…>`, then `/swarm issues resume` | `abandon` refuses non-blocked/failed entries; `resume` refuses while a blocked/failed entry remains |
+| `cancelled` (or any other terminal state) | `/swarm issues resume` only | `abandon` is REFUSED from this state (do not recommend it); `resume` passes `guardResumeRun` and advances the next queued issue |
+
+Every matrix-named command was driven for real from its seeded state — the notice never names
+a command that would be refused.
+
 ### Inspect or change agent roles
 
 ### Model pool auto-scaffold on first root session (Issue 20 + v4.2 dual scaffold)

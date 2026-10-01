@@ -307,6 +307,20 @@ export async function observeLinkedTaskLocked(
 		if (!gm.ok) return { acted: false };
 		run.status = "paused";
 		await writeState(p, st);
+		// b1-b2 (2026-10-01): the notice must name the disposition command that ACTUALLY succeeds
+		// from the observed state. abandon refuses non-blocked/failed entries (incident
+		// run-mup15r16-epimos: a cancelled entry was told to abandon); resume passes
+		// guardResumeRun once no blocked/failed entry remains.
+		// b1-b2 (2026-10-01): the notice must name the disposition command that ACTUALLY succeeds
+		// from the observed state. abandon refuses non-blocked/failed entries (incident
+		// run-mup15r16-epimos: a cancelled entry was told to abandon); resume passes
+		// guardResumeRun once no blocked/failed entry remains.
+		const nowEntry = (run.queue ?? []).find((q) => q.issueId === entry.issueId);
+		const entryTerminal = nowEntry && ["done", "blocked", "failed", "cancelled"].includes(nowEntry.status);
+		const dispositionText =
+			entryTerminal && nowEntry.status !== "blocked" && nowEntry.status !== "failed"
+				? `Continue with /swarm issues resume.`
+				: `Disposition: /swarm issues abandon ${entry.issueId} <reason…>, then /swarm issues resume.`;
 		const d: ControllerDeps = {
 			pi: deps?.pi,
 			readState: deps?.readState ?? readState,
@@ -317,7 +331,7 @@ export async function observeLinkedTaskLocked(
 		try {
 			await d.deliverMessageLocked(d.pi, ctx.cwd, p, st, {
 				to: "root",
-				body: `[issues] "${entry.issueId}" is ${taskStatus.status} — run ${run.runId} paused. Inspect with /swarm issues status; disposition (abandon) is a human decision. Later issues will not surface until then.`,
+				body: `[issues] "${entry.issueId}" is ${taskStatus.status} — run ${run.runId} paused. ${dispositionText} Inspect with /swarm issues status. Later issues will not surface until then.`,
 				subject: `[issues] ${entry.issueId} ${taskStatus.status}`,
 				priority: "high",
 				idempotencyKey: `issues-terminal:${run.runId}:${entry.issueId}`,
