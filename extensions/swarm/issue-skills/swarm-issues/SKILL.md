@@ -15,11 +15,27 @@ You are working in a swarm that runs a sequential issue auto-run. This skill is 
    - `title`
    - `content` (what "done" means, end to end)
    - `docs` (list of repo-relative context doc paths; may be empty)
-3. Write them to `issues.yml` at the project root (only when the human asked you to draft one).
+
+   Exact shape (the file MUST be a single root mapping named `issues` — a bare YAML list is rejected with `root_not_mapping`):
+
+   ```yaml
+   issues:
+     - id: fix-tokenizer-unbalanced-quote
+       title: "Tokenizer: error on unbalanced quotes instead of silent mis-parse"
+       content: >
+         Problem: src/tokenizer.ts:25-58 silently swallows the rest of
+         the input on an unbalanced double quote. Done means: (1) tokenizer
+         throws a clear error naming the unterminated quote; (2) unit test
+         covers `"abc` input; (3) `node test/tokenizer.test.mjs` — exit 0.
+       docs:
+         - README.md
+   ```
+3. Write them to `.pi/swarm/issues.yml` (the swarm root — where `swarm-state.json` lives; NOT the project root, NOT `issues.yml`). Only when the human asked you to draft one.
 4. Execute the validator and iterate until clean (`<skill-dir>` = the directory containing this SKILL.md — the skill is dispatched from pi's resource dir; repo checkout paths are irrelevant):
    ```bash
-   node <skill-dir>/scripts/validate-issues.mjs
+   node <skill-dir>/scripts/validate-issues.mjs --source .pi/swarm/issues.yml
    ```
+   The validator defaults to `issues.yml` in the CWD (kept for raw CLI use) — always pass `--source` explicitly when validating the real queue.
 5. Present the validated queue to the human for review/approval. **Stop.** Starting the run is a human decision (`/swarm issues start`).
 
 ## Mode 2 — root/worker active context (during a run)

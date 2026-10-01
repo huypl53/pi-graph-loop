@@ -10,7 +10,7 @@
 //   Exit 1 — invalid source / hard doc errors
 //   Exit 2 — source file unreadable
 import { statSync, realpathSync, readFileSync } from "node:fs";
-import { isAbsolute, resolve, dirname } from "node:path";
+import { isAbsolute, resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
@@ -20,20 +20,26 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const canonicalPath = resolve(scriptDir, "../../../src/issues/source.ts");
 
 const args = process.argv.slice(2);
-let sourcePath = "issues.yml";
+let sourcePath = null;
+let docRootRaw = null;
 let asJson = false;
 let strict = false;
 for (let i = 0; i < args.length; i++) {
 	if (args[i] === "--source") sourcePath = args[++i] ?? "";
+	else if (args[i] === "--doc-root") docRootRaw = args[++i] ?? "";
 	else if (args[i] === "--json") asJson = true;
 	else if (args[i] === "--strict") strict = true;
 	else if (args[i] === "--help" || args[i] === "-h") {
-		console.log("Usage: node validate-issues.mjs [--source <path>] [--json] [--strict]");
+		console.log("Usage: node validate-issues.mjs [--source <path>] [--doc-root <path>] [--json] [--strict]\n  --doc-root defaults to CWD (project root — docs resolve against it);\n  --source defaults to <doc-root>/.pi/swarm/issues.yml");
 		process.exit(0);
 	}
 }
-
-if (isAbsolute(sourcePath) === false) sourcePath = resolve(process.cwd(), sourcePath);
+// Phase-3b contract: docs resolve against the PROJECT cwd, while the queue itself lives at
+// .pi/swarm/issues.yml. Keep the two bases separate (the runtime controller does the same
+// via docRoot; see src/issues/snapshot.ts captureIssueSnapshot).
+const docRoot = docRootRaw === null ? process.cwd() : isAbsolute(docRootRaw) ? docRootRaw : resolve(process.cwd(), docRootRaw);
+if (sourcePath === null) sourcePath = join(docRoot, ".pi", "swarm", "issues.yml");
+if (sourcePath !== null && isAbsolute(sourcePath) === false) sourcePath = resolve(process.cwd(), sourcePath);
 
 function emit(json) {
 	console.log(asJson ? JSON.stringify(json, null, 2) : json);
@@ -58,15 +64,15 @@ const docProblems = [];
 if (result.ok) {
 	for (const issue of result.issues) {
 		for (const doc of issue.docs) {
-			const cls = classifyDocPath(dirname(sourcePath), doc);
+			const cls = classifyDocPath(docRoot, doc);
 			if (!cls.ok) {
 				docProblems.push({ issue: issue.id, doc, code: cls.code, message: cls.message });
 				continue;
 			}
-			const abs = resolve(dirname(sourcePath), cls.normalized);
+			const abs = resolve(docRoot, cls.normalized);
 			try {
 				const real = realpathSync(abs);
-				const rootReal = realpathSync(dirname(sourcePath));
+				const rootReal = realpathSync(docRoot);
 				if (!real.startsWith(rootReal + "/") && real !== rootReal) {
 					docProblems.push({ issue: issue.id, doc, code: "doc_escape", message: `resolves outside project root: ${real}` });
 					continue;
