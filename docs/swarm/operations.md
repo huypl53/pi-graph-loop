@@ -187,6 +187,14 @@ identically to multi-node graphs. Legacy behavior remains available via
 `issue-sequencer.workflow: single` (or `PI_SWARM_ISSUES_WORKFLOW=single`). Invalid workflow
 config fails fast at `/swarm issues start`.
 
+### Footer status line (advisory)
+
+The Pi footer carries a `swarm-issues` status line while a run is active/paused
+(see tools.md "Issue-run footer status" for the format). It is rendered from durable run state
+on pump ticks and `/swarm issues` commands, restored on session start, and advisory only —
+never a delivery surface, never agent-activity-derived. Stale or malformed run state degrades
+to a cleared or safe-truncated line (failures land in `.pi/swarm/traces/errors.jsonl`).
+
 ### Troubleshooting: exhausted-blocked run (running forever, no surface)
 
 Symptom: `/swarm issues status` shows the run `running` with NO active issue and zero queued

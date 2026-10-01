@@ -214,4 +214,12 @@ export async function runPumpMaintenancePhasesLocked(
 	} catch (err: any) {
 		await logSwarmError(p, "surface", "issues.tick_failed", err, { reason });
 	}
+	// === footer-status (2026-10-01): advisory issue-run line after the issues tick phase ===
+	// L3 visible surface (contract §1); hasUI-guarded, never throws into the tick.
+	try {
+		const { setIssueFooter } = await import("../issues/footer.ts");
+		await setIssueFooter(pi, ctx, st, p);
+	} catch (err: any) {
+		await logSwarmError(p, "surface", "issues.footer_failed", err, { reason });
+	}
 }

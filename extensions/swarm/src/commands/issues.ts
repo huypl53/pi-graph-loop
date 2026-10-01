@@ -13,6 +13,7 @@ import { currentAgentId } from "../session.ts";
 import { readState, withLock, writeState } from "../state.ts";
 import { validateIssuesSource, classifyDocPath } from "../issues/source.ts";
 import { captureIssueSnapshot, sourceHashOf } from "../issues/snapshot.ts";
+import { setIssueFooter } from "../issues/footer.ts";
 import {
 	getIssueRun, guardActivateIssue, applyActivateIssue, guardPauseRun, guardResumeRun,
 	reconcileIssueRun, type IssueQueueEntry,
@@ -164,6 +165,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 				const source = v.issues.find((i) => i.id === first.issueId)!;
 				await activateIssueLocked(p, ctx, st, run.runId, source);
 				await writeState(p, st);
+				await setIssueFooter(undefined, ctx, st, p);
 				ctx.ui.notify(`Issue run ${run.runId} started: ${run.queue.length} queued; "${first.issueId}" active${advancementMode === "manual" ? "; advancement: manual" : ""}.`, "info");
 			} catch (err: unknown) {
 				const st2 = await readState(p, ctx.cwd);
@@ -171,6 +173,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 				r2.status = "paused";
 				r2.updatedAt = new Date().toISOString();
 				await writeState(p, st2);
+				await setIssueFooter(undefined, ctx, st2, p);
 				ctx.ui.notify(`start failed during activation: ${err instanceof Error ? err.message : String(err)} — run paused durably.`, "error");
 			}
 		});
@@ -187,6 +190,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 				return;
 			}
 			await writeState(p, st);
+			await setIssueFooter(undefined, ctx, st, p);
 			ctx.ui.notify(`Issue run paused${run.activeIssueId ? ` (active issue ${run.activeIssueId} preserved)` : ""}.`, "info");
 		});
 		return;
@@ -213,6 +217,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 					const { advanceNextIssueLocked } = await import("../issues/controller.ts");
 					await advanceNextIssueLocked(p, ctx, st);
 					await writeState(p, st);
+					await setIssueFooter(undefined, ctx, st, p);
 					const act = getIssueRun(st);
 					ctx.ui.notify(act.activeIssueId ? `Manual wait released; "${act.activeIssueId}" active.` : "Manual wait released.", "info");
 				} catch (err: unknown) {
@@ -239,6 +244,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 					const { advanceNextIssueLocked } = await import("../issues/controller.ts");
 					await advanceNextIssueLocked(p, ctx, st);
 					await writeState(p, st);
+					await setIssueFooter(undefined, ctx, st, p);
 					const act = getIssueRun(st);
 					ctx.ui.notify(act.activeIssueId ? `Issue run resumed; "${act.activeIssueId}" active.` : "Issue run resumed.", "info");
 					return;
@@ -248,6 +254,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 					r2.status = "paused";
 					r2.updatedAt = new Date().toISOString();
 					await writeState(p, st2);
+					await setIssueFooter(undefined, ctx, st2, p);
 					ctx.ui.notify(`resume advanced to activation but it failed: ${err instanceof Error ? err.message : String(err)} — run paused durably.`, "error");
 					return;
 				}
@@ -260,9 +267,11 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 				const { advanceNextIssueLocked } = await import("../issues/controller.ts");
 				await advanceNextIssueLocked(p, ctx, st);
 				await writeState(p, st);
+				await setIssueFooter(undefined, ctx, st, p);
 				ctx.ui.notify(`Issue run resumed.`, "info");
 				return;
 			}
+			await setIssueFooter(undefined, ctx, st, p);
 			ctx.ui.notify(`Issue run resumed.`, "info");
 		});
 		return;
@@ -294,6 +303,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 			if (run.activeIssueId === issueId) run.activeIssueId = undefined;
 			run.updatedAt = entry.completedAt;
 			await writeState(p, st);
+			await setIssueFooter(undefined, ctx, st, p);
 			ctx.ui.notify(`Issue "${issueId}" cancelled (abandoned): ${reason}. Run remains paused for human disposition.`, "info");
 		});
 		return;
@@ -321,6 +331,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 			run.status = "stopped";
 			run.updatedAt = new Date().toISOString();
 			await writeState(p, st);
+			await setIssueFooter(undefined, ctx, st, p);
 			ctx.ui.notify(`Issue run stopped. Any remaining child task continues outside the issue run.`, "info");
 		});
 		return;

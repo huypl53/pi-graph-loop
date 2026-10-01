@@ -156,6 +156,20 @@ export function registerSessionHooks(
 			}
 		});
 		if (ctx.hasUI) ctx.ui.setStatus("swarm", `swarm:${agentId}`);
+		// footer-status (2026-10-01): restore the advisory issue-run line from durable state
+		// after a (root) restart. L3 visible surface; hasUI-guarded, never throws into the hook.
+		try {
+			// footer-status (2026-10-01): restore the advisory issue-run line from durable state
+			// after a (root) restart. L3 visible surface; hasUI-guarded inside setIssueFooter;
+			// best-effort — a restore failure never breaks session start.
+			const stF = await readState(p, ctx.cwd);
+			const { setIssueFooter } = await import("../issues/footer.ts");
+			await setIssueFooter(pi, ctx, stF, p);
+		} catch (err: unknown) {
+			// expected(): advisory footer restore is best-effort; routed to the durable error log
+			const { logSwarmError, expected } = await import("../errorlog.ts");
+			await logSwarmError(ctx.cwd, "issues-footer", "footer_restore_failed", expected("advisory footer restore is best-effort") && err, {});
+		}
 		if (agentId === "root") {
 			await startRootPump(ctx);
 		} else if (ctx.mode === "tui") {
