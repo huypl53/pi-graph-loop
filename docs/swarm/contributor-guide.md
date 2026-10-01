@@ -37,10 +37,17 @@ All test suites live under `extensions/swarm/tests/` (not the repo root) and
 the original history. Imports of `./src/...` were rewritten to `../src/...`.
 
 - Run a single suite: `node extensions/swarm/tests/<name>.test.mjs`
-- Run the swarm inventory: `npm run test:swarm` (sets
-  `PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1` so the
-  authority-gated suites do not crash)
-- Run the mock-llm inventory: `npm run test:mockllm`
+- Run the swarm gate: `npm run test:swarm` — **per-suite exit codes are the gate** (swarm
+  suites run with `PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1` injected; per-suite overrides in
+  the suites themselves still win). The runner (`scripts/run-suites.mjs`) prints a PASS/FAIL/
+  TIMEOUT/QUARANTINED table with per-suite durations and first error signatures, and **exits
+  non-zero when any non-quarantined suite fails** — the old `for … || true` loop exit 0 was
+  vacuous and is gone.
+- Run the mock-llm gate: `npm run test:mockllm` (same runner, ambient env).
+- Quarantine: `scripts/suite-quarantine.json` is the ONLY sanctioned exclusion path. Every
+  entry carries a reason + tracking pointer; quarantined suites are listed in every gate run
+  and excluded from the exit code. Adding to quarantine requires a named reason in the task
+  report — never a silent skip. New suites must be individually green before review.
 
 Pre-existing failures (kept byte-identical by this refactor — do NOT fix in this
 refactor; record new R-rows for fixes):
