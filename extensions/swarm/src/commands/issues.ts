@@ -252,6 +252,17 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 					return;
 				}
 			}
+			// exhausted-notice (2026-10-01): post-disposition resume with NOTHING queued — the
+			// exhausted branch of advanceNextIssueLocked owns completion (all-done → complete +
+			// completion notice; blocked-remnant → the exactly-once exhausted notice). Without
+			// this leg the resume silently no-ops on an exhausted queue.
+			if (!run.activeIssueId) {
+				const { advanceNextIssueLocked } = await import("../issues/controller.ts");
+				await advanceNextIssueLocked(p, ctx, st);
+				await writeState(p, st);
+				ctx.ui.notify(`Issue run resumed.`, "info");
+				return;
+			}
 			ctx.ui.notify(`Issue run resumed.`, "info");
 		});
 		return;
