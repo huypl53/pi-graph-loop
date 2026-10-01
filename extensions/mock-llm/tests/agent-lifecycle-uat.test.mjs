@@ -35,6 +35,10 @@ import { execSync } from "node:child_process";
 const here = dirname(fileURLToPath(import.meta.url));
 const swarmRoot = join(here, "..", "..", "swarm");
 const RED = process.env.UAT_RED === "1";
+// Isolation: this suite asserts the tmux new-window boundary via a pi.exec mock, so pin the
+// terminal driver to tmux regardless of the repo root's real .pi/swarm.yml (a repo-root
+// `terminalManager: herdr` made spawnAgent go through the herdr driver and L2b-L3c failed).
+process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
 const STAMP =
 	process.env.UAT_STAMP ||
 	`uat-${new Date()
