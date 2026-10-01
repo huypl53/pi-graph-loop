@@ -171,6 +171,20 @@ command that actually succeeds from the observed state (verified end-to-end by
 Every matrix-named command was driven for real from its seeded state — the notice never names
 a command that would be refused.
 
+### Advancement modes (auto | manual)
+
+The sequential issue auto-run supports two advancement modes (`issue-sequencer.advancement` in
+`.pi/swarm.yml`, or `PI_SWARM_ISSUES_ADVANCEMENT`; default `auto`):
+
+- **auto** (default): current behavior — terminal-done + safe-idle advances the next issue
+  automatically (including the post-hold replay above).
+- **manual**: a done issue holds the run in a `waiting-manual` state (status stays `running`)
+  with exactly one root notice naming `/swarm issues resume`; resume activates the next issue.
+  The pump tick never auto-advances in manual mode. Completion of the final issue completes the
+  run normally (completion is not advancement). Freeze (blocked/failed/cancelled → paused +
+  branched disposition notice) behaves identically in both modes. Invalid config values fail
+  fast at `/swarm issues start` — never silently auto.
+
 ### Troubleshooting: post-hold replay (running run, no active issue, done entry)
 
 When safe-idle was held at the moment an issue's linked task went terminal, the run can end up

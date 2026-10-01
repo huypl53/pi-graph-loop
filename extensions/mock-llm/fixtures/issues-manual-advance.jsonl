@@ -1,0 +1,2 @@
+{"name":"root observes manual wait","stopReason":"stop","events":[{"type":"text","delayMs":20,"text":"Issue done in manual mode — the run waits. Continue with /swarm issues resume when ready.","chunks":["Issue done in manual mode — ","the run waits."]}]}
+{"name":"root resumes manually","stopReason":"stop","events":[{"type":"text","delayMs":20,"text":"Manual wait released — resuming the run.","chunks":["Manual wait released — ","resuming."]}]}

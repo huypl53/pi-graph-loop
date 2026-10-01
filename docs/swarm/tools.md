@@ -53,6 +53,26 @@ and [operations](./operations.md). For task-graph semantics, read
 
 ## Configuration
 
+### Issue sequencer advancement (`issue-sequencer.advancement`)
+
+Configures how the sequential issue auto-run advances after an issue completes:
+
+```yaml
+# .pi/swarm.yml
+issue-sequencer:
+  advancement: auto   # "auto" (default) | "manual"
+```
+
+- `auto` (default): current behavior — terminal-done + safe-idle advances the next issue automatically.
+- `manual`: a done issue does NOT auto-advance; the run enters a `waiting-manual` state (status stays
+  `running`) and root receives exactly ONE notice per done issue naming `/swarm issues resume`.
+  Resume releases the wait and activates the next issue. Completion of the whole queue still
+  completes the run; freeze/abandon semantics are unchanged.
+
+Env override (highest precedence): `PI_SWARM_ISSUES_ADVANCEMENT=auto|manual` (case-insensitive).
+Invalid values fail fast with a precise error naming the source (env var or `issue-sequencer.advancement`)
+— never a silent fallback to auto.
+
 ### Config sources and precedence (v4.2: YAML-only)
 
 The swarm model pool reads two YAML config sources with strict precedence (low → high):
