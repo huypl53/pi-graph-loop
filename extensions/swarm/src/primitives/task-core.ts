@@ -13,12 +13,13 @@
 //   - wrappers keep their own authority/lock/trace/result-shaping behavior.
 
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import {
 	activateReworkNodes,
 	validateTaskGraph,
 	applyTaskStatus,
+	applyGateUpdates,
 	autoCloseRootTerminalNodes,
 	buildGraphFromInput,
 	buildTaskMarkdown,
