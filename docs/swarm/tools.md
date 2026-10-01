@@ -73,6 +73,24 @@ Env override (highest precedence): `PI_SWARM_ISSUES_ADVANCEMENT=auto|manual` (ca
 Invalid values fail fast with a precise error naming the source (env var or `issue-sequencer.advancement`)
 — never a silent fallback to auto.
 
+### Issue-run footer status (`swarm-issues` slot)
+
+While an issue run is `running`/`paused`, the extension renders one compact advisory line in the
+Pi footer status area under the `swarm-issues` key:
+
+```
+issues: <issueId> <done>/<total> <state>[ (<modes>)] — <hint>
+```
+
+- `<state>`: `running` | `manual-wait` | `paused` | `blocked`
+- `<modes>` (only when non-default): `manual` (advancement), `single` (workflow)
+- hints: `manual-wait — /swarm issues resume`, `paused/blocked — /swarm issues status`
+
+The line is **advisory only** (L3 visible surface — no delivery/freshness guarantee): it is
+rendered from durable run state on tick and command paths and restored from durable state on
+session start. It never shows issue titles or content, never reflects agent activity, and
+disappears when the run is complete/stopped/inactive. Use `/swarm issues status` for details.
+
 ### Issue sequencer workflow (`issue-sequencer.workflow`)
 
 Selects the task graph synthesized when an issue activates:
