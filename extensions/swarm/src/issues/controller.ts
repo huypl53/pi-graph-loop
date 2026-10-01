@@ -413,6 +413,33 @@ export async function advanceNextIssueLocked(p: Paths, ctx: { cwd: string }, st:
 			} catch (err: unknown) {
 				await logSwarmError(ctx.cwd, "issues-controller", "complete_notice_failed", err, { runId: run.runId });
 			}
+		} else {
+			// exhausted-notice (2026-10-01, incident run-mup15r16-epimos): the queue is exhausted
+			// (0 queued) but terminal-unsuccessful entries block guardCompleteRun — without this
+			// the run rests in "running" forever with zero surface. Exactly-one durable root
+			// disposition notice (run-scoped idempotency key); guardCompleteRun stays untouched.
+			const blockers = run.queue.filter((e: any) => ["cancelled", "blocked", "failed"].includes(e.status));
+			if (blockers.length > 0) {
+				const d: ControllerDeps = {
+					pi: deps?.pi,
+					readState: deps?.readState ?? readState,
+					writeState: deps?.writeState ?? writeState,
+					trace: deps?.trace ?? trace,
+					deliverMessageLocked: deps?.deliverMessageLocked ?? (await import("../mailbox.ts")).deliverMessageLocked,
+				};
+				const blockerList = blockers.map((e: any) => `${e.issueId}:${e.status}`).join(", ");
+				try {
+					await d.deliverMessageLocked(d.pi, ctx.cwd, p, st, {
+						to: "root",
+						body: `[issues] run ${run.runId} cannot complete — ${blockers.length} issue(s) blocked: ${blockerList}. Disposition: /swarm issues stop (ends the run), or /swarm issues abandon ${blockers[0].issueId} <reason…> then /swarm issues resume for entries you want resolved. Inspect with /swarm issues status.`,
+						subject: `[issues] run ${run.runId} blocked from completion`,
+						priority: "high",
+						idempotencyKey: `issues-exhausted:${run.runId}`,
+					});
+				} catch (err: unknown) {
+					await logSwarmError(ctx.cwd, "issues-controller", "exhausted_notice_failed", err, { runId: run.runId });
+				}
+			}
 		}
 		return false;
 	}

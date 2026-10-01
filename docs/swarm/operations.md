@@ -187,6 +187,21 @@ identically to multi-node graphs. Legacy behavior remains available via
 `issue-sequencer.workflow: single` (or `PI_SWARM_ISSUES_WORKFLOW=single`). Invalid workflow
 config fails fast at `/swarm issues start`.
 
+### Troubleshooting: exhausted-blocked run (running forever, no surface)
+
+Symptom: `/swarm issues status` shows the run `running` with NO active issue and zero queued
+issues, but one or more queue entries are `cancelled`/`blocked`/`failed`. `guardCompleteRun`
+requires ALL entries done, so the run cannot complete and used to rest silently (incident
+`run-mup15r16-epimos`: 9 done + 1 cancelled). Since the exhausted-notice fix, the tick (and any
+post-disposition `resume` with nothing queued) emits exactly ONE durable root notice —
+`issues-exhausted:<runId>` — naming the blocking `issueId:status` pairs and the dispositions:
+`/swarm issues stop` (ends the run), or `/swarm issues abandon <blocked-id> <reason…>` then
+`/swarm issues resume` for entries you want resolved (note: a `cancelled` remnant still blocks
+completion by design — all-done is required — so the run keeps resting until `stop`). A
+`blocked`/`failed` entry instead pauses the run with the `issues-terminal:` branched notice
+(see above); the exhausted notice covers the RUNNING orphan shape. Paused/stopped runs and
+runs with a queued successor never emit it.
+
 ### Advancement modes (auto | manual)
 
 The sequential issue auto-run supports two advancement modes (`issue-sequencer.advancement` in
