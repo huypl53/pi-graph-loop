@@ -20,7 +20,7 @@ import {
 	SETTLE_NOTIFY_COOLDOWN_MS,
 	SPAWN_SETTLE_MS,
 } from "./constants.ts";
-import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux } from "./tmux.ts";
+import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux, waitForPaneReady } from "./tmux.ts";
 import { getTerminalDriver } from "./terminal/index.ts";
 import { childPiArgs, currentAgentId, currentModel, currentProvider } from "./session.ts";
 import { pickSlot, poolStatus, preflightSpawn, formatPreflightError } from "./pool.ts";
@@ -315,7 +315,7 @@ export async function spawnAgent(
 	// RecentSpawn onto state.recentSpawns[] AND schedules the in-process timer; if the spawn throws
 	// before this point the watchdog was never armed so no cleanup is required.
 	if (isNewRecord) armOrphanWatch(p, state, id, ts);
-	await sleep(SPAWN_SETTLE_MS);
+	await waitForPaneReady(pi, target, { expectedAgentId: id });
 	const snapshot = await capturePane(pi, p, id, target, "spawn-after");
 	const kickoff = `${input.initialPrompt?.trim() || `You are ${id}. Follow your swarm identity and await tasks.`}${await mailboxKickoffPrompt(p, state, id)}${identityPrompt(cwd, identityRelPath)}`;
 	await sendToPane(pi, target, kickoff);

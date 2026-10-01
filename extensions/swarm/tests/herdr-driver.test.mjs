@@ -432,8 +432,8 @@ await asyncTest("checkTmuxSession succeeds without TMUX when PI_SWARM_TERMINAL_M
 	delete process.env.PI_SWARM_TMUX_OK;
 
 	try {
-		// Under default (tmux), missing TMUX fails
-		delete process.env.PI_SWARM_TERMINAL_MANAGER;
+		// Under tmux driver, missing TMUX fails
+		process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
 		const failRes = await checkTmuxSession("test-session");
 		assertOk(!failRes.ok, "Should fail when TMUX is missing under tmux driver");
 
@@ -445,6 +445,26 @@ await asyncTest("checkTmuxSession succeeds without TMUX when PI_SWARM_TERMINAL_M
 		// Alias checkTerminalSession also works
 		const aliasRes = await checkTerminalSession("w1");
 		assertOk(aliasRes.ok, "checkTerminalSession alias should work");
+	} finally {
+		if (prevTmux) process.env.TMUX = prevTmux;
+		if (prevOk) process.env.PI_SWARM_TMUX_OK = prevOk;
+		if (prevMgr) process.env.PI_SWARM_TERMINAL_MANAGER = prevMgr;
+		else delete process.env.PI_SWARM_TERMINAL_MANAGER;
+	}
+});
+
+await asyncTest("checkTmuxSession succeeds without TMUX when swarm.yml declares terminalManager: herdr (env unset)", async () => {
+	const prevTmux = process.env.TMUX;
+	const prevOk = process.env.PI_SWARM_TMUX_OK;
+	const prevMgr = process.env.PI_SWARM_TERMINAL_MANAGER;
+	delete process.env.TMUX;
+	delete process.env.PI_SWARM_TMUX_OK;
+	delete process.env.PI_SWARM_TERMINAL_MANAGER;
+
+	try {
+		// repo cwd has .pi/swarm.yml with terminalManager: herdr
+		const res = await checkTmuxSession("test-session");
+		assertOk(res.ok, "checkTmuxSession should succeed without TMUX when terminalManager: herdr is in swarm.yml");
 	} finally {
 		if (prevTmux) process.env.TMUX = prevTmux;
 		if (prevOk) process.env.PI_SWARM_TMUX_OK = prevOk;

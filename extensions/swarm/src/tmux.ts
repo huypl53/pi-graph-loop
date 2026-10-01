@@ -3,11 +3,76 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Paths } from "./types/index.ts";
-import { safeId } from "./utils.ts";
-import { tmuxDriver, getTerminalDriver, type TerminalPaneInfo, isPiLikeCommand, isHereToken, HERE_TOKENS } from "./terminal/index.ts";
+import { safeId, sleep } from "./utils.ts";
+import { expected } from "./errorlog.ts";
+import { SPAWN_SETTLE_MS } from "./constants.ts";
+import {
+	tmuxDriver,
+	getTerminalDriver,
+	type TerminalDriver,
+	type TerminalPaneInfo,
+	isPiLikeCommand,
+	isHereToken,
+	HERE_TOKENS,
+} from "./terminal/index.ts";
 
 export { isPiLikeCommand, isHereToken, HERE_TOKENS };
 export type TmuxPaneInfo = TerminalPaneInfo;
+
+/**
+ * Wait for a spawned agent's terminal pane to boot and render its interactive TUI.
+ *
+ * Prevents the race condition where sendToPane(kickoff) types into a still-booting
+ * shell or node process before the interactive prompt component is listening,
+ * which swallows the Enter key and leaves the prompt unsubmitted.
+ */
+export async function waitForPaneReady(
+	pi: ExtensionAPI,
+	target: string,
+	opts: {
+		timeoutMs?: number;
+		pollIntervalMs?: number;
+		settleMs?: number;
+		expectedAgentId?: string;
+		_driver?: TerminalDriver;
+	} = {},
+): Promise<boolean> {
+	const driver = opts._driver || getTerminalDriver();
+	if (driver.id === "mock") return true;
+
+	const timeoutMs = opts.timeoutMs ?? (SPAWN_SETTLE_MS < 500 ? SPAWN_SETTLE_MS : Math.max(SPAWN_SETTLE_MS, 10_000));
+	const pollIntervalMs = opts.pollIntervalMs ?? (timeoutMs < 500 ? 10 : 250);
+	const settleMs = opts.settleMs ?? (timeoutMs < 500 ? 0 : 450);
+
+	if (timeoutMs <= 0) return true;
+
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		try {
+			const proc = await driver.inspectProcess(pi, target);
+			const capture = await driver.capturePane(pi, target, 100);
+
+			const hasTuiMarkers =
+				capture.includes("─") ||
+				capture.includes("━") ||
+				capture.includes("│") ||
+				(opts.expectedAgentId ? capture.includes(`swarm:${opts.expectedAgentId}`) : false) ||
+				capture.includes("swarm:") ||
+				capture.includes("●") ||
+				capture.includes("❯") ||
+				capture.includes("Press ctrl+");
+
+			if (proc.piLike && hasTuiMarkers) {
+				if (settleMs > 0) await sleep(settleMs);
+				return true;
+			}
+		} catch (err: any) {
+			expected("transient_pane_probe", err);
+		}
+		await sleep(pollIntervalMs);
+	}
+	return false;
+}
 
 export async function tmux(pi: ExtensionAPI, args: string[], timeout = 10_000): Promise<string> {
 	return tmuxDriver.tmux(pi, args, timeout);

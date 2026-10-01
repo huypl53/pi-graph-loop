@@ -34,6 +34,7 @@ import {
 } from "./config.ts";
 import { atomicWriteFile, trace } from "./state.ts";
 import { expected, logSwarmError, traceLogged } from "./errorlog.ts";
+import { getTerminalDriver } from "./terminal/index.ts";
 
 export { parseQuotaResetMs } from "./config.ts";
 
@@ -1085,14 +1086,14 @@ export function formatPreflightError(err: PreflightError): string {
 	}
 }
 
-// Lazy tmux-session probe (no tmux exec when not needed). Pure helper to keep preflightSpawn
-// self-contained; uses $TMUX awareness rather than spawning `tmux has-session` so it stays fast
-// and side-effect free. The real tmux probe is intentionally left to spawnAgent (which performs
-// the actual new-session fallback).
+// Lazy terminal-session probe. Resolves the active terminal driver (consults env var
+// PI_SWARM_TERMINAL_MANAGER, then swarm.yml terminalManager, defaulting to tmux).
+// Under herdr, no $TMUX check is needed.
 export async function checkTmuxSession(session: string): Promise<{ ok: boolean; message?: string }> {
 	if (!session || session === "unknown")
 		return { ok: false, message: "tmux session name is unknown (no swarm started yet; run /swarm init)." };
-	if (process.env.PI_SWARM_TERMINAL_MANAGER === "herdr") {
+	const driver = getTerminalDriver();
+	if (driver.id === "herdr" || process.env.PI_SWARM_TERMINAL_MANAGER === "herdr") {
 		return { ok: true };
 	}
 	if (!process.env.TMUX && !process.env.PI_SWARM_TMUX_OK) {

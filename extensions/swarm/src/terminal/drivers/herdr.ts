@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TerminalDriver, TerminalTargetRef, TerminalPaneInfo, SpawnAgentOptions, FocusStatus, AttachCommands } from "../types.ts";
 import { sleep } from "../../utils.ts";
 import { expected, logSwarmError } from "../../errorlog.ts";
+import { PANE_SEND_ENTER_DEBOUNCE_MS } from "../../constants.ts";
 import { PI_COMMANDS } from "./tmux.ts";
 
 /**
@@ -477,7 +478,7 @@ export class HerdrDriver implements TerminalDriver {
 
 	async sendText(pi: ExtensionAPI, target: string, text: string): Promise<void> {
 		await this.herdr(pi, ["pane", "send-text", target, text], 10_000);
-		await sleep(100);
+		await sleep(PANE_SEND_ENTER_DEBOUNCE_MS);
 		await this.herdr(pi, ["pane", "send-keys", target, "enter"], 10_000);
 	}
 
