@@ -171,6 +171,18 @@ command that actually succeeds from the observed state (verified end-to-end by
 Every matrix-named command was driven for real from its seeded state — the notice never names
 a command that would be refused.
 
+### Troubleshooting: post-hold replay (running run, no active issue, done entry)
+
+When safe-idle was held at the moment an issue's linked task went terminal, the run can end up
+`running` with `activeIssueId` cleared and a done queue entry. The pump tick replays this shape
+automatically: on the next tick, `observeLinkedTaskLocked`'s post-hold branch re-checks
+safe-idle and, once no agent holds work, advances to the next queued issue (exactly once — the
+done-entry precondition disappears after the advance). **No human action is needed**; the run
+may sit idle for one tick in this shape. Paused runs are never auto-replayed — `pause` still
+requires `/swarm issues resume`. If the run stays stuck with this shape across multiple ticks,
+check for an agent record still holding a non-terminal task (`safeIdleBlockers`) — the replay
+stays a no-op until it clears.
+
 ### Inspect or change agent roles
 
 ### Model pool auto-scaffold on first root session (Issue 20 + v4.2 dual scaffold)

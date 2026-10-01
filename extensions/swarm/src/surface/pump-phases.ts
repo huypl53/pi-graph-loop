@@ -156,6 +156,20 @@ export async function runPumpMaintenancePhasesLocked(
 	// the root pump remains the only L2 boundary.
 	try {
 		const run = (st as any).issueRun;
+		// b3-posthold (2026-10-01, incident run-mup15r16-epimos @ 04:50:25): a safe_idle_hold can
+		// leave the run running with activeIssueId cleared and a done queue entry; the old
+		// activeIssueId-only guard made the tick a permanent no-op (hang with no advance/notice).
+		// Route that shape into observeLinkedTaskLocked's existing post-hold replay branch —
+		// it re-checks computeSafeIdle internally (held runs stay untouched) and advancing
+		// removes the done-entry precondition, so the replay is exactly-once.
+		const postHoldOrphan =
+			run?.status === "running" && !run.activeIssueId && (run.queue ?? []).some((q: any) => q.status === "done");
+		if (postHoldOrphan) {
+			const doneEntry = (run.queue ?? []).find((q: any) => q.status === "done");
+			if (doneEntry?.taskId) {
+				await observeLinkedTaskLocked(p, { cwd: ctx.cwd }, st, { taskId: doneEntry.taskId, status: "done" });
+			}
+		}
 		if (run && (run.status === "running" || run.status === "paused") && run.activeIssueId) {
 			const { taskPaths, readTaskState } = await import("../state.ts");
 			const entry = (run.queue ?? []).find((q: any) => q.issueId === run.activeIssueId);

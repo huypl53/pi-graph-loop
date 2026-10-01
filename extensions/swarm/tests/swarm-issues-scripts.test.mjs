@@ -47,6 +47,8 @@ function runScript(script, args, cwd) {
 	}
 }
 
+// 093badd contract: --doc-root defaults to CWD and --source defaults to <doc-root>/.pi/swarm/issues.yml.
+// Seed the canonical runtime location so the DEFAULT path is exercised (b3-posthold drift fix).
 function seedProject(yaml, withDocs = true) {
 	const cwd = mkdtempSync(join(tmpdir(), "issues-scr-"));
 	mkdirSync(join(cwd, ".pi", "swarm"), { recursive: true });
@@ -54,7 +56,7 @@ function seedProject(yaml, withDocs = true) {
 		mkdirSync(join(cwd, "docs"), { recursive: true });
 		writeFileSync(join(cwd, "docs", "one.md"), "doc one\n");
 	}
-	writeFileSync(join(cwd, "issues.yml"), yaml);
+	writeFileSync(join(cwd, ".pi", "swarm", "issues.yml"), yaml);
 	return cwd;
 }
 
@@ -63,11 +65,11 @@ const VALID = "issues:\n  - id: fix-one\n    title: One\n    content: do one\n  
 // --- validator: exit codes + outputs ---
 await t("validator: valid source → exit 0, human output, zero mutation", async () => {
 	const cwd = seedProject(VALID);
-	const before = readFileSync(join(cwd, "issues.yml"), "utf8") + "|" + (existsState(cwd) ?? "");
+	const before = readFileSync(join(cwd, ".pi", "swarm", "issues.yml"), "utf8") + "|" + (existsState(cwd) ?? "");
 	const r = runScript(VALIDATOR, [], cwd);
 	assert.equal(r.code, 0, `exit ${r.code}: ${r.out}`);
 	assert.match(r.out, /valid: 1 issue/);
-	const after = readFileSync(join(cwd, "issues.yml"), "utf8") + "|" + (existsState(cwd) ?? "");
+	const after = readFileSync(join(cwd, ".pi", "swarm", "issues.yml"), "utf8") + "|" + (existsState(cwd) ?? "");
 	assert.equal(before, after, "zero mutation required");
 	rmSync(cwd, { recursive: true, force: true });
 });
