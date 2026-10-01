@@ -110,6 +110,8 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 # until a human resumes. Env override: PI_SWARM_ISSUES_ADVANCEMENT=manual|auto.
 # issue-sequencer:
 #   advancement: auto
+#   workflow: feature-dev        # "feature-dev" (default; full role graph per issue) | "single"
+#                                # (legacy single-node wrapper). Env: PI_SWARM_ISSUES_WORKFLOW.
 
 # --- Global opt-out (optional) -----------------------------------------------
 # inheritGlobal: false           # ignore ~/.pi/agent/swarm.yml for this project

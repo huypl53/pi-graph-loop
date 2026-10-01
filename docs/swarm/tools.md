@@ -73,6 +73,32 @@ Env override (highest precedence): `PI_SWARM_ISSUES_ADVANCEMENT=auto|manual` (ca
 Invalid values fail fast with a precise error naming the source (env var or `issue-sequencer.advancement`)
 — never a silent fallback to auto.
 
+### Issue sequencer workflow (`issue-sequencer.workflow`)
+
+Selects the task graph synthesized when an issue activates:
+
+```yaml
+# .pi/swarm.yml
+issue-sequencer:
+  workflow: feature-dev   # "feature-dev" (default) | "single"
+```
+
+- `feature-dev` (default): the standard role graph — `plan(planner) → implement(implementer) →
+  test(tester) → review(reviewer) → commit(root, terminal)` plus `fix(implementer)` with rework
+  edges (`test→fix when:failed`, `fix→test when:implemented`, `review→fix when:rejected`) and
+  independent `reviewApproved`/`testsPassed` gates. Same template as `swarm_create_task`'s
+  feature-dev synthesis (`buildDefaultGraph`) — no second layout. Readiness is assign-time
+  derived (`computeReadyNodes`); `swarm_assign_task` role-matches each node.
+- `single`: the legacy single-node wrapper graph (escape hatch, pre-workflow-graphs behavior).
+
+Env override (highest precedence): `PI_SWARM_ISSUES_WORKFLOW=feature-dev|single`. Invalid values
+fail fast at `/swarm issues start` with a precise error naming the source. `/swarm issues start`
+records the resolved mode as `run.workflowMode`. Linkage provenance (queue-entry `taskId` +
+`snapshotHash`, goal fence, cancel-guard, safe-idle holders) is task-level and unchanged by the
+graph shape. Per-issue workflow override in issues.yml is a deferred follow-up. Scope note: the
+graph's implement/fix nodes carry the standard `allowedFiles` policy (unrestricted), same as the
+legacy wrapper.
+
 ### Config sources and precedence (v4.2: YAML-only)
 
 The swarm model pool reads two YAML config sources with strict precedence (low → high):

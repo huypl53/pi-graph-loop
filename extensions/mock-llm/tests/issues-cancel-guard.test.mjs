@@ -50,6 +50,10 @@ if (fail > 0) process.exit(1);
 // === End-to-end replay: seed a real linked run, resolve the token, spawn real pi ===
 process.env.PI_SWARM_AGENT_ID = "root";
 process.env.PI_SWARM_IS_ROOT = "1";
+// workflow-graphs: the fixture's subject is the single-node wrapper (nodeId "start") — pin the
+// legacy workflow for this replay. The B1 cancel-guard is graph-agnostic; wrapper semantics
+// unchanged. (Feature-dev subject covered by issues-workflow-graphs.test.mjs T8.)
+process.env.PI_SWARM_ISSUES_WORKFLOW = "single";
 const { spawnSync } = await import("node:child_process");
 const { paths, readState } = await import(join(swarmSrc, "state.ts"));
 const { getIssueRun } = await import(join(swarmSrc, "issues", "state.ts"));

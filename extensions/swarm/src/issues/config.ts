@@ -50,3 +50,43 @@ export function resolveIssueAdvancement(cwd: string): IssueAdvancement {
 export function shouldAutoAdvance(cwd: string): boolean {
 	return resolveIssueAdvancement(cwd) === "auto";
 }
+
+// === workflow-graphs: issue workflow resolution (same pattern as advancement) ===
+export type IssueWorkflow = "feature-dev" | "single";
+
+const VALID_WORKFLOWS: ReadonlySet<string> = new Set(["feature-dev", "single"]);
+
+function normalizeWorkflow(raw: unknown): IssueWorkflow | undefined {
+	if (typeof raw !== "string") return undefined;
+	const v = raw.toLowerCase().trim();
+	return (VALID_WORKFLOWS as Set<string>).has(v) ? (v as IssueWorkflow) : undefined;
+}
+
+/**
+ * Resolve the issue workflow template. Order (first match wins):
+ *   1. env PI_SWARM_ISSUES_WORKFLOW ("feature-dev" | "single", case/space-insensitive)
+ *   2. .pi/swarm.yml → issue-sequencer.workflow
+ *   3. default "feature-dev" (the standard role graph)
+ * Throws on an invalid env/yml value (precise error naming the source); never falls through.
+ */
+export function resolveIssueWorkflow(cwd: string): IssueWorkflow {
+	const envRaw = process.env.PI_SWARM_ISSUES_WORKFLOW;
+	if (envRaw !== undefined && envRaw !== "") {
+		const env = normalizeWorkflow(envRaw);
+		if (!env) throw invalidErr("env", "PI_SWARM_ISSUES_WORKFLOW", envRaw);
+		return env;
+	}
+	let cfg: Record<string, any> | null = null;
+	try {
+		cfg = readSwarmYml(cwd);
+	} catch {
+		cfg = null; // corrupt/absent yml defers to default
+	}
+	const ymlRaw = (cfg as any)?.["issue-sequencer"]?.workflow;
+	if (ymlRaw !== undefined && ymlRaw !== null && ymlRaw !== "") {
+		const yml = normalizeWorkflow(ymlRaw);
+		if (!yml) throw invalidErr("config", "issue-sequencer.workflow", String(ymlRaw));
+		return yml;
+	}
+	return "feature-dev";
+}
