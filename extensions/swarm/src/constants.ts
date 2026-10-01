@@ -103,6 +103,14 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 # defaultModel: glm-5.1
 # defaultProvider: zai-coding-cn
 
+# --- Issue sequencer (optional; controls /swarm issues run advancement) --------
+# auto (default) advances to the next issue when the current one completes
+# (safe-idle gated). manual holds each done issue in a waiting-manual state and
+# sends exactly one root notice carrying /swarm issues resume — nothing advances
+# until a human resumes. Env override: PI_SWARM_ISSUES_ADVANCEMENT=manual|auto.
+# issue-sequencer:
+#   advancement: auto
+
 # --- Global opt-out (optional) -----------------------------------------------
 # inheritGlobal: false           # ignore ~/.pi/agent/swarm.yml for this project
 `;

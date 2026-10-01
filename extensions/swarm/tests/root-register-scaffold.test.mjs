@@ -104,6 +104,10 @@ console.log("\n[1] '/swarm register here root' scaffolds .pi/swarm.yml in a fres
 	if (ymlExists) {
 		const content = readFileSync(ymlPath, "utf8");
 		ok("case1: .pi/swarm.yml has expected placeholder content", content === POOL_SCAFFOLD_YML_PLACEHOLDER);
+		ok(
+			"case1: placeholder documents issue-sequencer.advancement (discoverable on register)",
+			content.includes("issue-sequencer"),
+		);
 	}
 
 	const stPath = join(case1, ".pi", "swarm", "swarm-state.json");
