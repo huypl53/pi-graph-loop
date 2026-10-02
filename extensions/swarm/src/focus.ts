@@ -26,6 +26,7 @@ export type FocusSkipReason =
 	| "already-focused-live"
 	| "cooldown"
 	| "user-focused-outside-agents-workspace"
+	| "user-focused-elsewhere-in-session"
 	| "root-busy-hold"
 	| "active_window_mismatch"
 	| "no_busy_agent"
@@ -323,18 +324,28 @@ export async function maybeAutoFocusOnBusy(
 		}
 	}
 
-	// Cross-workspace guard — D1 policy switch (task herdr-autofocus-parity-20260927).
-	// Herdr-only (herdr `tab focus` is GLOBAL; tmux `select-window` is session-scoped, guard
-	// is a no-op under tmux). Policies:
-	//   follow   (default): S2 fix (task swarm-autofocus-focus-steal) — the user must already be
-	//             inside the agents workspace to be pulled along; a user in a DIFFERENT herdr
-	//             workspace is never stolen (the old root-idle carve-out was the dominant steal:
-	//             root is between turns most of the time). Guard query failures fail CLOSED.
+	// Cross-workspace guard — D1 policy switch (task herdr-autofocus-parity-20260927; tmux
+	// parity added in swarm-autofocus-round2). Applies to BOTH drivers:
+	//   herdr: `tab focus` is GLOBAL — veto when the user's focused workspace differs from the
+	//          agents workspace. Query failure AND "query OK but no focused row" (undefined)
+	//          both fail CLOSED under follow/suppress (hole e: undefined used to bypass the
+	//          veto entirely; only thrown queries failed closed — contradicting 8fc0748).
+	//   tmux:  `select-window` is session-scoped ONLY for non-attached callers; when the user
+	//          is attached to the agents session, it steals the visible window (hole b). The
+	//          guard therefore also runs under tmux via driver getFocusStatus (same argv the
+	//          settle path already uses): veto when the live active window is neither the
+	//          target agent's window/pane/tab nor its owning tab. This closes hole (a) for the
+	//          sticky-agent case too: a user who navigated away is re-detected per call, so
+	//          spaced tool calls no longer outlive the 2.5s cooldown into repeated steals.
+	// Policies:
+	//   follow   (default): the user must already be looking at the agents workspace (herdr) or
+	//             the target agent's window (tmux) to be pulled along; otherwise skip.
 	//   steal:    guard dropped entirely (pre-05d7df9 behavior).
 	//   suppress: guard always vetoes with "user-focused-outside-agents-workspace" (05d7df9).
 	// force/bypassActiveGuard unchanged; explicit /swarm focus unaffected.
 	if (!options?.force && !options?.bypassActiveGuard) {
 		const driver = getTerminalDriver();
+		const policy = getAutoFocusPolicy(st);
 		if (driver.id === "herdr") {
 			const targetAgentsWorkspace = agent.tmuxSession || st.tmuxSession;
 			if (targetAgentsWorkspace) {
@@ -351,19 +362,22 @@ export async function maybeAutoFocusOnBusy(
 					// silently disable the cross-workspace guard (fail-open). steal proceeds by contract.
 					workspaceQueryFailed = true;
 				}
-				if (workspaceQueryFailed && getAutoFocusPolicy(st) !== "steal") {
+				// Hole (e): a query that SUCCEEDS but reports no focused row (undefined workspace)
+				// is equally unknown focus — fail closed under follow/suppress exactly like a
+				// thrown query. steal proceeds by contract.
+				if ((workspaceQueryFailed || currentFocusedWorkspace === undefined) && policy !== "steal") {
 					await traceFocusSkip(p, ctx.cwd, "busy", agentId, "user-focused-outside-agents-workspace", {
-						policy: getAutoFocusPolicy(st),
-						guardQueryFailed: true,
+						policy,
+						guardQueryFailed: workspaceQueryFailed,
+						guardFocusUnknown: currentFocusedWorkspace === undefined,
 					});
 					return { switched: false, targetAgentId: agent.id, reason: "user-focused-outside-agents-workspace" };
 				}
 				const userOutsideAgentsWorkspace =
-					currentFocusedWorkspace &&
+					currentFocusedWorkspace !== undefined &&
 					currentFocusedWorkspace !== targetAgentsWorkspace &&
 					!isSameWorkspaceId(currentFocusedWorkspace, targetAgentsWorkspace);
 				if (userOutsideAgentsWorkspace) {
-					const policy = getAutoFocusPolicy(st);
 					if (policy === "suppress") {
 						await traceFocusSkip(p, ctx.cwd, "busy", agentId, "user-focused-outside-agents-workspace", { policy });
 						return { switched: false, targetAgentId: agent.id, reason: "user-focused-outside-agents-workspace" };
@@ -378,6 +392,48 @@ export async function maybeAutoFocusOnBusy(
 						return { switched: false, targetAgentId: agent.id, reason };
 					}
 					// policy === "steal": allow the pull (explicit opt-in).
+				}
+			}
+		} else if (driver.id === "tmux") {
+			// Hole (b) + hole (a) — tmux cross-window guard (swarm-autofocus-round2).
+			// The settle path already consults getFocusStatus (isCurrentActiveTmuxWindow); the busy
+			// path must apply the same live check. Veto when the session is alive and the active
+			// window/pane is known but does NOT belong to the target agent. Unknown focus (query
+			// failure / session dead / no window info) keeps the pre-existing behavior: proceed to
+			// focus (a detached user's select-window steals nothing visible). suppress vetoes on
+			// ANY live mismatch, follow vetoes on live mismatch (same reason shape as herdr),
+			// steal ignores the guard entirely.
+			if (policy !== "steal") {
+				const session = agent.tmuxSession || st.tmuxSession;
+				let status;
+				try {
+					status = await driver.getFocusStatus(pi, session, { order: "name-first" });
+				} catch (err: any) {
+					await logSwarmError(ctx.cwd, "focus", "cross_window_guard.query_failed", err, { agentId, session });
+					status = undefined; // unknown focus → fail-open under tmux (pre-existing shape)
+				}
+				const liveWin = status?.activeWindowName;
+				const liveIdx = status?.activeWindowIndex;
+				const livePane = status?.activePaneId;
+				if (status?.sessionAlive && (liveWin || liveIdx || livePane)) {
+					let focusedOnTarget = false;
+					if (agent.tmuxWindow && agent.tmuxWindow !== "unknown" && (agent.tmuxWindow === liveWin || agent.tmuxWindow === liveIdx)) {
+						focusedOnTarget = true;
+					}
+					if (!focusedOnTarget && agent.tmuxTarget && agent.tmuxTarget !== "unknown" && (agent.tmuxTarget === livePane || agent.tmuxTarget.endsWith(`:${liveIdx}.0`))) {
+						focusedOnTarget = true;
+					}
+					if (!focusedOnTarget && agent.id && (agent.id === liveWin || agent.id === liveIdx)) {
+						focusedOnTarget = true;
+					}
+					if (!focusedOnTarget) {
+						await traceFocusSkip(p, ctx.cwd, "busy", agentId, "user-focused-elsewhere-in-session", {
+							policy,
+							liveWindow: liveWin ?? null,
+							livePane: livePane ?? null,
+						});
+						return { switched: false, targetAgentId: agent.id, reason: "user-focused-elsewhere-in-session" };
+					}
 				}
 			}
 		}
@@ -485,6 +541,67 @@ export async function maybeAutoFocusBusyAgent(
 	if (!targetAgent) {
 		await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, "no_busy_agent");
 		return { switched: false, reason: "no_busy_agent" };
+	}
+
+	// Hole (d) — swarm-autofocus-round2: the settle path previously had NO cross-workspace
+	// policy guard (the busy path's guard was busy-only). Under herdr, getFocusStatus scopes
+	// its query to the AGENTS workspace, so a per-workspace last-active tab satisfies
+	// isCurrentActiveTmuxWindow even while the user's GLOBAL focus sits in another workspace —
+	// and the handoff then stole focus. Port the busy-path policy guard (follow/suppress/steal)
+	// here, verbatim semantics: follow never pulls a user out of a different workspace,
+	// suppress always vetoes, steal opts out; force/bypassActiveGuard respected; undefined or
+	// failed focus query fails CLOSED under follow/suppress (same hole-(e) contract).
+	if (!options?.force && !options?.bypassActiveGuard) {
+		const driver = getTerminalDriver();
+		if (driver.id === "herdr") {
+			const targetAgentsWorkspace = targetAgent.tmuxSession || session || st.tmuxSession;
+			if (targetAgentsWorkspace) {
+				let currentFocusedWorkspace: string | undefined;
+				let workspaceQueryFailed = false;
+				try {
+					currentFocusedWorkspace = await driver.getFocusedWorkspaceId(pi);
+				} catch (err: any) {
+					await logSwarmError(ctx.cwd, "focus", "settle_cross_workspace_guard.query_failed", err, {
+						settlingAgentId,
+						targetAgentId: targetAgent.id,
+						targetAgentsWorkspace,
+					});
+					workspaceQueryFailed = true;
+				}
+				const policy = getAutoFocusPolicy(st);
+				if ((workspaceQueryFailed || currentFocusedWorkspace === undefined) && policy !== "steal") {
+					await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, "user-focused-outside-agents-workspace", {
+						policy,
+						targetAgentId: targetAgent.id,
+						guardQueryFailed: workspaceQueryFailed,
+						guardFocusUnknown: currentFocusedWorkspace === undefined,
+					});
+					return { switched: false, targetAgentId: targetAgent.id, reason: "user-focused-outside-agents-workspace" };
+				}
+				const userOutsideAgentsWorkspace =
+					currentFocusedWorkspace !== undefined &&
+					currentFocusedWorkspace !== targetAgentsWorkspace &&
+					!isSameWorkspaceId(currentFocusedWorkspace, targetAgentsWorkspace);
+				if (userOutsideAgentsWorkspace) {
+					if (policy === "suppress") {
+						await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, "user-focused-outside-agents-workspace", {
+							policy,
+							targetAgentId: targetAgent.id,
+						});
+						return { switched: false, targetAgentId: targetAgent.id, reason: "user-focused-outside-agents-workspace" };
+					}
+					if (policy === "follow") {
+						const reason = isRootMidTurn(st) ? "root-busy-hold" : "user-focused-outside-agents-workspace";
+						await traceFocusSkip(p, ctx.cwd, "settle", settlingAgentId, reason, {
+							policy,
+							targetAgentId: targetAgent.id,
+						});
+						return { switched: false, targetAgentId: targetAgent.id, reason };
+					}
+					// policy === "steal": allow the pull (explicit opt-in).
+				}
+			}
+		}
 	}
 
 	// 5. Execute switch

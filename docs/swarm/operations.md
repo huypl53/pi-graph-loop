@@ -657,24 +657,24 @@ via `TerminalDriver.getFocusedWorkspaceId`, and applies the configured **auto-fo
 
 | Policy | Busy-path behavior (user outside agents workspace) | Use case |
 |---|---|---|
-| `follow` (default) | **Never pulls a user out of a different workspace.** Root mid-turn ⇒ skip with `root-busy-hold`; root idle ⇒ skip with `user-focused-outside-agents-workspace` (the old root-idle carve-out — the dominant steal — was removed in `swarm-autofocus-focus-steal`). Pulls happen only when the user is already inside the agents workspace. | Normal swarm work: follow worker activity without ever losing your workspace. |
+| `follow` (default) | **Never pulls a user out of a different context.** On herdr, follows only when user is in agents workspace; on tmux, follows only when session is attached and user is viewing the target worker window. A different window/workspace vetoes (`user-focused-elsewhere-in-session`, `root-busy-hold`, or `user-focused-outside-agents-workspace`). Unknown focus fails closed for herdr; detached/unknown tmux focus fails open (switching a detached session does not move the visible user). | Normal swarm work without stealing focus. |
 | `steal` | Always pull (pre-`05d7df9` behavior; guard dropped). | User explicitly wants every worker event to steal focus. |
 | `suppress` | Never pull — skip with `user-focused-outside-agents-workspace` (the `05d7df9` behavior). | User wants to stay in their own workspace and use `/swarm focus` manually. |
 
 Switch policies with `/swarm auto-focus follow|steal|suppress` (traces `swarm.auto_focus.policy_set`;
-also sets auto-focus enabled). `force` / `bypassActiveGuard` are unchanged. The guard is herdr-only:
-tmux is policy-neutral (`select-window` is session-scoped). Explicit `/swarm focus` (calls
-`focusAgentWindow` directly) and the settle path are unaffected. Query failures fail CLOSED under
-`follow`/`suppress` (skip with `user-focused-outside-agents-workspace`, `guardQueryFailed: true`) with a
-durable `cross_workspace_guard.query_failed` error log at the caller's cwd; `steal` proceeds by contract.
+also sets auto-focus enabled). `force` / `bypassActiveGuard` are unchanged. Busy and settle paths both
+apply the cross-context guard. Herdr unknown/failed focus queries fail CLOSED under `follow`/`suppress`
+(skip with `user-focused-outside-agents-workspace`, `guardQueryFailed: true`) with a durable
+`cross_workspace_guard.query_failed` error log; tmux detached/unknown focus fails OPEN because a
+window switch in a detached session cannot steal the user's visible focus; `steal` proceeds by contract.
 
 #### Skip observability (focus.skip)
 
 Every auto-focus skip on every driver emits a durable `focus.skip` trace in
 `.pi/swarm/traces/events.jsonl` with `{ path: "busy" | "settle", agentId, reason }` and a stable
 reason enum: `root_excluded | disabled | root_or_unknown_agent | agent_not_busy | already_focused |
-already-focused-live | cooldown | user-focused-outside-agents-workspace | root-busy-hold |
-active_window_mismatch | no_busy_agent | switch_failed`. Successful switches still trace
+already-focused-live | cooldown | user-focused-outside-agents-workspace | user-focused-elsewhere-in-session |
+root-busy-hold | active_window_mismatch | no_busy_agent | switch_failed`. Successful switches still trace
 `tmux.focus.switch`. This makes focus-decision bugs diagnosable from artifacts alone.
 
 #### Live-focus check (D2) and settle-path pane matching (D3)
