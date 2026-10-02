@@ -8,7 +8,7 @@
  *  4) commit node auto-close is blocked without real commit evidence and surfaces unverified evidence
  */
 
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,8 +61,49 @@ const readMailbox = (agentId) =>
 		.filter(Boolean)
 		.map((l) => JSON.parse(l));
 
+// swarm_register_agent is retired from the live tool surface (R31-era 21-tool trim); seed the
+// agent record directly into swarm-state.json (canonical pattern: rework-reopen Scenario 8).
 async function ensureWorker(id, roleKind) {
-	await call("swarm_register_agent", { id, role: `${roleKind} test agent`, roleKind, tmuxTarget: "unknown", inject: false });
+	mkdirSync(join(scratch, ".pi", "swarm"), { recursive: true });
+	const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
+	const st = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { swarmId: "row75-test", tmuxSession: "x", rootId: "root", agents: {}, delivered: {}, messages: {} };
+	st.agents = st.agents || {};
+	if (!st.agents[id])
+		st.agents[id] = {
+			id,
+			role: `${roleKind} test agent`,
+			roleKind,
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: roleKind === "root" ? 99 : 1,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd: scratch,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		};
+	writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
+}
+
+// Minimal protocol (gate=1): terminal updates need a verified reply to the assignment message.
+async function replyResult(agentId, taskId, nodeId) {
+	const assignmentMessageId = readTask(taskId).nodes[nodeId]?.assignmentMessageId;
+	if (!assignmentMessageId) return;
+	const prev = process.env.PI_SWARM_AGENT_ID;
+	process.env.PI_SWARM_AGENT_ID = agentId;
+	try {
+		await call("swarm_send_message", { to: "root", replyTo: assignmentMessageId, body: `result for ${taskId}/${nodeId}`, cwd: scratch });
+	} finally {
+		process.env.PI_SWARM_AGENT_ID = prev;
+	}
 }
 
 try {
@@ -121,6 +162,17 @@ try {
 	ok("assignment body uses task-absolute write artifact path", msg.body.includes(`.pi/swarm/tasks/${taskId}/artifacts/plan.md`));
 	ok("assignment note rewrites relative artifact path", msg.body.includes(`.pi/swarm/tasks/${taskId}/artifacts/analysis-a1.md`));
 
+	// Issue 85 (#2) semantics: an idle agent still carrying an activeTaskIds pointer blocks the
+	// all-idle epoch (assignment-in-flight). writer-1's leg ends here, so close its assignment
+	// the way the live terminal flow would (root force done releases the pointer) before the
+	// stall evaluation below.
+	{
+		// Minimal protocol: even a root force-terminal on a requiresResponse assignment needs the
+		// verified reply first (the worker's result reply), so send it as writer-1.
+		await replyResult("writer-1", taskId, "plan");
+		await call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
+	}
+
 	// 3) terminal-but-recoverable failed graph still nudges
 	await ensureWorker("planner-2", "planner");
 	await ensureWorker("impl-2", "implementer");
@@ -176,6 +228,7 @@ try {
 	await call("swarm_assign_task", { taskId: task2, nodeId: "plan", agentId: "planner-2", cwd: scratch });
 	const planAttempt = readTask(task2).nodes.plan.activeAttemptId;
 	process.env.PI_SWARM_AGENT_ID = "planner-2";
+	await replyResult("planner-2", task2, "plan");
 	await call("swarm_update_task", {
 		taskId: task2,
 		nodeId: "plan",
@@ -189,6 +242,7 @@ try {
 	await call("swarm_assign_task", { taskId: task2, nodeId: "implement", agentId: "impl-2", cwd: scratch });
 	const implAttempt = readTask(task2).nodes.implement.activeAttemptId;
 	process.env.PI_SWARM_AGENT_ID = "impl-2";
+	await replyResult("impl-2", task2, "implement");
 	await call("swarm_update_task", {
 		taskId: task2,
 		nodeId: "implement",
@@ -202,6 +256,7 @@ try {
 	await call("swarm_assign_task", { taskId: task2, nodeId: "test", agentId: "tester-2", cwd: scratch });
 	const testAttempt = readTask(task2).nodes.test.activeAttemptId;
 	process.env.PI_SWARM_AGENT_ID = "tester-2";
+	await replyResult("tester-2", task2, "test");
 	await call("swarm_update_task", {
 		taskId: task2,
 		nodeId: "test",
@@ -267,6 +322,7 @@ try {
 	await call("swarm_assign_task", { taskId: task3, nodeId: "plan", agentId: "planner-2", cwd: scratch });
 	const task3Plan = readTask(task3).nodes.plan.activeAttemptId;
 	process.env.PI_SWARM_AGENT_ID = "planner-2";
+	await replyResult("planner-2", task3, "plan");
 	await call("swarm_update_task", {
 		taskId: task3,
 		nodeId: "plan",
@@ -280,6 +336,7 @@ try {
 	await call("swarm_assign_task", { taskId: task3, nodeId: "implement", agentId: "impl-2", cwd: scratch });
 	const task3Impl = readTask(task3).nodes.implement.activeAttemptId;
 	process.env.PI_SWARM_AGENT_ID = "impl-2";
+	await replyResult("impl-2", task3, "implement");
 	await call("swarm_update_task", {
 		taskId: task3,
 		nodeId: "implement",
@@ -293,6 +350,7 @@ try {
 	await call("swarm_assign_task", { taskId: task3, nodeId: "test", agentId: "tester-2", cwd: scratch });
 	const task3Test = readTask(task3).nodes.test.activeAttemptId;
 	process.env.PI_SWARM_AGENT_ID = "tester-2";
+	await replyResult("tester-2", task3, "test");
 	await call("swarm_update_task", {
 		taskId: task3,
 		nodeId: "test",
@@ -306,6 +364,7 @@ try {
 	await call("swarm_assign_task", { taskId: task3, nodeId: "review", agentId: "reviewer-1", cwd: scratch });
 	const task3Review = readTask(task3).nodes.review.activeAttemptId;
 	process.env.PI_SWARM_AGENT_ID = "reviewer-1";
+	await replyResult("reviewer-1", task3, "review");
 	await call("swarm_update_task", {
 		taskId: task3,
 		nodeId: "review",
@@ -437,12 +496,14 @@ try {
 	await call("swarm_assign_task", { taskId: task4, nodeId: "plan", agentId: "planner-2", cwd: scratch });
 	const t4Plan = readTask(task4).nodes.plan.activeAttemptId;
 	process.env.PI_SWARM_AGENT_ID = "planner-2";
+	await replyResult("planner-2", task4, "plan");
 	await call("swarm_update_task", { taskId: task4, nodeId: "plan", status: "done", outcome: "planned", attemptId: t4Plan, cwd: scratch });
 	process.env.PI_SWARM_AGENT_ID = "root";
 	process.env.PI_SWARM_IS_ROOT = "1";
 	await call("swarm_assign_task", { taskId: task4, nodeId: "implement", agentId: "impl-4", cwd: scratch });
 	const t4Impl = readTask(task4).nodes.implement.activeAttemptId;
 	process.env.PI_SWARM_AGENT_ID = "impl-4";
+	await replyResult("impl-4", task4, "implement");
 	await call("swarm_update_task", {
 		taskId: task4,
 		nodeId: "implement",

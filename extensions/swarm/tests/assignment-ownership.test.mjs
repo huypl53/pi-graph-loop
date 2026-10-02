@@ -18,7 +18,7 @@
  *  12. Self-heal race simulation: writeTaskState failure between auto-stamp and return -> recipient's
  *      swarm_update_task lands in claim branch (24.a) and self-heals; no deadlock
  */
-import { rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { rmSync, readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -136,13 +136,35 @@ const readEvents = (taskId) => {
 };
 
 async function ensureWorker(agentId, roleKind) {
-	await awaitAs(agentId, "swarm_register_agent", {
+	// swarm_register_agent is retired from the live tool surface (R31-era 21-tool trim); seed the
+	// agent record directly into swarm-state.json (canonical pattern: rework-reopen Scenario 8).
+	const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
+	const seedAgent = (id, kind) => ({
+		id,
+		role: `test ${kind}`,
+		roleKind: kind,
+		roleKindExplicit: true,
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: kind === "root" ? 99 : 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: "x",
+		tmuxWindow: "unknown",
 		tmuxTarget: "unknown",
-		role: `test ${roleKind}`,
-		roleKind,
-		id: agentId,
-		inject: false,
+		model: "m",
+		provider: "p",
+		cwd: scratch,
+		mailbox: "x",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
 	});
+	const st = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { swarmId: "assignment-ownership-test", tmuxSession: "x", rootId: "root", agents: {}, delivered: {}, messages: {} };
+	st.agents = st.agents || {};
+	if (!st.agents[agentId]) st.agents[agentId] = seedAgent(agentId, roleKind);
+	st.agents.root = st.agents.root || seedAgent("root", "root");
+	writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
 }
 
 async function createTask(extra = {}) {
@@ -381,7 +403,13 @@ console.log("\n[7] assignment-style message to different assignee -> stamp + mis
 console.log("\n[8] failTaskTool coverage table: each listed site has actionableHint or suggestedNextCall");
 {
 	const { readFile } = await import("node:fs/promises");
-	const src = await readFile(join(here, "..", "src", "tools", "tasks.ts"), "utf8");
+	// The §24.c error sites moved from the tasks.ts monolith into src/tools/tasks/* AND
+	// src/primitives/task-core.ts during the phase-5/6 + task-core extractions; scan both trees
+	// so the static guard follows the code.
+	const scanDirs = [join(here, "..", "src", "tools", "tasks"), join(here, "..", "src", "primitives")];
+	const src = scanDirs
+		.flatMap((d) => readdirSync(d).filter((f) => f.endsWith(".ts")).map((f) => readFileSync(join(d, f), "utf8")))
+		.join("\n");
 	// The 6 §24.c sites are identified by error code + a unique substring near them. We check
 	// each by scanning the source for the error code + the next 350 chars; the hint must appear.
 	const checks = [

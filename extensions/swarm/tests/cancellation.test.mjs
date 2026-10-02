@@ -15,7 +15,7 @@
 //   - Edit lock release: cancellation releases advisory edit locks for the cancelled nodes
 //   - Historical compatibility: tasks without attemptHistory/cancelledAt remain readable
 //   - Helper: isTaskOrNodeCancelled correctness
-import { rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { rmSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -195,6 +195,9 @@ const materializeAssignments = (taskId, nodeIds) => {
 				updatedAt: new Date().toISOString(),
 				attempts: 1,
 				requiresAck: true,
+				// Minimal-protocol (gate=1) assignments carry requiresResponse=true (assign.ts:570);
+				// the reply auto-verify fence only engages on records with it set.
+				requiresResponse: true,
 				conversationId: `task:${taskId}:${nodeId}`,
 				subject: "assignment",
 				priority: "normal",
@@ -315,13 +318,36 @@ const materializeAssignments = (taskId, nodeIds) => {
 		Boolean(stAfter.messages[msgId]?.superseded),
 		`superseded=${JSON.stringify(stAfter.messages[msgId]?.superseded)}`,
 	);
+	// swarm_ack_message is retired under minimal protocol (gate=1); the live late-reply path is
+	// a worker result reply to the superseded assignment, which is fenced with
+	// TRACE_REPLY_REJECTED_SUPERSEDED (mailbox.ts): the original record's response.status is NOT
+	// mutated and response debt is NOT cleared.
 	await setAgent("planner-01", false);
 	const call2 = makeCall();
-	const { ok: codeOk, err } = await expectErr(
-		() => call2("swarm_ack_message", { messageId: msgId, status: "processing", cwd: scratch }),
-		"ASSIGNMENT_SUPERSEDED",
+	const before = JSON.parse(readFileSync(statePath, "utf8")).messages[msgId];
+	const reply = await call2("swarm_send_message", { to: "root", replyTo: msgId, body: "late result after cancel", cwd: scratch });
+	const replyId = asJson(reply)[0]?.id;
+	const stAfterReply = JSON.parse(readFileSync(statePath, "utf8"));
+	const original = stAfterReply.messages[msgId];
+	ok(
+		"late reply to superseded assignment does NOT verify the original",
+		original.response?.status !== "verified" && original.superseded,
+		JSON.stringify(original.response),
 	);
-	ok("late ACK on superseded assignment rejected with ASSIGNMENT_SUPERSEDED", codeOk, err);
+	// The fence is a trace event (TRACE_REPLY_REJECTED_SUPERSEDED) on the swarm traces stream,
+	// not a record-level error; the durable observable is the unverified original + the trace.
+	const tracePath = join(scratch, ".pi/swarm/traces/events.jsonl");
+	const traceText = existsSync(tracePath) ? readFileSync(tracePath, "utf8") : "";
+	ok(
+		"late reply fenced with message.reply_rejected_superseded trace",
+		traceText.includes("message.reply_rejected_superseded"),
+		"trace events tail: " + traceText.trim().split("\n").slice(-4).map((l) => { try { return JSON.parse(l).event; } catch { return "?"; } }).join(","),
+	);
+	ok(
+		"late reply leaves original response debt preserved (unverified)",
+		JSON.stringify(original.response ?? null) === JSON.stringify(before.response ?? null),
+		JSON.stringify({ before: before.response, after: original.response }),
+	);
 }
 
 // === Test 6: reassignment supersession ===

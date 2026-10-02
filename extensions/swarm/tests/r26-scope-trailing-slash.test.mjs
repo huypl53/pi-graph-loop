@@ -17,7 +17,7 @@
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { rmSync, existsSync, readFileSync } from "node:fs";
+import { rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const scratch = join(tmpdir(), `swarm-r26-scope-${process.pid}-${Date.now()}`);
@@ -131,15 +131,47 @@ const awaitAs = async (agentId, name, params) => {
 	}
 };
 
+// swarm_register_agent is retired from the live tool surface (R31-era 21-tool trim); seed the
+// agent record directly into swarm-state.json (canonical pattern: rework-reopen Scenario 8).
 async function ensureWorker(agentId, roleKind) {
-	await awaitAs(agentId, "swarm_register_agent", {
-		tmuxTarget: "unknown",
-		role: `test ${roleKind}`,
-		roleKind,
-		id: agentId,
-		inject: false,
-	});
+	mkdirSync(join(scratch, ".pi", "swarm"), { recursive: true });
+	const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
+	const st = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { swarmId: "r26-scope-test", tmuxSession: "x", rootId: "root", agents: {}, delivered: {}, messages: {} };
+	st.agents = st.agents || {};
+	if (!st.agents[agentId])
+		st.agents[agentId] = {
+			id: agentId,
+			role: `test ${roleKind}`,
+			roleKind,
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: roleKind === "root" ? 99 : 1,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd: scratch,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		};
+	writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
 }
+
+// Minimal protocol (gate=1): terminal swarm_update_task requires a verified reply to the
+// assignment message (RESPONSE_REQUIRED fence, task-core.ts). Workers send the result reply
+// before terminal updates — the live worker protocol (identity.ts:193).
+const replyResult = async (agentId, taskId, nodeId) => {
+	const taskJson = JSON.parse(readFileSync(join(scratch, ".pi", "swarm", "tasks", taskId, "task.json"), "utf8"));
+	const assignmentMessageId = taskJson.nodes[nodeId].assignmentMessageId;
+	if (!assignmentMessageId) return;
+	await awaitAs(agentId, "swarm_send_message", { to: "root", replyTo: assignmentMessageId, body: `result for ${taskId}/${nodeId}` });
+};
 
 await ensureWorker("worker-a", "implementer");
 await ensureWorker("worker-b", "implementer");
@@ -161,6 +193,7 @@ const taskIdA = ctA.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 
 await call("swarm_assign_task", { taskId: taskIdA, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 const planA = JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskIdA}/task.json`), "utf8")).nodes.plan;
+await replyResult("worker-a", taskIdA, "plan");
 await awaitAs("worker-a", "swarm_update_task", {
 	taskId: taskIdA,
 	nodeId: "plan",
@@ -190,6 +223,7 @@ const taskIdB = ctB.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 // Advance 26-b's plan to done before assigning implement
 await call("swarm_assign_task", { taskId: taskIdB, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 const planB = JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskIdB}/task.json`), "utf8")).nodes.plan;
+await replyResult("worker-a", taskIdB, "plan");
 await awaitAs("worker-a", "swarm_update_task", {
 	taskId: taskIdB,
 	nodeId: "plan",
@@ -230,6 +264,7 @@ const taskIdC = ctC.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 // Advance plan first
 await call("swarm_assign_task", { taskId: taskIdC, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 const planC = JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskIdC}/task.json`), "utf8")).nodes.plan;
+await replyResult("worker-a", taskIdC, "plan");
 await awaitAs("worker-a", "swarm_update_task", {
 	taskId: taskIdC,
 	nodeId: "plan",
@@ -267,6 +302,7 @@ const taskIdD = ctD.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 // Advance plan first
 await call("swarm_assign_task", { taskId: taskIdD, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 const planD = JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${taskIdD}/task.json`), "utf8")).nodes.plan;
+await replyResult("worker-a", taskIdD, "plan");
 await awaitAs("worker-a", "swarm_update_task", {
 	taskId: taskIdD,
 	nodeId: "plan",

@@ -38,7 +38,7 @@ import {
 import { resolveTaskStallLocked } from "../reconcile.ts";
 import { readTaskByRef, taskPaths, traceTask, writeTaskState, type Paths } from "../state.ts";
 import { heartbeatRootLeader, ensureRoot } from "../identity.ts";
-import { now, safeId, inferRoleKind, isSafeRelativePath, textResult } from "../utils.ts";
+import { ensureAgentDefaults, now, safeId, inferRoleKind, isSafeRelativePath, textResult } from "../utils.ts";
 import { writeBaselineCommit, attachGitDiffStat, validateAttestations } from "../trace.ts";
 import { CANCELLATION_REASON, TERMINAL_NODE_STATUSES, PI_SWARM_MINIMAL_PROTOCOL, TRACE_LATE_RESULT_REJECTED, TRACE_LIFECYCLE_DERIVED, TRACE_TASK_ATTEMPT_FORCE_REOPEN } from "../constants.ts";
 import { stampCloseEvidenceIfMissing, checkLateResultRejection, stampLateResultRejectionOnInboundMessage } from "../tools/tasks/fencing.ts";
@@ -489,7 +489,12 @@ export async function updateTaskCore(p: Paths, deps: TaskCoreDeps, params: any, 
 			params.nodeId,
 			params.attemptId,
 		);
-		throw new Error(`__LATE_RESULT_REFUSED__:${JSON.stringify(lateRefusal)}`);
+		// Convert to a marker RESULT (not a throw) so the facade layer can turn it into the
+		// structured refusal envelope. The pre-extraction facade caught the sentinel Error;
+		// the 70f8792 extraction dropped that catch, letting the raw sentinel leak to the model
+		// (regression: attempt-fencing envelope legs). Returning keeps state unmutated by the
+		// late result — the facade performs NO node mutation on this path.
+		return { __lateResultRefused: true, refusal: lateRefusal };
 	}
 
 	await failTaskTool(
