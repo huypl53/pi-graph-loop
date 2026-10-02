@@ -20,6 +20,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 // Force the env var so the constants module picks it up on import. Setting it here (before import)
 // is critical — Number(process.env.PI_SWARM_ORPHAN_TIMEOUT_MS) is evaluated at module load time.
 process.env.PI_SWARM_ORPHAN_TIMEOUT_MS = "50";
+// Isolation: mock pi.exec serves the tmux boundary — pin the terminal driver to tmux so the
+// repo root's real .pi/swarm.yml (terminalManager: herdr) cannot route spawn/stop through
+// the herdr driver (whose `workspace list` would fail against the mock and throw).
+process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
 
 // Direct imports of the cores + types we exercise. Real handlers, real lock, real state.
 const { spawnAgent, stopAgent, restartAgent, fireOrphanWarning, armOrphanWatch, clearOrphanWatch, recentSpawnCount, isSameRootLeader } =
