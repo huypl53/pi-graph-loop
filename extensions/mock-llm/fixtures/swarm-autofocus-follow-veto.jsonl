@@ -1,0 +1,2 @@
+{"name":"worker probe turn","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Checking my assigned task board before continuing.","chunks":["Checking my assigned task ","board before continuing."]},{"type":"toolcall","name":"swarm_task_status","arguments":{"taskId":"nonexistent-probe"},"delayMs":10}]}
+{"name":"worker settle turn","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Probe done — nothing actionable on the board right now.","chunks":["Probe done — nothing ","actionable on the board right now."]}]}
