@@ -240,9 +240,9 @@ await asyncTest("GREEN: herdr + getFocusedWorkspaceId query failure → fail-CLO
 	rmSync(scratch, { recursive: true, force: true });
 });
 
-console.log("\n=== Tmux path unaffected: guard is a no-op under tmux ===");
+console.log("\n=== Tmux path: cross-window guard added in swarm-autofocus-round2 (hole b) ===");
 
-await asyncTest("GREEN: tmux + user on different window → busy path proceeds (guard is a no-op under tmux)", async () => {
+await asyncTest("UPDATED: tmux + user on different window → busy path SKIPS (hole-b cross-window guard; superseded by auto-focus-round2)", async () => {
 	const scratch = join(tmpdir(), `swarm-af-guard-tmux-${process.pid}-${Date.now()}`);
 	mkdirSync(scratch, { recursive: true });
 	const p = paths(scratch);
@@ -251,19 +251,19 @@ await asyncTest("GREEN: tmux + user on different window → busy path proceeds (
 	const agentsPaneId = "sess:worker-a.0";
 	await writeState(p, baseState(scratch, agentsWsId, agentsTabId, agentsPaneId));
 
-	// tmux display-message returns a different window. The busy path (maybeAutoFocusOnBusy)
-	// does NOT have an active_window_mismatch guard — that lives in the settle path
-	// (maybeAutoFocusBusyAgent). Under tmux, the cross-workspace guard is a no-op
-	// (driver.id !== "herdr"), so the busy path proceeds to focusAgentWindow.
+	// swarm-autofocus-round2 hole (b): the busy path now runs the cross-window guard under
+	// tmux too (select-window DOES steal from a user attached to the agents session on
+	// another window — the old "session-scoped, no-op" claim was false). The live focus is
+	// a different window → follow policy vetoes with the stable skip reason.
 	process.env.TMUX = "1";
 	const { api, execs } = fakePi({
 		tmuxDisplayMessage: "other-window\t5\t%99\n",
 	});
 	setMgr("tmux");
 	const res = await maybeAutoFocusOnBusy(api, { cwd: scratch }, "af-worker");
-	strictEqual(res.switched, true, "tmux busy path must remain unchanged (no cross-workspace guard)");
-	strictEqual(res.reason, "ok");
-	ok(count(execs, "tmux", (e) => e.args[0] === "select-window") >= 1, "tmux select-window call expected");
+	strictEqual(res.switched, false, "tmux busy path must NOT steal from a user on another window");
+	strictEqual(res.reason, "user-focused-elsewhere-in-session", `expected the hole-b skip reason, got: ${res.reason}`);
+	strictEqual(count(execs, "tmux", (e) => e.args[0] === "select-window"), 0, "ZERO select-window calls under steal scenario");
 	strictEqual(count(execs, "herdr"), 0, "ZERO herdr execs under tmux");
 	rmSync(scratch, { recursive: true, force: true });
 	delete process.env.TMUX;

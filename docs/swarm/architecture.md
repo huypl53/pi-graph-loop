@@ -63,7 +63,8 @@ extension no longer registers tools or commands for them.
 ### 0. Focus / auto-focus observability
 Auto-focus (busy + settle paths, `src/focus.ts`) is fully traced: every switch emits
 `tmux.focus.switch`; every skip emits `focus.skip` with `{ path, agentId, reason }` and a stable
-reason enum — policy decisions (`follow`/`steal`/`suppress`, `root-busy-hold`), idle-caller refusals
+reason enum — policy decisions (`follow`/`steal`/`suppress`, `root-busy-hold`,
+`user-focused-elsewhere-in-session`), idle-caller refusals
 (`agent_not_busy`), live-focus and
 pane-matching outcomes (`already-focused-live`, `active_window_mismatch`), and cooldowns are
 all durably visible in `traces/events.jsonl` for every terminal driver. See
