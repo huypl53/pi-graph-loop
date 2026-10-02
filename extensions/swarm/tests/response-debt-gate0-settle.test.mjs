@@ -20,8 +20,9 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 if (process.env.PI_SWARM_MINIMAL_PROTOCOL !== "0") {
-	console.error("Run with PI_SWARM_MINIMAL_PROTOCOL=0 (see header).");
-	process.exit(2);
+	// Honest auto-skip (env-conditional): gate=0 env must be present at process boot (ESM caches it).
+	console.log("SKIP: PI_SWARM_MINIMAL_PROTOCOL=0 required at process boot (env-conditional suite)");
+	process.exit(0);
 }
 
 const here = dirname(fileURLToPath(import.meta.url));

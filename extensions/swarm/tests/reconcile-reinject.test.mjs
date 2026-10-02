@@ -4,6 +4,8 @@
 //
 // Run: node extensions/swarm/reconcile-reinject.test.mjs
 import { rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+// Reinject path is gated to non-minimal protocol (reconcile-core skips it under gate=1).
+process.env.PI_SWARM_MINIMAL_PROTOCOL = "0";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -260,6 +262,8 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 		registerCommand: () => {},
 		on: () => {},
 		exec: async (cmd, args) => {
+			// isTargetAlive probes via `tmux list-panes -t <target>` (success = alive).
+			if (cmd === "tmux" && args[0] === "list-panes") return { code: 0, stdout: "", stderr: "" };
 			if (cmd === "tmux" && args[0] === "display-message") {
 				// pane_alive probe (#{pane_id}) and pi-likeness probe (#{pane_current_command})
 				const fmt = args[args.length - 1];
@@ -275,6 +279,7 @@ const { findIdempotentMessage } = await import(join(here, "..", "src/mailbox.ts"
 		sendMessage: () => {},
 	};
 	factory(pi);
+
 	const rec = await tools["swarm_reconcile"].execute("c", { cwd: scratch }, undefined, undefined, { cwd: scratch });
 	const text = rec?.content?.[0]?.text || "";
 	ok("reconcile reports reinjected for old injected-unacked", /reinject/.test(text));

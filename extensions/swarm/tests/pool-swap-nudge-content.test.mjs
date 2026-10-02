@@ -13,6 +13,7 @@
  * Red criterion: sentMessages[0].m.content CONTAINS errorText substring → BUG.
  */
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { stringify } from "yaml";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,16 +27,14 @@ const { ENGINE_MAX_RETRIES } = await import(join(here, "..", "src", "constants.t
 const dir = await mkdtemp(join(tmpdir(), "pool-swap-nudge-content-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
 await writeFile(
-	join(dir, ".pi", "settings.json"),
-	JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1",
+	join(dir, ".pi", "swarm.yml"),
+	stringify({
+					defaultModel: "glm-5.1",
 			defaultProvider: "zai-coding-cn",
 			modelPool: [
 				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
 				{ model: "gpt-5.4-mini", provider: "openai", weight: 50 },
 			],
-		},
 	}),
 );
 process.chdir(dir);

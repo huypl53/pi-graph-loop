@@ -104,6 +104,10 @@ async function setup({ taskId = "task-1", ageMs = 0, withTask = false, taskStatu
 	const st = await readState(p, dir);
 	ensureRoot(st, dir, p);
 	const ts = new Date().toISOString();
+	// Clear agents left over from previous sections: a ghost busy/stopped agent from an earlier
+	// liveness/vacuous test makes allEffectiveIdleAgents report agent_busy for every later
+	// section (R23 lost 37 assertions to a stale `busy` ghost). Each section seeds its own workers.
+	for (const id of Object.keys(st.agents)) if (id !== "root") delete st.agents[id];
 	st.agents["worker-a"] = {
 		id: "worker-a",
 		role: "worker-a role",

@@ -40,7 +40,9 @@ const pi = {
 		// display-message is overloaded: format arg "-p #{pane_id}" => pane id; "#{pane_current_command}" => command.
 		if (sub === "display-message") {
 			const fmt = args.includes("-p") ? args[args.length - 1] : "";
-			if (fmt === "#{pane_current_command}") return { code: 0, stdout: "node\n", stderr: "" };
+			// inspectProcess sends "#{pane_current_command}\t#{pane_pid}" (tab-joined); match by includes
+			// so the pane reports the pi-like "node" command for the injection gate.
+			if (fmt.includes("pane_current_command")) return { code: 0, stdout: "node\t1234\n", stderr: "" };
 			return { code: 0, stdout: "%99\n", stderr: "" };
 		}
 		if (sub === "capture-pane") return { code: 0, stdout: "", stderr: "" }; // empty pane probe

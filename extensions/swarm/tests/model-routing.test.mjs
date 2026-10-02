@@ -19,8 +19,12 @@ const ok = (name, cond) => {
 	}
 };
 
-// Fast preset stays pinned.
+// Fast preset stays pinned. providerForModel no longer hardcodes model→provider presets
+// (Issue E: never force a provider onto an unknown model); the test sets the env explicitly
+// to assert the env-wins path.
+process.env.PI_SWARM_DEFAULT_PROVIDER = "openai";
 ok("fast model -> openai preset", providerForModel("gpt-5.4-mini") === "openai");
+delete process.env.PI_SWARM_DEFAULT_PROVIDER;
 
 // The bug: unknown models were forced onto zai. After the fix providerForModel returns undefined
 // for unknown models with no settings/env override, instead of a wrong hardcode.

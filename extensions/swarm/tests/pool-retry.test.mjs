@@ -11,6 +11,7 @@
 //
 // Run: node extensions/swarm/pool-retry.test.mjs
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { stringify } from "yaml";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paths, readState } from "../src/state.ts";
@@ -31,10 +32,9 @@ const ok = (name, cond, info) => {
 const dir = await mkdtemp(join(tmpdir(), "pool-retry-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
 await writeFile(
-	join(dir, ".pi", "settings.json"),
-	JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1",
+	join(dir, ".pi", "swarm.yml"),
+	stringify({
+					defaultModel: "glm-5.1",
 			defaultProvider: "zai-coding-cn",
 			modelPool: [
 				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
@@ -42,7 +42,6 @@ await writeFile(
 				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
 			],
 			rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
-		},
 	}),
 );
 process.chdir(dir);
@@ -207,7 +206,7 @@ const turnEnd = handlers["turn_end"][0];
 	ok("fixture 2: glm failure streak bumped (1x)", (glm.health?.failures ?? 0) === 1, `failures=${glm.health?.failures}`);
 	ok(
 		"fixture 2: swap note sent to the agent",
-		sentMessages.some((s) => /MODEL POOL/.test(s.m.content) && /transient/.test(s.m.content)),
+		sentMessages.some((s) => /Pool:/.test(s.m.content) && /transient/.test(s.m.content)),
 	);
 	const gated = await countTraceEvents("pool.swap_gated_by_engine_retry");
 	ok("fixture 2: pool.swap_gated_by_engine_retry fired for strike 1", gated === 1, `gated=${gated}`);

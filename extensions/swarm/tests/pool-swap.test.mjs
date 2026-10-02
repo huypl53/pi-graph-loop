@@ -16,6 +16,7 @@
 //
 // Run: node extensions/swarm/pool-swap.test.mjs
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { stringify } from "yaml";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paths, readState } from "../src/state.ts";
@@ -47,10 +48,9 @@ ok("context overflow -> unknown", classifyProviderError("Prompt is too long: 390
 const dir = await mkdtemp(join(tmpdir(), "pool-swap-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
 await writeFile(
-	join(dir, ".pi", "settings.json"),
-	JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1",
+	join(dir, ".pi", "swarm.yml"),
+	stringify({
+					defaultModel: "glm-5.1",
 			defaultProvider: "zai-coding-cn",
 			modelPool: [
 				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
@@ -58,7 +58,6 @@ await writeFile(
 				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
 			],
 			rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
-		},
 	}),
 );
 process.chdir(dir);
@@ -170,7 +169,7 @@ const glm = ps.slots.find((s) => s.model === "glm-5.1");
 ok("quota benched glm immediately", glm.inCooldown && /quota/.test(glm.health.lastError));
 ok(
 	"swap note sent to the agent",
-	sentMessages.some((s) => /MODEL POOL/.test(s.m.content) && /quota/.test(s.m.content)),
+	sentMessages.some((s) => /Pool:/.test(s.m.content) && /quota/.test(s.m.content)),
 );
 // Issue 17 (binding C3): positive assertion that pool.swap_gated_by_engine_retry fired for the
 // first two gated strikes. The 3rd strike opens the gate; gated count for this burst is exactly 2.

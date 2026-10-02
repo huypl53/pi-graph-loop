@@ -86,7 +86,9 @@ function makePiMock({ tmuxAlive = new Map() } = {}) {
 			if (cmd === "tmux" && args[0] === "list-panes") {
 				const target = args.find((a, i) => a === "-t") ? args[args.indexOf("-t") + 1] : null;
 				const alive = tmuxAlive.get(target) ?? false;
-				return { code: 0, stdout: alive ? "1\n" : "0\n", stderr: "" };
+				// isTargetAlive checks if the command SUCCEEDS (no throw), not the stdout.
+				// Return code 1 when the pane is dead so the driver reports alive=false.
+				return { code: alive ? 0 : 1, stdout: alive ? "1\n" : "", stderr: alive ? "" : "can't find pane" };
 			}
 			return { code: 0, stdout: "", stderr: "" };
 		},
