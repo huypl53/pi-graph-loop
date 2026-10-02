@@ -3,6 +3,7 @@
  * Issue 58 — trace-backed attestation tests.
  */
 import { mkdtemp, mkdir, readFile, rm, writeFile, unlink } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -101,6 +102,45 @@ async function loadExtension({ agentId = "root", isRoot = true } = {}) {
 }
 
 const call = (tools, name, params) => tools[name].execute("call", params, undefined, undefined, { cwd: scratch });
+
+// Direct swarm-state seeding for the retired swarm_register_agent (rework-reopen Scenario 8 pattern).
+async function seedWorker(id, roleKind) {
+	const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
+	const st = existsSync(statePath) ? JSON.parse(await readFile(statePath, "utf8")) : { swarmId: "attestation-test", tmuxSession: "x", rootId: "root", agents: {}, delivered: {}, messages: {} };
+	st.agents = st.agents || {};
+	if (!st.agents[id])
+		st.agents[id] = {
+			id,
+			role: roleKind,
+			roleKind,
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: 1,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd: scratch,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		};
+	await writeFile(statePath, JSON.stringify(st, null, 2) + "\n", "utf8");
+}
+
+// Minimal protocol (gate=1): terminal updates need a verified reply to the assignment message.
+async function replyResult(tools, agentId, taskId, nodeId) {
+	const task = await readTask(taskId);
+	const assignmentMessageId = task.nodes[nodeId]?.assignmentMessageId;
+	if (!assignmentMessageId) return;
+	await as(agentId, false, () => call(tools, "swarm_send_message", { to: "root", replyTo: assignmentMessageId, body: `result for ${taskId}/${nodeId}`, cwd: scratch }));
+}
+
 const as = async (agentId, isRoot, fn) => {
 	const prevId = process.env.PI_SWARM_AGENT_ID;
 	const prevOrch = process.env.PI_SWARM_IS_ROOT;
@@ -128,13 +168,9 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	const { tools } = await loadExtension();
-	await call(tools, "swarm_register_agent", {
-		id: "worker-a",
-		role: "implementer",
-		roleKind: "implementer",
-		tmuxTarget: "unknown",
-		inject: false,
-	});
+	// swarm_register_agent is retired from the live tool surface (R31-era 21-tool trim); seed the
+// agent record directly into swarm-state.json (canonical pattern: rework-reopen Scenario 8).
+await seedWorker("worker-a", "implementer");
 	const ct = await call(tools, "swarm_create_task", {
 		taskId: "task-attest-1",
 		title: "attest 1",
@@ -146,6 +182,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	});
 	const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 	await call(tools, "swarm_assign_task", { taskId, nodeId: "only", agentId: "worker-a", cwd: scratch });
+	replyResult(tools, "worker-a", taskId, "only").catch(() => {});
 	const attemptId = (await readTask(taskId)).nodes.only.activeAttemptId;
 	const err = await expectReject(
 		() =>
@@ -175,13 +212,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	const { tools } = await loadExtension();
-	await call(tools, "swarm_register_agent", {
-		id: "worker-b",
-		role: "implementer",
-		roleKind: "implementer",
-		tmuxTarget: "unknown",
-		inject: false,
-	});
+	await seedWorker("worker-b", "implementer");
 	const ct = await call(tools, "swarm_create_task", {
 		taskId: "task-attest-2",
 		title: "attest 2",
@@ -193,6 +224,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	});
 	const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 	await call(tools, "swarm_assign_task", { taskId, nodeId: "only", agentId: "worker-b", cwd: scratch });
+	replyResult(tools, "worker-b", taskId, "only").catch(() => {});
 	const attemptId = (await readTask(taskId)).nodes.only.activeAttemptId;
 	const eventsPath = join(scratch, ".pi/swarm/traces/events.jsonl");
 	await attach(
@@ -226,13 +258,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	const { tools } = await loadExtension();
-	await call(tools, "swarm_register_agent", {
-		id: "worker-c",
-		role: "implementer",
-		roleKind: "implementer",
-		tmuxTarget: "unknown",
-		inject: false,
-	});
+	await seedWorker("worker-c", "implementer");
 	const ct = await call(tools, "swarm_create_task", {
 		taskId: "task-attest-3",
 		title: "attest 3",
@@ -244,6 +270,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	});
 	const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 	await call(tools, "swarm_assign_task", { taskId, nodeId: "only", agentId: "worker-c", cwd: scratch });
+	replyResult(tools, "worker-c", taskId, "only").catch(() => {});
 	const attemptId = (await readTask(taskId)).nodes.only.activeAttemptId;
 	await writeFile(
 		join(scratch, ".pi/swarm/tasks", taskId, "artifacts", "implementation-report.md"),
@@ -274,13 +301,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	const { tools } = await loadExtension();
-	await call(tools, "swarm_register_agent", {
-		id: "worker-d",
-		role: "implementer",
-		roleKind: "implementer",
-		tmuxTarget: "unknown",
-		inject: false,
-	});
+	await seedWorker("worker-d", "implementer");
 	const ct = await call(tools, "swarm_create_task", {
 		taskId: "task-attest-4",
 		title: "attest 4",
@@ -292,6 +313,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	});
 	const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 	await call(tools, "swarm_assign_task", { taskId, nodeId: "only", agentId: "worker-d", cwd: scratch });
+	replyResult(tools, "worker-d", taskId, "only").catch(() => {});
 	const attemptId = (await readTask(taskId)).nodes.only.activeAttemptId;
 	await attach(
 		join(scratch, ".pi/swarm/traces/events.jsonl"),
@@ -324,13 +346,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	const { tools } = await loadExtension();
-	await call(tools, "swarm_register_agent", {
-		id: "worker-e",
-		role: "implementer",
-		roleKind: "implementer",
-		tmuxTarget: "unknown",
-		inject: false,
-	});
+	await seedWorker("worker-e", "implementer");
 	const ct = await call(tools, "swarm_create_task", {
 		taskId: "task-attest-5",
 		title: "attest 5",
@@ -342,6 +358,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	});
 	const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 	await call(tools, "swarm_assign_task", { taskId, nodeId: "only", agentId: "worker-e", cwd: scratch });
+	replyResult(tools, "worker-e", taskId, "only").catch(() => {});
 	const attemptId = (await readTask(taskId)).nodes.only.activeAttemptId;
 	await attach(
 		join(scratch, ".pi/swarm/traces/events.jsonl"),
@@ -390,13 +407,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	const { tools } = await loadExtension();
-	await call(tools, "swarm_register_agent", {
-		id: "worker-f",
-		role: "implementer",
-		roleKind: "implementer",
-		tmuxTarget: "unknown",
-		inject: false,
-	});
+	await seedWorker("worker-f", "implementer");
 	const ct = await call(tools, "swarm_create_task", {
 		taskId: "task-attest-6",
 		title: "attest 6",
@@ -408,6 +419,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	});
 	const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 	await call(tools, "swarm_assign_task", { taskId, nodeId: "only", agentId: "worker-f", cwd: scratch });
+	replyResult(tools, "worker-f", taskId, "only").catch(() => {});
 	const attemptId = (await readTask(taskId)).nodes.only.activeAttemptId;
 	const res = await as("worker-f", false, () =>
 		call(tools, "swarm_update_task", {
@@ -429,13 +441,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	const { tools } = await loadExtension();
-	await call(tools, "swarm_register_agent", {
-		id: "worker-g",
-		role: "implementer",
-		roleKind: "implementer",
-		tmuxTarget: "unknown",
-		inject: false,
-	});
+	await seedWorker("worker-g", "implementer");
 	const ct = await call(tools, "swarm_create_task", {
 		taskId: "task-attest-7",
 		title: "attest 7",
@@ -447,6 +453,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	});
 	const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 	await call(tools, "swarm_assign_task", { taskId, nodeId: "only", agentId: "worker-g", cwd: scratch });
+	replyResult(tools, "worker-g", taskId, "only").catch(() => {});
 	const attemptId = (await readTask(taskId)).nodes.only.activeAttemptId;
 	await attach(
 		join(scratch, ".pi/swarm/traces/events.jsonl"),
@@ -490,13 +497,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	const { tools } = await loadExtension();
-	await call(tools, "swarm_register_agent", {
-		id: "worker-h",
-		role: "implementer",
-		roleKind: "implementer",
-		tmuxTarget: "unknown",
-		inject: false,
-	});
+	await seedWorker("worker-h", "implementer");
 	const ct = await call(tools, "swarm_create_task", {
 		taskId: "task-attest-9",
 		title: "attest 9",
@@ -508,6 +509,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	});
 	const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 	await call(tools, "swarm_assign_task", { taskId, nodeId: "only", agentId: "worker-h", cwd: scratch });
+	await replyResult(tools, "worker-h", taskId, "only").catch(() => {});
 	await unlink(join(scratch, `.pi/swarm/tasks/${taskId}/baseline.txt`)).catch(() => {});
 	const attemptId = (await readTask(taskId)).nodes.only.activeAttemptId;
 	await attach(
@@ -529,7 +531,13 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 		}),
 	);
 	ok("baseline missing still succeeds", res?.content?.[0]?.text?.includes("Updated node"));
-	ok("diff unavailable noted", res?.content?.[0]?.text?.includes("git diff unavailable"));
+	// Current note text (update.ts:209): "Attestation diffstat: (unavailable: <note>)" — the
+	// baseline was unlinked in this scenario, so the note is baseline_missing.
+	ok(
+		"diff unavailable noted",
+		res?.content?.[0]?.text?.includes("(unavailable: baseline_missing)"),
+		res?.content?.[0]?.text?.slice(0, 240),
+	);
 }
 
 // Scenario 10: non-target outcome ignores attestation claims
@@ -538,13 +546,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	await rm(join(scratch, ".pi"), { recursive: true, force: true });
 	await mkdir(join(scratch, ".pi/swarm"), { recursive: true });
 	const { tools } = await loadExtension();
-	await call(tools, "swarm_register_agent", {
-		id: "planner-x",
-		role: "planner",
-		roleKind: "planner",
-		tmuxTarget: "unknown",
-		inject: false,
-	});
+	await seedWorker("planner-x", "planner");
 	const ct = await call(tools, "swarm_create_task", {
 		taskId: "task-attest-10",
 		title: "attest 10",
@@ -556,6 +558,7 @@ const taskJsonPath = (taskId) => join(scratch, `.pi/swarm/tasks/${taskId}/task.j
 	});
 	const taskId = ct.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
 	await call(tools, "swarm_assign_task", { taskId, nodeId: "only", agentId: "planner-x", cwd: scratch });
+	replyResult(tools, "planner-x", taskId, "only").catch(() => {});
 	const attemptId = (await readTask(taskId)).nodes.only.activeAttemptId;
 	const res = await as("planner-x", false, () =>
 		call(tools, "swarm_update_task", {

@@ -154,8 +154,37 @@ const buildTask = async (label) => {
 	return ct.content[0].text.match(/task-[\w-]+/)[0];
 };
 
-const ensureWorker = (agentId, roleKind) =>
-	awaitAs(agentId, "swarm_register_agent", { tmuxTarget: "unknown", role: `test ${roleKind}`, roleKind, id: agentId, inject: false });
+// swarm_register_agent is retired from the live tool surface (R31-era 21-tool trim); seed the
+// agent record directly into swarm-state.json (canonical pattern: rework-reopen Scenario 8).
+const ensureWorker = async (agentId, roleKind) => {
+	mkdirSync(join(scratch, ".pi", "swarm"), { recursive: true });
+	const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
+	const st = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { swarmId: "attention-reminder-test", tmuxSession: "x", rootId: "root", agents: {}, delivered: {}, messages: {} };
+	st.agents = st.agents || {};
+	if (!st.agents[agentId])
+		st.agents[agentId] = {
+			id: agentId,
+			role: `test ${roleKind}`,
+			roleKind,
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: roleKind === "root" ? 99 : 1,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd: scratch,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		};
+	writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
+};
 
 // workers register with themselves as sender id; do it once as root-run tool
 await ensureWorker("worker-a", "planner");
@@ -193,13 +222,20 @@ await ensureWorker("impl-a", "implementer");
 	// (f) Real worker ACK handler persists receipt (`ackedAt` + `lastAck=processing`), then
 	// the scratch-only fixture ages durable timestamps to cross the 60m policy boundary.
 	{
+		// swarm_ack_message is retired under minimal protocol (gate=1); the live receipt path is
+		// the worker's result reply (swarm_send_message replyTo=<assignmentMessageId>), which
+		// auto-verifies the assignment record's response debt (mailbox.ts reply auto-verify).
 		const node = readNode(taskId, "plan");
-		await awaitAs("worker-a", "swarm_ack_message", { messageId: node.assignmentMessageId, status: "processing" });
+		await awaitAs("worker-a", "swarm_send_message", {
+			to: "root",
+			replyTo: node.assignmentMessageId,
+			body: "result for attention-reminder 1f",
+		});
 		const received = readState().messages[node.assignmentMessageId];
 		ok(
-			"1f0 real processing ACK persists receipt timestamp and status",
-			Boolean(received.ackedAt) && received.lastAck?.status === "processing",
-			JSON.stringify(received),
+			"1f0 real result reply verifies the assignment response",
+			received.response?.status === "verified" && Boolean(received.response?.resultMessageId),
+			JSON.stringify(received.response),
 		);
 		ageAssignment(taskId, "plan", { ackStatus: "processing" });
 	}
@@ -315,6 +351,12 @@ await ensureWorker("impl-a", "implementer");
 	const t2 = await buildTask("terminal");
 	await call("swarm_assign_task", { taskId: t2, nodeId: "plan", agentId: "worker-a", cwd: scratch });
 	const { attemptId: attT } = ageAssignment(t2, "plan");
+	// Minimal protocol: terminal update requires a verified reply to the assignment message.
+	await awaitAs("worker-a", "swarm_send_message", {
+		to: "root",
+		replyTo: readNode(t2, "plan").assignmentMessageId,
+		body: "result for attention-reminder terminal",
+	});
 	await awaitAs("worker-a", "swarm_update_task", {
 		taskId: t2,
 		nodeId: "plan",

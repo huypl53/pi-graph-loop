@@ -19,7 +19,7 @@
  * 11. legacy tasks lacking ownership metadata remain readable; reconcile reports advisory drift
  */
 
-import { rmSync, readFileSync, existsSync } from "node:fs";
+import { rmSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,15 +86,46 @@ const readTask = (taskId) => JSON.parse(readFileSync(join(scratch, `.pi/swarm/ta
 const readNode = (taskId, nodeId) => readTask(taskId).nodes[nodeId];
 const readState = () => JSON.parse(readFileSync(join(scratch, ".pi/swarm/swarm-state.json"), "utf8"));
 
+// swarm_register_agent is retired from the live tool surface (R31-era 21-tool trim); seed the
+// agent record directly into swarm-state.json (canonical pattern: rework-reopen Scenario 8).
 async function ensureWorker(agentId, roleKind) {
-	await awaitAs(agentId, "swarm_register_agent", {
-		tmuxTarget: "unknown",
-		role: `test ${roleKind}`,
-		roleKind,
-		id: agentId,
-		inject: false,
-	});
+	mkdirSync(join(scratch, ".pi", "swarm"), { recursive: true });
+	const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
+	const st = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { swarmId: "file-ownership-test", tmuxSession: "x", rootId: "root", agents: {}, delivered: {}, messages: {} };
+	st.agents = st.agents || {};
+	if (!st.agents[agentId])
+		st.agents[agentId] = {
+			id: agentId,
+			role: `test ${roleKind}`,
+			roleKind,
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: roleKind === "root" ? 99 : 1,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd: scratch,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		};
+	writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
 }
+
+// Minimal protocol (gate=1): terminal swarm_update_task requires a verified reply to the
+// assignment message (RESPONSE_REQUIRED fence, task-core.ts). Workers send the result reply
+// before terminal updates — the live worker protocol (identity.ts:193).
+const replyResult = async (agentId, taskId, nodeId) => {
+	const assignmentMessageId = readNode(taskId, nodeId).assignmentMessageId;
+	if (!assignmentMessageId) return;
+	await awaitAs(agentId, "swarm_send_message", { to: "root", replyTo: assignmentMessageId, body: `result for ${taskId}/${nodeId}` });
+};
 
 // ============ 0. pure overlap predicate semantics (via module import) ============
 const tg = await import(join(here, "..", "src/taskgraph.ts"));
@@ -245,6 +276,7 @@ ok("disjoint cross-task assigns", readNode("task-own-d", "m1").assignee === "wor
 
 // ============ 4. terminal release frees the scope ============
 const nA1 = readNode(taskA, "n1");
+await replyResult("worker-a", taskA, "n1");
 await awaitAs("worker-a", "swarm_update_task", {
 	taskId: taskA,
 	nodeId: "n1",
@@ -314,6 +346,7 @@ ok("rework task created", true);
 await ensureWorker("worker-p", "planner");
 await call("swarm_assign_task", { taskId: "task-own-rw2", nodeId: "plan", agentId: "worker-p" });
 const planAttempt = readNode("task-own-rw2", "plan").activeAttemptId;
+await replyResult("worker-p", "task-own-rw2", "plan");
 await awaitAs("worker-p", "swarm_update_task", {
 	taskId: "task-own-rw2",
 	nodeId: "plan",
@@ -323,6 +356,7 @@ await awaitAs("worker-p", "swarm_update_task", {
 });
 await call("swarm_assign_task", { taskId: "task-own-rw2", nodeId: "implement", agentId: "worker-a" });
 const implAttempt = readNode("task-own-rw2", "implement").activeAttemptId;
+await replyResult("worker-a", "task-own-rw2", "implement");
 await awaitAs("worker-a", "swarm_update_task", {
 	taskId: "task-own-rw2",
 	nodeId: "implement",
@@ -334,6 +368,7 @@ await ensureWorker("worker-t", "tester");
 await call("swarm_assign_task", { taskId: "task-own-rw2", nodeId: "test", agentId: "worker-t" });
 const testAttempt = readNode("task-own-rw2", "test").activeAttemptId;
 // test fails -> rework reopens fix (scope inherited from implement => docs/swarm/rw.md)
+await replyResult("worker-t", "task-own-rw2", "test");
 await awaitAs("worker-t", "swarm_update_task", {
 	taskId: "task-own-rw2",
 	nodeId: "test",
@@ -361,6 +396,7 @@ await expectErrorCode("swarm_assign_task", { taskId: "task-own-rwc", nodeId: "m1
 // directly test rework lease release: mark test done/implemented again after fix finishes is complex.
 // Simpler rework-release check: fix fails -> (fix failed) its lease releases with terminal reason.
 const fixAttempt = readNode("task-own-rw2", "fix").activeAttemptId;
+await replyResult("worker-b", "task-own-rw2", "fix");
 await awaitAs("worker-b", "swarm_update_task", {
 	taskId: "task-own-rw2",
 	nodeId: "fix",

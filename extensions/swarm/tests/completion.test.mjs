@@ -92,12 +92,13 @@ const ok = (name, cond) => {
 };
 const vals = async (prefix) => ((await complete(prefix)) ?? []).map((i) => i.value);
 
-// 1. Empty prefix -> all subcommands (31 total incl. lifecycle cmds + panes + flow + deregister + auto-focus + focus).
+// 1. Empty prefix -> all subcommands (32 total incl. lifecycle cmds + panes + flow + deregister + auto-focus + focus + init).
 const subs = await vals("");
 ok(
 	"empty lists all subcommands",
-	subs.length === 31 &&
+	subs.length === 32 &&
 		subs.includes("graph") &&
+	subs.includes("init") &&
 		subs.includes("flow") &&
 		subs.includes("register") &&
 		subs.includes("release") &&

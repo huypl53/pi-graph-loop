@@ -45,7 +45,67 @@ const ok = (n, c) => {
 	}
 };
 
-const ct = await call("swarm_create_task", { title: "Demo", goal: "g", priority: "normal", cwd });
+const ASSIGNEE_STAMP = process.env.PI_SWARM_AGENT_ID;
+// swarm_create_task is root-only (documented authority contract since Phase 1; the suite's
+// historical non-root create was the stale side of the drift — testgate plan §0). Stamp root
+// for the privileged setup call, then restore the pinned non-root identity so the
+// assignee-stamping legs below still exercise a regular agent.
+{
+	const prevId = process.env.PI_SWARM_AGENT_ID;
+	process.env.PI_SWARM_AGENT_ID = "root";
+	const { paths: swarmPaths, readState: readSwarmState, writeState: writeSwarmState } = await import(join(here, "..", "src", "state.ts"));
+	const sp = swarmPaths(cwd);
+	const st = await readSwarmState(sp, cwd);
+	st.agents = st.agents || {};
+	st.agents.root = st.agents.root || {
+		id: "root",
+		role: "PM",
+		roleKind: "root",
+		roleKindExplicit: true,
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 99,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: "x",
+		tmuxWindow: "unknown",
+		tmuxTarget: "unknown",
+		model: "m",
+		provider: "p",
+		cwd,
+		mailbox: "x",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+	};
+	st.agents[ASSIGNEE_STAMP] = st.agents[ASSIGNEE_STAMP] || {
+		id: ASSIGNEE_STAMP,
+		role: "implementer",
+		roleKind: "implementer",
+		roleKindExplicit: true,
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: "x",
+		tmuxWindow: "unknown",
+		tmuxTarget: "unknown",
+		model: "m",
+		provider: "p",
+		cwd,
+		mailbox: "x",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+	};
+	await writeSwarmState(sp, st);
+	// Keep root stamped for the privileged create itself; restore after.
+	const ct = await call("swarm_create_task", { title: "Demo", goal: "g", priority: "normal", cwd });
+	process.env.PI_SWARM_AGENT_ID = prevId;
+	var ctOut = ct;
+}
+const ct = ctOut;
 ok("create_task returns text", ct?.content?.[0]?.text?.includes("task-"));
 const m = ct.content[0].text.match(/task-[A-Za-z0-9-]+/);
 const taskId = m[0];
@@ -59,6 +119,7 @@ const taskPath = join(cwd, `.pi/swarm/tasks/${taskId}/task.json`);
 // (mirroring how swarm_assign_task would, without depending on the agent pool). No attempt
 // fencing fields are stamped: these nodes have no attempt history, exercising the legacy path.
 const ASSIGNEE = process.env.PI_SWARM_AGENT_ID;
+void ASSIGNEE;
 const stamp = (nodeId, status) => {
 	const j = JSON.parse(readFileSync(taskPath, "utf8"));
 	j.nodes[nodeId].status = status;
@@ -91,16 +152,12 @@ ok("task returns to in_progress after rework reopen", taskJson.status === "in_pr
 const ts = await call("swarm_task_status", { taskId, cwd });
 ok("task_status text", !!ts?.content?.[0]?.text);
 
-const vg = await call("swarm_validate_graph", { taskId, cwd });
-ok("validate_graph text", !!vg?.content?.[0]?.text);
+// swarm_validate_graph / swarm_print_graph / swarm_next_nodes / swarm_task_message were retired
+// from the live surface (R31-era 21-tool trim, CHANGELOG-documented); their observability role
+// is served by swarm_task_status (asserted above) and the graph reads inside it.
+console.log("   skip validate/print/next_nodes/task_message: retired from live surface (R31 trim)");
 
-const pg = await call("swarm_print_graph", { taskId, format: "text", cwd });
-ok("print_graph text", !!pg?.content?.[0]?.text);
-
-const nn = await call("swarm_next_nodes", { taskId, cwd });
-ok("next_nodes text", !!nn?.content?.[0]?.text);
-
-await call("swarm_task_message", { taskId, fromNode: "plan", to: "root", body: "hi", cwd });
+await call("swarm_send_message", { to: "root", body: "functional test message", cwd });
 const rec = await call("swarm_reconcile", { cwd });
 ok("reconcile text", !!rec?.content?.[0]?.text);
 

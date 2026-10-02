@@ -42,6 +42,14 @@ export function inferRoleKind(id: string, role: string) {
 	// ids without a role keyword still classify via the role text.
 	const idHas = (kw: string) => lid.includes(kw);
 	if (idHas("root")) return "root";
+	// Explicit role-TEXT ownership signal wins BEFORE id-keyword heuristics: a node whose
+	// role is literally "root" (e.g. the default-graph commit node: id="commit",
+	// role="root") must classify as root-kind. Without this, the R27 hardening below
+	// tests /^root[\s:]/ against the COMBINED "commit root" text — the id prefix wins
+	// and the node falls to "worker", so autoCloseRootTerminalNodes/computeTaskStatus
+	// never close it and the task deadlocks (row75 graph-guardrails gap).
+	// role may be undefined for legacy records — treat missing as no explicit signal.
+	if (typeof role === "string" && role.trim().toLowerCase() === "root") return "root";
 	if (idHas("planner")) return "planner";
 	if (idHas("reviewer")) return "reviewer";
 	if (idHas("auditor") || idHas("audit")) return "auditor";

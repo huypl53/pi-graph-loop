@@ -69,15 +69,40 @@ const as = (agentId, fn) => {
 		process.env.PI_SWARM_AGENT_ID = prev;
 	}
 };
+// Minimal protocol (gate=1): terminal swarm_update_task requires a verified reply to the
+// assignment message (RESPONSE_REQUIRED fence, task-core.ts:898). Non-root workers send the
+// result reply before terminal updates — the live worker protocol (identity.ts:193).
 const awaitAs = async (agentId, name, params) => {
 	const prev = process.env.PI_SWARM_AGENT_ID;
 	process.env.PI_SWARM_AGENT_ID = agentId;
 	try {
+		if (
+			name === "swarm_update_task" &&
+			agentId !== "root" &&
+			["done", "failed", "skipped"].includes(params.status) &&
+			params.taskId &&
+			params.nodeId
+		) {
+			const node = JSON.parse(readFileSync(join(scratch, `.pi/swarm/tasks/${params.taskId}/task.json`), "utf8")).nodes[params.nodeId];
+			const assignmentMessageId = node?.assignmentMessageId;
+			if (assignmentMessageId) {
+				const t = tools.swarm_send_message;
+				if (t)
+					await t.execute(
+						"call",
+						{ to: "root", replyTo: assignmentMessageId, body: `result for ${params.taskId}/${params.nodeId}`, cwd: scratch },
+						undefined,
+						undefined,
+						{ cwd: scratch },
+					);
+			}
+		}
 		return await call(name, params);
 	} finally {
 		process.env.PI_SWARM_AGENT_ID = prev;
 	}
 };
+const __origExpect = null;
 const expectErrorCode = async (agentId, name, params, code) => {
 	try {
 		const result = await awaitAs(agentId, name, params);
@@ -92,6 +117,7 @@ const expectErrorCode = async (agentId, name, params, code) => {
 		ok(`expect ${code}`, false);
 		return null;
 	} catch (err) {
+		if (err.errorCode !== code) console.error("  DEBUG err:", err.message?.slice(0, 160), "| code:", err.errorCode, "| stack0:", String(err.stack).split("\n")[1]);
 		ok(`rejects with ${code} (got ${err.errorCode})`, err.errorCode === code);
 		return err;
 	}

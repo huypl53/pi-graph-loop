@@ -3,6 +3,7 @@
  * Issue 29 — force reopen clears stale activeAttemptId.
  */
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -114,7 +115,27 @@ async function loadExtension({ agentId, isRoot = false } = {}) {
 	return { tools };
 }
 const call = (tools, name, params) => tools[name].execute("call", params, undefined, undefined, { cwd: scratch });
+// Minimal-protocol (gate=1) contract: terminal swarm_update_task requires a verified reply to
+// the assignment message (RESPONSE_REQUIRED fence, task-core.ts). Workers send the result
+// message (replyTo=<assignmentMessageId>) before the terminal update — the live worker protocol.
+const sendResultAs = async (tools, agentId, params) => {
+	const node = (await readJson(join(scratch, ".pi", "swarm", "tasks", params.taskId, "task.json"))).nodes[params.nodeId];
+	const assignmentMessageId = node?.assignmentMessageId;
+	if (!assignmentMessageId) return;
+	await callAs(tools, agentId, "swarm_send_message", { to: "root", replyTo: assignmentMessageId, body: `result for ${params.taskId}/${params.nodeId}`, cwd: scratch });
+};
+const callAs = async (tools, agentId, name, params) => {
+	const prevId = process.env.PI_SWARM_AGENT_ID;
+	process.env.PI_SWARM_AGENT_ID = agentId;
+	try {
+		return await call(tools, name, params);
+	} finally {
+		if (prevId === undefined) delete process.env.PI_SWARM_AGENT_ID;
+		else process.env.PI_SWARM_AGENT_ID = prevId;
+	}
+};
 const updateAs = async (tools, agentId, isRoot, params) => {
+	if (!isRoot && ["done", "failed", "skipped"].includes(params.status)) await sendResultAs(tools, agentId, params);
 	const prevId = process.env.PI_SWARM_AGENT_ID;
 	const prevOrch = process.env.PI_SWARM_IS_ROOT;
 	process.env.PI_SWARM_AGENT_ID = agentId;
@@ -130,8 +151,38 @@ const updateAs = async (tools, agentId, isRoot, params) => {
 	}
 };
 const assign = async (tools, taskId, nodeId, agentId) => call(tools, "swarm_assign_task", { taskId, nodeId, agentId, cwd: scratch });
-const registerAgent = async (tools, id, roleKind) =>
-	call(tools, "swarm_register_agent", { id, role: `${roleKind} test agent`, roleKind, tmuxTarget: "unknown", inject: false });
+// swarm_register_agent is retired from the live tool surface (R31-era 21-tool trim); seed the
+// agent record directly into swarm-state.json (canonical pattern: rework-reopen Scenario 8).
+const registerAgent = async (tools, id, roleKind) => {
+	const statePath = join(scratch, ".pi", "swarm", "swarm-state.json");
+	const { mkdirSync } = await import("node:fs");
+	mkdirSync(join(scratch, ".pi", "swarm"), { recursive: true });
+	const st = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { swarmId: "force-reopen-test", tmuxSession: "x", rootId: "root", agents: {}, delivered: {}, messages: {} };
+	st.agents = st.agents || {};
+	if (!st.agents[id])
+		st.agents[id] = {
+			id,
+			role: `${roleKind} test agent`,
+			roleKind,
+			roleKindExplicit: true,
+			capabilities: [],
+			activeTaskIds: [],
+			maxConcurrentTasks: roleKind === "root" ? 99 : 1,
+			status: "running",
+			runtimeStatus: "idle",
+			health: "healthy",
+			tmuxSession: "x",
+			tmuxWindow: "unknown",
+			tmuxTarget: "unknown",
+			model: "m",
+			provider: "p",
+			cwd: scratch,
+			mailbox: "x",
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		};
+	writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
+};
 
 // Scenario 1: force reopen clears stale attempt and fences prior assignment
 {
