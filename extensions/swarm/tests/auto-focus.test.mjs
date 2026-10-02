@@ -482,6 +482,88 @@ console.log("\n=== 5. Reproduce: Busy worker auto-focus and command focus ===");
 	rmSync(scratch, { recursive: true, force: true });
 }
 
+// S1 regression (task swarm-autofocus-focus-steal): the busy-event seam must REFUSE to
+// focus an IDLE caller — every tool-call burst from a settled agent used to steal focus.
+console.log("\n=== 5. maybeAutoFocusOnBusy refuses idle callers (S1 agent_not_busy) ===");
+{
+	const scratch = join(tmpdir(), `swarm-auto-focus-s1-${process.pid}-${Date.now()}`);
+	mkdirSync(scratch, { recursive: true });
+	process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
+	const { paths, writeState } = await import(join(here, "..", "src", "state.ts"));
+	const { maybeAutoFocusOnBusy } = await import(join(here, "..", "src", "focus.ts"));
+	const p = paths(scratch);
+	await writeState(p, {
+		version: 1, swarmId: "s1", cwd: scratch, tmuxSession: "sess", autoFocusBusy: true,
+		agents: { "idle-1": { id: "idle-1", role: "worker", roleKind: "worker", status: "running", runtimeStatus: "idle", tmuxSession: "sess", tmuxWindow: "w-idle", tmuxTarget: "sess:w-idle" } },
+		delivered: {}, messages: {}, createdAt: "", updatedAt: "",
+	});
+	const selectCalls = [];
+	const fakePi = { exec: async (bin, args) => { if (args[0] === "select-window") selectCalls.push(args.join(" ")); return { code: 0, stdout: "", stderr: "" }; } };
+	const res = await maybeAutoFocusOnBusy(fakePi, { cwd: scratch }, "idle-1");
+	ok("idle caller → switched:false", res.switched === false);
+	ok("idle caller → reason 'agent_not_busy'", res.reason === "agent_not_busy");
+	ok("idle caller → zero select-window calls", selectCalls.length === 0);
+	// Positive control: a genuinely busy caller still focuses.
+	await writeState(p, {
+		version: 1, swarmId: "s1", cwd: scratch, tmuxSession: "sess", autoFocusBusy: true,
+		agents: { "busy-1": { id: "busy-1", role: "worker", roleKind: "worker", status: "running", runtimeStatus: "tool_running", tmuxSession: "sess", tmuxWindow: "w-b", tmuxTarget: "sess:w-b" } },
+		delivered: {}, messages: {}, createdAt: "", updatedAt: "",
+	});
+	const res2 = await maybeAutoFocusOnBusy(fakePi, { cwd: scratch }, "busy-1");
+	ok("busy caller → switched:true (positive control)", res2.switched === true && res2.reason === "ok");
+	rmSync(scratch, { recursive: true, force: true });
+}
+
+// S2 regression (task swarm-autofocus-focus-steal): follow policy NEVER pulls the user out
+// of a different herdr workspace — including with root IDLE (the removed carve-out) — and the
+// reason split (root-busy-hold vs user-focused-outside-agents-workspace) must be observable.
+console.log("\n=== 6. follow policy cross-workspace veto incl. root-idle (S2) ===");
+{
+	const scratch = join(tmpdir(), `swarm-auto-focus-s2-${process.pid}-${Date.now()}`);
+	mkdirSync(scratch, { recursive: true });
+	process.env.PI_SWARM_TERMINAL_MANAGER = "herdr";
+	const { paths, writeState } = await import(join(here, "..", "src", "state.ts"));
+	const { maybeAutoFocusOnBusy } = await import(join(here, "..", "src", "focus.ts"));
+	const p = paths(scratch);
+	const mk = async (policy, rootState) => writeState(p, {
+		version: 1, swarmId: "s2", cwd: scratch, tmuxSession: "wA", autoFocusBusy: true, autoFocusPolicy: policy,
+		agents: {
+			"af-worker": { id: "af-worker", role: "worker", roleKind: "worker", status: "running", runtimeStatus: "busy", tmuxSession: "wA", tmuxWindow: "wA:t1", tmuxTarget: "wA:p1" },
+			...(rootState ? { root: rootState } : {}),
+		},
+		delivered: {}, messages: {}, createdAt: "", updatedAt: "",
+	});
+	const mkApi = (focusCalls) => ({ exec: async (bin, args) => {
+		const c = args.join(" ");
+		if (bin === "herdr" && c === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [
+			{ tab_id: "wA:t1", workspace_id: "wA", focused: false },
+			{ tab_id: "wU:t1", workspace_id: "wU", focused: true },
+		] } }), stderr: "" };
+		if (bin === "herdr" && c.startsWith("pane list")) return { code: 0, stdout: JSON.stringify({ result: { panes: [] } }), stderr: "" };
+		if (bin === "herdr" && c.startsWith("tab focus")) { focusCalls.push(c); return { code: 0, stdout: "{}", stderr: "" }; }
+		return { code: 0, stdout: "{}", stderr: "" };
+	} });
+	// root idle + user outside → veto with the NEW reason (not the old root-idle pull)
+	await mk("follow", { id: "root", role: "root", roleKind: "root", status: "running", runtimeStatus: "idle" });
+	let calls = [];
+	let res = await maybeAutoFocusOnBusy(mkApi(calls), { cwd: scratch }, "af-worker");
+	ok("follow + root idle + user outside → switched:false", res.switched === false);
+	ok("follow + root idle + user outside → reason 'user-focused-outside-agents-workspace'", res.reason === "user-focused-outside-agents-workspace");
+	ok("follow + root idle + user outside → zero tab focus calls", calls.length === 0);
+	// root mid-turn + user outside → distinct reason kept
+	await mk("follow", { id: "root", role: "root", roleKind: "root", status: "running", runtimeStatus: "busy", lastToolAt: new Date().toISOString() });
+	calls = [];
+	res = await maybeAutoFocusOnBusy(mkApi(calls), { cwd: scratch }, "af-worker");
+	ok("follow + root mid-turn + user outside → reason 'root-busy-hold'", res.switched === false && res.reason === "root-busy-hold");
+	// steal still pulls (explicit opt-in)
+	await mk("steal", null);
+	calls = [];
+	res = await maybeAutoFocusOnBusy(mkApi(calls), { cwd: scratch }, "af-worker");
+	ok("steal + user outside → still pulls", res.switched === true && calls.length === 1);
+	rmSync(scratch, { recursive: true, force: true });
+	process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
+}
+
 if (fail > 0) {
 	console.error(`\nFAILED: ${fail} assertions failed.`);
 	process.exit(1);

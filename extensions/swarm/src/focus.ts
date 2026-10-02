@@ -29,6 +29,7 @@ export type FocusSkipReason =
 	| "root-busy-hold"
 	| "active_window_mismatch"
 	| "no_busy_agent"
+	| "agent_not_busy"
 	| "switch_failed";
 
 /**
@@ -264,6 +265,16 @@ export async function maybeAutoFocusOnBusy(
 		return { switched: false, reason: "root_or_unknown_agent" };
 	}
 
+	// S1 fix (task swarm-autofocus-focus-steal): the busy-event hook seam fires on EVERY
+	// tool_execution_start / agent_start, but the CALLING agent's runtimeStatus is stamped by
+	// later lifecycle events — an idle agent reaching this path stole focus on each tool-call
+	// burst (live RED: repro-s1.js). Only genuinely busy/tool-running agents may pull focus;
+	// pickNextBusyAgent's own candidate filter is the same contract.
+	if (agent.runtimeStatus !== "busy" && agent.runtimeStatus !== "tool_running" && !options?.force) {
+		await traceFocusSkip(p, ctx.cwd, "busy", agentId, "agent_not_busy", { runtimeStatus: agent.runtimeStatus ?? null });
+		return { switched: false, targetAgentId: agent.id, reason: "agent_not_busy" };
+	}
+
 	// D2 (task herdr-autofocus-parity-20260927): the sticky lastFocusedAgentId comparison is
 	// superseded by a live-focus check. Manual navigation away from a previously auto-focused
 	// agent used to make this skip permanently wrong. Compare the DRIVER's current global
@@ -315,8 +326,10 @@ export async function maybeAutoFocusOnBusy(
 	// Cross-workspace guard — D1 policy switch (task herdr-autofocus-parity-20260927).
 	// Herdr-only (herdr `tab focus` is GLOBAL; tmux `select-window` is session-scoped, guard
 	// is a no-op under tmux). Policies:
-	//   follow   (default): the guard is a MID-TURN VETO — root idle ⇒ allow the pull;
-	//             root mid-turn ⇒ skip with "root-busy-hold".
+	//   follow   (default): S2 fix (task swarm-autofocus-focus-steal) — the user must already be
+	//             inside the agents workspace to be pulled along; a user in a DIFFERENT herdr
+	//             workspace is never stolen (the old root-idle carve-out was the dominant steal:
+	//             root is between turns most of the time). Guard query failures fail CLOSED.
 	//   steal:    guard dropped entirely (pre-05d7df9 behavior).
 	//   suppress: guard always vetoes with "user-focused-outside-agents-workspace" (05d7df9).
 	// force/bypassActiveGuard unchanged; explicit /swarm focus unaffected.
@@ -326,6 +339,7 @@ export async function maybeAutoFocusOnBusy(
 			const targetAgentsWorkspace = agent.tmuxSession || st.tmuxSession;
 			if (targetAgentsWorkspace) {
 				let currentFocusedWorkspace: string | undefined;
+				let workspaceQueryFailed = false;
 				try {
 					currentFocusedWorkspace = await driver.getFocusedWorkspaceId(pi);
 				} catch (err: any) {
@@ -333,9 +347,16 @@ export async function maybeAutoFocusOnBusy(
 						agentId,
 						targetAgentsWorkspace,
 					});
-					// Fail-open: a query failure must not silently swallow the busy-path focus.
-					// Logged durably; proceed to focusAgentWindow.
-					currentFocusedWorkspace = undefined;
+					// S2 fix: fail CLOSED under follow/suppress — a broken `herdr tab list` used to
+					// silently disable the cross-workspace guard (fail-open). steal proceeds by contract.
+					workspaceQueryFailed = true;
+				}
+				if (workspaceQueryFailed && getAutoFocusPolicy(st) !== "steal") {
+					await traceFocusSkip(p, ctx.cwd, "busy", agentId, "user-focused-outside-agents-workspace", {
+						policy: getAutoFocusPolicy(st),
+						guardQueryFailed: true,
+					});
+					return { switched: false, targetAgentId: agent.id, reason: "user-focused-outside-agents-workspace" };
 				}
 				const userOutsideAgentsWorkspace =
 					currentFocusedWorkspace &&
@@ -347,11 +368,16 @@ export async function maybeAutoFocusOnBusy(
 						await traceFocusSkip(p, ctx.cwd, "busy", agentId, "user-focused-outside-agents-workspace", { policy });
 						return { switched: false, targetAgentId: agent.id, reason: "user-focused-outside-agents-workspace" };
 					}
-					if (policy === "follow" && isRootMidTurn(st)) {
-						await traceFocusSkip(p, ctx.cwd, "busy", agentId, "root-busy-hold", { policy });
-						return { switched: false, targetAgentId: agent.id, reason: "root-busy-hold" };
+					if (policy === "follow") {
+						// S2 fix (task swarm-autofocus-focus-steal): follow NEVER pulls a user out of a
+						// different herdr workspace — the old root-idle carve-out was the dominant steal
+						// (root is between turns most of the time). Reason string distinguishes the kept
+						// mid-turn veto from the new root-idle veto for the trace census.
+						const reason = isRootMidTurn(st) ? "root-busy-hold" : "user-focused-outside-agents-workspace";
+						await traceFocusSkip(p, ctx.cwd, "busy", agentId, reason, { policy });
+						return { switched: false, targetAgentId: agent.id, reason };
 					}
-					// policy === "steal", or "follow" with root idle: allow the pull.
+					// policy === "steal": allow the pull (explicit opt-in).
 				}
 			}
 		}
