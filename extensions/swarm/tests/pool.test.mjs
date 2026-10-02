@@ -2,6 +2,7 @@
 //
 // Run: node extensions/swarm/pool.test.mjs
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { stringify } from "yaml";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paths } from "../src/state.ts";
@@ -20,16 +21,14 @@ const ok = (name, cond) => {
 const dir = await mkdtemp(join(tmpdir(), "pool-test-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
 const settings = {
-	swarm: {
-		modelPool: [
-			{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-			{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-			{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-		],
-		rotation: { strategy: "weighted", cooldownMs: 60_000, maxRetries: 2 },
-	},
+	modelPool: [
+		{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
+		{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+		{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+	],
+	rotation: { strategy: "weighted", cooldownMs: 60_000, maxRetries: 2 },
 };
-await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify(settings));
+await writeFile(join(dir, ".pi", "swarm.yml"), stringify(settings));
 process.chdir(dir);
 const p = paths(dir);
 
@@ -118,8 +117,8 @@ ok("sticky is deterministic", picks.size === 1);
 }
 
 // No pool configured -> undefined pick.
-await rm(join(dir, ".pi", "settings.json"), { force: true });
-await writeFile(join(dir, ".pi", "settings.json"), JSON.stringify({ swarm: { defaultModel: "glm-5.1" } }));
+await rm(join(dir, ".pi", "swarm.yml"), { force: true });
+await writeFile(join(dir, ".pi", "swarm.yml"), stringify({ defaultModel: "glm-5.1" }));
 ok("no pool -> undefined", (await pickSlot(p)) === undefined);
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);

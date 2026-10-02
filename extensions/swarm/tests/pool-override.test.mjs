@@ -19,6 +19,7 @@
 //
 // Run: node extensions/swarm/pool-override.test.mjs
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { stringify } from "yaml";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paths, readState, writeState } from "../src/state.ts";
@@ -40,18 +41,16 @@ const ok = (name, cond, info) => {
 const dir = await mkdtemp(join(tmpdir(), "pool-override-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
 await writeFile(
-	join(dir, ".pi", "settings.json"),
-	JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1",
-			defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-			],
-			rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-		},
+	join(dir, ".pi", "swarm.yml"),
+	stringify({
+		defaultModel: "glm-5.1",
+		defaultProvider: "zai-coding-cn",
+		modelPool: [
+			{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
+			{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+			{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+		],
+		rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
 	}),
 );
 process.chdir(dir);
@@ -267,20 +266,18 @@ registerSwarmCommand(fakePi);
 {
 	// Seed a fresh fixture with quotaResetMs=7_200_000 on glm-5.1.
 	const { rm, writeFile } = await import("node:fs/promises");
-	await rm(join(dir, ".pi", "settings.json"), { force: true }).catch(() => {});
+	await rm(join(dir, ".pi", "swarm.yml"), { force: true }).catch(() => {});
 	await writeFile(
-		join(dir, ".pi", "settings.json"),
-		JSON.stringify({
-			swarm: {
-				defaultModel: "glm-5.1",
-				defaultProvider: "zai-coding-cn",
-				modelPool: [
-					{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, quotaResetMs: 7_200_000 },
-					{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-					{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-				],
-				rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
-			},
+		join(dir, ".pi", "swarm.yml"),
+		stringify({
+			defaultModel: "glm-5.1",
+			defaultProvider: "zai-coding-cn",
+			modelPool: [
+				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50, quotaResetMs: 7_200_000 },
+				{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+			],
+			rotation: { strategy: "round-robin", cooldownMs: 900_000, maxRetries: 2 },
 		}),
 	);
 	// Clear the pool.ts quotaResetMs cache so the new per-slot value is read.

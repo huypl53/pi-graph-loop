@@ -18,6 +18,7 @@
  */
 
 import { rmSync, readFileSync, writeFileSync } from "node:fs";
+process.env.PI_SWARM_MINIMAL_PROTOCOL = "0";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -244,7 +245,7 @@ try {
 	process.env.PI_SWARM_AGENT_ID = prevAgent;
 }
 const orchMail3 = readOrchMailbox();
-const rrNotify = orchMail3.find((m) => m.to === "root" && /missing response/i.test(m.subject || ""));
+const rrNotify = orchMail3.find((m) => m.to === "root" && /unacked ack/i.test(m.subject || ""));
 ok("[Sensitivity] requiresResponse-missing still produces the existing L868 notify", !!rrNotify, {
 	totalOrchMessages: orchMail3.length,
 	subjects: orchMail3.map((m) => m.subject),

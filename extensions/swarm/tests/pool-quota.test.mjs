@@ -14,6 +14,7 @@
 //
 // Run: node extensions/swarm/pool-quota.test.mjs
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { stringify } from "yaml";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paths, readState } from "../src/state.ts";
@@ -41,10 +42,9 @@ const quotaBodyOpenAI = (resets) =>
 const dir = await mkdtemp(join(tmpdir(), "pool-quota-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
 await writeFile(
-	join(dir, ".pi", "settings.json"),
-	JSON.stringify({
-		swarm: {
-			defaultModel: "glm-5.1",
+	join(dir, ".pi", "swarm.yml"),
+	stringify({
+					defaultModel: "glm-5.1",
 			defaultProvider: "zai-coding-cn",
 			modelPool: [
 				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
@@ -52,7 +52,6 @@ await writeFile(
 				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
 			],
 			rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
-		},
 	}),
 );
 process.chdir(dir);
@@ -228,8 +227,8 @@ registerSwarmHooks(fakePi);
 	ok("F1: quota slot benched (in cooldown)", Boolean(glm.inCooldown), JSON.stringify(glm.health));
 	ok("F1: benched with lastBenchReason=quota", glm.health?.lastBenchReason === "quota", `reason=${glm.health?.lastBenchReason}`);
 	ok(
-		"F1: [PI-SWARM MODEL POOL] notify sent",
-		sentMessages.some((s) => /MODEL POOL/.test(s.m.content) && /quota/.test(s.m.content)),
+		"F1: pool quota swap notify sent",
+		sentMessages.some((s) => /Pool:.*quota/.test(s.m.content) && /switched/.test(s.m.content)),
 		JSON.stringify(sentMessages.map((s) => s.m.content?.slice(0, 60))),
 	);
 }

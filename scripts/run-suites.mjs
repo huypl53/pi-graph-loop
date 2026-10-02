@@ -81,12 +81,24 @@ for (const file of files) {
 			.filter((l) => /FAIL|Error|error:/i.test(l))
 			.find((l) => l.length > 0);
 		signature = (errLine || `exit ${r.status}`).slice(0, 200);
+	} else {
+		// P2-1 (round2 review): an env-conditional suite that clean-SKIPs (exit 0, zero
+		// assertions) must not render as an ordinary PASS — parse the suite's "SKIP:" stdout
+		// marker and surface it. SKIP still exits 0 (not a gate failure), it is just honest.
+		const skipLine = `${r.stdout || ""}`
+			.split("\n")
+			.map((l) => l.trim())
+			.find((l) => l.startsWith("SKIP:"));
+		if (skipLine) {
+			status = "SKIP";
+			signature = skipLine.slice(0, 200);
+		}
 	}
 	results.push({ file, status, ms, signature });
 }
 
 const pad = (s, n) => (s.length >= n ? s : s + " ".repeat(n - s.length));
-const order = { FAIL: 0, TIMEOUT: 1, PASS: 2, QUARANTINED: 3 };
+const order = { FAIL: 0, TIMEOUT: 1, PASS: 2, SKIP: 3, QUARANTINED: 4 };
 results.sort((a, b) => order[a.status] - order[b.status] || a.file.localeCompare(b.file));
 console.log("\n=== suite gate:", dir, "===");
 for (const r of results) {
@@ -95,7 +107,11 @@ for (const r of results) {
 }
 const failed = results.filter((r) => r.status === "FAIL" || r.status === "TIMEOUT");
 const quarantined = results.filter((r) => r.status === "QUARANTINED");
-console.log(`\n${results.length - failed.length - quarantined.length} passed, ${failed.length} failed, ${quarantined.length} quarantined`);
+const skipped = results.filter((r) => r.status === "SKIP");
+console.log(
+	`\n${results.length - failed.length - quarantined.length - skipped.length} passed, ${failed.length} failed, ${skipped.length} skipped (env-conditional), ${quarantined.length} quarantined`,
+);
+if (skipped.length > 0) console.log(`skipped (env absent, zero assertions run): ${skipped.map((r) => r.file.split("/").pop()).join(", ")}`);
 if (quarantined.length > 0) console.log(`quarantined (excluded from gate): ${quarantined.map((r) => r.file).join(", ")}`);
 if (catalogOut) {
 	const lines = [

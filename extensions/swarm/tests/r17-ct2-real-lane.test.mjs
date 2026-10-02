@@ -71,7 +71,7 @@ const ORIG_PI_SWARM_AGENT_ID = process.env.PI_SWARM_AGENT_ID;
 const ORIG_PI_SWARM_IS_ROOT = process.env.PI_SWARM_IS_ROOT;
 
 // Fixture existence sanity (must exist before this test can be considered scoped).
-const FIXTURE_PATH = join(here, "../mock-llm/fixtures/r17-ct2-real-lane.jsonl");
+const FIXTURE_PATH = join(here, "../../mock-llm/fixtures/r17-ct2-real-lane.jsonl");
 section("fixture existence");
 ok("r17-ct2-real-lane.jsonl fixture file exists", existsSync(FIXTURE_PATH), { path: FIXTURE_PATH });
 

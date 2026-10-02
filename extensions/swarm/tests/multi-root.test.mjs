@@ -215,7 +215,10 @@ ok(
 ok("T7 stop denied worker", await expectErr(() => call("swarm_stop_agent", { agentId: "worker" }), "ROOT_AUTHORITY_REQUIRED"));
 
 // T8: release_agent_task denied worker
-ok("T8 release denied worker", await expectErr(() => call("swarm_release_agent_task", { agentId: "worker" }), "ROOT_AUTHORITY_REQUIRED"));
+// SKIP(retired-surface): swarm_release_agent_task was retired in the R31 21-tool retirement
+// (CHANGELOG-documented; rework/reuse supersedes manual release). The ROOT_AUTHORITY_REQUIRED
+// leg it tested is covered by T5 (update force denied worker) on the live surface.
+ok("T8 release denied worker — SKIP(retired-surface: swarm_release_agent_task retired R31)", true);
 
 // T9: reconcile(mark=true) denied for non-leader (a DIFFERENT live process holds the claim — a
 // real spawned+alive child pid, since R11-4 makes dead pids immediately replaceable)
@@ -279,7 +282,7 @@ process.env.PI_SWARM_AGENT_ID = "root";
 ok("T13 stop allowed root", text(await call("swarm_stop_agent", { agentId: "worker" })).includes("Stopped"));
 
 // T14: release allowed root
-ok("T14 release allowed root", text(await call("swarm_release_agent_task", { agentId: "worker" })).includes("removed"));
+ok("T14 release allowed root — SKIP(retired-surface: swarm_release_agent_task retired R31)", true);
 
 // T15: reconcile(mark=true) allowed root
 ok("T15 reconcile allowed root", text(await call("swarm_reconcile", { mark: true, dryRun: true })).includes("Reconciled"));

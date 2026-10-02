@@ -1,4 +1,7 @@
 import { ok as assertOk, equal, deepEqual } from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	HerdrDriver,
 	herdrDriver,
@@ -404,8 +407,20 @@ test("getTerminalDriver defaults safely to tmuxDriver", () => {
 
 test("getTerminalDriver resolves Herdr from swarm.yml terminalManager (H2)", () => {
 	delete process.env.PI_SWARM_TERMINAL_MANAGER;
-	const driver = getTerminalDriver(); // repo cwd: .pi/swarm.yml declares terminalManager: herdr
-	equal(driver.id, "herdr");
+	// Resolution from a project swarm.yml: run from a scratch cwd whose .pi/swarm.yml declares
+	// terminalManager: herdr (the repo's own yml only declares a modelPool — relying on it made
+	// this leg env-coupled to repo state).
+	const scratch = mkdtempSync(join(tmpdir(), "herdr-h2-"));
+	mkdirSync(join(scratch, ".pi"), { recursive: true });
+	writeFileSync(join(scratch, ".pi", "swarm.yml"), "terminalManager: herdr\n");
+	const prevCwd = process.cwd();
+	process.chdir(scratch);
+	try {
+		const driver = getTerminalDriver();
+		equal(driver.id, "herdr");
+	} finally {
+		process.chdir(prevCwd);
+	}
 });
 
 test("getTerminalDriver resolves Herdr from environment variable", () => {
@@ -457,12 +472,19 @@ await asyncTest("checkTmuxSession succeeds without TMUX when swarm.yml declares 
 	const prevTmux = process.env.TMUX;
 	const prevOk = process.env.PI_SWARM_TMUX_OK;
 	const prevMgr = process.env.PI_SWARM_TERMINAL_MANAGER;
+	const prevCwd = process.cwd();
 	delete process.env.TMUX;
 	delete process.env.PI_SWARM_TMUX_OK;
 	delete process.env.PI_SWARM_TERMINAL_MANAGER;
 
+	// Run from a scratch cwd whose .pi/swarm.yml declares terminalManager: herdr (self-contained;
+	// the repo's own yml only declares a modelPool).
+	const scratch = mkdtempSync(join(tmpdir(), "herdr-yml-"));
+	mkdirSync(join(scratch, ".pi"), { recursive: true });
+	writeFileSync(join(scratch, ".pi", "swarm.yml"), "terminalManager: herdr\n");
+	process.chdir(scratch);
+
 	try {
-		// repo cwd has .pi/swarm.yml with terminalManager: herdr
 		const res = await checkTmuxSession("test-session");
 		assertOk(res.ok, "checkTmuxSession should succeed without TMUX when terminalManager: herdr is in swarm.yml");
 	} finally {
@@ -470,6 +492,7 @@ await asyncTest("checkTmuxSession succeeds without TMUX when swarm.yml declares 
 		if (prevOk) process.env.PI_SWARM_TMUX_OK = prevOk;
 		if (prevMgr) process.env.PI_SWARM_TERMINAL_MANAGER = prevMgr;
 		else delete process.env.PI_SWARM_TERMINAL_MANAGER;
+		process.chdir(prevCwd);
 	}
 });
 

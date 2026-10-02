@@ -66,6 +66,9 @@ const mkCtx = () => {
 			},
 			setStatus: (k, v) => {
 				state.status = [k, v];
+				// Register-adopt: capture every status write so the test can assert the
+				// registration footer even after the root pump's issues footer overwrites it.
+				(state.statusHistory ||= []).push([k, v]);
 			},
 		},
 	};
@@ -139,7 +142,7 @@ console.log("\n[3] 'register here root' performs a FULL PM opt-in (not just a re
 	await swarmCmd.handler("register here root Drive the swarm", ctx);
 	ok("PI_SWARM_IS_ROOT=1 set", process.env.PI_SWARM_IS_ROOT === "1");
 	ok("PI_SWARM_AGENT_ID=root set", process.env.PI_SWARM_AGENT_ID === "root");
-	ok("footer updated to swarm:root", !!state.status && state.status[1] === "swarm:root");
+	ok("footer updated to swarm:root", (state.statusHistory || []).some(([k, v]) => k === "swarm" && v === "swarm:root"), JSON.stringify(state.statusHistory || state.status));
 	const orch = stateAgent("root");
 	ok("mailbox-only root record exists", !!orch);
 	ok("record is mailbox-only (no hijacked pane target)", orch.tmuxTarget === "unknown");

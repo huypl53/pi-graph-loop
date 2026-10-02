@@ -314,9 +314,11 @@ console.log("C5/C6: positive-path (fresh attemptId) + reconcile rec-level extens
 	// C6: reconcile.ts must extend the rec.superseded guard with late-result trace emission.
 	// Read reconcile.ts source and assert the TRACE_LATE_RESULT_REJECTED reference is wired in.
 	const fs = await import("node:fs");
-	const reconcileSrc = fs.readFileSync(join(here, "..", "src/reconcile.ts"), "utf8");
+	// The rec-level superseded guard + actionable predicate moved from the reconcile.ts monolith
+	// to src/surface/actionable.ts during the pump split; scan that file instead.
+	const reconcileSrc = fs.readFileSync(join(here, "..", "src/surface/actionable.ts"), "utf8");
 	ok(
-		"C6.a: reconcile.ts references TRACE_LATE_RESULT_REJECTED",
+		"C6.a: actionable.ts references TRACE_LATE_RESULT_REJECTED",
 		reconcileSrc.includes("TRACE_LATE_RESULT_REJECTED"),
 		"rec-level guard must emit the trace on late-result arrival",
 	);
@@ -328,7 +330,9 @@ console.log("C5/C6: positive-path (fresh attemptId) + reconcile rec-level extens
 console.log("C7/C8: KR5 rec-level trace + lateResultRejectionCount stamping");
 {
 	const fs = await import("node:fs");
-	const reconcileSrc = fs.readFileSync(join(here, "..", "src/reconcile.ts"), "utf8");
+	// KR5 static guards: the rec.superseded block + isActionableRootMessage signature live in
+	// src/surface/actionable.ts after the pump split.
+	const reconcileSrc = fs.readFileSync(join(here, "..", "src/surface/actionable.ts"), "utf8");
 
 	// Extract the rec.superseded block from isActionableRootMessage (best-effort regex).
 	const blockMatch = reconcileSrc.match(/if \(rec\.superseded\) \{([\s\S]*?)\n\t\}/);
@@ -348,7 +352,8 @@ console.log("C7/C8: KR5 rec-level trace + lateResultRejectionCount stamping");
 	ok("C7.c: rec-level guard does NOT have outer try/catch swallowing all errors (KR5)", !hasOuterTryCatchSwallow, "");
 
 	// C7.d: the function signature accepts a `Paths` parameter so the real path can be threaded in.
-	const sigMatch = reconcileSrc.match(/export function isActionableRootMessage\(([\s\S]*?)\)/);
+	// Signature spans a multi-line object type; capture through the closing `) {` of the function.
+	const sigMatch = reconcileSrc.match(/export function isActionableRootMessage\(([\s\S]*?)\)\s*\{/);
 	const sig = sigMatch ? sigMatch[1] : "";
 	ok("C7.d: isActionableRootMessage signature accepts Paths parameter", /p\??:\s*Paths/.test(sig), `sig: ${sig.slice(0, 200)}`);
 
