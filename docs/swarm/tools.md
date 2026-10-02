@@ -171,6 +171,35 @@ is no longer read; the warning is self-extinguishing when the block is removed.
 any unrecognized top-level keys in either yml file. No Levenshtein suggestions — just the
 plain list with the source file.
 
+### Role playbooks (`roles:`)
+
+The top-level `roles:` key configures per-role playbooks (pi skills injected at spawn via
+additive `--skill <path>` flags) and the shared charter. Precedence is per-key:
+project > global > bundled default.
+
+```yaml
+# .pi/swarm.yml (project or global layer)
+roles:
+  charter: ./docs/my-charter.md   # optional; "default" = embedded correctness-first charter
+  planner: ./playbooks/planner    # a pi skill directory (SKILL.md) or a direct .md file
+  implementer: default            # "default" sentinel = bundled role-skills/<kind>/
+  fixer: ./playbooks/fixer        # custom paths are validated; missing paths are PREFLIGHT ERRORS
+  # tester / reviewer follow the same shape
+```
+
+- Spawn-time injection: `swarm_spawn_agent` appends `--skill <abs-path>` after the `-e`
+  extension flags (PI_SWARM_CHILD_ARGS override still wins verbatim and skips injection).
+- Fix-node remap: an implementer assigned the `fix` node resolves the **fixer** playbook.
+- Identity + assignment bodies carry the playbook path and charter so adopted panes and
+  overrides stay consistent.
+- Invalid config never silently falls back: `/swarm pool validate` and the spawn boundary
+  surface per-sub-key errors (`roles.charter` missing file, skill dir without `SKILL.md`,
+  non-`.md` files).
+- Inspect the effective config with `/swarm roles` (read-only: paths, source layer, and
+  existence per role).
+
+Bundled playbooks live in `extensions/swarm/role-skills/{planner,implementer,fixer,tester,reviewer}/`.
+
 `/swarm pool validate` (and the root's launch-time pool-health check) also runs **live
 resolvability checks** per slot when the model registry is available in the session:
 `slot_unresolvable` for a provider/model pair not in the registry, and `slot_no_credential`

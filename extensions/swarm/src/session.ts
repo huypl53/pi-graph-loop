@@ -59,3 +59,24 @@ export function childPiArgs() {
 	return `--approve -e ${shellQuote(extPath)}`;
 }
 
+// === Role playbook injection (task-role-playbooks) ==========================
+// Same contract as childPiArgs(), but appends one `--skill <abs-path>` flag per
+// resolved playbook AFTER the `-e <ext>` args. `--skill` is additive pi CLI
+// surface (docs/skills.md): normal skill discovery still happens, so
+// user/project skills are preserved and playbooks are added on top.
+//
+// Contract:
+//   - default (no skills): identical string to childPiArgs() — existing
+//     callers and child-pi-args-cwd.test.mjs assertions stay valid verbatim.
+//   - PI_SWARM_CHILD_ARGS passthrough STILL WINS VERBATIM even when skills are
+//     passed (an explicit operator override composes the whole argv; injecting
+//     extra flags after it would defeat the override).
+//   - empty/absent skills list: falls back to childPiArgs() (no --skill flags).
+export function childPiArgsWithSkills(skills: string[]): string {
+	if (process.env.PI_SWARM_CHILD_ARGS) return process.env.PI_SWARM_CHILD_ARGS;
+	if (!skills || skills.length === 0) return childPiArgs();
+	const args = childPiArgs(); // "--approve -e <ext>"
+	const skillFlags = skills.map((p) => `--skill ${shellQuote(p)}`).join(" ");
+	return `${args} ${skillFlags}`;
+}
+

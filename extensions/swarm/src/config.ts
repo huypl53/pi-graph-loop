@@ -19,17 +19,21 @@
 //     the corrupt piece is skipped but reported via corrupt[] with {layer, file, errCode}.
 //   - readSwarmYml / readGlobalSwarmYml: return null when absent, THROW on corrupt YAML
 //     (so /swarm pool validate can surface the per-layer corrupt kinds).
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { parse as parseYaml } from "yaml";
 import { logSwarmError } from "./errorlog.ts";
+import { ROLE_CHARTER_DEFAULT, ROLE_PLAYBOOK_KINDS } from "./constants.ts";
 import type { ModelSlot, RotationConfig, RotationStrategy, SwarmSettings } from "./types/index.ts";
 
 export type SwarmConfigSource = "swarm.yml" | "swarm.yaml" | "global-swarm.yml" | "global-swarm.yaml";
 
-export type ConfigKey = "modelPool" | "rotation" | "defaultModel" | "defaultProvider" | "terminalManager" | "inheritGlobal";
+// Needs "fileURLToPath" for bundledRolePlaybookPath (see bottom of file).
+
+export type ConfigKey = "modelPool" | "rotation" | "defaultModel" | "defaultProvider" | "terminalManager" | "inheritGlobal" | "roles";
 
 export type SourceLayer = "global" | "project.swarm.yml" | "default";
 
@@ -134,7 +138,7 @@ export function _clearGlobalYmlMemoForTests() {
 	globalYmlMemoHome = undefined;
 }
 
-const RECOGNIZED_KEYS: ConfigKey[] = ["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal"];
+const RECOGNIZED_KEYS: ConfigKey[] = ["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal", "roles"];
 
 // Layered merge: global (lowest yml precedence) + project (highest yml precedence).
 // Per-top-level-key winner-takes-all. modelPool is whole-array replacement.
@@ -330,4 +334,234 @@ export function readSwarmSettings(cwd = process.cwd()): SwarmSettings {
 		rotation: parseRotationConfig(cfg.rotation),
 		terminalManager: typeof cfg.terminalManager === "string" && cfg.terminalManager.trim() ? cfg.terminalManager.trim() : undefined,
 	};
+}
+
+// ============================================================================
+// === roles: config (task-role-playbooks) ====================================
+// ============================================================================
+
+// One role's resolved playbook configuration. `path` is the resolved (usually
+// absolute) path from the yml config; `null` would mean "unset", but as of
+// this implementation every kind always resolves to SOME path (custom or
+// bundled default) so that spawn-time injection never silently degrades to
+// "no playbook". Existence checks happen in validateRolesConfig (preflight
+// error surface), NOT here — resolution is a pure path-map.
+export type RolePlaybookConfig = {
+	kind: string;
+	path: string;
+	source: SourceLayer;
+	file?: string;
+};
+
+export type RolesConfig = {
+	// Keys: planner, implementer, fixer, tester, reviewer
+	roles: Record<string, RolePlaybookConfig>;
+	// Path to the project-charter override; null = use ROLE_CHARTER_DEFAULT
+	charter: { path: string | null };
+	// Whole-key provenance for the `roles:` object (informational)
+	source: SourceInfo | null;
+};
+
+// Path to the bundled playbook skill directory for a role kind. Anchored to
+// this module's location, NOT cwd, so a spawned worker receives a valid
+// absolute path regardless of where pi was launched from (same discipline as
+// session.ts defaultSwarmExtensionPath).
+export function bundledRolePlaybookPath(kind: string): string {
+	return fileURLToPath(new URL(`../role-skills/${kind}/`, import.meta.url));
+}
+
+// Resolve a candidate playbook VALUE from yml into a RolePlaybookConfig.
+// Accepted shapes: "default" (sentinel → bundled), null/undefined (→ bundled),
+// or a string path (absolute, or relative to the project root `cwd`).
+// The path may point at a DIRECTORY containing SKILL.md or a direct .md
+// file — both are legal at the pi `--skill <path>` boundary.
+export function resolveRolePlaybookPath(
+	kind: string,
+	value: unknown,
+	cwd: string,
+	source: SourceLayer,
+	file?: string,
+): RolePlaybookConfig {
+	if (value === undefined || value === null) {
+		return { kind, path: bundledRolePlaybookPath(kind), source };
+	}
+	if (typeof value !== "string") {
+		return { kind, path: bundledRolePlaybookPath(kind), source };
+	}
+	const trimmed = value.trim();
+	if (!trimmed || trimmed.toLowerCase() === "default") {
+		return { kind, path: bundledRolePlaybookPath(kind), source };
+	}
+	const abs = trimmed.startsWith("/") ? trimmed : join(cwd, trimmed);
+	return { kind, path: abs, source, file };
+}
+
+// Read and resolve the top-level `roles:` config key across both layers
+// (global + project) with PER-SUB-KEY precedence: project > global > bundled
+// default. This differs from `modelPool` (whole-array replacement): a project
+// declaring only `roles.tester` preserves global `roles.planner` etc.
+export function readRolesConfig(cwd: string, opts: { freshGlobal?: boolean } = {}): RolesConfig {
+	const merged = mergeSwarmConfig(cwd, opts);
+
+	// Re-read both layers individually for per-sub-key merge (mergeSwarmConfig
+	// applied whole-OBJECT replacement for the roles key: the project object
+	// fully replaced the global one in `merged.cfg`).
+	let projRolesObj: Record<string, unknown> | null = null;
+	let globalRolesObj: Record<string, unknown> | null = null;
+	try {
+		const projYml = readSwarmYml(cwd);
+		projRolesObj =
+			projYml?.roles && typeof projYml.roles === "object" && !Array.isArray(projYml.roles)
+				? (projYml.roles as Record<string, unknown>)
+				: null;
+	} catch {
+		projRolesObj = null; // corrupt project yml: corrupt[] already reports it
+	}
+	try {
+		const globalYml = readGlobalSwarmYml(opts.freshGlobal === true);
+		globalRolesObj =
+			globalYml?.roles && typeof globalYml.roles === "object" && !Array.isArray(globalYml.roles)
+				? (globalYml.roles as Record<string, unknown>)
+				: null;
+	} catch {
+		globalRolesObj = null; // corrupt global yml: corrupt[] already reports it
+	}
+
+	// Resolve each playbook kind: project > global > bundled default.
+	const roles: Record<string, RolePlaybookConfig> = {};
+	for (const kind of ROLE_PLAYBOOK_KINDS) {
+		const projVal = projRolesObj?.[kind];
+		const globalVal = globalRolesObj?.[kind];
+		if (projVal !== undefined && projVal !== null) {
+			roles[kind] = resolveRolePlaybookPath(kind, projVal, cwd, "project.swarm.yml");
+		} else if (globalVal !== undefined && globalVal !== null) {
+			roles[kind] = resolveRolePlaybookPath(kind, globalVal, cwd, "global");
+		} else {
+			roles[kind] = { kind, path: bundledRolePlaybookPath(kind), source: "default" };
+		}
+	}
+
+	// charter: project > global; resolve to abs path; null → embedded default.
+	let charter: RolesConfig["charter"] = { path: null };
+	const projCharter = projRolesObj?.charter;
+	const globalCharter = globalRolesObj?.charter;
+	if (typeof projCharter === "string" && projCharter.trim()) {
+		const t = projCharter.trim();
+		charter = { path: t.startsWith("/") ? t : join(cwd, t) };
+	} else if (typeof globalCharter === "string" && globalCharter.trim()) {
+		const t = globalCharter.trim();
+		charter = { path: t.startsWith("/") ? t : join(cwd, t) };
+	}
+
+	return { roles, charter, source: merged.sources.roles ?? null };
+}
+
+// Structural error shape for roles config validation (mirrors PoolValidationError).
+export type RoleConfigError = { kind: string; field?: string; message: string; source?: string };
+
+// Validate the roles config: custom paths must exist and be shaped correctly
+// (directory containing SKILL.md, or a direct .md file). Bundled defaults are
+// package-shipped and always valid. Returns an array of errors (empty = valid).
+// Callers surface these through the preflight error surface (preflightSpawn /
+// /swarm pool validate) — invalid paths NEVER silently fall back to bundled.
+export function validateRolesConfig(cwd: string, opts: { freshGlobal?: boolean } = {}): RoleConfigError[] {
+	const errors: RoleConfigError[] = [];
+	const rc = readRolesConfig(cwd, opts);
+
+	// Charter: when a path is configured, it must exist and be a readable file.
+	if (rc.charter.path) {
+		if (!existsSync(rc.charter.path)) {
+			errors.push({
+				kind: "roles_charter_missing",
+				field: "roles.charter",
+				message: `roles.charter points at a missing file: ${rc.charter.path}`,
+			});
+		}
+	}
+
+	// Role playbooks: each resolved CUSTOM path must exist. Directories must
+	// contain a SKILL.md; loose files must end in .md.
+	for (const [kind, conf] of Object.entries(rc.roles)) {
+		if (!conf.path) continue;
+		if (conf.source === "default") continue; // bundled, cannot miss
+		let st: import("node:fs").Stats | null = null;
+		try {
+			st = statSync(conf.path);
+		} catch {
+			st = null;
+		}
+		if (!st) {
+			errors.push({
+				kind: "roles_playbook_missing",
+				field: `roles.${kind}`,
+				message: `roles.${kind} points at a missing path: ${conf.path}`,
+				source: conf.source,
+			});
+			continue;
+		}
+		if (st.isDirectory()) {
+			if (!existsSync(join(conf.path, "SKILL.md"))) {
+				errors.push({
+					kind: "roles_playbook_no_skill_md",
+					field: `roles.${kind}`,
+					message: `roles.${kind} directory has no SKILL.md: ${conf.path}`,
+					source: conf.source,
+				});
+			}
+		} else if (!conf.path.endsWith(".md")) {
+			errors.push({
+				kind: "roles_playbook_not_skill",
+				field: `roles.${kind}`,
+				message: `roles.${kind} must be a directory containing SKILL.md or a direct .md file; got: ${conf.path}`,
+				source: conf.source,
+			});
+		}
+	}
+
+	return errors;
+}
+
+// Read the charter text. Priority: custom path (when configured + readable) →
+// ROLE_CHARTER_DEFAULT. A custom path that fails to read at this layer logs
+// durably (logSwarmError) and falls back to the default; validateRolesConfig
+// already reported the miss as a preflight error.
+export function readCharterText(cwd: string, opts: { freshGlobal?: boolean } = {}): string {
+	const rc = readRolesConfig(cwd, opts);
+	if (rc.charter.path) {
+		try {
+			return readFileSync(rc.charter.path, "utf8");
+		} catch (err: any) {
+			logSwarmError(cwd, "config", "roles_charter_read_failed", err, { charterPath: rc.charter.path });
+			return ROLE_CHARTER_DEFAULT;
+		}
+	}
+	return ROLE_CHARTER_DEFAULT;
+}
+
+// Resolve the playbook path for a role kind at call time.
+//
+// Fix-node remap: when `opts.nodeId` is "fix", or the role TEXT strongly
+// indicates a fixer (starts with "fix"), an implementer-kind resolves the
+// FIXER playbook instead of the generic implementer playbook. This is a
+// PLAYBOOK-LAYER remap only — the graph keeps role "implementer" on the fix
+// node so model-pool routing is unchanged.
+export function resolveRolePlaybook(
+	roleKind: string,
+	opts: { nodeId?: string; role?: string; cwd?: string; freshGlobal?: boolean } = {},
+	cwdArg?: string,
+): string | null {
+	const cwd = typeof cwdArg === "string" ? cwdArg : opts.cwd || process.cwd();
+
+	let kind: string = roleKind;
+	if (roleKind === "implementer") {
+		const nodeId = (opts.nodeId || "").toLowerCase();
+		const roleStr = (opts.role || "").trim().toLowerCase();
+		if (nodeId === "fix" || /^fix(er)?$/.test(roleStr) || roleStr.startsWith("fix ")) {
+			kind = "fixer";
+		}
+	}
+
+	if (!(ROLE_PLAYBOOK_KINDS as readonly string[]).includes(kind)) return null;
+	const rc = readRolesConfig(cwd, { freshGlobal: opts?.freshGlobal });
+	return rc.roles[kind]?.path ?? null;
 }

@@ -12,6 +12,7 @@ import {
 	PI_SWARM_MINIMAL_PROTOCOL,
 } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
+import { readCharterText, resolveRolePlaybook } from "./config.ts";
 import { identityPath, mailboxPath, paths, trace } from "./state.ts";
 import { now, safeId } from "./utils.ts";
 import { tmux } from "./tmux.ts";
@@ -156,6 +157,21 @@ export function ensureRoot(st: SwarmState, cwd: string, p: Paths): SwarmAgent {
 // read-only when appending the `## Memory protocol` link to generated agent identity, so there is no
 // redeclaration here. Both regions stay disjoint; the constant value is shared and identical.
 
+// Role Playbook section (task-role-playbooks). Renders the agent's always-loaded
+// role playbook (a pi skill injected at spawn via --skill) plus the charter it
+// operates under. Config reads are synchronous (readSwarmYml); any failure falls
+// back to bundled defaults and logs durably — identity generation never throws.
+function buildRolePlaybookSection(agent: SwarmAgent): string {
+	const playbook = resolveRolePlaybook(agent.roleKind, { role: agent.role });
+	if (!playbook) return "";
+	const charterText = readCharterText(agent.cwd);
+	return (
+		`## Role Playbook\n\n` +
+		`Your role playbook (pi skill, always loaded): \`${playbook}\`\n\n` +
+		`**Charter:** ${charterText.trim()}\n\n`
+	);
+}
+
 export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 	return (
 		`# Swarm Agent Identity: ${agent.id}\n\n` +
@@ -181,6 +197,7 @@ export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 		(["root", "reviewer", "auditor"].includes(agent.roleKind)
 			? `7. Qualification responsibility: read the package skill \`extensions/swarm/qualification-skills/qualification-gate/SKILL.md\` when preparing, challenging, or auditing a task's qualification gate. Keep it private to qualification roles; implementers follow the frozen artifact instead.\n\n`
 			: "\n") +
+		buildRolePlaybookSection(agent) +
 		(PI_SWARM_MINIMAL_PROTOCOL === 1
 			? `## Reply Protocol\n\n` +
 				`- Replies are auto-verified; do NOT call \`swarm_ack_message\` for normal workflow.\n` +

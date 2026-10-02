@@ -169,6 +169,24 @@ export const POOL_SCAFFOLD_GLOBAL_YML_NOTIFY_TEXT =
 // can be updated in one place.
 export const POOL_SCAFFOLD_DOC_HINT = "docs/swarm/tools.md#configuration";
 
+// === Role playbooks (task-role-playbooks) ==============================
+// Five bundled pi skills under extensions/swarm/role-skills/{planner,implementer,fixer,tester,reviewer}
+// injected at spawn via `--skill` (additive). Top-level `roles:` config in swarm.yml
+// can override each playbook per-key (project yml > global yml > bundled default).
+
+// The kind ids that carry a bundled playbook. Roles without a playbook
+// (root / observer / worker / auditor) resolve to null.
+export const ROLE_PLAYBOOK_KINDS = ["planner", "implementer", "fixer", "tester", "reviewer"];
+
+// Embedded default charter ("không sai > đẹp" — correctness beats beauty). A project
+// can override with `roles.charter: <path>` in swarm.yml; the custom file REPLACES
+// this text everywhere the charter is surfaced (identity, /swarm roles).
+export const ROLE_CHARTER_DEFAULT =
+	"Correctness first: không sai > đẹp — not-wrong beats beautiful. " +
+	"Minimal diff inside your node's scope. Every claim you make must carry evidence: " +
+		"the command you ran and the path you read. Missing evidence counts as failure. " +
+	"Ask (blocked) instead of guessing outside scope.";
+
 // === Issue 17: engine-retry gate constants (extracted to constants.ts in Issue 19) ===
 // The pi engine retries a failed provider request up to retry.maxRetries (default 3) times with
 // exponential backoff (2s, 4s, 8s — see @earendil-works/pi-coding-agent/docs/settings.md). These

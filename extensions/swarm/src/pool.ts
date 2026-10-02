@@ -393,7 +393,7 @@ export function validateSwarmSettings(
 	const cfg = resolved.cfg;
 	// v4.2: unknown-key warning (plain list, no suggestions) for both layers.
 	// MUST fire before the empty-cfg early return, because unknown keys are stripped from cfg.
-	const RECOGNIZED = new Set(["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal"]);
+	const RECOGNIZED = new Set(["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal", "roles"]);
 	const projFile = findSwarmYamlFile(cwd);
 	if (projFile) {
 		try {

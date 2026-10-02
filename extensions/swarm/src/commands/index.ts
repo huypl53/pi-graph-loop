@@ -12,12 +12,14 @@ import type { ScopedSwarmCommandName } from "./parser.ts";
 import { handleIssuesCommand } from "./issues.ts";
 import { handlePoolCommand } from "./pool.ts";
 import { handleProtocolCommand } from "./protocol.ts";
+import { handleRolesCommand } from "./roles.ts";
 import { handleTasksCommand } from "./tasks.ts";
 
 export * from "./parser.ts";
 export * from "./markers.ts";
 export * from "./agents.ts";
 export * from "./tasks.ts";
+export * from "./roles.ts";
 export * from "./pool.ts";
 export * from "./goal.ts";
 export * from "./attention.ts";
@@ -103,6 +105,10 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 			}
 			if (cmd === "protocol") {
 				await handleProtocolCommand(cmd, rest, ctx, p, pi);
+				return;
+			}
+			if (cmd === "roles") {
+				await handleRolesCommand(rest, ctx, p, pi);
 				return;
 			}
 			ctx.ui.notify(`Unknown /${commandName} command: ${cmd}`, "warning");

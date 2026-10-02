@@ -1,0 +1,17 @@
+# role-playbook-e2e: role playbook injection, end-to-end at the real spawn boundary.
+#
+# Scenario (task-role-playbooks):
+#   - Root spawns a fixer-role worker via the production `swarm_spawn_agent` tool.
+#   - Spawn argv must carry `--skill <abs-path-to-role-skills/fixer>` AFTER `-e <swarm-ext>`.
+#   - Assignment surface (identity/assignment body) is asserted by the companion lane test
+#     via swarm-state.json + identity file, not by fixture narration (no fixture theater).
+#
+# Turns:
+#   1. Root inspects agents and spawns worker "rp-fixer-01" (role text contains "fix" ->
+#      fix-node remap resolves the fixer playbook).
+#   2. Root narrates and settles; the lane test asserts on REAL artifacts:
+#      swarm-state.json agent record, identity markdown `## Role Playbook` section,
+#      charter text presence, and the tmux spawn command (captured via mock driver
+#      exec log when PI_SWARM_TERMINAL_MANAGER=mock).
+{"name":"rp inspect + spawn fixer","events":[{"type":"text","delayMs":15,"text":"Inspecting agents and spawning a fixer-role worker so the role playbook fixture lane can observe spawn-time --skill injection at the real boundary.","chunks":["Inspecting agents ","and spawning a fixer-role worker ","so the role playbook fixture lane can observe ","spawn-time --skill injection."]},{"type":"toolcall","delayMs":10,"name":"swarm_list_agents","id":"rp-la-0","arguments":{}},{"type":"toolcall","delayMs":15,"name":"swarm_spawn_agent","id":"rp-sp-1","arguments":{"id":"rp-fixer-01","role":"fixer worker for role-playbook-e2e; verify assigned fix node then settle","roleKind":"fixer"}}]}
+{"name":"rp settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Spawn result above is the evidence; the lane asserts on real state artifacts, not this narration.","chunks":["Spawn result above is the evidence; ","the lane asserts on real state artifacts, ","not this narration."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
