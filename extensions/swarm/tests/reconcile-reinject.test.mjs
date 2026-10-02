@@ -6,6 +6,10 @@
 import { rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 // Reinject path is gated to non-minimal protocol (reconcile-core skips it under gate=1).
 process.env.PI_SWARM_MINIMAL_PROTOCOL = "0";
+// Isolation: this suite mocks the tmux send-keys boundary — pin the terminal driver to tmux
+// regardless of the repo root's real .pi/swarm.yml (terminalManager: herdr there would route
+// reinjection through the herdr driver and the mock would never see it).
+process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
