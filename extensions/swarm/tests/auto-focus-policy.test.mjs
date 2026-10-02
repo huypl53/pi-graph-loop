@@ -103,7 +103,9 @@ const outsideFixtures = {
 console.log("=== D1 policy matrix (herdr busy path, user outside agents workspace) ===");
 
 for (const [rootName, rootState] of Object.entries(rootVariants)) {
-	// follow: pull iff root idle
+	// follow (S2 fix, task swarm-autofocus-focus-steal): NEVER pulls a user out of a different
+	// workspace, regardless of root mid-turn state. Root mid-turn keeps the distinct
+	// "root-busy-hold" reason; root idle vetoes as "user-focused-outside-agents-workspace".
 	{
 		const scratch = join(tmpdir(), `swarm-pol-follow-${rootName}-${process.pid}-${Date.now()}`);
 		mkdirSync(scratch, { recursive: true });
@@ -111,18 +113,11 @@ for (const [rootName, rootState] of Object.entries(rootVariants)) {
 		const { api, execs } = fakePi(outsideFixtures);
 		setMgr("herdr");
 		const res = await maybeAutoFocusOnBusy(api, { cwd: scratch }, "af-worker");
-		// follow: pull iff root is NOT mid-turn. Unknown/absent root state counts as idle
-		// (fail-open, mirrors the guard's query-failure fail-open).
-		const expectPull = rootName !== "midTurn";
-		const label = `follow + root ${rootName} → ${expectPull ? "PULL" : "root-busy-hold"}`;
-		if (expectPull) {
-			strictEqual(res.switched, true, label);
-			ok(countTabFocus(execs) >= 1, `${label} — tab focus call at seam`);
-		} else {
-			strictEqual(res.switched, false, label);
-			strictEqual(res.reason, "root-busy-hold", label);
-			strictEqual(countTabFocus(execs), 0, `${label} — zero tab focus calls`);
-		}
+		const expectReason = rootName === "midTurn" ? "root-busy-hold" : "user-focused-outside-agents-workspace";
+		const label = `follow + root ${rootName} → veto (${expectReason})`;
+		strictEqual(res.switched, false, label);
+		strictEqual(res.reason, expectReason, label);
+		strictEqual(countTabFocus(execs), 0, `${label} — zero tab focus calls`);
 		console.log(`  ok   ${label}`);
 		pass++;
 		rmSync(scratch, { recursive: true, force: true });

@@ -216,7 +216,7 @@ await asyncTest("GREEN: herdr + bypassActiveGuard option bypasses cross-workspac
 	rmSync(scratch, { recursive: true, force: true });
 });
 
-await asyncTest("GREEN: herdr + getFocusedWorkspaceId query failure → fail-open (logged durably, focus proceeds)", async () => {
+await asyncTest("GREEN: herdr + getFocusedWorkspaceId query failure → fail-CLOSED under follow (logged durably, no focus)", async () => {
 	const scratch = join(tmpdir(), `swarm-af-guard-5-${process.pid}-${Date.now()}`);
 	mkdirSync(scratch, { recursive: true });
 	const p = paths(scratch);
@@ -225,13 +225,15 @@ await asyncTest("GREEN: herdr + getFocusedWorkspaceId query failure → fail-ope
 	const agentsPaneId = "wA:p1";
 	await writeState(p, baseState(scratch, agentsWsId, agentsTabId, agentsPaneId));
 
-	// herdr tab list throws → getFocusedWorkspaceId logs error + returns undefined → guard fails open.
+	// S2 fix (task swarm-autofocus-focus-steal): herdr tab list throws → the cross-workspace
+	// guard fails CLOSED under follow/suppress (a broken tab list used to silently disable the
+	// guard and steal focus). steal still proceeds by contract.
 	const { api, execs } = fakePi({ herdrTabListThrows: true });
 	setMgr("herdr");
 	const res = await maybeAutoFocusOnBusy(api, { cwd: scratch }, "af-worker");
-	strictEqual(res.switched, true, "fail-open: query failure must not silently swallow the busy-path focus");
-	strictEqual(res.reason, "ok");
-	ok(count(execs, "herdr", (e) => e.args[0] === "tab" && e.args[1] === "focus") >= 1, "herdr tab focus call expected on fail-open");
+	strictEqual(res.switched, false, "fail-closed: query failure must not disable the cross-workspace guard");
+	strictEqual(res.reason, "user-focused-outside-agents-workspace");
+	strictEqual(count(execs, "herdr", (e) => e.args[0] === "tab" && e.args[1] === "focus"), 0, "zero herdr tab focus calls on fail-closed");
 	// Durable error log written
 	const errFile = join(scratch, ".pi", "swarm", "traces", "errors.jsonl");
 	ok(existsSync(errFile), "durable error log must be written on query failure");
