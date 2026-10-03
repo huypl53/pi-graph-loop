@@ -26,7 +26,7 @@ import {
 	POOL_SCAFFOLD_YML_PLACEHOLDER,
 } from "./constants.ts";
 import { atomicWriteFile, ensureDirs, paths as statePaths, readState, trace, withLock, writeState } from "./state.ts";
-import { expected, logSwarmError, traceLogged } from "./errorlog.ts";
+import { expected, logSwarmError } from "./errorlog.ts";
 import { now } from "./utils.ts";
 import { validateSwarmSettings } from "./pool.ts";
 import type { Paths } from "./types.ts";
@@ -120,7 +120,7 @@ export async function ensurePoolScaffold(cwd: string, opts: { alreadyNotified?: 
 
 // PUBLIC: ensure `~/.pi/agent/swarm.yml` has a modelPool placeholder. One-shot via
 // `SwarmState.poolScaffoldGlobalNotifiedAt`. Never overwrites corrupt global.
-export async function ensureGlobalPoolScaffold(opts: { alreadyNotified?: boolean } = {}): Promise<GlobalScaffoldResult> {
+export async function ensureGlobalPoolScaffold(opts: { alreadyNotified?: boolean; p?: Paths } = {}): Promise<GlobalScaffoldResult> {
 	const found = findGlobalSwarmYaml();
 	const targetPath = found?.file || getGlobalSwarmYmlPrimary();
 
@@ -146,10 +146,11 @@ export async function ensureGlobalPoolScaffold(opts: { alreadyNotified?: boolean
 
 	// Global yml doesn't exist — write the scaffold.
 	await atomicWriteFile(targetPath, POOL_SCAFFOLD_GLOBAL_YML_PLACEHOLDER);
-	await traceLogged(undefined, "pool.global_scaffold_created", {
+	const traceP = opts.p ?? statePaths(process.cwd());
+	await trace(traceP, "pool.global_scaffold_created", {
 		path: targetPath,
 		source: "global-swarm.yml",
-	});
+	}).catch(() => {});
 	return { wrote: true, path: targetPath, notify: POOL_SCAFFOLD_GLOBAL_YML_NOTIFY_TEXT };
 }
 
@@ -185,7 +186,7 @@ export async function runRootPoolScaffoldAndHealth(ctx: any, p: Paths): Promise<
 
 	// 2. Global pool scaffold (~/.pi/agent/swarm.yml)
 	try {
-		const globalResult = await ensureGlobalPoolScaffold();
+		const globalResult = await ensureGlobalPoolScaffold({ p });
 		if (globalResult.wrote) {
 			await withLock(p, async () => {
 				const locked = await readState(p, ctx.cwd);
