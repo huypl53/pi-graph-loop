@@ -40,15 +40,64 @@ function agentSlot(agent: any): string {
 	return `${agent.provider || "?"}/${agent.model || "?"}`;
 }
 
+// tool-output-slim §8 (2026-10-03): compact row for targeted agentId queries — same vocabulary as
+// attention rows. Renamed fields (paneAlive/target), human ages (heartbeatAge/settledAge),
+// dead counters dropped (unackedMessages/ackMissing are always 0 under minimal protocol), debt
+// counters only when non-zero, plumbing ISOs/pid gone. view:"full" keeps the legacy 24-field row.
+function slimStatusRow(row: any): Record<string, unknown> {
+	const slim: Record<string, unknown> = {
+		agentId: row.agentId,
+		taskProgressState: row.taskProgressState,
+		status: row.status,
+		runtimeStatus: row.runtimeStatus,
+		health: row.health,
+		paneAlive: row.paneAlive,
+		driver: row.driver,
+		target: row.target,
+		heartbeatAge: row.lastHeartbeatAgeSec,
+		slot: row.slot,
+	};
+	if (row.paused) slim.paused = true;
+	if (row.runtimeStatus === "busy" || row.runtimeStatus === "tool_running") slim.lastToolAge = row.lastToolAt ? humanAge(row.lastToolAt) : undefined;
+	if (row.lastHeartbeatAgeSec === undefined) delete slim.heartbeatAge;
+	const settledAgeSec = row.lastAgentSettledAt ? Math.round((Date.now() - new Date(row.lastAgentSettledAt).getTime()) / 1000) : undefined;
+	if (settledAgeSec !== undefined) slim.settledAge = settledAgeSec;
+	// debt counters only when non-zero; `why` mirrors the attention-row sentence
+	if (row.pendingMessages > 0) slim.pendingMessages = row.pendingMessages;
+	if (row.deadLetters > 0) slim.deadLetters = row.deadLetters;
+	if (row.responseMissing > 0) slim.responseMissing = row.responseMissing;
+	if (row.responsesVerified > 0) slim.responsesVerified = row.responsesVerified;
+	if (row.blockedFromReuse) slim.blockedFromReuse = true;
+	if (row.unackedMessages > 0) slim.unackedMessages = row.unackedMessages;
+	if (row.ackMissing > 0) slim.ackMissing = row.ackMissing;
+	slim.why = whyOfRow(row);
+	return slim;
+}
+
+// why: first matching derived fact wins (one sentence) — shared by attention rows and slim
+// targeted rows so both views speak the same health vocabulary.
+function whyOfRow(row: any): string {
+	if (row.status === "stopped" && row.paneAlive) return "pane alive but agent stopped";
+	if (row.status === "stopped") return "agent stopped";
+	if (row.taskProgressState === "dead") return "no pane / stale heartbeat";
+	if (row.deadLetters > 0) return `${row.deadLetters} dead-letter message(s)`;
+	if (row.responseMissing > 0) return `${row.responseMissing} response(s) missing (blocked from reuse)`;
+	if (row.pendingMessages > 0) return `${row.pendingMessages} pending message(s)`;
+	if (row.paused) return "paused";
+	if (row.taskProgressState === "stalled") return "stalled (active task, no recent tool activity)";
+	if (row.taskProgressState === "completed_unverified") return "artifact fresh but result unverified";
+	return row.taskProgressState;
+}
+
 export function registerAgentStatusTools(pi: ExtensionAPI): void {
 	pi.registerTool(
 		defineTool({
 			name: "swarm_agent_status",
 			label: "Swarm Agent Status",
 			description:
-				"Report runtime/liveness status for swarm agents using pi lifecycle state, tmux pane liveness, and mailbox message counts. Default view is a compact attention/census summary; view:'full' (or verbose:true) returns the legacy 24-field rows; pass agentId for a targeted full-row query.",
+				"Report runtime/liveness status for swarm agents using pi lifecycle state, tmux pane liveness, and mailbox message counts. Default view is a compact attention/census summary and is the correct shape for routine supervision; view:'full' (or verbose:true) returns the legacy 24-field rows — reserve it for debugging ONE agent (pass agentId with it); pass agentId alone for a targeted full-row query.",
 			promptGuidelines: [
-				"Use `swarm_agent_status` to inspect which swarm agents are idle, busy, tool-running, stopped, alive in tmux, or have pending/unacked/dead-letter messages. The default attention view summarizes the whole swarm; pass agentId (or view:'full') for per-agent detail.",
+				"Use `swarm_agent_status` to inspect which swarm agents are idle, busy, tool-running, stopped, alive in tmux, or have pending/unacked/dead-letter messages. The default attention view summarizes the whole swarm; use view:'full' only when debugging a specific agent (pass agentId).",
 			],
 			parameters: Type.Object({
 				agentId: Type.Optional(Type.String({ description: "Optional agent id. If omitted, returns all agents." })),
@@ -130,16 +179,20 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						});
 					}
 					await trace(p, "agent.status.read", { agentId: filter, count: rows.length });
-					// === tool-output-slim §2 — attention/census default view ===
-					// Targeted queries and view:"full"/verbose:true keep the legacy envelope.
-					const view =
-						params.agentId || params.view === "full" || params.verbose === true
-							? "full"
-							: params.view === "census"
-								? "census"
-								: "attention";
+					// === tool-output-slim §2 + §8 — view resolution ===
+					// view:"full"/verbose:true → legacy 24-field rows (explicit escape hatch). Everything else
+					// is compact: no-filter calls get the attention/census summary; targeted agentId queries
+					// get ONE slim row (same vocabulary as attention rows) — the routine per-agent
+					// supervision call no longer pays the 24-field ~1.1KB envelope by default.
+					const viewFull = params.view === "full" || params.verbose === true;
+					const view = viewFull ? "full" : params.view === "census" ? "census" : "attention";
 					if (view === "full") {
 						return textResult(JSON.stringify({ count: rows.length, agents: rows }, null, 2), { agents: rows });
+					}
+					if (filter) {
+						// §8 targeted query: slim row(s) — normally exactly one agent
+						const slimRows = rows.map((r: any) => slimStatusRow(r));
+						return textResult(JSON.stringify({ count: slimRows.length, agents: slimRows }), { agents: rows });
 					}
 					// Census buckets from taskProgressState. Healthy-idle = active|awaiting_input agents with
 					// no pending/dead-letter/response debt. Everything else lands in attention.
@@ -162,18 +215,7 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						else if (row.taskProgressState === "stalled" || row.taskProgressState === "idle_blocked") census.stalled++;
 						else census.idle++;
 						if (!unhealthy) continue;
-						// why: first matching derived fact wins (one sentence).
-						let why: string;
-						if (row.status === "stopped" && row.paneAlive) why = "pane alive but agent stopped";
-						else if (row.status === "stopped") why = "agent stopped";
-						else if (row.taskProgressState === "dead") why = "no pane / stale heartbeat";
-						else if (row.deadLetters > 0) why = `${row.deadLetters} dead-letter message(s)`;
-						else if (row.responseMissing > 0) why = `${row.responseMissing} response(s) missing (blocked from reuse)`;
-						else if (row.pendingMessages > 0) why = `${row.pendingMessages} pending message(s)`;
-						else if (row.paused) why = "paused";
-						else if (row.taskProgressState === "stalled") why = "stalled (active task, no recent tool activity)";
-						else if (row.taskProgressState === "completed_unverified") why = "artifact fresh but result unverified";
-						else why = row.taskProgressState;
+						// why: shared whyOfRow (one sentence; same vocabulary as slim targeted rows)
 						const slim: Record<string, unknown> = {
 							agentId: row.agentId,
 							taskProgressState: row.taskProgressState,
@@ -195,7 +237,7 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						if (row.ackMissing > 0) slim.ackMissing = row.ackMissing;
 						if (row.responsesVerified > 0) slim.responsesVerified = row.responsesVerified;
 						if (row.paused) slim.paused = true;
-						slim.why = why;
+						slim.why = whyOfRow(row);
 						attention.push(slim);
 					}
 					const hint =
