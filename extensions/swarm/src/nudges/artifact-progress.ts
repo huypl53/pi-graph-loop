@@ -20,6 +20,7 @@ import { deliverMessageLocked, findIdempotentMessage } from "../mailbox.ts";
 import { logSwarmError } from "../errorlog.ts";
 import { readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "../state.ts";
 import { outgoingOutcomes } from "../taskgraph/graph.ts";
+import { PI_SWARM_MINIMAL_PROTOCOL } from "../constants.ts";
 
 export async function evaluateArtifactProgressNudgeLocked(
 	pi: ExtensionAPI,
@@ -177,7 +178,7 @@ export async function evaluateArtifactProgressNudgeLocked(
 			// hint instead of any vocabulary list.
 			const outcomes = outgoingOutcomes(task, nodeId);
 			const outcomeArg = outcomes.length > 0 ? `<one of: ${outcomes.join("|")}>` : `<see task.md edges for this node's valid outcomes>`;
-			const body = [
+			const bodyLines = [
 				`[PI-SWARM ARTIFACT-PROGRESS NUDGE] (high-priority)`,
 				`File detected: ${contributingFile} (mtime ${fileMtimeIso})`,
 				`Node ${nodeId} still ${node.status}. Last update: ${lastProgressIso}.`,
@@ -193,11 +194,21 @@ export async function evaluateArtifactProgressNudgeLocked(
 				`    body="<1-line summary>"`,
 				`  )`,
 				``,
-				`  swarm_ack_message(messageId="${assignmentMsgId}", status=done, resultMessageId="<result msg id>")`,
-				``,
 				`If the work is genuinely incomplete, call swarm_update_task(status=blocked, note=<reason>) instead.`,
 				`(Auto-backoff: ${Math.round(ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS / 60000)} min between nudges; cap ${ARTIFACT_PROGRESS_NUDGE_CAP} then escalate to root.)`,
-			].join("\n");
+			];
+			// Fix B (task-202610031339): swarm_ack_message is retired under minimal protocol — the ack
+			// step is engine-derived (mirror delivery.ts showAckHint). Only the legacy lane
+			// (PI_SWARM_MINIMAL_PROTOCOL=0) keeps the ack triple, byte-identical.
+			if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
+				bodyLines.splice(
+					16,
+					0,
+					`  swarm_ack_message(messageId="${assignmentMsgId}", status=done, resultMessageId="<result msg id>")`,
+					``,
+				);
+			}
+			const body = bodyLines.join("\n");
 			try {
 				await deliverMessageLocked(pi, cwd, p, st, {
 					to: node.assignee,
