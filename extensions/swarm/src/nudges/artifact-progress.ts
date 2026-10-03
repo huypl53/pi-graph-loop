@@ -19,6 +19,7 @@ import type { Paths, SwarmState, TaskPaths, TaskState } from "../types.ts";
 import { deliverMessageLocked, findIdempotentMessage } from "../mailbox.ts";
 import { logSwarmError } from "../errorlog.ts";
 import { readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "../state.ts";
+import { outgoingOutcomes } from "../taskgraph/graph.ts";
 
 export async function evaluateArtifactProgressNudgeLocked(
 	pi: ExtensionAPI,
@@ -169,6 +170,13 @@ export async function evaluateArtifactProgressNudgeLocked(
 			const lastProgressIso = node.lastProgressAt ?? "never";
 			const fileMtimeIso = new Date(maxMtimeMs).toISOString();
 			const assignmentMsgId = node.assignmentMessageId ?? `<assignment msg id for ${task.taskId}:${nodeId}>`;
+			// Fix A (task-202610031339): the outcome vocabulary must match the node's actual outgoing
+			// edge `when` values (edgeMatchesActivation compares from.outcome === edge.when). Advertising
+			// the old generic list caused workers to close with outcome=tested when the edge required
+			// passed (live incident msg-1791033710946). Terminal/no-outgoing-edge nodes get a pointer
+			// hint instead of any vocabulary list.
+			const outcomes = outgoingOutcomes(task, nodeId);
+			const outcomeArg = outcomes.length > 0 ? `<one of: ${outcomes.join("|")}>` : `<see task.md edges for this node's valid outcomes>`;
 			const body = [
 				`[PI-SWARM ARTIFACT-PROGRESS NUDGE] (high-priority)`,
 				`File detected: ${contributingFile} (mtime ${fileMtimeIso})`,
@@ -176,7 +184,7 @@ export async function evaluateArtifactProgressNudgeLocked(
 				``,
 				`You are 1 step from closing the task. To finish:`,
 				``,
-				`  swarm_update_task(taskId="${task.taskId}", nodeId="${nodeId}", status=done|failed|blocked, outcome=<one of: planned|implemented|tested|reviewed|approved|rejected|failed>)`,
+				`  swarm_update_task(taskId="${task.taskId}", nodeId="${nodeId}", status=done|failed|blocked, outcome=${outcomeArg})`,
 				``,
 				`  swarm_send_message(`,
 				`    to="root",`,
