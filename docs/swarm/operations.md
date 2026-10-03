@@ -1175,6 +1175,27 @@ Rules governing which messages mint response debt and how debt clears (source:
   under gate=0 no `respondedAt`/`lifecycleStage`/`lifecycleSource`/`terminalAt` is stamped
   (Phase-1 shadow-only contract preserved).
 
+### Artifact-progress nudge template contract (task-202610031339, 2026-10-03)
+
+- **Edge-aware outcome vocabulary (Fix A)** — the nudge's `swarm_update_task` line advertises the
+  node's ACTUAL outgoing-edge `when` values (`outgoingOutcomes(task, nodeId)` in
+  `extensions/swarm/src/taskgraph/graph.ts`), e.g. `outcome=<one of: passed|failed>`. Terminal /
+  no-outgoing-edge nodes fall back to a `see task.md edges` pointer hint. The old generic list
+  (`planned|implemented|tested|reviewed|approved|rejected|failed`) caused workers to close with
+  `outcome=tested` when the edge required `passed`.
+- **Protocol-gated ack line (Fix B)** — the `swarm_ack_message(...)` body line renders only under
+  the legacy lane (`PI_SWARM_MINIMAL_PROTOCOL=0`); under minimal protocol the ack step is
+  engine-derived and the body omits it (mirror of `delivery.ts showAckHint`). Gate=0 bodies are
+  byte-identical to the pre-change legacy template.
+- **Closure-aware delivery (Fix C)** — immediately before nudge (and cap-escalation) delivery the
+  sweep re-reads `task.json` from disk (lock-held) and skips when the node went terminal between
+  snapshot and delivery, emitting a `worker.artifact_progress_race_lost` census trace. The nudge
+  bookkeeping persist merges onto a fresh disk read so the sweep can no longer clobber a
+  concurrent closure (previously it reverted `done` back to `assigned`, resurrecting the cycle).
+  Red-first lane: `extensions/swarm/tests/nudge-closure-race.test.mjs` (fs.stat interposition;
+  the patch must precede the first `node:fs/promises` import in the process — Node 26 pins named
+  core-module exports at first import) + mock-llm fixture `nudge-closure-race.jsonl`.
+
 ### Goal idle-streak nudge (Issue 18, redesigned R27)
 
 The root's durable goal plus an anti-loop nudge that fires when the swarm has nothing to do.
