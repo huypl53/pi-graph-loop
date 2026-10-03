@@ -95,7 +95,13 @@ export function verifiedResponseCount(st: SwarmState, agentId: string) {
 		.length;
 }
 
-export function validateResultMessage(st: SwarmState, rec: MessageRecord, resultMessageId: string, agentId: string) {
+export function validateResultMessage(
+	st: SwarmState,
+	rec: MessageRecord,
+	resultMessageId: string,
+	agentId: string,
+	extraLinkedIds?: string[],
+) {
 	const result = st.messages[resultMessageId];
 	if (!result) throw new Error(`INVALID_RESULT_MESSAGE: resultMessageId ${resultMessageId} does not exist in swarm state.`);
 	if (result.from !== agentId)
@@ -104,7 +110,10 @@ export function validateResultMessage(st: SwarmState, rec: MessageRecord, result
 		throw new Error(
 			`INVALID_RESULT_MESSAGE: result ${resultMessageId} is addressed to ${result.to}, expected original sender ${rec.from}.`,
 		);
-	const linked = result.replyTo === rec.id || (Boolean(result.conversationId) && result.conversationId === rec.conversationId);
+	const linked =
+		result.replyTo === rec.id ||
+		(Boolean(result.conversationId) && result.conversationId === rec.conversationId) ||
+		(Array.isArray(extraLinkedIds) && extraLinkedIds.includes(result.replyTo));
 	if (!linked)
 		throw new Error(
 			`INVALID_RESULT_MESSAGE: result ${resultMessageId} must replyTo ${rec.id} or share conversationId ${rec.conversationId || "(none)"}.`,
@@ -570,6 +579,8 @@ export async function deliverMessageLocked(
 	// from === original.to === m.from/to; etc.) so the verified path cannot be abused by a
 	// mismatched reply. Runs INSIDE the existing deliverMessageLocked lock — no nested withLock.
 	if (params.replyTo) {
+		// Ergonomics Fix 1: per-delivery redirect dedupe guard (idempotent replay safety).
+		const redirectedChecked = new Set<string>();
 		let original = st.messages[params.replyTo];
 		if (original && !original.requiresResponse && original.replyTo && st.messages[original.replyTo]?.requiresResponse) {
 			original = st.messages[original.replyTo];
@@ -710,6 +721,117 @@ export async function deliverMessageLocked(
 				}
 			} else {
 				// Gate=0 OR superseded/cancelled/orphaned: keep current behavior (sent, no verify).
+				// Ergonomics Fix 1 (task-202610031216): a completion reply aimed at a SUPERSEDED
+				// assignment of the SAME task+node is redirected at this engine boundary — the
+				// verification credit re-parents to the live node.assignmentMessageId record instead
+				// of dangling (root saw duplicate-looking "done" pairs in the live probe). Scope
+				// guards: assignment-class reply only (conversationId task:<taskId>:<nodeId> shared
+				// with the stale record), target record live (non-superseded, requiresResponse, same
+				// from/to pair). Supersession evidence on the stale record is NEVER erased (the
+				// fence trace still fires; the waived status is preserved). Any resolution failure
+				// (missing task.json, unreadable node, dead target) fails soft back to the legacy
+				// advisory "sent" path — never throws out of the delivery hot path.
+				let redirected = false;
+				if (PI_SWARM_MINIMAL_PROTOCOL === 1 && original.superseded && !redirectedChecked.has(m.id)) {
+					redirectedChecked.add(m.id);
+					try {
+						const convoMatchRedirect =
+							typeof original.conversationId === "string" && typeof m.conversationId === "string"
+								? m.conversationId.match(/^task:([a-z0-9_-]+):([a-z0-9_-]+)$/)
+								: null;
+						const sameConvo =
+							Boolean(convoMatchRedirect) && original.conversationId === m.conversationId;
+						if (sameConvo && convoMatchRedirect) {
+							const rTaskId = convoMatchRedirect[1];
+							const rNodeId = convoMatchRedirect[2];
+							const rTp = taskPaths(p, rTaskId);
+							if (existsSync(rTp.taskJson)) {
+								const rTask = await readTaskState(rTp.taskJson);
+								const rNode = rTask?.nodes?.[rNodeId];
+								const currentId = rNode?.assignmentMessageId;
+								const current = currentId ? st.messages[currentId] : undefined;
+								if (
+									current &&
+									current.id !== original.id &&
+									!current.superseded &&
+									current.requiresResponse &&
+									current.to === original.to &&
+									current.from === original.from &&
+									current.response?.status !== "verified"
+								) {
+									// Re-target the verify block onto the live assignment record.
+									original = current;
+									redirected = true;
+									await trace(p, "message.response.redirected", {
+										redirectedFrom: params.replyTo,
+										redirectedTo: current.id,
+										resultMessageId: m.id,
+										from,
+										to,
+										taskId: rTaskId,
+										nodeId: rNodeId,
+										gate: PI_SWARM_MINIMAL_PROTOCOL,
+									});
+									// Fall through to the CURRENT-CONTEXT verify block below by re-entering
+									// the same validation + settlement sequence against `original` (now the
+									// live record).
+									let validationPassedRedirect = true;
+									try {
+										validateResultMessage(st, original, m.id, from, [params.replyTo]);
+									} catch (err) {
+										validationPassedRedirect = false;
+										await trace(p, TRACE_REPLY_REJECTED_SUPERSEDED, {
+											id: original.id,
+											resultMessageId: m.id,
+											from,
+											to,
+											gate: PI_SWARM_MINIMAL_PROTOCOL,
+											reason: "validation_failed_after_redirect",
+											error: String((err as Error)?.message || err),
+										}).catch(() => {});
+									}
+									if (validationPassedRedirect) {
+										original.response = {
+											...(original.response || { status: "missing" as MessageResponseStatus }),
+											status: "verified",
+											resultMessageId: m.id,
+											sentAt: now(),
+											verifiedAt: now(),
+											lastError: undefined,
+										};
+										original.updatedAt = now();
+										// Release response debt mirror (same shape as the current-context path).
+										if (
+											st.agents[original.to]?.runtimeStatus === "response_missing" &&
+											responseMissingRecords(st, original.to).length === 0
+										) {
+											st.agents[original.to].runtimeStatus = "idle";
+											st.agents[original.to].updatedAt = now();
+										}
+										await trace(p, "message.response.verified", {
+											id: original.id,
+											resultMessageId: m.id,
+											from,
+											to,
+											gate: PI_SWARM_MINIMAL_PROTOCOL,
+											via: "stale_replyto_redirect",
+										});
+									}
+								}
+							}
+						}
+					} catch (redirectErr) {
+						// Fail soft: redirect is an ergonomics improvement, never a delivery hazard.
+						await traceLogged(trace, p, "mailbox", p, "message.response.redirect_failed", {
+							replyTo: params.replyTo,
+							resultMessageId: m.id,
+							from,
+							to,
+							error: String((redirectErr as Error)?.message || redirectErr),
+						}).catch(() => {});
+					}
+				}
+				if (!redirected) {
 				// Emit a fence trace on the superseded branch so dashboards see the rejection.
 				if (PI_SWARM_MINIMAL_PROTOCOL === 1 && original.superseded) {
 					await trace(p, TRACE_REPLY_REJECTED_SUPERSEDED, {
@@ -724,6 +846,7 @@ export async function deliverMessageLocked(
 				// supersession evidence and re-introduce response debt. Plan §2.4(a) explicit binding.
 				original.updatedAt = now();
 				await trace(p, "message.response.sent", traceBase);
+				}
 			}
 		}
 	}
