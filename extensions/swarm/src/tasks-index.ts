@@ -24,6 +24,7 @@ import { readTaskState } from "./state.ts";
 import { resolveGoalNudgeIntervalMs, resolveGoalMaxNudges } from "./nudges/goal-epoch.ts";
 import { taskPaths } from "./state.ts";
 import { logSwarmError } from "./errorlog.ts";
+import { computeCodeStamp, renderCodeStampLine } from "./stamp.ts";
 
 // PM-facing swarm rollup for `/swarm status`. Bounded: scans up to MAX_STATUS_TASKS task.json
 // files, prioritizing non-terminal tasks, and emits stable prefixed lines that are grep-able so
@@ -111,6 +112,15 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 	}
 	const proxy = st.proxyMetrics || { hungButAlive: 0, staleOpen: 0, supersessionChurn: 0 };
 	const closureLine = `closure: ${byTaskStatus["done"] || 0} done, ${byTaskStatus["in_progress"] || 0} in_progress, ${(byTaskStatus["blocked"] || 0) + (byTaskStatus["stale"] || 0)} blocked/stale, ${byTaskStatus["failed"] || 0} failed`;
+	// Stale-root detection (2026-10-03): fold the ext-code generation comparison into the
+	// status rollup. Computed FRESH here (self) and compared against the DURABLE leader
+	// stamp; mismatch ⇒ the leader process predates the on-disk code (STALE).
+	const curStamp = await computeCodeStamp();
+	const extCode = renderCodeStampLine(st.rootLeader?.extCodeStamp, curStamp);
+	const extCodeDetails =
+		typeof extCode.line === "string" && typeof extCode.verdict === "string"
+			? { self: curStamp.hash.slice(0, 8), root: st.rootLeader?.extCodeStamp?.hash.slice(0, 8), verdict: extCode.verdict, files: curStamp.files }
+			: { self: curStamp.hash.slice(0, 8), verdict: "unknown" };
 	const lines = [
 		`swarm ${st.swarmId}: ${runningAgents}/${agents.length} agents running, tmux ${st.tmuxSession}`,
 		`agents by runtime: ${
@@ -129,6 +139,7 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 				.join(", ") || "none"
 		}; staleNodes=${staleNodes}; ackMissing=${ackMissing}`,
 		`proxy metrics: hungButAlive=${proxy.hungButAlive} staleOpen=${proxy.staleOpen} supersessionChurn=${proxy.supersessionChurn}${proxy.lastEmitAt ? ` lastEmitAt=${proxy.lastEmitAt}` : ""}`,
+		extCode.line,
 		st.goal
 			? `goal: ${st.goal.id}${st.goal.text ? ` — "${st.goal.text.slice(0, 100)}${st.goal.text.length > 100 ? "…" : ""}"` : ""} interval=${resolveGoalNudgeIntervalMs(st.goal.nudgeIntervalMs)}ms nudges=${st.goal.consecutiveNoResolveNudges}/${st.goal.maxNudges === -1 ? "∞" : resolveGoalMaxNudges(st.goal.maxNudges)}`
 			: `goal: none`,
@@ -148,6 +159,7 @@ export async function buildSwarmStatusSummary(p: Paths, st: SwarmState): Promise
 			staleNodes,
 			ackMissing,
 			proxyMetrics: proxy,
+			extCodeStamp: extCodeDetails,
 			goal: st.goal,
 			closure: closureLine,
 			taskLines,

@@ -16,6 +16,17 @@ import { readCharterText, resolveRolePlaybook } from "./config.ts";
 import { identityPath, mailboxPath, paths, trace } from "./state.ts";
 import { now, safeId } from "./utils.ts";
 import { tmux } from "./tmux.ts";
+import { getProcessCodeStamp } from "./stamp.ts";
+
+// Durable ext-code stamp for the leader lease (see types/state.ts RootLeader.extCodeStamp).
+// Fresh stampedAt on every write — the heartbeat/surface comparison uses it for the boot-age.
+function stampWithStampedAt(stamp: ReturnType<typeof getProcessCodeStamp>): {
+	hash: string;
+	files: number;
+	stampedAt: string;
+} {
+	return { hash: stamp.hash, files: stamp.files, stampedAt: new Date().toISOString() };
+}
 export { isRootHostPane } from "./terminal/index.ts";
 
 // Centralized authority check used by every server-side mutation that depends on identity. Phase 1
@@ -75,6 +86,9 @@ export function claimRootLeader(st: SwarmState, nowMs: number, me: number) {
 		claimedAt: ts,
 		lastHeartbeatAt: ts,
 		agentRecordId: "root",
+		// Stale-root detection (2026-10-03): record WHICH code generation this leader
+		// loaded at claim time; /swarm status compares it against the on-disk generation.
+		extCodeStamp: stampWithStampedAt(getProcessCodeStamp()),
 	};
 	return { kind: "claimed" as const, leader: st.rootLeader };
 }
@@ -92,6 +106,9 @@ export function heartbeatRootLeader(st: SwarmState, nowMs: number, me: number, _
 		claimedAt: cur.kind === "vacant" ? ts : cur.leader.claimedAt,
 		lastHeartbeatAt: ts,
 		agentRecordId: "root",
+		// Stale-root detection (2026-10-03): this record is rebuilt from scratch on every
+		// heartbeat, so restamp HERE or the stamp would be silently dropped on each beat.
+		extCodeStamp: stampWithStampedAt(getProcessCodeStamp()),
 	};
 }
 

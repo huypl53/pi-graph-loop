@@ -27,6 +27,15 @@ export type RootLeader = {
 	claimedAt: string;
 	lastHeartbeatAt: string;
 	agentRecordId?: string;
+	// Which CODE GENERATION of extensions/swarm this leader process loaded (2026-10-03
+	// stale-root incident). Absent = the leader predates ext-code stamping (unknown).
+	// Written ONLY by claimRootLeader/heartbeatRootLeader — both rebuild this record from
+	// scratch, so the stamp must ride BOTH writers or heartbeats silently drop it.
+	extCodeStamp?: {
+		hash: string;
+		files: number;
+		stampedAt: string;
+	};
 };
 
 // Per-task task-graph-state idle nudge state (Issue 23). One entry per stalled task; the root

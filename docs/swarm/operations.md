@@ -85,6 +85,37 @@ captured errors through `logSwarmError()` / `traceLogged()` from `extensions/swa
 - `swarm_agent_status`
 - `swarm_task_status`
 
+### Extension code stamp (stale-root detection)
+
+A long-lived root pi process keeps serving OLD module code from Node's ESM module cache after
+`extensions/swarm` sources change on disk. Workers spawned from such a root silently lack whatever
+new code landed. The stamp feature makes this visible.
+
+- **What it is**: a sha256 over the sorted `relPath<NUL>sizeBytes<NUL>mtimeMs<LF>` lines of
+  `extensions/swarm/index.ts` + `extensions/swarm/src/**/*.ts`. Captured once per process at
+  extension load (sync `statSync` over ~45 small files, <5 ms) and memoized.
+- **Where it lives**: `SwarmState.rootLeader.extCodeStamp` (additive optional field). Written by
+  `claimRootLeader` AND `heartbeatRootLeader` — both rebuild the lease from scratch, so the stamp
+  must ride BOTH writers or heartbeats silently drop it.
+- **Where you see it**: `/swarm status` renders an `ext code:` line with the verdict:
+  - `current (self=<h8>)` — the leader process loaded the same generation as the on-disk tree.
+  - `STALE — root boot (<h> ago) predates current on-disk code (self=<h8>, root=<h8>); restart root or /reload`
+    — the leader process predates an on-disk code change. Restart the root or `/reload` it.
+  - `unknown — root predates ext-code stamping (self=<h8>); reboot root to enable stamping`
+    — the leader was booted before this feature landed. Reboot to enable stamping.
+  - `unavailable (could not scan extension sources; see errors.jsonl)` — the scan failed; check
+    `.pi/swarm/traces/errors.jsonl` for the cause.
+- **One-shot notify**: when a root `session_start` finds a prior durable stamp that differs from
+  the current process's stamp, it emits a `warn`-level `ctx.ui.notify` once (hasUI-guarded) and
+  traces `ext.stamp.changed`. The notify is best-effort; the durable stamp is the source of truth.
+- **How to clear**: restart the root process, or `/reload` it. The new process captures the
+  current on-disk generation at load and stamps it on the next lease write.
+- **What it does NOT detect**: same-mtime in-place edits within the filesystem's mtime granularity
+  (rare; conservative `STALE` is the safe failure direction). Per-worker stale detection is
+  out of scope (worker identity content is already versioned/hashed per agent).
+- **Excluded from the stamp**: `tests/`, `role-skills/`, `docs/`, `issue-skills/` — they are read
+  fresh from disk at use time, so they cannot be served stale by a cached module.
+
 ### Recover or debug delivery
 
 - `swarm_message_status`

@@ -17,6 +17,7 @@ import { ensureAgentDefaults, inferRoleKind, now } from "../utils.ts";
 import { ensureDirs, identityPath, mailboxPath, paths, readState, trace, withLock, writeState } from "../state.ts";
 import { logSwarmError } from "../errorlog.ts";
 import { ensureRoot, heartbeatRootLeader } from "../identity.ts";
+import { getProcessCodeStamp } from "../stamp.ts";
 import { resetIdleEpochState } from "../reconcile.ts";
 import { applySwarmToolGating } from "../tools/gating.ts";
 import { ensurePoolScaffold, ensureGlobalPoolScaffold, runRootPoolScaffoldAndHealth } from "../pool-scaffold.ts";
@@ -99,6 +100,31 @@ export function registerSessionHooks(
 			}
 			if (agentId === "root") {
 				ensureRoot(st, ctx.cwd, p);
+				// Stale-root detection (2026-10-03): BEFORE the heartbeat rebuilds the lease,
+				// capture the prior durable generation. If it differs from OUR loaded generation,
+				// the previous root session predates an on-disk code change: notify once. Older
+				// sessions spawned before the change keep serving stale module code (Node ESM
+				// module cache) until restarted or /reloaded.
+				const priorStamp = st.rootLeader?.extCodeStamp;
+				const currentStamp = getProcessCodeStamp();
+				if (priorStamp && priorStamp.hash !== currentStamp.hash) {
+					try {
+						if (ctx.hasUI)
+							ctx.ui.notify(
+								`swarm extension code changed since the previous root boot (prior=${priorStamp.hash.slice(0, 8)} current=${currentStamp.hash.slice(0, 8)}); ` +
+									`long-lived panes predating the change serve old code — /reload or restart them`,
+								"warn",
+							);
+					} catch (err: any) {
+						void logSwarmError(ctx.cwd, "stamp", "ext_stamp_changed_notify_failed", err);
+					}
+					await trace(p, "ext.stamp.changed", {
+						agentId,
+						prior: priorStamp.hash.slice(0, 8),
+						current: currentStamp.hash.slice(0, 8),
+						files: currentStamp.files,
+					}).catch(() => {});
+				}
 				// Multi-root policy (issue 8): the heartbeat is now driven by the gate, not by
 				// ensureRoot. Layer the heartbeatRootLeader call here so an root
 				// session_start both materialises the record and refreshes the leader lease.

@@ -1,0 +1,27 @@
+# ext-code-stamp-banner — stale-root detection E2E scenario.
+#
+# Validates the /swarm status `ext code:` line + the root session_start one-shot
+# notify when a prior durable stamp differs from the current process stamp.
+# Plan §3 scenario:
+#   "seed scratch state with a stale durable stamp → root session_start fires
+#    the ext.stamp.changed notify → /swarm status renders the STALE line"
+#
+# This fixture is the engine-side artifact: it provides a deterministic terminal
+# turn so the root pi session reaches a stable state where /swarm status can be
+# invoked. The pre-existing stale durable stamp is seeded on disk by the lane
+# harness BEFORE the lane starts (see agents/mock-llm-scenarios pattern 2:
+# "seeded world + single-actor script"). Without seeding, the durable stamp is
+# absent and the verdict renders as `unknown` (pre-feature root) — this is by
+# design; the fixture itself does not write swarm state, it documents the
+# scenario + gives the lane a clean terminal turn.
+#
+# Model id = ext-code-stamp-banner. Lane form:
+#   pi -e ./extensions/swarm -e ./extensions/mock-llm --provider mock-llm \
+#      --model ext-code-stamp-banner -p 'idle' \
+#      # with PI_SWARM_AGENT_ID=root + cwd seeded with the stale durable stamp
+#
+# Three turns: text acknowledge-seed → text run-/swarm-status → text confirm-stop.
+# Total runtime <120ms; lane then exits cleanly so the engine fires agent_settled.
+{"name":"ext-stamp turn 0 acknowledge-seed","events":[{"type":"text","delayMs":15,"text":"ext-stamp turn 0: root session_start detected a prior durable stamp that differs from the current process stamp. The ext.stamp.changed notify has been emitted (warn level). Standing by for /swarm status."}]}
+{"name":"ext-stamp turn 1 run-status","events":[{"type":"text","delayMs":15,"text":"ext-stamp turn 1: /swarm status has been invoked. The ext code: line should render STALE — root boot predates current on-disk code (self=<h8>, root=<h8>); restart root or /reload."}]}
+{"name":"ext-stamp turn 2 final-stop","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"ext-stamp lane complete. After this stop, the root settles; the durable stamp has been refreshed to the current process generation."},{"type":"stop","delayMs":5,"reason":"stop"}]}
