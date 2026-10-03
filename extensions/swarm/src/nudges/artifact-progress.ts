@@ -209,6 +209,32 @@ export async function evaluateArtifactProgressNudgeLocked(
 				);
 			}
 			const body = bodyLines.join("\n");
+			// Fix C (task-202610031339): closure-aware re-check. The sweep snapshot may predate the
+			// worker's closure — three live "nudge raced the closure" replies in task-202610031216.
+			// Re-read task.json from disk right before delivery (we already hold the swarm lock in
+			// production) and skip if the node went terminal between snapshot and now.
+			try {
+				const fresh = await readTaskState(tp.taskJson);
+				const freshNode = fresh?.nodes?.[nodeId];
+				if (freshNode && (freshNode.status === "done" || freshNode.status === "failed" || freshNode.status === "skipped")) {
+					await trace(p, "worker.artifact_progress_race_lost", {
+						taskId: task.taskId,
+						nodeId,
+						assignee: node.assignee,
+						snapshotStatus: node.status,
+						diskStatus: freshNode.status,
+					}).catch(() => {});
+					continue;
+				}
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") {
+					await logSwarmError(p, "graph-advance", "artifact_progress.closure_recheck_failed", err, {
+						taskId: task.taskId,
+						nodeId,
+					});
+				}
+				// unreadable task.json: deliver anyway (same policy as the snapshot phase)
+			}
 			try {
 				await deliverMessageLocked(pi, cwd, p, st, {
 					to: node.assignee,
@@ -256,12 +282,33 @@ export async function evaluateArtifactProgressNudgeLocked(
 		}
 	}
 	// Persist any task.json mutations (node.artifactProgressNudgeAt / Count). The in-memory
-	// `task` reference holds our mutations; writeTaskState serializes the LIVE object (no
-	// fresh re-read, which would lose the in-memory mutations because readTaskState deserializes
-	// a new copy). Updated updatedAt is stamped inside writeTaskState.
+	// Persist any task.json mutations (node.artifactProgressNudgeAt / Count). Fix C
+	// (task-202610031339): merge the nudge bookkeeping onto a FRESH disk read instead of
+	// serializing the sweep's in-memory snapshot — serializing the snapshot clobbers a node that
+	// closed concurrently (the closure would be reverted to assigned, resurrecting the nudge cycle).
 	for (const tp of Array.from(dirtyTaskPaths)) {
 		try {
-			await writeTaskState(tp, tpToTask.get(tp)!);
+			let persisted = false;
+			try {
+				const fresh = await readTaskState(tp.taskJson);
+				if (fresh) {
+					const snap = tpToTask.get(tp)!;
+					for (const [nodeId, node] of Object.entries(snap.nodes)) {
+						const freshNode = fresh.nodes[nodeId];
+						if (!freshNode || !node) continue;
+						if (node.artifactProgressNudgeAt !== undefined) freshNode.artifactProgressNudgeAt = node.artifactProgressNudgeAt;
+						if (node.artifactProgressNudgeCount !== undefined) freshNode.artifactProgressNudgeCount = node.artifactProgressNudgeCount;
+						if (node.artifactProgressCapSurfaced !== undefined) freshNode.artifactProgressCapSurfaced = node.artifactProgressCapSurfaced;
+					}
+					await writeTaskState(tp, fresh);
+					persisted = true;
+				}
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") throw err;
+				// task.json vanished (task deleted mid-sweep): nothing to persist — expected branch
+				persisted = true;
+			}
+			if (!persisted) await writeTaskState(tp, tpToTask.get(tp)!);
 		} catch (err) {
 			// Losing a nudge-timestamp write re-triggers the nudge next tick (visible); losing it
 			// SILENTLY would also hide systemic write failures. Log it.
