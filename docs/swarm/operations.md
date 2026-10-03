@@ -1185,9 +1185,11 @@ Rules governing which messages mint response debt and how debt clears (source:
   `outcome=tested` when the edge required `passed`.
 - **Protocol-gated ack line (Fix B)** — the `swarm_ack_message(...)` body line renders only under
   the legacy lane (`PI_SWARM_MINIMAL_PROTOCOL=0`); under minimal protocol the ack step is
-  engine-derived and the body omits it (mirror of `delivery.ts showAckHint`). Gate=0 bodies are
-  byte-identical to the pre-change legacy template.
-- **Closure-aware delivery (Fix C)** — immediately before nudge (and cap-escalation) delivery the
+  engine-derived and the body omits it (mirror of `delivery.ts showAckHint`). Gate=0 bodies keep
+  the baseline line ORDER — the ack triple is inserted by marker (before the incomplete-work
+  note), not a position-coupled splice index (review F-1/F-3 follow-up, 2026-10-03).
+- **Closure-aware delivery (Fix C)** — immediately before nudge (and cap-escalation, review F-2
+  follow-up) delivery the
   sweep re-reads `task.json` from disk (lock-held) and skips when the node went terminal between
   snapshot and delivery, emitting a `worker.artifact_progress_race_lost` census trace. The nudge
   bookkeeping persist merges onto a fresh disk read so the sweep can no longer clobber a

@@ -161,6 +161,35 @@ for (const terminalStatus of ["done", "failed", "skipped"]) {
 	}
 }
 
+// F-2 (task review 2026-10-03): the cap-escalation delivery path must ALSO be closure-aware.
+// Seed a node already at the nudge cap (priorCount >= CAP) whose closure lands mid-sweep —
+// the escalation to root must NOT fire for a node that just closed.
+{
+	console.log(`\n=== F-2: node closes mid-sweep at cap → no cap-escalation ===`);
+	closureWritten = false;
+	const { dir, p } = await buildScratch();
+	const taskJsonPath = await seed(p, dir, "task-f2-cap");
+	// Push the node to the cap: prior nudges recorded, capSurfaced not yet.
+	{
+		const task = JSON.parse(await readFile(taskJsonPath, "utf8"));
+		task.nodes.implement.artifactProgressNudgeCount = Number(process.env.PI_SWARM_ARTIFACT_PROGRESS_NUDGE_CAP || 3);
+		task.nodes.implement.artifactProgressNudgeAt = new Date(Date.now() - 3_600_000).toISOString();
+		await writeFile(taskJsonPath, JSON.stringify(task, null, 2));
+	}
+	closureTaskPath = taskJsonPath;
+	closureNodeId = "implement";
+	closureStatus = "done";
+	const r = await runEvaluator(p, dir, Date.now());
+	await new Promise((res) => setTimeout(res, 20));
+	const mailboxRoot = await readMailboxMessages(p, "root");
+	const escalation = mailboxRoot.filter((m) => m.subject?.includes("ARTIFACT-PROGRESS CAP"));
+	const onDisk = JSON.parse(await readFile(taskJsonPath, "utf8"));
+	console.log(`  evaluator:`, JSON.stringify(r), `closureWritten:`, closureWritten, `onDisk:`, onDisk.nodes.implement.status, `escalations:`, escalation.length);
+	ok("F-2: closure landed mid-sweep at cap", onDisk.nodes.implement.status === "done", onDisk.nodes.implement.status);
+	ok("F-2: no cap-escalation delivered for closed node", escalation.length === 0, `got=${escalation.length}`);
+	await rm(dir, { recursive: true, force: true });
+}
+
 console.log(`\n---`);
 console.log(`nudge-closure-race results: ${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

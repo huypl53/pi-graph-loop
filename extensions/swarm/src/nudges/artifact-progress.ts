@@ -141,6 +141,31 @@ export async function evaluateArtifactProgressNudgeLocked(
 					}).catch(() => {});
 					// Lightweight root escalation: durable mailbox delivery so the root
 					// sees the "node stalled with N ignored nudges" line on its next pump tick.
+					// F-2 follow-up: the escalation path is closure-aware too — same re-read
+					// as the nudge path (Fix C) so a node that closed mid-sweep never escalates.
+					try {
+						const freshCap = await readTaskState(tp.taskJson);
+						const freshCapNode = freshCap?.nodes?.[nodeId];
+						if (freshCapNode && (freshCapNode.status === "done" || freshCapNode.status === "failed" || freshCapNode.status === "skipped")) {
+							await trace(p, "worker.artifact_progress_race_lost", {
+								taskId: task.taskId,
+								nodeId,
+								assignee: node.assignee,
+								snapshotStatus: node.status,
+								diskStatus: freshCapNode.status,
+								path: "cap-escalation",
+							}).catch(() => {});
+							continue;
+						}
+					} catch (err: any) {
+						if (err?.code !== "ENOENT") {
+							await logSwarmError(p, "graph-advance", "artifact_progress.cap_closure_recheck_failed", err, {
+								taskId: task.taskId,
+								nodeId,
+							});
+						}
+						// unreadable task.json: escalate anyway (same policy as the nudge path)
+					}
 					try {
 						await deliverMessageLocked(pi, cwd, p, st, {
 							to: "root",
@@ -199,14 +224,19 @@ export async function evaluateArtifactProgressNudgeLocked(
 			];
 			// Fix B (task-202610031339): swarm_ack_message is retired under minimal protocol — the ack
 			// step is engine-derived (mirror delivery.ts showAckHint). Only the legacy lane
-			// (PI_SWARM_MINIMAL_PROTOCOL=0) keeps the ack triple, byte-identical.
+			// (PI_SWARM_MINIMAL_PROTOCOL=0) keeps the ack triple. F-1/F-3 follow-up: insert by MARKER
+			// (before the incomplete-work note), not by position-coupled splice index — the baseline
+			// bd71726 order was ack line -> blank -> note, which a numeric index silently drifted from.
 			if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
-				bodyLines.splice(
-					16,
-					0,
-					`  swarm_ack_message(messageId="${assignmentMsgId}", status=done, resultMessageId="<result msg id>")`,
-					``,
-				);
+				const noteIdx = bodyLines.findIndex((l) => l.startsWith("If the work is genuinely incomplete"));
+				if (noteIdx !== -1) {
+					bodyLines.splice(
+						noteIdx,
+						0,
+						`  swarm_ack_message(messageId="${assignmentMsgId}", status=done, resultMessageId="<result msg id>")`,
+						``,
+					);
+				}
 			}
 			const body = bodyLines.join("\n");
 			// Fix C (task-202610031339): closure-aware re-check. The sweep snapshot may predate the

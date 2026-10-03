@@ -50,6 +50,7 @@ if (process.argv[2] === "--child") {
 
 	ok("gate=0: nudge was delivered", gate0.delivered, JSON.stringify(gate0));
 	ok("gate=0: body carries the ack triple (legacy byte-preserved)", gate0.bodyIncludesAck, "ack line missing at gate=0");
+	ok("gate=0: ack line precedes the incomplete-work note (F-1 ordering)", gate0.ackBeforeNote, "ack line placed after the note — splice order drift");
 
 	console.log(`\n---\nnudge-minimal-protocol results: ${passed} passed, ${failed} failed`);
 	process.exit(failed > 0 ? 1 : 0);
@@ -128,6 +129,10 @@ async function runChild(gate) {
 				bodyIncludesAck: body.includes("swarm_ack_message("),
 				bodyIncludesUpdate: body.includes("swarm_update_task("),
 				bodyIncludesSend: body.includes("swarm_send_message("),
+				// F-1 (task review 2026-10-03): at gate=0 the ack line must sit BEFORE the
+				// "If the work is genuinely incomplete" note — byte-order parity with baseline
+				// bd71726, not just presence.
+				ackBeforeNote: gate === "0" ? body.indexOf("swarm_ack_message(") < body.indexOf("If the work is genuinely incomplete") : true,
 			}),
 	);
 	process.exit(0);
