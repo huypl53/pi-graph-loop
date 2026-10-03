@@ -1,0 +1,23 @@
+# root-unread-drain: the root poll loop must not re-dump actionable messages forever.
+#
+# Reproduces the 2026-10-02 incident class: an actionable root message (requiresAck:true,
+# e.g. a task-stall nudge) that the pump already surfaced (consumer receipt written) kept
+# counting as unread because root unread keyed ONLY on surfacedAt. With swarm_ack_message
+# unregistered there was no ack path, so the model re-polled fullBody and re-read the same
+# ~5.8KB of bodies 5+ times in one session.
+#
+# Seeded world (lane script seeds before pi starts):
+#   - .pi/swarm/swarm-state.json: root agent + 3 messages
+#     * msg-drain-action: requiresAck:true, injected, consumerReceipts entry present (pump surfaced)
+#     * msg-drain-info:    requiresAck:false, surfacedAt set (already read)
+#     * msg-drain-new:     requiresAck:false, never surfaced (genuinely unread)
+#   - .pi/swarm/mailboxes/root.jsonl: matching leaf envelopes
+#
+# Scripted root turns:
+#   1. Scan mailbox (default compact view) -> expect unread=1 (only the fresh one).
+#   2. markDelivered poll -> unread=0.
+#   3. Follow-up poll -> unread STAYS 0 (the drain is durable; no re-dump loop).
+{"name":"scan mailbox","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Checking the root mailbox with the compact scan first."},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"drain-1","arguments":{"agentId":"root","limit":20}}]}
+{"name":"mark delivered then verify drain","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Marking the mailbox read and verifying the unread count drains."},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"drain-2","arguments":{"agentId":"root","limit":20,"markDelivered":true}}]}
+{"name":"confirm no re-dump","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Polling once more to confirm the drain is durable and nothing re-surfaces."},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"drain-3","arguments":{"agentId":"root","limit":20}}]}
+{"name":"settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Unread stayed at zero across polls: the actionable message with a consumer receipt drains correctly."},{"type":"stop","delayMs":5,"reason":"stop"}]}

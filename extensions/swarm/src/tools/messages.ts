@@ -28,19 +28,37 @@ import {
 	TRACE_LIFECYCLE_DERIVED_SHADOW,
 } from "../constants.ts";
 import { deriveLifecycleFromTrigger } from "../mailbox.ts";
+import { fingerprintMessage } from "../surface/pump-shared.ts";
 
 // === tool-output-slim §1 helpers — check_mailbox scan/read split ==============================
 
 // Read-only unread computation for the envelope. DOES NOT write any ledger.
 //   worker: same st.delivered[agentId] ledger pendingOnly already uses.
-//   root:   st.messages[id].surfacedAt (stamped by pump receipts + the root markDelivered path).
+//   root:   durable read markers — surfacedAt (informational), consumerReceipts entries
+//           (actionable messages the pump surfaced; surfacedAt is deliberately NOT stamped
+//           for those, see pump.ts), or ackedAt (legacy pre-minimal-protocol acks).
 // NEVER reads or writes st.delivered.root; never touches rootPumpSessions (pump decoupling).
+//
+// unread-drain fix (2026-10-02): previously root unread keyed ONLY on !surfacedAt, but
+// surfacedAt is stamped exclusively on the requiresAck:false path (both here in the
+// markDelivered branch and in the root pump). Actionable messages (requiresAck:true —
+// task-stall, graph-advance, goal-escalation nudges under the legacy flag) got a
+// consumerReceipts entry instead, which this predicate never consulted, and
+// swarm_ack_message is not registered, so unread stuck at >0 forever and the model
+// re-polled + re-dumped full bodies (live evidence: same 5,841B result ≥5 times in one
+// root session). Root read-ness now = surfacedAt OR consumerReceipt OR ackedAt.
+function rootMessageIsRead(st: any, m: any): boolean {
+	const rec = st?.messages?.[m.id];
+	if (!rec || rec.to !== "root") return true; // no record / not root traffic → not unread debt
+	if (rec.surfacedAt) return true;
+	if (rec.ackedAt) return true;
+	if (st.consumerReceipts?.root?.entries?.[m.id]) return true;
+	return false;
+}
+
 function computeUnreadForTool(st: any, agentId: string, messages: Array<any>): number {
 	if (agentId === "root") {
-		return messages.filter((m) => {
-			const rec = st.messages?.[m.id];
-			return rec && rec.to === "root" && !rec.surfacedAt;
-		}).length;
+		return messages.filter((m) => !rootMessageIsRead(st, m)).length;
 	}
 	const delivered = new Set(st.delivered?.[agentId] || []);
 	return messages.filter((m) => !delivered.has(m.id)).length;
@@ -51,8 +69,7 @@ function computeUnreadForTool(st: any, agentId: string, messages: Array<any>): n
 function slimMailboxRow(m: any, st: any, agentId: string, previewLen: number): any {
 	let unread: boolean;
 	if (agentId === "root") {
-		const rec = st?.messages?.[m.id];
-		unread = Boolean(rec && rec.to === "root" && !rec.surfacedAt);
+		unread = !rootMessageIsRead(st, m);
 	} else {
 		const delivered = new Set(st?.delivered?.[agentId] || []);
 		unread = !delivered.has(m.id);
@@ -363,8 +380,11 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 		defineTool({
 			name: "swarm_check_mailbox",
 			label: "Swarm Mailbox",
-			description: "Read pending or recent messages from a swarm agent mailbox JSONL. Defaults to the current PI_SWARM_AGENT_ID.",
-			promptGuidelines: ["Use `swarm_check_mailbox` when you are a swarm agent and need to read messages sent by other agents."],
+			description:
+			"Read pending or recent messages from a swarm agent mailbox JSONL. Defaults to the current PI_SWARM_AGENT_ID. The default compact scan (id/from/subject/age/unread) is the correct poll shape; unread drains durably once messages are surfaced or marked delivered, so a repeated poll returning unread:0 needs no re-reading. Use bodyPreview to triage bodies; use fullBody only to read specific message(s) you have already selected from a scan (pass a small limit).",
+			promptGuidelines: [
+				"Use `swarm_check_mailbox` when you are a swarm agent and need to read messages sent by other agents. Poll with the default compact scan; do not re-read with fullBody when unread is 0.",
+			],
 			parameters: Type.Object({
 				agentId: Type.Optional(Type.String({ description: "Agent id. Defaults to current PI_SWARM_AGENT_ID or root." })),
 				limit: Type.Optional(Type.Number({ description: "Maximum messages to return. Defaults to 20." })),
@@ -419,9 +439,30 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 								const ts = now();
 								for (const m of messages) {
 									const rec = st.messages[m.id];
-									if (!rec || rec.to !== "root" || rec.requiresAck !== false || rec.surfacedAt) continue;
-									rec.surfacedAt = ts;
-									rec.updatedAt = ts;
+									if (!rec || rec.to !== "root" || rec.surfacedAt) continue;
+									// informational messages: legacy surfacedAt stamp (unchanged semantics)
+									if (rec.requiresAck === false) {
+										rec.surfacedAt = ts;
+										rec.updatedAt = ts;
+										continue;
+									}
+									// actionable messages (requiresAck !== false): unread-drain fix (2026-10-02) —
+									// the read marker is a consumer receipt (mirrors what the pump writes when IT
+									// surfaces actionable traffic). rec.ackedAt is left alone (ack is not our business
+									// here); a pre-existing ackedAt already counts as read via rootMessageIsRead.
+									if (!st.consumerReceipts) st.consumerReceipts = {};
+									if (!st.consumerReceipts.root) st.consumerReceipts.root = { entries: {}, revision: 0 };
+									if (!st.consumerReceipts.root.entries) st.consumerReceipts.root.entries = {};
+									if (!st.consumerReceipts.root.entries[m.id]) {
+										st.consumerReceipts.root.entries[m.id] = {
+											surfacedAt: ts,
+											ackedAt: rec.ackedAt,
+											requiresAck: true,
+											conversationId: rec.conversationId,
+											fingerprint: fingerprintMessage(rec),
+										};
+										st.consumerReceipts.root.revision = (st.consumerReceipts.root.revision || 0) + 1;
+										}
 								}
 							}
 						}

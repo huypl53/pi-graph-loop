@@ -2195,12 +2195,23 @@ the terminal driver manager).
 
 - Worker: `unread` keys off the shared `st.delivered[agentId]` ledger (the same ledger
   `pendingOnly` uses; read-only in the scan path).
-- Root: `unread` keys off the durable `surfacedAt` stamp on the message record — NOT
-  `st.delivered.root` and NOT the pump's per-pid ledger. A root message surfaced by the pump (or
-  stamped via the informational-consume path) reads `unread:false`. Validation note: in a fresh
-  lane the pump can surface seeded messages ~130ms before a scripted scan, so `unread:0` there is
-  correct-by-design (tester verdict in test-evidence.md, trace-confirmed:
-  `notification.batch.surfaced` → `mailbox.poll` → `surfacedAt` stamp).
+- Root: `unread` keys off durable read markers on the message record — `surfacedAt` (informational
+  path), a `consumerReceipts.root.entries[id]` entry (actionable messages the pump surfaced —
+  `surfacedAt` is deliberately NOT stamped for those), or `ackedAt` (legacy pre-minimal-protocol
+  acks) — NOT `st.delivered.root` and NOT the pump's per-pid ledger. A root message surfaced by
+  the pump (or stamped via the informational-consume path) reads `unread:false`.
+  **unread-drain fix (2026-10-02)**: before the fix, root unread keyed ONLY on `surfacedAt`, so
+  actionable messages with a consumer receipt (task-stall / graph-advance / goal-escalation
+  nudges) counted as unread forever — with `swarm_ack_message` unregistered there was no ack
+  path, and the model re-polled `fullBody` re-reading the same bodies 5+ times per session
+  (live evidence: same 5,841B result repeated in one root session). `markDelivered:true` now
+  also writes a consumer receipt for actionable messages (mirroring the pump), and both the
+  envelope count and the per-row flag consult all three markers. Worker semantics unchanged.
+  Regression test: `node extensions/swarm/tests/root-unread-drain.test.mjs`; mock-llm lane:
+  fixture `root-unread-drain` (seeded world: actionable+receipt / informational+surfaced /
+  fresh). Validation note: in a fresh lane the pump can surface seeded messages ~130ms before a
+  scripted scan, so `unread:0` there is correct-by-design (tester verdict in test-evidence.md,
+  trace-confirmed: `notification.batch.surfaced` → `mailbox.poll` → `surfacedAt` stamp).
 
 ### Verify commands
 
