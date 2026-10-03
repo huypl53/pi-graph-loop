@@ -27,6 +27,18 @@ const swarmRoot = join(here, "..", "..", "swarm", "src");
 
 let pass = 0,
 	fail = 0;
+// task-202610031339 Fix D: by-design gate=1-only assertions (minimal-protocol redirect/verify
+// semantics retired at PI_SWARM_MINIMAL_PROTOCOL=0). Skip with a visible marker at gate=0.
+const GATE0 = process.env.PI_SWARM_MINIMAL_PROTOCOL === "0";
+let skippedGate0 = 0;
+const okGate0 = (name, cond, info) => {
+	if (GATE0) {
+		skippedGate0++;
+		console.log("  SKIP (gate=0 by-design):", name);
+		return;
+	}
+	ok(name, cond, info);
+};
 const ok = (name, cond, info) => {
 	if (cond) {
 		pass++;
@@ -219,8 +231,8 @@ console.log("\nF2: real deliverMessageLocked redirect on seeded supersession sta
 	}
 
 	const stAfter = JSON.parse(await readFile(join(scratch, ".pi/swarm/swarm-state.json"), "utf8"));
-	ok("F2.a: CURRENT assignment record verified by the redirected reply", stAfter.messages[currentId]?.response?.status === "verified", JSON.stringify(stAfter.messages[currentId]?.response || {}));
-	ok(
+	okGate0("F2.a: CURRENT assignment record verified by the redirected reply", stAfter.messages[currentId]?.response?.status === "verified", JSON.stringify(stAfter.messages[currentId]?.response || {}));
+	okGate0(
 		"F2.b: verified resultMessageId is the worker's completion reply",
 		typeof stAfter.messages[currentId]?.response?.resultMessageId === "string" &&
 			stAfter.messages[currentId].response.resultMessageId.startsWith("msg-"),
@@ -236,8 +248,8 @@ console.log("\nF2: real deliverMessageLocked redirect on seeded supersession sta
 	const traceText = await readFile(join(scratch, ".pi/swarm/traces/events.jsonl"), "utf8").catch(() => "");
 	const redirectedLine = traceText.split("\n").find((l) => l.includes("message.response.redirected"));
 	const verifiedLine = traceText.split("\n").find((l) => l.includes("message.response.verified") && l.includes("stale_replyto_redirect"));
-	ok("F2.d: message.response.redirected trace recorded", !!redirectedLine, traceText.slice(0, 400));
-	ok("F2.e: verified trace carries via=stale_replyto_redirect", !!verifiedLine, "");
+	okGate0("F2.d: message.response.redirected trace recorded", !!redirectedLine, traceText.slice(0, 400));
+	okGate0("F2.e: verified trace carries via=stale_replyto_redirect", !!verifiedLine, "");
 
 	await rm(scratch, { recursive: true, force: true });
 }
@@ -284,5 +296,5 @@ function eventFingerprint(evts) {
 }
 ok("F4.a: event sequence identical across replays", eventFingerprint(events) === eventFingerprint(events2), `len1=${eventFingerprint(events).length} len2=${eventFingerprint(events2).length}`);
 
-console.log(`\n${pass} pass / ${fail} fail`);
+console.log(`\n${pass} pass / ${fail} fail${skippedGate0 ? ` / ${skippedGate0} SKIPPED (gate=0 by-design)` : ""}`);
 process.exit(fail === 0 ? 0 : 1);

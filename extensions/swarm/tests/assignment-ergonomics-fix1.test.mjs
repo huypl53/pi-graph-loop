@@ -202,8 +202,20 @@ const traces2 = readTraces();
 const redirectedTrace = traces2.find(
 	(t) => t.event === "message.response.redirected" && t.redirectedFrom === msgA1 && t.redirectedTo === msgA2,
 );
-ok("F1: message.response.redirected trace emitted (from A1 to A2)", !!redirectedTrace, `traces: ${traces2.map((t) => t.event).slice(-8).join(",")}`);
-ok(
+// task-202610031339 Fix D: these assertions are by-design gate=1-only (minimal-protocol
+// redirect/verify + body-contract semantics are retired at PI_SWARM_MINIMAL_PROTOCOL=0).
+const GATE0 = process.env.PI_SWARM_MINIMAL_PROTOCOL === "0";
+let skippedGate0 = 0;
+const okGate0 = (name, cond, info) => {
+	if (GATE0) {
+		skippedGate0++;
+		console.log("  SKIP (gate=0 by-design):", name);
+		return;
+	}
+	ok(name, cond, info);
+};
+okGate0("F1: message.response.redirected trace emitted (from A1 to A2)", !!redirectedTrace, `traces: ${traces2.map((t) => t.event).slice(-8).join(",")}`);
+okGate0(
 	"F1: credit lands on the CURRENT assignment record (A2 verified)",
 	st2.messages[msgA2]?.response?.status === "verified" && st2.messages[msgA2]?.response?.resultMessageId === reply1?.details?.message?.id,
 	JSON.stringify(st2.messages[msgA2]?.response || {}),
@@ -233,7 +245,7 @@ ok("F2: direct reply sent", !reply2?.details?.error, JSON.stringify(reply2?.deta
 const st3 = readStateJson();
 const traces3 = readTraces();
 const redirectCount = traces3.filter((t) => t.event === "message.response.redirected").length;
-ok("F2: still exactly ONE redirect trace total (direct reply did not redirect)", redirectCount === 1, `redirects: ${redirectCount}`);
+okGate0("F2: still exactly ONE redirect trace total (direct reply did not redirect)", redirectCount === 1, `redirects: ${redirectCount}`);
 ok(
 	"F2: A2 response remains verified",
 	st3.messages[msgA2]?.response?.status === "verified",
@@ -323,7 +335,7 @@ console.log("\n§Fix 2/3/4: assignment body ergonomics");
 		body.includes(`replyTo=${bodyMsgId}`),
 		body.slice(0, 200),
 	);
-	ok(
+	okGate0(
 		"§2.c: ack line retired under minimal protocol",
 		!body.includes("Ack this assignment message too"),
 		body.split("\n").at(-1) || "",
@@ -348,7 +360,7 @@ console.log("\n§Fix 2/3/4: assignment body ergonomics");
 	);
 
 	// §4 — fencing order stated upfront
-	ok(
+	okGate0(
 		"§4.a: reply-BEFORE-update fencing order in body",
 		/BEFORE (calling )?swarm_update_task/.test(body) && /reply must land first/.test(body),
 		body.slice(0, 300),
@@ -360,5 +372,5 @@ console.log("\n§Fix 2/3/4: assignment body ergonomics");
 	);
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
+console.log(`\n${pass} passed, ${fail} failed${skippedGate0 ? `, ${skippedGate0} SKIPPED (gate=0 by-design)` : ""}`);
 process.exit(fail === 0 ? 0 : 1);

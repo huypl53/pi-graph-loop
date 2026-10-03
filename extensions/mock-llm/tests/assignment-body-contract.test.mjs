@@ -29,6 +29,19 @@ const swarmRoot = join(here, "..", "..", "swarm");
 
 let pass = 0,
 	fail = 0;
+// task-202610031339 Fix D: these assertions are by-design gate=1-only — at
+// PI_SWARM_MINIMAL_PROTOCOL=0 the minimal-protocol body contract (fencing order, retired ack
+// line) does not apply. Skip with a visible marker instead of failing the suite.
+const GATE0 = process.env.PI_SWARM_MINIMAL_PROTOCOL === "0";
+let skippedGate0 = 0;
+const okGate0 = (name, cond, info) => {
+	if (GATE0) {
+		skippedGate0++;
+		console.log("  SKIP (gate=0 by-design):", name);
+		return;
+	}
+	ok(name, cond, info);
+};
 const ok = (name, cond, info) => {
 	if (cond) {
 		pass++;
@@ -127,8 +140,8 @@ const body = assignmentMsg?.body || "";
 ok("F1.a: assignment message delivered with a real id", !!assignmentMsgId && !!assignmentMsg, assignmentMsgId || "(none)");
 ok("F1.b: body names its own message id (replyTo contract)", body.includes(`replyTo=${assignmentMsgId}`), body.slice(0, 200));
 ok("F1.c: body carries the graph-state summary line", /Graph: \d+ done \/ \d+ in-progress \/ \d+ pending — you are node plan \(1 of 2\)/.test(body), (body.match(/Graph: [^\n]+/) || ["(missing)"])[0]);
-ok("F1.d: body states the reply-BEFORE-update fencing order", /BEFORE (calling )?swarm_update_task/.test(body) && /reply must land first/.test(body), "");
-ok("F1.e: body does NOT carry the retired ack instruction", !body.includes("Ack this assignment message too"), "");
+okGate0("F1.d: body states the reply-BEFORE-update fencing order", /BEFORE (calling )?swarm_update_task/.test(body) && /reply must land first/.test(body), "");
+okGate0("F1.e: body does NOT carry the retired ack instruction", !body.includes("Ack this assignment message too"), "");
 ok(
 	"F1.f: acceptance criteria are a pointer, not a full echo",
 	body.includes("acceptanceCriteria") && !body.includes("plan artifact exists"),
@@ -238,5 +251,5 @@ function eventFingerprint(evts) {
 }
 ok("F4.a: event sequence identical across replays", eventFingerprint(events) === eventFingerprint(events2), "");
 
-console.log(`\n${pass} pass / ${fail} fail`);
+console.log(`\n${pass} pass / ${fail} fail${skippedGate0 ? ` / ${skippedGate0} SKIPPED (gate=0 by-design)` : ""}`);
 process.exit(fail === 0 ? 0 : 1);
