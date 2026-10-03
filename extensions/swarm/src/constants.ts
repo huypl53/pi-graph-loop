@@ -543,6 +543,18 @@ export const DEFAULT_AGENT_HEARTBEAT_STALE_MS = 600_000; // 10 minutes
 // R29 (2026-09-20): Grace window for freshly spawned workers to launch tmux process & record first heartbeat (default: 3 minutes)
 export const DEFAULT_AGENT_BOOT_GRACE_MS = 180_000;
 
+// === task-r-deadpane-goal-classifier (2026-10-03) — goal-escalation dead-pane probe bounds ===
+// The goal-floor dead-pane classifier probes busy/tool_running agents' panes via the existing
+// isTmuxRunning facade. Two knobs bound the worst-case subprocess fan-out under the pump lock
+// (same discipline as the heartbeat-GC gate-2 probe ledger):
+//   - GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS: per-agent probe cooldown; an agent probed within
+//     this window is skipped (liveness unknown ⇒ treated alive-by-convention). Default 60s;
+//     env PI_SWARM_GOAL_DIAG_PROBE_INTERVAL_MS.
+//   - GOAL_ESCALATION_DIAG_PROBE_MAX: max probes per evaluator round. Default 8;
+//     env PI_SWARM_GOAL_DIAG_PROBE_MAX.
+export const GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS = 60_000;
+export const GOAL_ESCALATION_DIAG_PROBE_MAX = 8;
+
 // === Issue 83a — stale-open surfacing threshold ===
 // Window (ms) after which an `assigned`/`in_progress` node WITHOUT a `lastProgressAt` update
 // is surfaced to the root via `stale_open_surfaced` + an root mailbox nudge.

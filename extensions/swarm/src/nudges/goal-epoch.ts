@@ -31,10 +31,12 @@ import {
 	formatNotifyKey,
 	PI_SWARM_MINIMAL_PROTOCOL,
 	DEFAULT_AGENT_BOOT_GRACE_MS,
+	GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS,
+	GOAL_ESCALATION_DIAG_PROBE_MAX,
 } from "../constants.ts";
 
 import { ensureAgentDefaults, now } from "../utils.ts";
-import { tmux } from "../tmux.ts";
+import { isTmuxRunning } from "../tmux.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale } from "../taskgraph.ts";
 import { deliverMessageLocked, findIdempotentMessage, readMailbox } from "../mailbox.ts";
 import { mailboxPath, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "../state.ts";
@@ -97,6 +99,132 @@ export function resolveGoalIdleChecksRequired(): number {
 		if (Number.isFinite(env) && env > 0) return Math.floor(env);
 	}
 	return 3;
+}
+
+// === task-r-deadpane-goal-classifier (2026-10-03): dead-pane probe bounds resolvers ===
+// Env-overridable so tests can compress the cooldown / cap (file convention: resolvers live
+// next to resolveGoalIdleCheckIntervalMs).
+export function resolveGoalDiagProbeIntervalMs(): number {
+	const raw = process.env.PI_SWARM_GOAL_DIAG_PROBE_INTERVAL_MS;
+	if (raw !== undefined && String(raw).trim() !== "") {
+		const env = Number(raw);
+		if (Number.isFinite(env) && env > 0) return Math.floor(env);
+	}
+	return GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS;
+}
+
+export function resolveGoalDiagProbeMax(): number {
+	const raw = process.env.PI_SWARM_GOAL_DIAG_PROBE_MAX;
+	if (raw !== undefined && String(raw).trim() !== "") {
+		const env = Number(raw);
+		if (Number.isInteger(env) && env > 0) return env;
+	}
+	return GOAL_ESCALATION_DIAG_PROBE_MAX;
+}
+
+// === probeAgentPaneLiveness (task-r-deadpane-goal-classifier) ===
+// Probes the panes of busy/tool_running agents via the existing isTmuxRunning facade (active
+// terminal driver — tmux/herdr/mock parity for free). LEDGER-GATED: an agent probed within
+// resolveGoalDiagProbeIntervalMs() is skipped (liveness null = unknown = treated
+// alive-by-convention, matching deriveTaskProgressState). CAPPED: at most
+// resolveGoalDiagProbeMax() probes per round to bound the worst-case pump-lock hold (same
+// discipline as the heartbeat-GC gate-2 probe ledger).
+//
+// READ-ONLY: never mutates agent.tmuxAlive / agent.status — the heartbeat GC stays the SOLE
+// writer of agent liveness fields (keeps the classifier pure, avoids write-during-nudge edge
+// cases). Errors per agent are routed to logSwarmError (no silent swallow) and resolve null
+// (unknown liveness), so one failing probe never fails the round (per-agent, no unhandled
+// rejection; Promise.all stays safe because every promise resolves).
+//
+// Ledger hygiene: entries for agent ids no longer in st.agents are dropped (bounded by the
+// agent count). Returns { liveness: Map<agentId, boolean|null>, probed, skipped }.
+export async function probeAgentPaneLiveness(
+	pi: ExtensionAPI,
+	p: Paths,
+	st: SwarmState,
+	agents: SwarmAgent[],
+	nowMs: number,
+): Promise<{ liveness: Map<string, boolean | null>; probed: number; skipped: number }> {
+	const idleState: SwarmIdleNudgeState = (st.idleNudgeState ||= {});
+	const ledger = (idleState.goalDiagProbeLedger ||= {});
+	// Drop ledger entries for pruned agents first (bounded by agent count).
+	for (const id of Object.keys(ledger)) {
+		if (!st.agents[id]) delete ledger[id];
+	}
+	const intervalMs = resolveGoalDiagProbeIntervalMs();
+	const probeCap = resolveGoalDiagProbeMax();
+	const liveness = new Map<string, boolean | null>();
+	let probed = 0;
+	let skipped = 0;
+	const eligible = agents.filter((a) => a.tmuxTarget && a.tmuxTarget !== "unknown" && a.status === "running");
+	for (const a of eligible) {
+		if (probed >= probeCap) {
+			liveness.set(a.id, null);
+			continue;
+		}
+		const lastProbeAtMs = ledger[a.id] ? new Date(ledger[a.id]).getTime() : 0;
+		if (Number.isFinite(lastProbeAtMs) && nowMs - lastProbeAtMs <= intervalMs) {
+			// Ledger-gated skip: probed too recently. The FRESH cached verdict (if the agent was
+			// probed dead within the window) is still trustworthy; re-probing again so soon would
+			// violate the cost bound, so report unknown and let the classifier use the last round's
+			// classification-by-convention (alive) — cooldown expiry re-arms the probe.
+			liveness.set(a.id, null);
+			skipped++;
+			continue;
+		}
+		probed++;
+		ledger[a.id] = new Date(nowMs).toISOString();
+		const target = a.tmuxTarget!;
+		try {
+			const alive = await isTmuxRunning(pi, target);
+			liveness.set(a.id, alive);
+		} catch (err: unknown) {
+			// No-silent-swallow (AGENTS.md 2026-09-08): durable errorlog entry, then treat the
+			// agent as liveness-unknown (null) — unknown is classified alive-by-convention, never
+			// dead, so a failing probe cannot fire a false escalation.
+			await logSwarmError(p, "goal-epoch", "goal_diag.probe_failed", err, { agentId: a.id, target });
+			liveness.set(a.id, null);
+		}
+	}
+	return { liveness, probed, skipped };
+}
+
+// === classifyPoolAgent (task-r-deadpane-goal-classifier) ===
+// Pure, synchronous, mutually-exclusive classification for a poolDiag row. `paneAlive` is the
+// FRESH probe verdict from probeAgentPaneLiveness (null = unprobed/unknown). Predicate order is
+// the display precedence: a probe-dead busy agent is the headline (busy_dead_pane); existing
+// hint-bucket semantics are preserved verbatim for everything else.
+export function classifyPoolAgent(
+	a: {
+		status?: string;
+		runtimeStatus?: string;
+		tmuxAlive?: boolean;
+		lastHeartbeatAt?: string;
+		lastShutdownAt?: string;
+		updatedAt?: string;
+		createdAt?: string;
+	},
+	paneAlive: boolean | null,
+	nowMs: number,
+): "busy_dead_pane" | "busy" | "stopped" | "stale" | "boot_failed" | "idle" {
+	const rt = a.runtimeStatus;
+	// The incident shape: busy/tool_running agent whose pane just died but the heartbeat is
+	// still fresh (event-driven heartbeats stop the moment the pane dies). Probe verdict beats
+	// BOTH the cached tmuxAlive field and heartbeat age.
+	if ((rt === "busy" || rt === "tool_running") && a.status === "running" && paneAlive === false) return "busy_dead_pane";
+	if (rt === "busy" || rt === "tool_running") return "busy";
+	if (rt === "stopped") return "stopped";
+	// Stale / boot-failed buckets mirror the vacuous-branch hint predicates (heartbeat-age
+	// based; pane not known-dead, agent not already stopped).
+	const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
+	const hbKnown = Number.isFinite(hb);
+	const paneKnownDead = a.tmuxAlive === false || paneAlive === false;
+	if (!hbKnown && !paneKnownDead && a.createdAt) {
+		const createdMs = new Date(a.createdAt).getTime();
+		if (Number.isFinite(createdMs) && nowMs - createdMs > AGENT_BOOT_GRACE_MS) return "boot_failed";
+	}
+	if (hbKnown && !paneKnownDead && nowMs - hb > AGENT_HEARTBEAT_STALE_MS) return "stale";
+	return "idle";
 }
 
 export function agentIsEffectivelyAlive(
@@ -314,6 +442,150 @@ export async function updateIdleEpochLocked(
 // turn_end branch, R16). Once the counter reaches MAX_CONSECUTIVE_NUDGES_DEFAULT, the pump
 // enters a GOAL_NUDGE_BACKOFF_TICKS-round back-off; each COMPLETED check-round consumes one
 // back-off slot.
+// === emitPoolEmptyEscalationLocked (task-r-deadpane-goal-classifier, 2026-10-03) ===
+// Shared pool-empty escalation emitter extracted verbatim from the vacuous branch of
+// evaluateIdleGoalNudgeLocked (R14 Fix C + R16 Fix C body). Two call sites:
+//   - Call site A (vacuous branch): cause "pool_empty" — behavior byte-identical for the
+//     existing suites (same trace fields modulo the new `cause`, same message family, same
+//     cooldown/idempotency key family).
+//   - Call site B (busy-dead route in the !allIdle branch): cause "busy_dead_pane" — the
+//     incident shape where every effective worker is probe-dead but heartbeats are still
+//     fresh, so the pool LOOKS busy while being effectively empty.
+// Idempotency: reuses the SAME key family `goal:<id>:escalation:pool-empty:<hour-bucket>` +
+// `lastPoolEmptyEscalationAt` cooldown → at most one pool escalation per goal per hour,
+// whichever cause fires first (deliberate anti-spam inheritance; the trace + body carry the
+// cause). MUST be called under the evaluator's existing withLock(p).
+//
+// poolDiag rows gain `classification` + `paneAlive` (the "distinguishes busy-but-dead-pane
+// from live busy" acceptance surface); the busy_dead_pane bucket is named FIRST in the hints.
+async function emitPoolEmptyEscalationLocked(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	goal: NonNullable<SwarmState["goal"]>,
+	idleState: SwarmIdleNudgeState,
+	nowMs: number,
+	cause: "pool_empty" | "busy_dead_pane",
+	probeLiveness?: Map<string, boolean | null>,
+): Promise<void> {
+	const poolDiag = Object.values(st.agents)
+		.filter((a) => {
+			if (a.id === "root") return false;
+			// Exclude historical agents that have been stopped for longer than the heartbeat stale window.
+			// Those agents are cleanly retired and should not pollute actionable poolDiag.
+			if (a.runtimeStatus === "stopped") {
+				const stoppedAt = a.lastShutdownAt || a.updatedAt || a.lastHeartbeatAt;
+				const stoppedMs = stoppedAt ? new Date(stoppedAt).getTime() : NaN;
+				if (Number.isFinite(stoppedMs) && nowMs - stoppedMs > AGENT_HEARTBEAT_STALE_MS) {
+					return false;
+				}
+			}
+			return true;
+		})
+		.map((a) => {
+			const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
+			const ageSec = Number.isFinite(hb) ? Math.round((nowMs - hb) / 1000) : null;
+			// task-r-deadpane-goal-classifier: classification + fresh probe verdict. The vacuous
+			// caller does not probe, so paneAlive is null there (unknown = alive-by-convention)
+			// and classification falls back to the cached-field semantics — byte-compatible with
+			// the pre-existing rows (which carried no classification at all; additive fields only).
+			// The busy-dead caller passes probeLiveness so the fresh pane verdict beats BOTH the
+			// cached tmuxAlive field and heartbeat age in the row classification.
+			const paneAlive = probeLiveness?.get(a.id) ?? (null as boolean | null);
+			return {
+				id: a.id,
+				tmuxAlive: a.tmuxAlive ?? null,
+				runtimeStatus: a.runtimeStatus,
+				heartbeatAgeSec: ageSec,
+				classification: classifyPoolAgent(a, paneAlive, nowMs),
+				paneAlive,
+			};
+		});
+	await traceLogged(p, "goal.escalation.pool_empty", {
+		goalId: goal.id,
+		origin: goal.origin,
+		effectiveAgentCount: 0,
+		poolDiag,
+		cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS,
+		cause,
+	});
+	idleState.lastPoolEmptyEscalationAt = new Date(nowMs).toISOString();
+	// === R16 Fix C (2026-09-02): action-oriented nudge body ===
+	// Replace the generic diagnostic dump with condition-specific next-action hints
+	// per the root's note: "Nudges must be action-oriented per user direction:
+	// condition-specific next-action hints." The poolDiag already classifies agents
+	// by tmuxAlive/runtimeStatus/heartbeatAgeSec; we classify the actionable subset
+	// into the four hint buckets and join the relevant ones into the body.
+	const deadAgents = poolDiag.filter((d) => d.tmuxAlive === false);
+	const busyDeadAgents = poolDiag.filter((d) => d.classification === "busy_dead_pane");
+	const stoppedAgents = poolDiag.filter((d) => d.runtimeStatus === "stopped");
+	const staleAgents = poolDiag.filter(
+		(d) => d.heartbeatAgeSec !== null && d.heartbeatAgeSec > 600 && d.tmuxAlive !== false && d.runtimeStatus !== "stopped",
+	);
+	const bootFailedAgents = poolDiag.filter((d) => d.heartbeatAgeSec === null && d.tmuxAlive !== false && d.runtimeStatus !== "stopped");
+	const hints: string[] = [];
+	if (busyDeadAgents.length > 0) {
+		// task-r-deadpane-goal-classifier: probe-dead busy agents are the headline — the worker
+		// LOOKED busy but its pane is gone (herdr workspace closed / tmux session killed).
+		const ids = busyDeadAgents.map((a) => a.id).join(", ");
+		hints.push(
+			`Busy but dead panes (${busyDeadAgents.length}): ${ids}. Pane probe returned dead while heartbeat was fresh — the worker cannot make progress. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace, or \`swarm_restart_agent(agentId=...)\` if panes are recoverable.`,
+		);
+	}
+	if (deadAgents.length > 0) {
+		const ids = deadAgents.map((a) => a.id).join(", ");
+		hints.push(
+			`Dead panes (${deadAgents.length}): ${ids}. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace, or \`swarm_restart_agent(agentId=...)\` if panes are recoverable.`,
+		);
+	}
+	if (stoppedAgents.length > 0 && deadAgents.length === 0 && busyDeadAgents.length === 0) {
+		const ids = stoppedAgents.map((a) => a.id).join(", ");
+		hints.push(
+			`Stopped agents (${stoppedAgents.length}): ${ids}. Run \`swarm_restart_agent(agentId=...)\` for each, or spawn fresh.`,
+		);
+	}
+	if (staleAgents.length > 0 && deadAgents.length === 0 && stoppedAgents.length === 0 && busyDeadAgents.length === 0) {
+		hints.push(`All agents stale (>10min no heartbeat). Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to mint a fresh worker.`);
+	}
+	if (
+		bootFailedAgents.length > 0 &&
+		deadAgents.length === 0 &&
+		stoppedAgents.length === 0 &&
+		staleAgents.length === 0 &&
+		busyDeadAgents.length === 0
+	) {
+		const ids = bootFailedAgents.map((a) => a.id).join(", ");
+		hints.push(
+			`Boot failed / no heartbeat (${bootFailedAgents.length}): ${ids}. Workers exceeded boot grace without registering a heartbeat. Run \`swarm_restart_agent(agentId=...)\` or spawn fresh.`,
+		);
+	}
+	if (hints.length === 0) {
+		hints.push(`No live workers but no clear ghost classification. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` or ask the user for direction.`);
+	}
+	hints.push(`Or scope a step: \`swarm_create_task(title=..., goal=..., workflow=feature-dev)\` and assign to a fresh worker.`);
+	hints.push(`Or clear the goal if it is no longer relevant: \`swarm_mark_goal_done(goalId="${goal.id}")\`.`);
+	const causeLine =
+		cause === "busy_dead_pane"
+			? `All effective live workers are probe-dead (busy + dead pane — pane liveness probe, not heartbeat age).\n`
+			: `User-origin goal is held with zero effective live workers (cooldown: ${Math.round(NOTIFY_DEFAULT_COOLDOWN_MS / 1000)}s).\n`;
+	await deliverMessageLocked(pi, cwd, p, st, {
+		to: "root",
+		priority: "high",
+		subject: `Goal escalation: worker pool empty (goal ${goal.id})`,
+		body:
+			causeLine +
+			`Goal text: ${String(goal.text || "").slice(0, 200)}.\n\n` +
+			`Pool diag: ${JSON.stringify(poolDiag)}.\n\n` +
+			`Next action (one of):\n` +
+			hints.map((h, i) => `  ${i + 1}. ${h}`).join("\n"),
+		requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
+		requiresResponse: false,
+		conversationId: `goal:${goal.id}:escalation:pool-empty:cooldown:${NOTIFY_DEFAULT_COOLDOWN_MS}`,
+		idempotencyKey: `goal:${goal.id}:escalation:pool-empty:${new Date(nowMs).toISOString().slice(0, 13)}`,
+	});
+}
+
 // MUST be called under the same withLock(p) the pump already holds; never acquire the lock
 // inside this function.
 //
@@ -382,95 +654,11 @@ export async function evaluateIdleGoalNudgeLocked(
 				? new Date(idleStateVac.lastPoolEmptyEscalationAt).getTime() + NOTIFY_DEFAULT_COOLDOWN_MS
 				: 0;
 			if (!isCapped && nowMs >= cooldownUntilMs) {
-				const poolDiag = Object.values(st.agents)
-					.filter((a) => {
-						if (a.id === "root") return false;
-						// Exclude historical agents that have been stopped for longer than the heartbeat stale window.
-						// Those agents are cleanly retired and should not pollute actionable poolDiag.
-						if (a.runtimeStatus === "stopped") {
-							const stoppedAt = a.lastShutdownAt || a.updatedAt || a.lastHeartbeatAt;
-							const stoppedMs = stoppedAt ? new Date(stoppedAt).getTime() : NaN;
-							if (Number.isFinite(stoppedMs) && nowMs - stoppedMs > AGENT_HEARTBEAT_STALE_MS) {
-								return false;
-							}
-						}
-						return true;
-					})
-					.map((a) => {
-						const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
-						const ageSec = Number.isFinite(hb) ? Math.round((nowMs - hb) / 1000) : null;
-						return { id: a.id, tmuxAlive: a.tmuxAlive ?? null, runtimeStatus: a.runtimeStatus, heartbeatAgeSec: ageSec };
-					});
-				await traceLogged(p, "goal.escalation.pool_empty", {
-					goalId: goal.id,
-					origin: goal.origin,
-					effectiveAgentCount: 0,
-					poolDiag,
-					cooldownMs: NOTIFY_DEFAULT_COOLDOWN_MS,
-				});
-				idleStateVac.lastPoolEmptyEscalationAt = new Date(nowMs).toISOString();
-				// === R16 Fix C (2026-09-02): action-oriented nudge body ===
-				// Replace the generic diagnostic dump with condition-specific next-action hints
-				// per the root's note: "Nudges must be action-oriented per user direction:
-				// condition-specific next-action hints." The poolDiag already classifies agents
-				// by tmuxAlive/runtimeStatus/heartbeatAgeSec; we classify the actionable subset
-				// into the four hint buckets and join the relevant ones into the body.
-				const deadAgents = poolDiag.filter((d) => d.tmuxAlive === false);
-				const stoppedAgents = poolDiag.filter((d) => d.runtimeStatus === "stopped");
-				const staleAgents = poolDiag.filter(
-					(d) => d.heartbeatAgeSec !== null && d.heartbeatAgeSec > 600 && d.tmuxAlive !== false && d.runtimeStatus !== "stopped",
-				);
-				const bootFailedAgents = poolDiag.filter(
-					(d) => d.heartbeatAgeSec === null && d.tmuxAlive !== false && d.runtimeStatus !== "stopped",
-				);
-				const hints: string[] = [];
-				if (deadAgents.length > 0) {
-					const ids = deadAgents.map((a) => a.id).join(", ");
-					hints.push(
-						`Dead panes (${deadAgents.length}): ${ids}. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace, or \`swarm_restart_agent(agentId=...)\` if panes are recoverable.`,
-					);
-				}
-				if (stoppedAgents.length > 0 && deadAgents.length === 0) {
-					const ids = stoppedAgents.map((a) => a.id).join(", ");
-					hints.push(
-						`Stopped agents (${stoppedAgents.length}): ${ids}. Run \`swarm_restart_agent(agentId=...)\` for each, or spawn fresh.`,
-					);
-				}
-				if (staleAgents.length > 0 && deadAgents.length === 0 && stoppedAgents.length === 0) {
-					hints.push(
-						`All agents stale (>10min no heartbeat). Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to mint a fresh worker.`,
-					);
-				}
-				if (bootFailedAgents.length > 0 && deadAgents.length === 0 && stoppedAgents.length === 0 && staleAgents.length === 0) {
-					const ids = bootFailedAgents.map((a) => a.id).join(", ");
-					hints.push(
-						`Boot failed / no heartbeat (${bootFailedAgents.length}): ${ids}. Workers exceeded boot grace without registering a heartbeat. Run \`swarm_restart_agent(agentId=...)\` or spawn fresh.`,
-					);
-				}
-				if (hints.length === 0) {
-					hints.push(
-						`No live workers but no clear ghost classification. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` or ask the user for direction.`,
-					);
-				}
-				hints.push(
-					`Or scope a step: \`swarm_create_task(title=..., goal=..., workflow=feature-dev)\` and assign to a fresh worker.`,
-				);
-				hints.push(`Or clear the goal if it is no longer relevant: \`swarm_mark_goal_done(goalId="${goal.id}")\`.`);
-				await deliverMessageLocked(pi, cwd, p, st, {
-					to: "root",
-					priority: "high",
-					subject: `Goal escalation: worker pool empty (goal ${goal.id})`,
-					body:
-						`User-origin goal is held with zero effective live workers (cooldown: ${Math.round(NOTIFY_DEFAULT_COOLDOWN_MS / 1000)}s).\n` +
-						`Goal text: ${String(goal.text || "").slice(0, 200)}.\n\n` +
-						`Pool diag: ${JSON.stringify(poolDiag)}.\n\n` +
-						`Next action (one of):\n` +
-						hints.map((h, i) => `  ${i + 1}. ${h}`).join("\n"),
-					requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
-					requiresResponse: false,
-					conversationId: `goal:${goal.id}:escalation:pool-empty:cooldown:${NOTIFY_DEFAULT_COOLDOWN_MS}`,
-					idempotencyKey: `goal:${goal.id}:escalation:pool-empty:${new Date(nowMs).toISOString().slice(0, 13)}`,
-				});
+				// task-r-deadpane-goal-classifier (2026-10-03): the escalation body moved into the
+				// shared emitPoolEmptyEscalationLocked emitter so the busy-dead route
+				// (!allIdle branch below) fires the SAME trace + message family. Call site A:
+				// the original vacuous route with cause "pool_empty" (behavior preserved).
+				await emitPoolEmptyEscalationLocked(pi, cwd, p, st, goal, idleStateVac, nowMs, "pool_empty");
 			}
 		}
 
@@ -500,11 +688,76 @@ export async function evaluateIdleGoalNudgeLocked(
 			return { emitted: false, reason: "assignment_in_flight" };
 		}
 
+		// === task-r-deadpane-goal-classifier (2026-10-03): NEW dead-pane classification route ===
+		// The 2026-10-03 incident: a worker's pane died (herdr workspace closed externally) but
+		// swarm-state kept runtimeStatus=busy on a stale-fresh heartbeat; this branch reported
+		// the opaque agent_busy while the worker was physically dead, delaying recovery by the
+		// heartbeat-stale window (~10 min). Heartbeat age is a weak liveness signal for busy
+		// agents (heartbeats are event-driven and stop the moment the pane dies), so the
+		// classifier itself probes the pane via the existing isTmuxRunning facade — ledger-gated
+		// + capped by probeAgentPaneLiveness, read-only (the heartbeat GC stays the sole writer
+		// of agent liveness fields).
+		const busyAgents = idleAgents.filter((a) => a.runtimeStatus === "busy" || a.runtimeStatus === "tool_running");
+		// Probe-dead agent ids consumed by the dead-pane route (exported to the health-check
+		// predicate below; empty when no busy agent exists or no probe fired).
+		const deadPaneConsumed: Set<string> = new Set();
+		if (busyAgents.length > 0) {
+			const probe = await probeAgentPaneLiveness(pi, p, st, busyAgents, nowMs);
+			const deadBusy = busyAgents.filter((a) => probe.liveness.get(a.id) === false);
+			if (deadBusy.length > 0) {
+				const deadIds = deadBusy.map((a) => a.id);
+				for (const id of deadIds) deadPaneConsumed.add(id);
+				// Effective-pool-empty route: every effective agent is either already non-effective
+				// (stopped — excluded from idleAgents) or probe-dead → the pool is effectively
+				// empty even though records say "busy". Run the SAME pool-empty escalation body the
+				// vacuous branch uses (shared emitter) with cause busy_dead_pane. Fires regardless
+				// of rootBusy (parity with the vacuous branch — deliverMessageLocked is L1; the root
+				// pump surfaces it when the root settles).
+				if (idleAgents.length === deadBusy.length) {
+					const effectiveMaxNudges = resolveGoalMaxNudges(goal.maxNudges);
+					const isInfinite = effectiveMaxNudges === -1;
+					const isCapped = !isInfinite && (goal.consecutiveNoResolveNudges ?? 0) >= effectiveMaxNudges;
+					const cooldownUntilMs = idleState.lastPoolEmptyEscalationAt
+						? new Date(idleState.lastPoolEmptyEscalationAt).getTime() + NOTIFY_DEFAULT_COOLDOWN_MS
+						: 0;
+					if (goal.origin === "user" || goal.origin === "system" || goal.origin === "batch") {
+						if (!isCapped && nowMs >= cooldownUntilMs) {
+							// Call site B: same emitter, busy-dead cause. Mark the probe ledger BEFORE
+							// the emitter may early-return so the cooldown stamp + ledger survive via
+							// the same persistence contract as the vacuous branch (R16 Fix B writeState
+							// below covers this return path too).
+							idleState.lastPoolEmptyEscalationAt = new Date(nowMs).toISOString();
+							await emitPoolEmptyEscalationLocked(pi, cwd, p, st, goal, idleState, nowMs, "busy_dead_pane", probe.liveness);
+							await writeState(p, st);
+						}
+					}
+					return { emitted: false, reason: "no_live_workers" };
+				}
+				// Mixed-pool route (>=1 live agent remains): trace-only diagnostic — no mailbox
+				// message, the swarm genuinely has live workers so the goal floor's silence stays
+				// correct, but the classifier now says WHY. Ledger-gated by the same probe cooldown:
+				// the probe ledger was just stamped for every probed agent, so this trace fires at
+				// most once per probe interval per agent (no tick spam).
+				await traceLogged(p, "goal.escalation.dead_pane_detected", {
+					goalId: goal.id,
+					agents: deadIds,
+					classification: "busy_dead_pane",
+					hint: `Pane probe returned dead for busy worker(s) ${deadIds.join(", ")} while heartbeat was fresh. Run \`swarm_restart_agent(agentId=...)\` if panes are recoverable, or \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace.`,
+				});
+				// Fall through: a dead mid-tool agent consumed by this route must NOT get the
+				// "capture the pane" health-check nudge below (it is dead, not long-running).
+			}
+		}
+
 		// Check for workers running a tool for > 10m without heartbeat update (e.g. sync/test command).
 		// Rather than falsely claiming "all agents are idle" or staying silent, emit an actionable
 		// health check so Root can inspect progress (e.g. long sync test vs stuck command).
+		// task-r-deadpane-goal-classifier: probe-dead agents were consumed by the dead-pane route
+		// above — exclude them here so a dead mid-tool agent gets the dead-pane escalation
+		// instead of a "capture the pane" health-check nudge.
 		const staleBusyWorker = idleAgents.find((a) => {
 			if (a.runtimeStatus !== "tool_running") return false;
+			if (deadPaneConsumed.has(a.id)) return false;
 			const hb = a.lastHeartbeatAt ? new Date(a.lastHeartbeatAt).getTime() : NaN;
 			return !Number.isFinite(hb) || nowMs - hb > AGENT_HEARTBEAT_STALE_MS;
 		});

@@ -2244,3 +2244,78 @@ the terminal driver manager).
 - Pre-existing suite failures (identical on main, stash-verified): cancellation 41/1,
   minimal-protocol-shadow 24/7, reconcile-reinject 16/4, root-wake 31/3, functional/attestation
   env crashes.
+
+## Operator: busy-but-dead-pane classifier — goal-escalation distinguishes dead panes from live busy (2026-10-03)
+
+Task `task-r-deadpane-goal-classifier`. The goal-escalation classifier's `!allIdle` branch
+previously returned the opaque `{emitted:false, reason:"agent_busy"}` for busy agents without
+ever consulting the existing pane-liveness probe (`isTmuxRunning` facade → terminal driver).
+A busy-but-dead-pane worker (herdr workspace closed externally, tmux session killed) was
+therefore reported as a live busy worker for the full heartbeat-stale window (~10 min) while
+the worker was physically dead. Live incident 2026-10-03: implementer-02 pane wV:p4 died,
+swarm-state kept `runtimeStatus=busy` on a fresh heartbeat, goal-escalation classifier
+reported a live busy worker, recovery delayed ~10 min.
+
+### What changed
+
+- `extensions/swarm/src/nudges/goal-epoch.ts` — new exports `probeAgentPaneLiveness` (ledger-gated
+  + capped probe round via the existing `isTmuxRunning` facade) and `classifyPoolAgent` (pure,
+  synchronous, mutually-exclusive classification: `busy_dead_pane` | `busy` | `stopped` | `stale`
+  | `boot_failed` | `idle`). New `emitPoolEmptyEscalationLocked` shared emitter extracted from the
+  vacuous branch — two call sites: vacuous branch (`cause: "pool_empty"`, behavior byte-identical)
+  and busy-dead route (`cause: "busy_dead_pane"`). The `!allIdle` branch gains a dead-pane
+  classification insertion: busy agents are probed, probe-dead agents are consumed by either the
+  effective-pool-empty route (fires the same escalation body with `cause: "busy_dead_pane"`) or
+  the mixed-pool route (trace-only `goal.escalation.dead_pane_detected`).
+- `extensions/swarm/src/constants.ts` — `GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS = 60_000` (per-agent
+  probe cooldown; env `PI_SWARM_GOAL_DIAG_PROBE_INTERVAL_MS`) and `GOAL_ESCALATION_DIAG_PROBE_MAX = 8`
+  (max probes per round; env `PI_SWARM_GOAL_DIAG_PROBE_MAX`).
+- `extensions/swarm/src/types/state.ts` — `SwarmIdleNudgeState.goalDiagProbeLedger?: Record<string, string>`
+  (additive optional field; ISO last-probe-at per agent id).
+
+### Why this matters
+
+Heartbeats are event-driven, not wall-clock — `lastHeartbeatAt` only advances on
+`tool_execution_start`/`tool_execution_end`, `agent_settled`, and session hooks. A worker parked
+in a long tool call — or one whose pane just died mid-work — stops heartbeating. Heartbeat age
+is therefore a weak liveness signal for busy agents, which is exactly what the incident exploited.
+The classifier now probes the pane directly via the existing `isTmuxRunning` facade (active
+terminal driver — tmux/herdr/mock parity for free; herdr `isTargetAlive` = `inspectProcess().piLike`).
+
+### Cost bound
+
+- **Ledger-gated**: an agent probed within `GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS` (default 60s)
+  is skipped — liveness `null` (unknown ⇒ treated alive-by-convention, matching
+  `deriveTaskProgressState`).
+- **Cap**: at most `GOAL_ESCALATION_DIAG_PROBE_MAX` (default 8) probes per round — bounds
+  worst-case pump-lock hold (same discipline as the heartbeat-GC gate-2 probe ledger).
+- **Read-only**: never mutates `agent.tmuxAlive`/`status` — the heartbeat GC stays the sole
+  writer of agent liveness fields (keeps the classifier pure, avoids write-during-nudge edge cases).
+- **No silent swallow**: per-agent probe errors are routed to `logSwarmError(p, "goal-epoch",
+  "goal_diag.probe_failed", err, { agentId })` and resolve `null` (unknown liveness) — one failing
+  probe never fails the round (per-agent, no unhandled rejection; `Promise.all` stays safe because
+  every promise resolves).
+
+### Idempotency
+
+Reuses the SAME key family `goal:<id>:escalation:pool-empty:<hour-bucket>` +
+`lastPoolEmptyEscalationAt` cooldown → at most one pool escalation per goal per hour, whichever
+cause fires first (deliberate anti-spam inheritance; the trace + body carry the cause).
+
+### Verify commands
+
+- `node extensions/swarm/tests/goal-escalation-deadpane-classify.test.mjs` — 53 assertions
+  (S1 THE REPRODUCTION red-first + S1b tool_running variant + S2 control + S3 probe ledger + cap
+  + S4 mixed pool + S5 probe failure routing + S6 parity + R10-1 boundary counters + R27-B static
+  import-integrity guard + AGENTS.md no-silent-swallow mandate).
+- Mock-LLM lane: `pi --provider mock-llm --model goal-escalation-deadpane` in a seeded scratch cwd
+  (fixture `extensions/mock-llm/fixtures/goal-escalation-deadpane.jsonl`, 3 turns). WARNING: do NOT
+  also pass `-e extensions/swarm` — the global packages entry already loads it; double registration
+  aborts the extension. Companion lane test `extensions/mock-llm/tests/goal-escalation-deadpane.test.mjs`
+  (fixture-shape assertions always run; opt-in live lane via `RUN_DEADPANE_LANE=1`).
+- Regression surface (full gate must stay green): `r14-goal-empty-pool-escalation`,
+  `pool-diag-historical-reproduce`, `vacuous-max-nudges-reproduce`, `tmux-alive-fallback-reproduce`,
+  `r27-goal-task-independent-idle-nudge`, `r16-idle-goal-regression`, `r27b-pump-import-guards`,
+  `uat-goal-nudge`, `idle-nudge`, `r19-goal-graph-deadlock`, `r29-spawn-boot-grace-false-escalation`,
+  `goal-max-nudges`, `task-liveness`, `heartbeat-gc`.
+- Pi runtime contract §10 F24 row with L1-L4 accounting + counters C-F24-1/2/3.

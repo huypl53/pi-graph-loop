@@ -147,6 +147,13 @@ export type SwarmIdleNudgeState = {
 	goalIdleCheckCount?: number;
 	goalIdleLastCheckAt?: string;
 	lastLongRunningToolNudges?: Record<string, string>;
+	// === task-r-deadpane-goal-classifier (2026-10-03): per-agent pane-probe cooldown ledger ===
+	// goalDiagProbeLedger[agentId] = ISO timestamp of the last dead-pane probe issued by the
+	// goal-escalation classifier for that agent. An agent probed within
+	// GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS is skipped (liveness null = treated
+	// alive-by-convention, matching deriveTaskProgressState). Entries for pruned agents are
+	// dropped on each probe round (bounded by the agent count).
+	goalDiagProbeLedger?: Record<string, string>;
 };
 
 // Checkpoint marker created via /swarm mark / /swarm-mark for timeline debugging.
