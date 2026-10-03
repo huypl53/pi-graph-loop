@@ -962,6 +962,44 @@ N is bounded by `agent.maxConcurrentTasks`. This is **extra I/O vs the pre-83a b
 - `/swarm trace` to view `stale_open_surfaced` events.
 - `swarm_task_status` shows `node.staleOpenSurfacedAt` per node.
 
+## Operator: Stale-replyTo completion redirect (assignment ergonomics, 2026-10-03)
+
+When a node is reassigned, its prior assignment message record is superseded +
+waived, but the old id often remains the most recent assignment-shaped message in
+the worker's context — so the worker's first completion reply can land on the
+STALE id. Left alone, that reply is unanchored traffic: root sees two
+near-identical "done" messages per node and no verified completion on the live
+assignment (observed in the 2026-10-03 tool-output live probe).
+
+**Engine behavior (minimal protocol, gate=1):** when a reply's `replyTo` names a
+SUPERSEDED assignment whose `conversationId` is `task:<taskId>:<nodeId>` and the
+task's node has a live (non-superseded, `requiresResponse`, same from/to pair,
+not yet verified) `assignmentMessageId`, `deliverMessageLocked` redirects the
+verification credit to that live record: trace `message.response.redirected`
+(`redirectedFrom` / `redirectedTo` / `taskId` / `nodeId`), then the normal
+`message.response.verified` trace with `via: "stale_replyto_redirect"`. The
+stale record's supersession evidence (waived status) is never erased. Scope
+guards: assignment-class replies only; cross-node stale replies and
+non-assignment messages keep the legacy fence (`message.reply_rejected_superseded`
++ advisory `message.response.sent`). Any resolution failure (missing task.json,
+unreadable node, dead target) fails soft back to the legacy fence and emits
+`message.response.redirect_failed` — never throws out of the delivery hot path.
+Gate=0 behavior is byte-unchanged.
+
+**Worker-side contract that prevents the miss in the first place:** assignment
+bodies name their own message id (`replyTo=<id>`) and state the
+reply-BEFORE-update fencing order — see tools.md §Message completion protocol.
+
+**Mock-LLM fixture**: `extensions/mock-llm/fixtures/assignment-stale-replyto-redirect.jsonl` —
+worker replies to the stale assignment id; the engine redirects the credit to the
+active assignment. Lane command: `pi --provider mock-llm --model
+assignment-stale-replyto-redirect -e ./extensions/mock-llm -e ./extensions/swarm`.
+
+**Regression**: `extensions/swarm/tests/assignment-ergonomics-fix1.test.mjs` (redirect +
+direct-reply no-redirect + cross-node no-redirect controls);
+`extensions/mock-llm/tests/assignment-stale-replyto-redirect.test.mjs` (real
+`deliverMessageLocked` on seeded supersession state).
+
 ## Operator: Late-result fencing (Issue 83 sub-task b, P1)
 
 Two related guards protect against late worker results and reassign churn:

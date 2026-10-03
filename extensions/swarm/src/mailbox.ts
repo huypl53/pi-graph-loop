@@ -113,7 +113,7 @@ export function validateResultMessage(
 	const linked =
 		result.replyTo === rec.id ||
 		(Boolean(result.conversationId) && result.conversationId === rec.conversationId) ||
-		(Array.isArray(extraLinkedIds) && extraLinkedIds.includes(result.replyTo));
+		(Array.isArray(extraLinkedIds) && result.replyTo !== undefined && extraLinkedIds.includes(result.replyTo));
 	if (!linked)
 		throw new Error(
 			`INVALID_RESULT_MESSAGE: result ${resultMessageId} must replyTo ${rec.id} or share conversationId ${rec.conversationId || "(none)"}.`,
