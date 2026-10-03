@@ -263,5 +263,102 @@ ok(
 	JSON.stringify(st4.messages[msgPlan]?.response || {}),
 );
 
+// ============================================================
+// §Fix 2/§Fix 3/§Fix 4 — assignment BODY ergonomics (task-202610031216 goals 2/3/4).
+// RED FIRST: these blocks are written against the PRE-FIX body shape and must fail before the
+// formatting/assign fixes land.
+//   §2  body carries an explicit THIS-message reply instruction naming the assignment message
+//       id; the misleading "Ack this assignment message too" line is GONE under minimal
+//       protocol (swarm_ack_message is retired); acceptance full echo is replaced by a pointer
+//       into task.json.
+//   §3  body carries a one-line graph-state summary: done / in-progress / pending counts plus
+//       this node's position.
+//   §4  body states the fencing order upfront: reply to the assignment message BEFORE
+//       swarm_update_task(status=done).
+// ============================================================
+console.log("\n§Fix 2/3/4: assignment body ergonomics");
+{
+	// Fresh task so the body assertions are isolated from the F1 redirect legs. Pass explicit
+	// acceptance criteria (create seeds [] by default) so the §2.d pointer leg is meaningful.
+	const ctB = await call("swarm_create_task", {
+		taskId: "task-ergo-body",
+		title: "ergonomics body contract",
+		goal: "assignment body contract repro",
+		acceptanceCriteria: ["plan artifact exists and names the contract lines"],
+		cwd: scratch,
+		start: "plan",
+		nodes: {
+			plan: { role: "planner", dependsOn: [], writeArtifacts: ["artifacts/plan.md"] },
+			implement: { role: "implementer", dependsOn: ["plan"], writeArtifacts: ["artifacts/impl.md"] },
+		},
+		edges: [{ from: "plan", to: "implement", when: "planned" }],
+	});
+	ok("§setup: body task created", !ctB?.details?.error, JSON.stringify(ctB?.details?.error || ""));
+	await ensureWorker("body-planner", "planner");
+	await call("swarm_assign_task", { taskId: "task-ergo-body", nodeId: "plan", agentId: "body-planner", cwd: scratch });
+
+	const stB = readStateJson();
+	const taskB = JSON.parse(readFileSync(join(scratch, ".pi/swarm/tasks/task-ergo-body/task.json"), "utf8"));
+	const bodyMsgId = taskB.nodes.plan.assignmentMessageId;
+	const bodyRec = stB.messages[bodyMsgId];
+	// State records do not carry body — the mailbox JSONL line is the durable body copy.
+	const mailboxLine = readFileSync(join(scratch, ".pi/swarm/mailboxes/body-planner.jsonl"), "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter((m) => m && m.id === bodyMsgId)
+		.at(-1);
+	const body = mailboxLine?.body || bodyRec?.body || "";
+
+	// §2 — THIS-message reply instruction naming the id
+	ok("§2.a: assignment message id present in state", !!bodyMsgId && !!bodyRec, bodyMsgId || "(none)");
+	ok(
+		"§2.b: body names the assignment message id (replyTo=<id>)",
+		body.includes(`replyTo=${bodyMsgId}`),
+		body.slice(0, 200),
+	);
+	ok(
+		"§2.c: ack line retired under minimal protocol",
+		!body.includes("Ack this assignment message too"),
+		body.split("\n").at(-1) || "",
+	);
+	ok(
+		"§2.d: acceptance criteria are a pointer, not a full echo",
+		taskB.acceptanceCriteria.length > 0 && !body.includes(taskB.acceptanceCriteria[0].slice(0, 40)) && body.includes("acceptanceCriteria"),
+		(body.match(/Acceptance: [^\n]*/) || [""])[0],
+	);
+
+	// §3 — graph-state summary line
+	const graphLine = (body.match(/Graph: [^\n]+/) || [""])[0];
+	ok(
+		"§3.a: one-line graph-state summary present",
+		/Graph: \d+ done \/ \d+ in-progress \/ \d+ pending/.test(graphLine),
+		graphLine || "(missing)",
+	);
+	ok(
+		"§3.b: summary names this node and its position",
+		graphLine.includes("you are node plan (1 of 2)"),
+		graphLine || "(missing)",
+	);
+
+	// §4 — fencing order stated upfront
+	ok(
+		"§4.a: reply-BEFORE-update fencing order in body",
+		/BEFORE (calling )?swarm_update_task/.test(body) && /reply must land first/.test(body),
+		body.slice(0, 300),
+	);
+	ok(
+		"§4.b: body names the task conversationId for the reply",
+		body.includes("conversationId=task:task-ergo-body:plan"),
+		(body.match(/conversationId=[^ \n]+/) || [""])[0],
+	);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

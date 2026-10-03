@@ -29,7 +29,7 @@ import {
 } from "../../taskgraph.ts";
 import type { ReusableAgentMatch, TaskState } from "../../types.ts";
 import { currentAgentId } from "../../session.ts";
-import { deliverMessageLocked, supersedeOpenAssignments } from "../../mailbox.ts";
+import { deliverMessageLocked, mintMessageId, supersedeOpenAssignments } from "../../mailbox.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, textResult } from "../../utils.ts";
 import {
 	ensureDirs,
@@ -494,7 +494,11 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 
 						const replyTarget = params.replyTarget || me;
 						const conversationId = `task:${task.taskId}:${params.nodeId}`;
-						const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note, attemptId);
+						// Ergonomics Fix 2 (task-202610031216): pre-mint the assignment message id so the
+						// body can name it literally (replyTo contract) and deliverMessageLocked adopts it
+						// via idOverride — body, state record, and mailbox line carry the identical id.
+						const assignmentMsgId = mintMessageId();
+						const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note, attemptId, assignmentMsgId);
 						// Deterministic idempotency key: same task/node/assignee/attempt -> same message (no duplicate on retry).
 						const idempotencyKey = `assign:${task.taskId}:${params.nodeId}:${assignee.id}:${node.attempts}`;
 						// Lifecycle-fencing (issue 9, site 8, defense-in-depth): per-node staleness check right
@@ -516,14 +520,19 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 								evidence: assignStaleCheck.evidence,
 							});
 							const fencedKey = `${idempotencyKey}:fenced`;
+							// Ergonomics Fix 2: pre-mint the id so the fenced body can name it (consistency
+							// with the canonical path below).
+							const fencedMsgId = mintMessageId();
+							const fencedBody = `${body}\n\n(Note: this FENCED notice replaces the canonical assignment message ${fencedMsgId} — no response is expected; the assignment record persists.)`;
 							const { msg: fmsg, delivery: fdelivery } = await deliverMessageLocked(pi, ctx.cwd, p, st, {
 								to: assignee.id,
-								body: `Assignment to node ${params.nodeId} of ${task.taskId} is stale (${assignStaleCheck.reason}: ${assignStaleCheck.evidence.join("; ")}). The assignment record persists but no canonical assignment message was sent.`,
+								body: fencedBody,
 								subject: `Task ${task.taskId} / node ${params.nodeId} assignment FENCED`,
 								conversationId,
 								requiresAck: false,
 								requiresResponse: false,
 								idempotencyKey: fencedKey,
+								idOverride: fencedMsgId,
 								clearReason: "swarm_assign_task",
 							});
 							const activeAttemptFenced = node.attemptHistory?.find((a: any) => a.attemptId === attemptId);
@@ -569,6 +578,7 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 							requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
 							requiresResponse: true,
 							idempotencyKey,
+							idOverride: assignmentMsgId,
 							clearReason: "swarm_assign_task",
 						});
 						// swarm-issues Phase 4: issue-linked assignment context hint (plan §6).

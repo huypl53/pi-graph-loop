@@ -2,7 +2,7 @@
 // Includes assignment-body composition and task-absolute artifact path rewriting.
 // Extracted from taskgraph.ts (Phase 6 real split).
 
-import { NODE_ICON } from "../constants.ts";
+import { NODE_ICON, PI_SWARM_MINIMAL_PROTOCOL } from "../constants.ts";
 import { readCommitEvidence } from "./evidence.ts";
 import type { TaskState } from "../types.ts";
 
@@ -136,12 +136,43 @@ function rewriteTaskArtifactRefs(taskId: string, text: string) {
 	);
 }
 
-export function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget: string, note?: string, attemptId?: string) {
+export function buildAssignmentBody(
+	task: TaskState,
+	nodeId: string,
+	replyTarget: string,
+	note?: string,
+	attemptId?: string,
+	assignmentMessageId?: string,
+) {
 	const node = task.nodes[nodeId];
 	const lines: string[] = [];
 	lines.push(`You are assigned task ${task.taskId}, node ${nodeId} (${node.role}).`);
 	lines.push(`Read .pi/swarm/tasks/${task.taskId}/task.md and .pi/swarm/tasks/${task.taskId}/task.json, plus any prior artifacts below.`);
-	lines.push(`Reply to ${replyTarget} when done, blocked, or needing clarification.`);
+	// Ergonomics Fix 3 (task-202610031216): one-line graph-state summary so the worker does not
+	// need to read task.json just to learn the graph shape. Counts are by exact status; the
+	// position suffix is this node's 1-based ordinal in the node map.
+	{
+		const statuses = Object.values(task.nodes).map((n) => n.status);
+		const doneCount = statuses.filter((s) => s === "done").length;
+		const inProgressCount = statuses.filter((s) => s === "in_progress" || s === "assigned").length;
+		const pendingCount = statuses.filter((s) => s === "pending" || s === "ready" || s === "blocked").length;
+		const nodeIds = Object.keys(task.nodes);
+		const position = nodeIds.indexOf(nodeId) + 1;
+		lines.push(
+			`Graph: ${doneCount} done / ${inProgressCount} in-progress / ${pendingCount} pending — you are node ${nodeId} (${position} of ${nodeIds.length})`,
+		);
+	}
+	// Ergonomics Fix 2: the reply contract must name THIS assignment message, not just the agent
+	// id — the live probe showed completion replies landing on the PREVIOUS node's assignment id
+	// because nothing told the worker which id to target. When the id is threaded (assign path
+	// pre-mints it), the body names it literally.
+	if (assignmentMessageId) {
+		lines.push(
+			`Reply to THIS assignment message: replyTo=${assignmentMessageId} conversationId=task:${task.taskId}:${nodeId}.`,
+		);
+	} else {
+		lines.push(`Reply to ${replyTarget} when done, blocked, or needing clarification.`);
+	}
 	const scope =
 		node.allowedFiles && node.allowedFiles.length
 			? node.allowedFiles.join(", ")
@@ -153,16 +184,33 @@ export function buildAssignmentBody(task: TaskState, nodeId: string, replyTarget
 		lines.push(`Read artifacts: ${node.readArtifacts.map((artifact) => taskAbsoluteArtifactPath(task.taskId, artifact)).join(", ")}`);
 	if (node.writeArtifacts && node.writeArtifacts.length)
 		lines.push(`Write artifacts: ${node.writeArtifacts.map((artifact) => taskAbsoluteArtifactPath(task.taskId, artifact)).join(", ")}`);
-	if (task.acceptanceCriteria.length) lines.push(`Acceptance: ${task.acceptanceCriteria.join("; ")}`);
+	// Ergonomics Fix 2: task.json is the durable source for acceptance criteria — the full echo
+	// made the assignment body redundant boilerplate (worker review note, task-202610031143).
+	if (task.acceptanceCriteria.length)
+		lines.push(`Acceptance: ${task.acceptanceCriteria.length} criteria — see .pi/swarm/tasks/${task.taskId}/task.json (acceptanceCriteria).`);
 	// NEW: Include attempt token in assignment contract for fencing
 	if (attemptId) lines.push(`Attempt token: ${attemptId}`);
 	if (note) {
 		const rewritten = rewriteTaskArtifactRefs(task.taskId, note);
 		lines.push(rewritten === note ? `Note: ${rewritten}` : `Note (rewritten to task-absolute artifact paths): ${rewritten}`);
 	}
-	lines.push(
-		`When finished, call swarm_update_task with taskId=${task.taskId}, nodeId=${nodeId}, status=done (or failed/blocked) and an outcome. Ack this assignment message too.`,
-	);
+	// Ergonomics Fix 2 + Fix 4: under minimal protocol the ack is retired (swarm_ack_message is
+	// unregistered; identity.ts already tells workers NOT to call it) — the closing line instead
+	// states the fencing contract: reply to this assignment BEFORE the terminal update. Under
+	// gate=0 the legacy ack line is preserved (Phase-1 byte-identical contract, mirroring the
+	// delivery.ts showAckHint gating).
+	if (PI_SWARM_MINIMAL_PROTOCOL === 1) {
+		const replyClause = assignmentMessageId
+			? `Reply to this assignment message (replyTo=${assignmentMessageId}) BEFORE`
+			: `Reply to ${replyTarget} BEFORE`;
+		lines.push(
+			`When finished: send your result (${replyClause} calling swarm_update_task with status=done/failed/blocked and an outcome — the reply must land first so the assignment response is verified). Do NOT call swarm_ack_message (retired under minimal protocol).`,
+		);
+	} else {
+		lines.push(
+			`When finished, call swarm_update_task with taskId=${task.taskId}, nodeId=${nodeId}, status=done (or failed/blocked) and an outcome. Ack this assignment message too.`,
+		);
+	}
 	return lines.join("\n");
 }
 

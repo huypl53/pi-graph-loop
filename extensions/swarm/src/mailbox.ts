@@ -146,6 +146,14 @@ export function findIdempotentMessage(st: SwarmState, from: string, to: string, 
 	return rec;
 }
 
+// Ergonomics Fix 2 (task-202610031216): mint a swarm message id with the canonical shape BEFORE
+// delivery so the assignment body can name its own id (replyTo contract) and deliverMessageLocked
+// can adopt it via the idOverride param — body, state record, and mailbox JSONL line all carry the
+// identical id. Exported for the assign tool's pre-mint path.
+export function mintMessageId(): string {
+	return `msg-${Date.now()}-${randomUUID().slice(0, 8)}`;
+}
+
 // Incremental mailbox read (issue B): parse only lines appended since the byte `offset`, avoiding a
 // full-file parse per pump tick on unbounded root mailboxes. Falls back to a full read (and
 // returns its length) when the file shrank or no checkpoint exists. Returns the parsed messages and
@@ -375,6 +383,10 @@ export async function deliverMessageLocked(
 		ttlMs?: number;
 		idempotencyKey?: string;
 		clearReason?: OrphanClearReason;
+		// Ergonomics Fix 2 (task-202610031216): adopt a caller pre-minted id so a body that names
+		// its own message id (assignment replyTo contract) matches the delivered record + mailbox
+		// line. Additive: all existing callers keep minting ids internally when absent.
+		idOverride?: string;
 	},
 ): Promise<{ msg: SwarmMessage; delivery: any }> {
 	const to = safeId(params.to);
@@ -408,7 +420,7 @@ export async function deliverMessageLocked(
 
 	const createdAt = now();
 	const m: SwarmMessage = {
-		id: `msg-${Date.now()}-${randomUUID().slice(0, 8)}`,
+		id: params.idOverride || `msg-${Date.now()}-${randomUUID().slice(0, 8)}`,
 		swarmId: st.swarmId,
 		from,
 		to,
