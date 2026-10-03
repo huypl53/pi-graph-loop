@@ -278,10 +278,18 @@ task-creation modes.
 
 The package-shipped task-role staffing playbook is
 `extensions/swarm/role-skills/task-role-staffing/SKILL.md`. It is a root-only
-reference doc (not wired into identity) that explains how to staff a freshly
-created task with role-specific agents using the existing `swarm_spawn_agent`
-and `swarm_assign_task` tools. The `swarm_create_task` result text ends with a
-concise hint naming this skill.
+reference doc (not wired into identity, NOT auto-injected — see the note below)
+that explains how to staff a freshly created task with role-specific agents using
+the existing `swarm_spawn_agent` and `swarm_assign_task` tools. The
+`swarm_create_task` result text ends with a concise hint naming this skill.
+
+> **Mount status note (2026-10-03):** unlike the five role playbooks, this skill
+> is NOT mounted anywhere — `role-skills/` is not a pi skill-discovery location,
+> and no `--skill` flag is injected for root. It is only reachable when a model
+> follows the path in the `swarm_create_task` hint text (same shelf-not-mechanism
+> pattern as qualification-skills/). Root sessions that want it as a real skill
+can add `"skills": ["extensions/swarm/role-skills/task-role-staffing"]` to
+`.pi/settings.json` or pass `--skill` manually.
 
 ## Documentation update checklist
 

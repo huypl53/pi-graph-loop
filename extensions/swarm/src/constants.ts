@@ -99,6 +99,19 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 # Options: tmux | herdr
 # terminalManager: tmux
 
+# --- Role playbooks + charter (optional; default = bundled, correctness-first) -----
+# Top-level \`roles:\` selects per-role playbook skills injected ADDITIVELY at spawn
+# via \`--skill <path>\` (your existing skills are never removed) and the shared
+# charter. Precedence per key: project yml > global yml > bundled default.
+# Inspect the effective config any time with /swarm roles.
+# roles:
+#   charter: ./TEAM-RULES.md      # optional; replaces the embedded default charter
+#   planner: default              # "default" = bundled extensions/swarm/role-skills/planner
+#   implementer: default          # custom: a dir containing SKILL.md or a direct .md path
+#   fixer: ./playbooks/fixer      # missing/invalid paths are preflight errors (never silent)
+#   tester: default
+#   reviewer: default
+
 # --- Singleton default (optional — used when no modelPool is declared) --------
 # defaultModel: glm-5.1
 # defaultProvider: zai-coding-cn
