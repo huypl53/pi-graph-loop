@@ -649,6 +649,47 @@ for authority-sensitive mutations. The durable record lives in `swarm-state.json
 The leadership blind spot is a documented trade-off, not a semantic failure: the harness treats the
 stale record as recoverable state, not evidence that a worker may take over.
 
+### Boot-identity binding for the leader lease (redteam F3, 2026-10-04)
+
+The leader lease carries `rootLeader.bootId` — a composite `"<hostname>::<bootMarker>"` written by
+BOTH lease writers (`claimRootLeader` and `heartbeatRootLeader`). It binds the lease to the boot
+that minted it, so a foreign process with a COLLIDING pid (containers, shared volumes, a state file
+copied across hosts) can no longer restamp `rootLeader.extCodeStamp` and mask a stale root.
+
+- **Boot marker resolution** (`getBootIdentity()` in `src/stamp.ts`, memoized per process):
+  Linux reads `/proc/sys/kernel/random/boot_id`; darwin/BSD parses `sysctl -n kern.boottime`
+  (there is no `kern.bootid` oid on darwin — verified 2026-10-04). When neither resolves, the id
+  is `"unknown"` and the lease degrades to the historical pid-only scope (once, durably logged in
+  `errors.jsonl` with an `expected` marker — never a silent swallow).
+- **Deny meanings:** `ROOT_LEADER_DENIED: lease pid=<pid> held by a DIFFERENT BOOT (lease
+  bootId=…, this process bootId=…) …` means one of: (a) a foreign-boot process with a colliding pid
+  tried to write the lease — refused, the lease is left untouched; (b) the state file was copied
+  across hosts and both sides are live; (c) the hostname was renamed mid-boot (the composite is
+  hostname-prefixed) — the lease self-heals when the ≤60s stale TTL expires and a fresh claim
+  re-stamps the new composite.
+- **Remedy:** wait out the ≤60s TTL (`ROOT_LEADER_STALE_MS`) — the stale path reclaims the lease
+  and stamps the current boot id. Do NOT hand-edit `swarm-state.json` while a deny is firing.
+- **Legacy migration:** leases written before this change have no `bootId` and are legacy-trusted
+  (pid-only scope, exactly the pre-change behavior — a force re-claim would have denied the LIVE
+  root's own first post-upgrade heartbeat for ≥1 TTL on every running swarm). The next claim or
+  stale-reclaim stamps `bootId`; at worst a legacy lease survives one root lifetime.
+- **Same-boot pid reuse is out of scope:** within one boot, a dead root's pid reused by an
+  unrelated process is indistinguishable (bootId matches, pid matches). Behavior is unchanged
+  (a fresh root waits out the ≤60s TTL); the residual risk is accepted and observably mitigated
+  by `extCodeStamp` + `sessionStartedAt`.
+- **bootId is a collision guard, not an authenticator:** an attacker who controls a host's
+  hostname and clock can forge a matching composite — deliberate forgery with state-file write
+  access is inside the documented self-trust boundary (R27 goal-epoch precedent). F3's threat —
+  ACCIDENTAL cross-boot collision — is what this closes.
+- **Deterministic coverage:** `extensions/swarm/tests/bootid-lease.test.mjs` (R1–R9) seeds the
+  exact red-team PoC state; no mock-llm lane exercises the boot deny because the deny precondition
+  (lease pid === caller pid with a foreign bootId) cannot be seeded deterministically there — a
+  lane's pid is unknowable before spawn and the only seeding window (mutating `bootId` in
+  `swarm-state.json` after the lane's own first heartbeat) races the lane's per-tick pump
+  heartbeat, which re-stamps a legit bootId between turns. A deny asserted on the pid rule alone
+  would NOT exercise the changed code path; the unit suite is the compulsory reproduction
+  (AGENTS.md mock-llm fallback clause).
+
 ## Trace audit + retention
 
 `swarm audit` is the supported reader for `.pi/swarm/traces/events.jsonl` and the gzip generations produced by trace rotation.

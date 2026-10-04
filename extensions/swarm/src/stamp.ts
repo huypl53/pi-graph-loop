@@ -9,10 +9,12 @@
 // Docs: docs/swarm/operations.md (Extension code stamp, stale-root detection);
 // docs/swarm/pi-runtime-contract.md section 10 row F23.
 import { readdirSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { hostname } from "node:os";
 import { join, posix, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { logSwarmError } from "./errorlog.ts";
+import { logSwarmError, expected } from "./errorlog.ts";
 
 export type CodeStamp = {
 	/** sha256 hex over the sorted "relPath<NUL>sizeBytes<NUL>mtimeMs<LF>" lines; "unavailable" when the scan failed. */
@@ -118,6 +120,61 @@ export function getProcessCodeStamp(): CodeStamp {
 
 // Eagerly initialize the process cache at module evaluation (sync statSync twin).
 getProcessCodeStamp();
+
+// === Boot-identity binding for the root leader lease (redteam F3, 2026-10-04) ===
+// heartbeatRootLeader/claimRootLeader used to trust pid equality alone, so a foreign
+// process with a COLLIDING pid (container/host namespaces, or a swarm-state file
+// copied across hosts) could restamp rootLeader.extCodeStamp and mask a stale root
+// (PoC /tmp/rt-guarda/poc-heartbeat.mjs). Each writer now binds the lease to a
+// per-boot identity via getBootIdentity(); identity.ts's leaseScopeMismatch() refuses
+// foreign writes whose boot-identity mismatches.
+export type BootIdentity = {
+	/** Composite "<hostname>::<bootMarker>"; "unknown" when no probe resolved. */
+	id: string;
+	/** Which probe resolved: /proc boot_id file | sysctl kern.boottime | neither. */
+	source: "boot_id_file" | "kern_boottime" | "none";
+};
+
+const BOOT_ID_UNKNOWN = "unknown";
+
+function probeBootIdentity(): BootIdentity {
+	// 1) Linux: /proc/sys/kernel/random/boot_id — regenerated every boot.
+	try {
+		const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+		if (bootId) return { id: `${hostname()}::boot_id:${bootId}`, source: "boot_id_file" };
+	} catch (err: any) {
+		if (err?.code === "ENOENT") {
+			// Non-Linux (no /proc): expected absence, guarded branch per the no-silent-swallow
+			// mandate — silence is correct because the sysctl probe below is the next resolver.
+			expected("proc_boot_id_absent");
+		} else {
+			logSwarmError(process.cwd(), "stamp", "bootid_proc_read_failed", err, { code: err?.code });
+		}
+	}
+	// 2) darwin/BSD: sysctl kern.boottime — frozen at boot (changes on every reboot).
+	// On this Darwin host, "kern.bootid" does NOT exist as a sysctl oid (verified 2026-10-04);
+	// kern.boottime is the correct base-kernel boot marker.
+	try {
+		const out = execFileSync("sysctl", ["-n", "kern.boottime"], { encoding: "utf8" });
+		const m = /sec\s*=\s*(\d+)\s*,\s*usec\s*=\s*(\d+)/.exec(out || "");
+		if (m) return { id: `${hostname()}::boottime:${m[1]}.${m[2]}`, source: "kern_boottime" };
+	} catch (err2: any) {
+		// Typically ENOENT on non-darwin / no sysctl on PATH; expected absence — compacted
+		// per the no-silent-swallow mandate (marker + durable log, never a bare catch).
+		expected("sysctl_kern_boottime_absent");
+		logSwarmError(process.cwd(), "stamp", "bootid_sysctl_failed", err2, { code: err2?.code, expected: true });
+	}
+	return { id: BOOT_ID_UNKNOWN, source: "none" };
+}
+
+// Memoized per process (first lease-write pays the probe once, matching getProcessCodeStamp).
+let bootIdentityCache: BootIdentity | null = null;
+export function getBootIdentity(): BootIdentity {
+	if (bootIdentityCache === null) {
+		bootIdentityCache = probeBootIdentity();
+	}
+	return bootIdentityCache;
+}
 
 export type ExtCodeStampVerdict = "current" | "stale" | "unknown" | "unavailable";
 

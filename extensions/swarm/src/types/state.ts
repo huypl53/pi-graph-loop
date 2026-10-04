@@ -36,6 +36,11 @@ export type RootLeader = {
 		files: number;
 		stampedAt: string;
 	};
+	// Per-boot identity binding (redteam F3, 2026-10-04): composite "<hostname>::<bootMarker>"
+	// (Linux /proc/sys/kernel/random/boot_id; darwin sysctl kern.boottime; "unknown" when neither
+	// resolves). Absent = legacy lease predating boot binding (legacy-trusted, pid-only scope).
+	// Rides BOTH writers exactly like extCodeStamp above, or heartbeats silently drop it.
+	bootId?: string;
 };
 
 // Per-task task-graph-state idle nudge state (Issue 23). One entry per stalled task; the root

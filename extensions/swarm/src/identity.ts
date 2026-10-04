@@ -16,7 +16,7 @@ import { readCharterText, resolveRolePlaybook } from "./config.ts";
 import { identityPath, mailboxPath, paths, trace } from "./state.ts";
 import { now, safeId } from "./utils.ts";
 import { tmux } from "./tmux.ts";
-import { getProcessCodeStamp } from "./stamp.ts";
+import { getProcessCodeStamp, getBootIdentity } from "./stamp.ts";
 
 // Durable ext-code stamp for the leader lease (see types/state.ts RootLeader.extCodeStamp).
 // Fresh stampedAt on every write — the heartbeat/surface comparison uses it for the boot-age.
@@ -76,9 +76,22 @@ function isPidAlive(pid: number): boolean {
 	}
 }
 
+// Boot-scope gate (redteam F3, 2026-10-04). True ONLY for a concrete cross-boot mismatch:
+// legacy leases (absent bootId) and any "unknown" resolution (either side) fold into the
+// historical pid-only scope (D4 legacy-trusted migration — a force re-claim would deny the
+// LIVE root's own heartbeat for >=1 stale TTL on every running swarm post-upgrade).
+export function leaseScopeMismatch(lease: { bootId?: string } | undefined | null, meBootId: string): boolean {
+	if (!lease?.bootId) return false; // legacy lease → legacy-trusted
+	if (lease.bootId === "unknown") return false; // unresolvable at write time → pid-only scope
+	if (meBootId === "unknown") return false; // we cannot compare → pid-only scope
+	return lease.bootId !== meBootId; // concrete mismatch = foreign boot
+}
+
 export function claimRootLeader(st: SwarmState, nowMs: number, me: number) {
 	const cur = readRootLeader(st, nowMs);
-	if (cur.kind === "claimed" && cur.leader.pid !== me) return { kind: "denied" as const, currentLeader: cur.leader, ageMs: cur.ageMs };
+	const meBootId = getBootIdentity().id;
+	if (cur.kind === "claimed" && (cur.leader.pid !== me || leaseScopeMismatch(cur.leader, meBootId)))
+		return { kind: "denied" as const, currentLeader: cur.leader, ageMs: cur.ageMs };
 	const ts = new Date(nowMs).toISOString();
 	st.rootLeader = {
 		pid: me,
@@ -89,16 +102,31 @@ export function claimRootLeader(st: SwarmState, nowMs: number, me: number) {
 		// Stale-root detection (2026-10-03): record WHICH code generation this leader
 		// loaded at claim time; /swarm status compares it against the on-disk generation.
 		extCodeStamp: stampWithStampedAt(getProcessCodeStamp()),
+		// Boot-identity binding (redteam F3): every lease write re-binds the boot scope.
+		bootId: meBootId,
 	};
 	return { kind: "claimed" as const, leader: st.rootLeader };
 }
 
 export function heartbeatRootLeader(st: SwarmState, nowMs: number, me: number, _source: string) {
 	const cur = readRootLeader(st, nowMs);
-	if (cur.kind === "claimed" && cur.leader.pid !== me)
-		throw new Error(
-			`${ERR_ROOT_LEADER_DENIED}: live root leader pid=${cur.leader.pid} (heartbeat ${cur.ageMs}ms ago). Refusing to mutate from pid=${me}.`,
-		);
+	if (cur.kind === "claimed") {
+		const meBootId = getBootIdentity().id;
+		if (cur.leader.pid !== me) {
+			throw new Error(
+				`${ERR_ROOT_LEADER_DENIED}: live root leader pid=${cur.leader.pid} (heartbeat ${cur.ageMs}ms ago). Refusing to mutate from pid=${me}.`,
+			);
+		}
+		// Boot-scope gate (redteam F3): a pid-COLLIDING foreign-boot process must not
+		// restamp the lease (it used to overwrite extCodeStamp, masking a stale root).
+		// Refuse-and-leave: recovery stays owned by the stale path; deny message names BOTH
+		// boot ids — today a foreign restamp is invisible, which is the finding.
+		if (leaseScopeMismatch(cur.leader, meBootId)) {
+			throw new Error(
+				`${ERR_ROOT_LEADER_DENIED}: lease pid=${cur.leader.pid} held by a DIFFERENT BOOT (lease bootId=${cur.leader.bootId ?? "(none)"}, this process bootId=${meBootId}). Foreign process with a colliding pid refused.`,
+			);
+		}
+	}
 	const ts = new Date(nowMs).toISOString();
 	st.rootLeader = {
 		pid: me,
@@ -109,6 +137,9 @@ export function heartbeatRootLeader(st: SwarmState, nowMs: number, me: number, _
 		// Stale-root detection (2026-10-03): this record is rebuilt from scratch on every
 		// heartbeat, so restamp HERE or the stamp would be silently dropped on each beat.
 		extCodeStamp: stampWithStampedAt(getProcessCodeStamp()),
+		// Boot-identity binding (redteam F3): must ride BOTH writers or heartbeats
+		// silently drop it (the extCodeStamp lesson, asserted by bootid-lease R3).
+		bootId: getBootIdentity().id,
 	};
 }
 
