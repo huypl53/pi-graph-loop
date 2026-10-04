@@ -1,0 +1,20 @@
+# Shared-workspace teardown scenario (task-fu-herdr-workspace-loss, H1/T1-T3 RED-first).
+# This scenario drives the REAL HerdrDriver through a stopAgent(spawnAgent(x)) pair twice —
+# emulating TWO concurrent pi swarm sessions sharing ONE `swarm-agents` herdr workspace
+# (the topology behind incidents wV..w17: main-checkout root + worktree root).
+#
+# Turn 1: session-A spawns its agent, session-B spawns its agent. Both drivers track THEIR
+#         pane only; authoritative workspace pane count == 2.
+# Turn 2: session-A stops its own agent. PRE-FIX WRONG BEHAVIOR (the 6-incidents bug):
+#         session-A's driver saw "MY tracked set is empty" and closed the whole shared
+#         workspace, Hangup-killing session-B's live agent pane (herdr crash signature:
+#         pane.exit signal=Hangup right after cli:workspace:close).
+#         EXPECTED FIXED BEHAVIOR: the authoritative full-workspace pane count (queried
+#         live from herdr pane list --workspace) is 1 (session-B's pane still lives), so
+#         the workspace MUST SURVIVE, with a confirmation re-probe before any close.
+# Turn 3: session-B stops its agent too. Now the authoritative count reaches 0 — with the
+#         T2 race guard satisfied (double-confirm re-probe sees >=1 pane mid-flight, close
+#         only when both readings agree; a mid-flight spawn delays, not deletes, a close).
+# See .pi/swarm/tasks/task-fu-herdr-workspace-loss/artifacts/diagnosis.md for the
+# 12-incident herdr-server log timeline that this scenario reduces to deterministic form.
+{"name":"scenario preamble: declare turns","stopReason":"stop","events":[{"type":"text","delayMs":5,"text":"Shared-workspace teardown scenario ready.","chunks":["Shared-workspace teardown scenario ready."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

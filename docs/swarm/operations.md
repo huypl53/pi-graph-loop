@@ -677,13 +677,87 @@ workers and makes teardown deterministic (one workspace to close when no workers
   id is cached on the driver instance.
 - **Stale-cache recovery**: if the cached workspace id no longer resolves
   (`workspace_not_found`), the driver re-creates it on the next spawn.
-- **Teardown**: after every `killAgent`, the driver calls `pane list --workspace <wsId>`
-  and intersects with its tracked swarm pane ids. If no swarm panes remain, it calls
-  `workspace close <wsId>` and clears the cache.
+- **Teardown** (hardened by task-fu-herdr-workspace-loss, 2026-10-04): after every
+  `killAgent`, the driver takes an AUTHORITATIVE workspace-wide pane census via
+  `pane list --workspace <wsId>` (queried live on every probe — never trusting this
+  driver instance's tracked `swarmPaneIds` subset alone). Only when the census reports
+  zero panes AND a confirmation re-probe (second consecutive census) still reports zero
+  does it call `workspace close <wsId>` and clear the cache. A pane appearing between
+  the two probes (mid-flight spawn race) vetoes the close for that round. The tracked
+  set remains as best-effort pre-tracking for observability only. Any pane-list failure
+  aborts the close (durable-logged via `logSwarmError`, never silently swallowed).
 - **Root workspace**: never touched. `spawnAgent` never resolves the root workspace id
   for tab placement; the root workspace id is used only for root-pane detection.
 - **herdr 0.8.2 commands used**: `workspace list`, `workspace create --label`,
   `workspace get`, `workspace close`, `pane list --workspace`.
+
+
+### Herdr workspace-loss runbook (task-fu-herdr-workspace-loss, 2026-10-04)
+
+Six-plus incidents over two days (wV, wW, wX, wY, wZ, w11 + the w13-w17 close storm)
+where ALL panes of the shared `swarm-agents` workspace vanished while the herdr server
+stayed alive. Root cause (fully evidenced in
+`.pi/swarm/tasks/task-fu-herdr-workspace-loss/artifacts/diagnosis.md`): every loss was an
+API-driven `cli:workspace:close` issued by a swarm `HerdrDriver` teardown that trusted
+its OWN tracked pane set (per-driver-instance state) while the workspace itself is a
+shared singleton — driver A retiring its last agent closed the workspace underneath
+driver B's live panes (`pane.exit signal=Hangup` milliseconds after the close in
+`~/.config/herdr/herdr-server.log`). Fixed by the authoritative-census + confirmation
+re-probe criterion described above; this runbook covers detection and response for any
+future recurrence of the user-visible symptom.
+
+**Step 1 — DETECT.** Swarm agents unresponsive / spawning stalls, plus one or more of:
+
+```bash
+herdr workspace list | grep -q swarm-agents || echo "MISSING: agents workspace is gone"
+herdr status                                        # server still running? (usually yes)
+grep 'workspace.close' ~/.config/herdr/herdr-server.log | tail
+# incident signature: the close line immediately follows a cli:pane:close request whose
+# request_id prefix is exactly "cli:" (ours), e.g.:
+#   ... request_id="cli:pane:close"      method="pane.close"
+#   ... request_id="cli:workspace:close" method="workspace.close"
+#   ... workspace closed ... workspace_id="wX"
+#   ... pane child exited ... pane_id=N ... signal=Hangup   <- victims (co-tenants)
+```
+
+Corroborate in `.pi/swarm/traces/events.jsonl`: right after the close timestamp you will
+see a cluster of `agent.status` events flipping victims to `stopped/unhealthy` while NONE
+of them has an `agent.stop` record (they were passengers). Killing-side trace shows an
+`agent.stop` from ANOTHER pi session (main checkout root / another worktree) within
+±500 ms.
+
+**Step 2 — VERIFY DISK WORK before anything else.** Agent state never lived in the
+panes; it lives in `.pi/swarm/`:
+
+```bash
+git status                      # working tree intact?
+ls .pi/swarm/tasks/*/task.json  # task graphs + statuses survived?
+ls .pi/swarm/agents/*.md        # identity cards intact?
+tail -5 .pi/swarm/traces/errors.jsonl
+```
+
+In all six incidents the disk work survived 100% — mailboxes, task graphs, identity
+cards, trace tails. Panic respawning before this check wastes the one chance to see the
+pre-respawn state.
+
+**Step 3 — RESPAWN.** Restart the parked root normally; it re-creates the missing
+workspace automatically. Standard worker brief (adjust agent id + task pointer):
+
+```text
+/swarm spawn <id> "<role>. You are <agent-id>. Read your identity card
+(.pi/swarm/agents/<agent-id>.md) first, then your task: .pi/swarm/tasks/<task-id>.
+It was interrupted by a terminal-workspace loss at <time>; your pane was killed.
+All durable state (task.json, mailbox, artifacts dir) survived — resume from your
+last commit/artifact, do NOT redo finished work. Cite evidence paths from the
+artifact dir. Update your node in task.json when done: outcome + status + reply root."
+```
+
+Then verify recovery: next `agent.spawn.ok` in traces + `/swarm status` shows the
+agents; `.pi/swarm/traces/events.jsonl` shows heartbeats again.
+
+**Step 4 — RECORD.** Append the incident row to the evidence timeline: close timestamp
+(from `herdr-server.log`), triggering `agent.stop` (which session), victims, next
+`agent.spawn.ok` (downtime cost), artifact paths of any node work lost mid-turn.
 
 ### Surface coverage (H6, 2026-09-26)
 
