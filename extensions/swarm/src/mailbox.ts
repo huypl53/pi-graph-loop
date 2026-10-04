@@ -17,6 +17,7 @@ import {
 	PI_SWARM_MINIMAL_PROTOCOL,
 	SEND_SETTLE_MS,
 	MAX_REINJECTS,
+	TERMINAL_NODE_STATUSES,
 	TRACE_LIFECYCLE_DERIVED,
 	TRACE_REPLY_REJECTED_SUPERSEDED,
 } from "./constants.ts";
@@ -465,34 +466,49 @@ export async function deliverMessageLocked(
 				try {
 					const task = await readTaskState(tp.taskJson);
 					const node = task?.nodes?.[nodeId];
-					if (task && node && node.assignee !== to) {
-						const priorAssignee = node.assignee;
-						node.assignee = to;
-						node.lastActivityAt = now();
-						await writeTaskState(tp, task);
-						assignmentAutoStamped = true;
-						await trace(p, "message.deliver.assignment_auto_stamp", {
-							taskId,
-							nodeId,
-							assignee: to,
-							priorAssignee: priorAssignee || null,
-						});
-						// === Issue 24.e — assignment-mismatch advisory trace ===
-						// If after the stamp, node.assignee was set to someone OTHER than `to` BEFORE
-						// we stamped (race: a concurrent mutation set it elsewhere), the message is
-						// being delivered to a non-assignee. This is a signal of an in-flight reassign
-						// race or a configuration error. Advisory only — the message is still delivered
-						// (the recipient may legitimately need context for a handover).
-						if (priorAssignee && priorAssignee !== to) {
-							await trace(p, "message.deliver.assignment_mismatch", {
+					if (task && node) {
+						// F7 (task-redteam-fixnow): a terminal node is CLOSED work — never auto-stamp its
+						// assignee from a later assignment-shaped message (audit distortion; redteam
+						// finding F7). Delivery itself is NOT skipped — only the mutation is suppressed.
+						// The 24.a claim branch already refuses claims on terminal nodes, so no consumer
+						// depended on stamping them.
+						if (TERMINAL_NODE_STATUSES.has(node.status)) {
+							await trace(p, "message.deliver.assignment_auto_stamp_skipped_terminal", {
 								taskId,
 								nodeId,
+								nodeStatus: node.status,
 								messageTo: to,
-								nodeAssignee: to,
-								priorAssignee,
-								severity: "warn",
-								note: "assignment-style message delivered to a recipient other than the current node.assignee; investigate for an in-flight reassign race or configuration error",
+								messageId: msgId,
 							});
+						} else if (node.assignee !== to) {
+							const priorAssignee = node.assignee;
+							node.assignee = to;
+							node.lastActivityAt = now();
+							await writeTaskState(tp, task);
+							assignmentAutoStamped = true;
+							await trace(p, "message.deliver.assignment_auto_stamp", {
+								taskId,
+								nodeId,
+								assignee: to,
+								priorAssignee: priorAssignee || null,
+							});
+								// === Issue 24.e — assignment-mismatch advisory trace ===
+								// If after the stamp, node.assignee was set to someone OTHER than `to` BEFORE
+								// we stamped (race: a concurrent mutation set it elsewhere), the message is
+								// being delivered to a non-assignee. This is a signal of an in-flight reassign
+								// race or a configuration error. Advisory only — the message is still delivered
+								// (the recipient may legitimately need context for a handover).
+								if (priorAssignee && priorAssignee !== to) {
+									await trace(p, "message.deliver.assignment_mismatch", {
+										taskId,
+										nodeId,
+										messageTo: to,
+										nodeAssignee: to,
+										priorAssignee,
+										severity: "warn",
+										note: "assignment-style message delivered to a recipient other than the current node.assignee; investigate for an in-flight reassign race or configuration error",
+									});
+							}
 						}
 					}
 				} catch (err) {

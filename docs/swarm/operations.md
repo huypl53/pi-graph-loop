@@ -127,6 +127,46 @@ new code landed. The stamp feature makes this visible.
   durable mailbox → tmux inject → input hook intercept → ack → reconcile
   retry / dead-letter path with real payload examples.
 
+### Mailbox body clamp (F4, task-redteam-fixnow)
+
+`swarm_send_message` bodies are clamped at the tool boundary BEFORE any mailbox append or
+state write:
+
+- Cap: `PI_SWARM_MESSAGE_BODY_MAX_BYTES` (env, read at module load; integer > 0), default
+  `262144` (256 KiB). An oversized body is REJECTED with a
+  `MESSAGE_BODY_TOO_LARGE: body is <size> (cap <cap> — PI_SWARM_MESSAGE_BODY_MAX_BYTES). Trim
+  the body or reference an artifact path instead.` throw — never truncated silently mid-write;
+  nothing is persisted on rejection (0 mailbox lines, 0 `st.messages` records).
+- `swarm_check_mailbox fullBody:true` row bodies are clamped to `FULL_BODY_MAX_CHARS`
+  (20 000 chars, constant) with an escape-hint suffix naming the durable mailbox JSONL path
+  (`…[+N chars truncated — full body durable in mailbox JSONL: <path>]`). The complete body
+  stays durable in the mailbox and in the tool result's `details.messages` (raw,
+  programmatic/harness escape — never model context).
+- Engine-internal senders (nudges, escalations, hints) call `deliverMessageLocked` directly
+  and are UNCLAMPED by design: their content is engine-generated and bounded, and failing them
+  closed at delivery would break nudges over the cap. Out-of-band/legacy giant mailbox lines
+  (written directly to the JSONL) are the residual shape the fullBody clamp exists for — the
+  send boundary cannot see them, the read view bounds them.
+
+### Roles/charter project-root containment (F1, task-redteam-fixnow)
+
+Custom `roles.*` playbook paths and `roles.charter` paths (`.pi/swarm.yml` / global
+`~/.pi/agent/swarm.yml`) must resolve INSIDE the project root — same realpath containment as
+`resolveEvidencePath` (state.ts). A relative `../` traversal, an absolute path outside the
+project, or a symlink escaping the root produces:
+
+- preflight validation errors `roles_charter_outside_project` /
+  `roles_playbook_outside_project` (surfaced by `validateRolesConfig` → preflight spawn /
+  `/swarm pool validate`);
+- a durable refusal at load time: `readCharterText` returns `ROLE_CHARTER_DEFAULT` and
+  `resolveRolePlaybook` returns `null` (spawn never receives the escaping path as `--skill`),
+  each logging `roles_charter_outside_project_refused` / `roles_playbook_outside_project_refused`
+  to `errors.jsonl` (memoized once per path per process).
+
+Missing-but-inside paths keep their existing `roles_*_missing` error kinds (containment is
+ENOENT-tolerant by design: nothing can load from a missing path). Bundled role-skills defaults
+are never flagged (they legitimately live outside arbitrary project cwds).
+
 ### Recover or debug task execution
 
 - `swarm_task_status(..., runtime=true)`

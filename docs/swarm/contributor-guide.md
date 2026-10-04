@@ -6,6 +6,28 @@ Use this guide when implementing or refactoring swarm features.
 
 Treat swarm as a set of **bounded subsystems**. Avoid implementing cross-cutting behavior in the nearest tool handler just because it is convenient.
 
+## House conventions
+
+- **Config-side path resolution must enforce project-root realpath containment.** Any config
+  path that will be read or handed to a subprocess (roles playbooks, charter, evidence, etc.)
+  resolves through a realpath containment check mirroring `resolveEvidencePath`
+  (`extensions/swarm/src/state.ts`): contained iff `target === base || target.startsWith(base + sep)`,
+  with fail-closed error mapping (ENOENT/ENOTDIR on the target tolerated only because nothing
+  can load; any other realpath error counts as NOT contained). Reference implementation:
+  `containedInProjectSync` + the `roles_*_outside_project` validation kinds in
+  `extensions/swarm/src/config.ts` (F1, task-redteam-fixnow). Do not introduce new config
+  paths that bypass this discipline.
+- **Tool-boundary clamps reject; they never silently truncate.** Model-facing inputs that
+  persist durably (e.g. `swarm_send_message` bodies) are validated at the tool boundary and
+  rejected with a stable error code (`MESSAGE_BODY_TOO_LARGE`) before any write. Read-side
+  model views (e.g. `fullMailboxRow`) bound their output with an escape-hint suffix naming the
+  durable store. Raw data stays reachable through `details` (programmatic escape, never model
+  context) — keep that split intact when adding new surfaces.
+- **Id-based privilege is root-only.** Any new privilege check must align with
+  `isRootAuthority` (identity.ts): the id literal is `root` and nothing else. Recovery
+  escape-hatches are env-based (`PI_SWARM_ADMIN_MODE=1`), never hard-coded ids (F8,
+  task-redteam-fixnow removed the last one).
+
 ## Code map
 
 Implementation entrypoint:

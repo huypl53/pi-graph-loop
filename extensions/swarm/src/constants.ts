@@ -616,6 +616,31 @@ export const PI_SWARM_REASSIGN_RATE_WINDOW_MS =
 		? Math.floor(Number(process.env.PI_SWARM_REASSIGN_RATE_WINDOW_MS))
 		: DEFAULT_REASSIGN_RATE_WINDOW_MS;
 
+// === F4 (task-redteam-fixnow) — mailbox body clamp =========================
+// swarm_send_message bodies are clamped at the tool boundary BEFORE any mailbox append or
+// state write: an oversized body is REJECTED with MESSAGE_BODY_TOO_LARGE (throw per
+// pi-runtime-contract §9), never truncated silently mid-write. Without the clamp an
+// unbounded body persists as an unbounded JSONL line (redteam PoC: 200MB line → +609MB RSS
+// per reader parse).
+//   DEFAULT_MESSAGE_BODY_MAX_BYTES  — 256 KiB in-band default.
+//   PI_SWARM_MESSAGE_BODY_MAX_BYTES — env read at module load (integer > 0 else default),
+//                                     same pattern as PI_SWARM_REASSIGN_RATE_LIMIT.
+//   FULL_BODY_MAX_CHARS             — chars for check_mailbox fullBody:true row bodies
+//                                     (constant, NOT env: tests import it; out-of-band/legacy
+//                                     giant lines are the only thing it can bite because the
+//                                     send cap already bounds in-band bodies). Truncated rows
+//                                     carry an escape-hint suffix naming the durable mailbox
+//                                     JSONL path.
+// Engine-internal senders (nudges, escalations, hints) call deliverMessageLocked directly and
+// stay UNCLAMPED by design: their content is engine-generated and bounded, and failing them
+// closed at delivery would break nudges over the cap.
+export const DEFAULT_MESSAGE_BODY_MAX_BYTES = 256 * 1024;
+export const PI_SWARM_MESSAGE_BODY_MAX_BYTES =
+	Number(process.env.PI_SWARM_MESSAGE_BODY_MAX_BYTES) > 0
+		? Math.floor(Number(process.env.PI_SWARM_MESSAGE_BODY_MAX_BYTES))
+		: DEFAULT_MESSAGE_BODY_MAX_BYTES;
+export const FULL_BODY_MAX_CHARS = 20_000;
+
 // === Issue 83b — late-result rejection trace ===
 // Emitted when a worker (the previous assignee) attempts `swarm_update_task` after the node has
 // been reassigned: the caller's `attemptId` is a SUPERSEDED attempt and the node has a NEWER active

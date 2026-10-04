@@ -19,9 +19,9 @@
 //     the corrupt piece is skipped but reported via corrupt[] with {layer, file, errCode}.
 //   - readSwarmYml / readGlobalSwarmYml: return null when absent, THROW on corrupt YAML
 //     (so /swarm pool validate can surface the per-layer corrupt kinds).
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { parse as parseYaml } from "yaml";
@@ -351,13 +351,18 @@ export type RolePlaybookConfig = {
 	path: string;
 	source: SourceLayer;
 	file?: string;
+	// F1 (task-redteam-fixnow): true when the custom path's realpath resolves OUTSIDE the
+	// project root (join/../, absolute-outside, or symlink escape). Mirrors the
+	// resolveEvidencePath containment discipline (state.ts:378-383). validateRolesConfig
+	// reports it (roles_playbook_outside_project) and resolveRolePlaybook refuses it (null).
+	outsideProject?: boolean;
 };
 
 export type RolesConfig = {
 	// Keys: planner, implementer, fixer, tester, reviewer
 	roles: Record<string, RolePlaybookConfig>;
 	// Path to the project-charter override; null = use ROLE_CHARTER_DEFAULT
-	charter: { path: string | null };
+	charter: { path: string | null; outsideProject?: boolean };
 	// Whole-key provenance for the `roles:` object (informational)
 	source: SourceInfo | null;
 };
@@ -368,6 +373,36 @@ export type RolesConfig = {
 // session.ts defaultSwarmExtensionPath).
 export function bundledRolePlaybookPath(kind: string): string {
 	return fileURLToPath(new URL(`../role-skills/${kind}/`, import.meta.url));
+}
+
+// Memoized refusals for F1 containment — one durable logSwarmError per escaping path per
+// process (readCharterText/resolveRolePlaybook run on every spawn/preflight; the escape is
+// durable in errors.jsonl once, not once per call).
+const containmentRefusalMemo = new Map<string, true>();
+
+// F1 (task-redteam-fixnow): sync mirror of resolveEvidencePath's realpath containment
+// (state.ts:378-383). A path is contained iff its realpath equals the project root's
+// realpath or sits under it (verbatim prefix discipline: target === base ||
+// target.startsWith(base + sep)).
+// Error mapping (fail-closed except where nothing can load):
+//   - ENOENT/ENOTDIR on the TARGET -> contained (nothing can load; the existing
+//     roles_*_missing validations report it — keeps not-yet-created inside paths honest).
+//   - Any other realpath error (EACCES...) -> NOT contained (fail closed).
+export function containedInProjectSync(cwd: string, abs: string): boolean {
+	let base: string;
+	try {
+		base = realpathSync(cwd);
+	} catch {
+		return false; // cannot anchor the project root -> fail closed
+	}
+	let target: string;
+	try {
+		target = realpathSync(abs);
+	} catch (err: any) {
+		if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return true;
+		return false;
+	}
+	return target === base || target.startsWith(`${base}${sep}`);
 }
 
 // Resolve a candidate playbook VALUE from yml into a RolePlaybookConfig.
@@ -393,7 +428,10 @@ export function resolveRolePlaybookPath(
 		return { kind, path: bundledRolePlaybookPath(kind), source };
 	}
 	const abs = trimmed.startsWith("/") ? trimmed : join(cwd, trimmed);
-	return { kind, path: abs, source, file };
+	// F1 containment: ONLY custom values are checked here — the bundled role-skills/ path
+	// legitimately sits outside arbitrary project cwds and must never be flagged.
+	const outsideProject = !containedInProjectSync(cwd, abs);
+	return { kind, path: abs, source, file, outsideProject };
 }
 
 // Read and resolve the top-level `roles:` config key across both layers
@@ -442,15 +480,19 @@ export function readRolesConfig(cwd: string, opts: { freshGlobal?: boolean } = {
 	}
 
 	// charter: project > global; resolve to abs path; null → embedded default.
+	// F1 containment: flag escaping charter paths (outsideProject) so validateRolesConfig
+	// reports them and readCharterText refuses the load (mirrors resolveEvidencePath).
 	let charter: RolesConfig["charter"] = { path: null };
 	const projCharter = projRolesObj?.charter;
 	const globalCharter = globalRolesObj?.charter;
 	if (typeof projCharter === "string" && projCharter.trim()) {
 		const t = projCharter.trim();
-		charter = { path: t.startsWith("/") ? t : join(cwd, t) };
+		const path = t.startsWith("/") ? t : join(cwd, t);
+		charter = { path, outsideProject: !containedInProjectSync(cwd, path) };
 	} else if (typeof globalCharter === "string" && globalCharter.trim()) {
 		const t = globalCharter.trim();
-		charter = { path: t.startsWith("/") ? t : join(cwd, t) };
+		const path = t.startsWith("/") ? t : join(cwd, t);
+		charter = { path, outsideProject: !containedInProjectSync(cwd, path) };
 	}
 
 	return { roles, charter, source: merged.sources.roles ?? null };
@@ -468,9 +510,18 @@ export function validateRolesConfig(cwd: string, opts: { freshGlobal?: boolean }
 	const errors: RoleConfigError[] = [];
 	const rc = readRolesConfig(cwd, opts);
 
-	// Charter: when a path is configured, it must exist and be a readable file.
+	// Charter: when a path is configured, it must exist, be a readable file, AND resolve
+	// inside the project root (F1 containment). Escapes are reported as
+	// roles_charter_outside_project and the normal existence check is skipped for them
+	// (the escape itself is the error; missing-vs-present inside an attacker dir is noise).
 	if (rc.charter.path) {
-		if (!existsSync(rc.charter.path)) {
+		if (rc.charter.outsideProject) {
+			errors.push({
+				kind: "roles_charter_outside_project",
+				field: "roles.charter",
+				message: `roles.charter resolves outside the project root (realpath containment, mirrors resolveEvidencePath): ${rc.charter.path}`,
+			});
+		} else if (!existsSync(rc.charter.path)) {
 			errors.push({
 				kind: "roles_charter_missing",
 				field: "roles.charter",
@@ -480,10 +531,21 @@ export function validateRolesConfig(cwd: string, opts: { freshGlobal?: boolean }
 	}
 
 	// Role playbooks: each resolved CUSTOM path must exist. Directories must
-	// contain a SKILL.md; loose files must end in .md.
+	// contain a SKILL.md; loose files must end in .md. F1 containment first: an
+	// escaping path is reported as roles_playbook_outside_project and the normal
+	// existence/shape checks are skipped for it (same rationale as charter above).
 	for (const [kind, conf] of Object.entries(rc.roles)) {
 		if (!conf.path) continue;
 		if (conf.source === "default") continue; // bundled, cannot miss
+		if (conf.outsideProject) {
+			errors.push({
+				kind: "roles_playbook_outside_project",
+				field: `roles.${kind}`,
+				message: `roles.${kind} resolves outside the project root (realpath containment, mirrors resolveEvidencePath): ${conf.path}`,
+				source: conf.source,
+			});
+			continue;
+		}
 		let st: import("node:fs").Stats | null = null;
 		try {
 			st = statSync(conf.path);
@@ -524,10 +586,21 @@ export function validateRolesConfig(cwd: string, opts: { freshGlobal?: boolean }
 // Read the charter text. Priority: custom path (when configured + readable) →
 // ROLE_CHARTER_DEFAULT. A custom path that fails to read at this layer logs
 // durably (logSwarmError) and falls back to the default; validateRolesConfig
-// already reported the miss as a preflight error.
+// already reported the miss as a preflight error. F1 containment: a charter
+// that resolves OUTSIDE the project root is NEVER loaded — the refusal is durable
+// (logSwarmError, memoized per path per process) and the default is returned.
 export function readCharterText(cwd: string, opts: { freshGlobal?: boolean } = {}): string {
 	const rc = readRolesConfig(cwd, opts);
 	if (rc.charter.path) {
+		if (rc.charter.outsideProject) {
+			if (!containmentRefusalMemo.has(`charter:${rc.charter.path}`)) {
+				containmentRefusalMemo.set(`charter:${rc.charter.path}`, true);
+				void logSwarmError(cwd, "config", "roles_charter_outside_project_refused", new Error("charter path resolves outside the project root; load refused"), {
+					charterPath: rc.charter.path,
+				});
+			}
+			return ROLE_CHARTER_DEFAULT;
+		}
 		try {
 			return readFileSync(rc.charter.path, "utf8");
 		} catch (err: any) {
@@ -563,5 +636,20 @@ export function resolveRolePlaybook(
 
 	if (!(ROLE_PLAYBOOK_KINDS as readonly string[]).includes(kind)) return null;
 	const rc = readRolesConfig(cwd, { freshGlobal: opts?.freshGlobal });
-	return rc.roles[kind]?.path ?? null;
+	const conf = rc.roles[kind];
+	// F1 containment: an escaping playbook is NEVER returned — spawn would hand it to
+	// --skill and identity would embed it. Refusal is durable (logSwarmError, memoized per
+	// path per process) and the caller (agents.ts --skill guard, identity.ts playbook
+	// section) proceeds as if no playbook were configured.
+	if (conf?.outsideProject) {
+		if (!containmentRefusalMemo.has(`playbook:${conf.path}`)) {
+			containmentRefusalMemo.set(`playbook:${conf.path}`, true);
+			void logSwarmError(cwd, "config", "roles_playbook_outside_project_refused", new Error("playbook path resolves outside the project root; resolve refused"), {
+				kind,
+				playbookPath: conf.path,
+			});
+		}
+		return null;
+	}
+	return conf?.path ?? null;
 }

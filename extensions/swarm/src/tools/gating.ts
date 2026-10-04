@@ -95,7 +95,7 @@ export function applySwarmToolGating(pi: ExtensionAPI): void {
 	} else {
 		// Phase 2 path: tier-based allow-list.
 		const me = currentAgentId();
-		const isAdmin = process.env.PI_SWARM_ADMIN_MODE === "1" || me === "admin";
+		const isAdmin = process.env.PI_SWARM_ADMIN_MODE === "1";
 		const isOrch = me === "root";
 		if (currentAgentId() === SWARM_GUEST_ID) {
 			// Guest loses swarm tools entirely (same as gate=0).
