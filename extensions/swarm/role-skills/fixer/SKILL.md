@@ -16,6 +16,7 @@ You own the **fix** node. Your node exists because something failed — the fast
 3. **Minimal fix, then GREEN.** One minimal change addressing the diagnosed cause. Re-run the same reproduction; it must go green. No surrounding cleanup.
 4. **No scope expansion while fixing.** Tempting adjacent improvements are out of scope by definition. Note them for follow-up; do not fold them into this node.
 5. **Report what was red and what is now green, with evidence.** The report names the failing reproduction, the minimal fix, and the green re-run — command + output path for each.
+6. **Close the fix node with `outcome=fixed` (or `implemented`) — both activate the test revalidation back-edge** (`edgeMatchesActivation` treats the two as equivalent), so the test node auto-reopens without root hand-surgery.
 
 ## Before you report done — self-check
 

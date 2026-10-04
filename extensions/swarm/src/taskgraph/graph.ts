@@ -96,9 +96,20 @@ export function buildDefaultGraph(allowedFiles: string[]): {
 function edgeMatchesActivation(task: TaskState, edge: TaskEdge) {
 	const from = task.nodes[edge.from];
 	if (!from) return false;
-	if (from.outcome !== edge.when) return false;
+	if (!outcomeMatchesEdgeWhen(edge.when, from.outcome)) return false;
 	if (from.status === "done") return true;
 	return Boolean(edge.rework && (from.status === "failed" || from.status === "skipped"));
+}
+
+// Fix-completion outcomes are equivalent for edge activation: fixers legitimately close the fix
+// node with either "implemented" or "fixed" (attestation gate parity: task-core.ts treats both
+// identically for the done-diffstat gate; incident task-redteam-fixnow 2026-10-04 — fix closed
+// outcome="fixed", back-edge fix→test when="implemented" never fired, graph stalled until root
+// hand-surgery). Default graph edges are unchanged.
+const FIX_COMPLETION_OUTCOMES = ["implemented", "fixed"];
+function outcomeMatchesEdgeWhen(when: string, outcome: string | null | undefined): boolean {
+	if (outcome === when) return true;
+	return FIX_COMPLETION_OUTCOMES.includes(when) && FIX_COMPLETION_OUTCOMES.includes(outcome ?? "");
 }
 
 function reworkEdgeKey(edge: TaskEdge) {

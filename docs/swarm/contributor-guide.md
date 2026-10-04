@@ -27,6 +27,14 @@ Treat swarm as a set of **bounded subsystems**. Avoid implementing cross-cutting
   `isRootAuthority` (identity.ts): the id literal is `root` and nothing else. Recovery
   escape-hatches are env-based (`PI_SWARM_ADMIN_MODE=1`), never hard-coded ids (F8,
   task-redteam-fixnow removed the last one).
+- **Spot-verify reverts are worktree/tmp-only; live-tree checkout/reset/stash is a
+  review-blocking defect.** Testers must never run `git checkout`/`git restore`/`git reset`/
+  `git stash` in the live shared working tree (see the tester playbook's spot-verify discipline,
+  incident task-redteam-fixnow 2026-10-04).
+- **Fix-completion outcomes are equivalent for edge activation.** `edgeMatchesActivation`
+  (`extensions/swarm/src/taskgraph/graph.ts`) treats `implemented` and `fixed` as the same
+  fix-completion signal, so a fix node closed either way fires the `fix→test` rework back-edge
+  and the test node auto-reopens for revalidation. Default graph edges stay byte-unchanged.
 
 ## Code map
 
