@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HerdrDriver, getTerminalDriver, tmuxDriver, translateTmuxKeyToHerdr, isPiLikeProcess } from "../src/terminal/index.ts";
+import { projectSlug } from "../src/utils.ts";
 import { getAttachCommandsShapeProbe } from "./helpers/herdr-audit-helpers.mjs";
 
 let pass = 0;
@@ -155,7 +156,11 @@ function createMockPi(state = {}) {
 	return { exec, calls, state };
 }
 
-const WS = [{ workspace_id: "w99", label: "swarm-agents", active_tab_id: "w99:t1" }];
+// Per-project agents-workspace label (task-202610040005-herdr-agents-workspace-p):
+// fixtures must seed the label THIS driver resolves — `swarm-agents-<projectSlug(cwd)>`.
+// The pre-fix constant "swarm-agents" no longer matches by design.
+const AGENTS_WS_LABEL = `swarm-agents-${projectSlug(process.cwd())}`;
+const WS = [{ workspace_id: "w99", label: AGENTS_WS_LABEL, active_tab_id: "w99:t1" }];
 const PANE_WORKER = { pane_id: "w99:p2", tab_id: "w99:t2", workspace_id: "w99" };
 const PANE_FOREIGN = { pane_id: "w99:p9", tab_id: "w99:t9", workspace_id: "w99" };
 
@@ -408,7 +413,7 @@ await asyncTest("5.1 root tab closed after FIRST agent spawn only; close failure
 console.log("=== 6. tracked-vs-foreign teardown (maybeCloseAgentsWorkspace) ===");
 
 await asyncTest(
-	"6.1 two tracked panes + one foreign: first kill keeps ws, final kill closes it, foreign-only never triggers close",
+	"6.1 two tracked panes + one foreign: first kill keeps ws, final kill VETOED by foreign pane (close only when zero panes remain), foreign-only never triggers close",
 	async () => {
 		const state = {
 			workspaces: [...WS],
@@ -426,9 +431,20 @@ await asyncTest(
 		equal(r1.killed, true);
 		equal((state.closedWorkspaces || []).length, 0, "workspace survives while another tracked agent remains");
 
+		// Foreign-pane teardown guard (task-202610040005-herdr-agents-workspace-p): after the
+		// final tracked pane dies, the foreign w99:p9 STILL LIVES in the workspace — the close
+		// is vetoed. (Pre-fix this closed the ws out from under the foreign pane; that close
+		// was the bug.)
 		const r2 = await d.killAgent(pi, { target: "w99:p3", session: "w99", window: "w99:t3", paneId: "w99:p3" });
 		equal(r2.killed, true);
-		deepEqual(state.closedWorkspaces || [], ["w99"], "workspace closed after final tracked pane dies");
+		equal((state.closedWorkspaces || []).length, 0, "foreign pane still in the workspace vetoes the close");
+		equal((state.panes || []).some((p) => p.pane_id === "w99:p9"), true, "foreign pane untouched");
+
+		// Close fires only when the workspace's live pane list is EMPTY: clear the foreign
+		// pane (simulating its own lifecycle ending), then the next teardown decision closes.
+		state.panes = [];
+		await d.maybeCloseAgentsWorkspace(pi);
+		deepEqual(state.closedWorkspaces || [], ["w99"], "close fires once zero panes remain");
 
 		// foreign-only pane state must NOT trigger close: fresh driver that tracked nothing
 		const state2 = { workspaces: [...WS], panes: [{ ...PANE_FOREIGN }] };

@@ -1,7 +1,7 @@
 // === swarm/terminal/drivers/herdr.ts — Herdr Terminal Driver ===
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TerminalDriver, TerminalTargetRef, TerminalPaneInfo, SpawnAgentOptions, FocusStatus, AttachCommands } from "../types.ts";
-import { sleep } from "../../utils.ts";
+import { sleep, projectSlug } from "../../utils.ts";
 import { expected, logSwarmError } from "../../errorlog.ts";
 import { PANE_SEND_ENTER_DEBOUNCE_MS } from "../../constants.ts";
 import { PI_COMMANDS } from "./tmux.ts";
@@ -76,8 +76,17 @@ export class HerdrDriver implements TerminalDriver {
 	// pane → never close" (foreign-only guard).
 	private everTrackedSwarmPanes = false;
 
+	/**
+	 * Per-project agents-workspace label (task-202610040005-herdr-agents-workspace-p):
+	 * `swarm-agents-<projectSlug(cwd)>` — the same per-project convention the tmux driver
+	 * uses for session naming (state.ts `pi-swarm-${projectSlug(cwd)}-…`). Before this fix
+	 * every project on one herdr instance converged on the SAME "swarm-agents" workspace
+	 * by label, and teardown could close it out from under foreign projects' workers.
+	 * `PI_SWARM_HERDR_WS_LABEL` is a FULL-label override: exactly what it says wins, no
+	 * slug appended.
+	 */
 	private getAgentsWorkspaceLabel(): string {
-		return process.env.PI_SWARM_HERDR_WS_LABEL || "swarm-agents";
+		return process.env.PI_SWARM_HERDR_WS_LABEL || `swarm-agents-${projectSlug(process.cwd())}`;
 	}
 
 	private async ensureAgentsWorkspace(pi: ExtensionAPI): Promise<string> {
@@ -368,10 +377,15 @@ export class HerdrDriver implements TerminalDriver {
 	}
 
 	/**
-	 * G4 teardown: if no swarm-spawned panes remain in the agents workspace, close it.
-	 * Counts only panes the driver spawned (tracked by pane id in `swarmPaneIds`),
-	 * so foreign panes in the agents workspace never block or trigger close wrongly.
-	 * Never touches the root workspace.
+	 * G4 teardown: close the agents workspace only when NOTHING remains in it. Counts only
+	 * panes the driver spawned (tracked by pane id in `swarmPaneIds`), then consults the
+	 * workspace's LIVE pane list (`pane list --workspace <wsId>`): close fires only when
+	 * zero panes remain at all. Foreign panes (never tracked by this driver — other
+	 * projects' workers sharing one herdr instance, or user-created tabs) VETO the close,
+	 * so this driver can never close a workspace out from under them
+	 * (task-202610040005-herdr-agents-workspace-p RED 2: the tracked-set-only close killed
+	 * live workers of unrelated projects in the shared workspace). Never touches the root
+	 * workspace.
 	 */
 	private async maybeCloseAgentsWorkspace(pi: ExtensionAPI): Promise<void> {
 		if (!this.agentsWorkspaceId) return;
@@ -409,6 +423,11 @@ export class HerdrDriver implements TerminalDriver {
 		this.swarmPaneIds.clear();
 		for (const id of stillAlive) this.swarmPaneIds.add(id);
 		if (this.swarmPaneIds.size > 0) return;
+		// Foreign-pane teardown guard: close ONLY when the workspace's total LIVE pane count
+		// is zero. `wsPanes` is the authoritative `pane list --workspace` result fetched above;
+		// any remaining pane (tracked-by-us survivor or foreign) vetoes the close. A foreign
+		// pane holding the workspace open is a normal, expected condition — skip silently.
+		if (wsPanes.length > 0) return;
 		// No swarm panes remain — close the agents workspace.
 		try {
 			await this.herdr(pi, ["workspace", "close", this.agentsWorkspaceId], 5_000);

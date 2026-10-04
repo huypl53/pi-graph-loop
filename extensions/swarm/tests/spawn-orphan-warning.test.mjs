@@ -24,6 +24,11 @@ process.env.PI_SWARM_ORPHAN_TIMEOUT_MS = "50";
 // repo root's real .pi/swarm.yml (terminalManager: herdr) cannot route spawn/stop through
 // the herdr driver (whose `workspace list` would fail against the mock and throw).
 process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
+// preflightSpawn's checkTmuxSession gates on $TMUX; run-suites lanes from a herdr pane have no
+// $TMUX (the same env gap that pinned the driver above). PI_SWARM_TMUX_OK is the documented
+// bypass (pool.ts checkTmuxSession); the tmux exec boundary itself is MOCKED here, so the
+// bypass cannot mask a real spawn failure.
+if (!process.env.TMUX) process.env.PI_SWARM_TMUX_OK = "1";
 
 // Direct imports of the cores + types we exercise. Real handlers, real lock, real state.
 const { spawnAgent, stopAgent, restartAgent, fireOrphanWarning, armOrphanWatch, clearOrphanWatch, recentSpawnCount, isSameRootLeader } =

@@ -33,10 +33,16 @@ const transcriptRoot = join(scratch, ".pi/mock-llm/transcripts");
 // MOCK_LLM_API_KEY: preflightSpawn probes provider credentials (a spawned pi would exit with
 // "No API key found" for real providers). mock-llm is local and keyless — the conventional
 // <PROVIDER>_API_KEY env (suggested by the probe's own error text) marks it authenticated.
+// PI_SWARM_TMUX_OK=1: the suite's scratch cwd has no terminalManager override, so the driver
+// resolves to tmux and checkTmuxSession gates on $TMUX. Run-suites lanes from a herdr pane have
+// no $TMUX (agent-lifecycle-uat pins the driver the same way); PI_SWARM_TMUX_OK is the
+// documented bypass (pool.ts checkTmuxSession) and does NOT touch the spawn boundary under
+// test (the real child spawn still runs; a fake $TMUX would fail at tmux has-session).
 const env = {
 	...process.env,
 	PI_SWARM_AGENT_ID: "root",
 	PI_SWARM_IS_ROOT: "1",
+	PI_SWARM_TMUX_OK: process.env.TMUX ? process.env.PI_SWARM_TMUX_OK : "1",
 	PI_MOCK_LLM_TRANSCRIPTS_DIR: transcriptRoot,
 	MOCK_LLM_API_KEY: "mock",
 };

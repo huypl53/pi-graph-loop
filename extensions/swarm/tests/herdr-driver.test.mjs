@@ -288,7 +288,11 @@ await asyncTest("spawnAgent creates tab in dedicated agents workspace (G4 herdr-
 	const wsCreateCall = mockPi.calls.find((c) => c.args[0] === "workspace" && c.args[1] === "create");
 	assertOk(wsCreateCall, "driver must call workspace create when agents workspace is absent");
 	assertOk(wsCreateCall.args.includes("--label"), "workspace create must include --label");
-	assertOk(wsCreateCall.args.includes("swarm-agents"), "workspace create must use the swarm-agents label");
+	// Per-project label (task-202610040005-herdr-agents-workspace-p): the label is
+	// `swarm-agents-<projectSlug(cwd)>`; the G4 isolation contract (own workspace, not root)
+	// is unchanged.
+	const wsLabel = wsCreateCall.args[wsCreateCall.args.indexOf("--label") + 1];
+	assertOk(wsLabel.startsWith("swarm-agents-"), `workspace create must use the per-project swarm-agents-<slug> label; got: ${wsLabel}`);
 });
 
 await asyncTest("listPanes queries panes scoped to workspace", async () => {
