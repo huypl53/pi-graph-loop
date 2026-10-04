@@ -111,13 +111,20 @@ ok("row.taskProgressState !== dead (incident shape is mid-tool, not dead)", row?
 ok("row.taskProgressState === active (fresh lastToolAt verdict)", row?.taskProgressState === "active", `got=${row?.taskProgressState}`);
 ok("why does not say 'no pane / stale heartbeat'", !(row?.why ?? "").includes("no pane / stale heartbeat"), `why=${row?.why}`);
 
-// Negative control: same shape but idle (not mid-tool) stays dead (no masking).
+// Negative control (task-202610040001, refined by task-202610040400): same record but idle
+// (not mid-tool). This lane's pi mock answers tmux list-panes unconditionally ALIVE, so the
+// handler's live probe legitimately returns true — positive pane-alive evidence on a
+// status=running record now outranks heartbeat staleness (202610040400): the agent must NOT
+// be dead and must not carry the stale-heartbeat sentence. The true no-evidence negative
+// control (idle + stale hb + absent probe evidence → dead) lives in the pure-function suite
+// (agent-status-idle-stale-heartbeat I5b); the pane-DEAD negative control lives in the
+// taskprogress-idle-stale-hb fixture lane.
 state.agents[targetAgentId].runtimeStatus = "idle";
 await writeFile(join(scratch, ".pi/swarm/swarm-state.json"), JSON.stringify(state, null, 2), "utf8");
 const r2 = await tools["swarm_agent_status"].execute("t", { agentId: targetAgentId }, undefined, undefined, { cwd: scratch });
 const row2 = JSON.parse(r2?.content?.[0]?.text ?? "{}").agents?.[0];
-ok("negative control: idle + stale heartbeat still dead (no masking)", row2?.taskProgressState === "dead", `got=${row2?.taskProgressState}`);
-ok("negative control: why says 'no pane / stale heartbeat' for the genuine dead", (row2?.why ?? "").includes("no pane / stale heartbeat"), `why=${row2?.why}`);
+ok("negative control: idle + stale heartbeat + pane probed alive → NOT dead (no false corpse)", row2?.taskProgressState !== "dead" && row2?.paneAlive === true, `got=${row2?.taskProgressState}/pane=${row2?.paneAlive}`);
+ok("negative control: why does not say 'no pane / stale heartbeat' for the alive-idle agent", !(row2?.why ?? "").includes("no pane / stale heartbeat"), `why=${row2?.why}`);
 
 console.log(`\n---\ntaskprogress-dead-false-positive (fixture lane) results: ${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

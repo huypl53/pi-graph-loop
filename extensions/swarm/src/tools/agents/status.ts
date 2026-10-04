@@ -92,6 +92,12 @@ function whyOfRow(row: any): string {
 	if (row.paused) return "paused";
 	if (row.taskProgressState === "stalled") return "stalled (active task, no recent tool activity)";
 	if (row.taskProgressState === "completed_unverified") return "artifact fresh but result unverified";
+	// task-202610040400: pane-alive evidence outranks heartbeat staleness, so an idle agent with
+	// a stale heartbeat no longer lands in dead. Keep the stale-hb observation visible (truthfully
+	// scoped) instead of dropping it on the deferred shapes — slim/targeted rows only; the census
+	// view stays quiet for healthy-idle agents (tool-output-budget §2).
+	if (row.taskProgressState === "awaiting_input" && row.paneAlive && row.lastHeartbeatAgeSec > 60)
+		return "idle (pane alive, heartbeat stale)";
 	return row.taskProgressState;
 }
 

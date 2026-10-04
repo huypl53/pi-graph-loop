@@ -995,7 +995,18 @@ export function deriveTaskProgressState(agent: SwarmAgent, st: SwarmState, ctx: 
 	// busy|tool_running defers the heartbeat verdict (same rule as taskgraph/stale.ts:60-67);
 	// the pane probe above still catches real death, and a hung turn converges to `stalled`.
 	const running = agent.runtimeStatus === "busy" || agent.runtimeStatus === "tool_running";
-	if (hbMs && nowMs - hbMs > DEAD_HEARTBEAT_MS && !running) return "dead";
+	// Pane-alive defer (task-202610040400, live incident 2026-10-04 02:45 UTC idle-death-probe):
+	// heartbeats stamp at tool boundaries + settle, so an IDLE agent waiting between assignments
+	// (the normal quiescent posture — root included) fires no boundaries and reads stale-hb while
+	// the live tmux probe proves the pane lives. POSITIVE pane-alive evidence on a status=running
+	// record outranks heartbeat staleness: probed true (ctx probe or explicit cached true) defers
+	// the verdict, which falls through to the honest pipeline (awaiting_input / stalled /
+	// idle_blocked). Absence of pane evidence is NOT life — unknown/undefined keeps the dead
+	// verdict (no masking); tmuxAlive===false above still kills unconditionally; stopped records
+	// with residual live panes stay dead (whyOfRow: "pane alive but agent stopped"). The stale-hb
+	// signal stays visible in the row via heartbeatAge + heartbeat-gc gate 3 health:stale.
+	const probedAlive = ctx.tmuxAlive === true || (ctx.tmuxAlive === undefined && agent.tmuxAlive === true);
+	if (hbMs && nowMs - hbMs > DEAD_HEARTBEAT_MS && !running && !(probedAlive && agent.status === "running")) return "dead";
 
 	// 2) idle_blocked: responseMissing > 0 OR ackMissing > 0 OR deadLetters > 0
 	const messages = Object.values(st.messages || {}).filter((m) => m.to === agent.id);
