@@ -989,7 +989,13 @@ export function deriveTaskProgressState(agent: SwarmAgent, st: SwarmState, ctx: 
 	const tmuxAlive = ctx.tmuxAlive === undefined ? (agent.tmuxAlive === undefined ? true : Boolean(agent.tmuxAlive)) : ctx.tmuxAlive;
 	const hbMs = agent.lastHeartbeatAt ? new Date(agent.lastHeartbeatAt).getTime() : 0;
 	if (tmuxAlive === false) return "dead";
-	if (hbMs && nowMs - hbMs > DEAD_HEARTBEAT_MS) return "dead";
+	// Mid-tool defer (task-202610040001, live incident 2026-10-03): heartbeats stamp only at
+	// tool_execution_start/end, session start, and settle — ONE tool call running >60s (gates,
+	// test suites) leaves lastHeartbeatAt stale while the agent is legitimately working.
+	// busy|tool_running defers the heartbeat verdict (same rule as taskgraph/stale.ts:60-67);
+	// the pane probe above still catches real death, and a hung turn converges to `stalled`.
+	const running = agent.runtimeStatus === "busy" || agent.runtimeStatus === "tool_running";
+	if (hbMs && nowMs - hbMs > DEAD_HEARTBEAT_MS && !running) return "dead";
 
 	// 2) idle_blocked: responseMissing > 0 OR ackMissing > 0 OR deadLetters > 0
 	const messages = Object.values(st.messages || {}).filter((m) => m.to === agent.id);

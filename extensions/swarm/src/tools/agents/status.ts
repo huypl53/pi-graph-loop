@@ -79,7 +79,13 @@ function slimStatusRow(row: any): Record<string, unknown> {
 function whyOfRow(row: any): string {
 	if (row.status === "stopped" && row.paneAlive) return "pane alive but agent stopped";
 	if (row.status === "stopped") return "agent stopped";
-	if (row.taskProgressState === "dead") return "no pane / stale heartbeat";
+	if (row.taskProgressState === "dead") {
+		// task-202610040001: tool-running agents never get the stale-heartbeat sentence —
+		// either the pane died mid-tool (rare, truthful) or the verdict was pane-probed.
+		if (row.runtimeStatus === "busy" || row.runtimeStatus === "tool_running")
+			return row.paneAlive ? "tool running (heartbeat deferred)" : "pane died mid-tool";
+		return "no pane / stale heartbeat";
+	}
 	if (row.deadLetters > 0) return `${row.deadLetters} dead-letter message(s)`;
 	if (row.responseMissing > 0) return `${row.responseMissing} response(s) missing (blocked from reuse)`;
 	if (row.pendingMessages > 0) return `${row.pendingMessages} pending message(s)`;

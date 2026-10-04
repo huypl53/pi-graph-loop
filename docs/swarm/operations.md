@@ -1867,6 +1867,7 @@ A second, related improvement: `swarm_agent_status` now returns a single top-lev
 - **Cap-exceeded fires but the worker is still active:** the worker is ignoring nudges. Restart the agent (`swarm_restart_agent`) or force-close the node (`swarm_update_task force=true`).
 - **No nudge fires on a clearly-stuck node:** verify `node.allowedFiles` is non-empty. The predicate skips nodes with empty allowed-files (too noisy to track whole-project mtime).
 - **`taskProgressState` shows `awaiting_input` but the worker is clearly working:** stale `agent.lastToolAt`. The heartbeat hook (`tool_execution_end`) should keep it fresh; a worker stuck between tool calls may have a stale stamp. Cross-check with `swarm_audit({mode:"events", event:"tool_execution_end"})`.
+- **`taskProgressState` `dead` verdicts and long tool calls (task-202610040001):** heartbeats stamp only at tool-call boundaries — ONE tool running >60s (gates, test suites) leaves `lastHeartbeatAt` stale mid-tool. Since the fix, `runtimeStatus busy|tool_running` defers the heartbeat-dead verdict (the agent classifies `active`/`stalled` honestly; the pane probe still catches real death, and `why` for a mid-tool dead-row now says `tool running (heartbeat deferred)` / `pane died mid-tool` instead of the misleading `no pane / stale heartbeat`). Before declaring an agent dead, cross-check `runtimeStatus` — a `tool_running` agent with a stale heartbeat is mid-tool, not dead.
 
 ### Verify the fix locally
 
