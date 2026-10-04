@@ -27,6 +27,8 @@ import type {
 import { EXT, LOCK_STALE_MS, STATE_VERSION } from "./constants.ts";
 import { ensureAgentDefaults, isSafeRelativePath, normalizeTaskNode, now, projectSlug, safeId, sleep } from "./utils.ts";
 import { expected, logSwarmError } from "./errorlog.ts";
+// Local import to avoid a circular module dependency: mailbox.ts imports this module.
+import { isOversizedLine } from "./mailbox.ts";
 import { backfillIssueRun } from "./issues/state.ts";
 import { tmux } from "./tmux.ts";
 
@@ -408,6 +410,10 @@ export async function readJsonlRecords<T = any>(file: string): Promise<T[]> {
 	for (const line of raw.split("\n")) {
 		const t = line.trim();
 		if (!t) continue;
+		// task-fu-readmailbox-rss consistency guard: never fully parse an oversized line. Byte
+		// offsets are approximate here (line starts, ledger-keyed) since readJsonlRecords serves
+		// generic JSONL files; the durable skip entry still names file + line offset + length.
+		if (isOversizedLine(process.cwd(), t, file, out.length + 1, -1)) continue;
 		try {
 			out.push(JSON.parse(t) as T);
 		} catch {

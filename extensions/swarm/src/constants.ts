@@ -644,6 +644,29 @@ export const PI_SWARM_MESSAGE_BODY_MAX_BYTES =
 		: DEFAULT_MESSAGE_BODY_MAX_BYTES;
 export const FULL_BODY_MAX_CHARS = 20_000;
 
+// === task-fu-readmailbox-rss — read-side per-line cap ======================
+// F4 bounds NEW writes at the send/assign tool boundaries; pre-existing or out-of-band
+// legacy mailbox lines can still be arbitrarily large and were fully JSON.parse'd on every
+// read (redteam PoC: 200MB line → +609MB RSS per parse, per pump poll). The read guard
+// skips any line whose serialized byteLength exceeds PI_SWARM_MAILBOX_LINE_MAX_BYTES before
+// parsing; first encounter per process writes a durable logSwarmError entry
+// (op=mailbox.oversized_line_skipped, extra: file/lineIndex/byteOffset/byteLength/cap);
+// an in-process log-once ledger keys file:byteOffset:byteLength. Skipped lines are INERT
+// (never returned, never delivery targets) and STAY in the file (append-only contract);
+// readMailboxSince checkpoints still advance past their full byte length.
+//   DEFAULT_MAILBOX_LINE_MAX_BYTES — 1 MiB default (≈4× headroom over the 256 KiB body cap:
+//                                    envelope + headers + JSON escaping are line-level, and
+//                                    engine-internal senders (nudges/escalations) are
+//                                    deliberately unclamped at send).
+//   PI_SWARM_MAILBOX_LINE_MAX_BYTES — env read at module load (integer > 0 else default).
+//                                    FLOORED at PI_SWARM_MESSAGE_BODY_MAX_BYTES: a legal
+//                                    in-band write must never be skipped on read.
+export const DEFAULT_MAILBOX_LINE_MAX_BYTES = 1024 * 1024;
+export const PI_SWARM_MAILBOX_LINE_MAX_BYTES =
+	Number(process.env.PI_SWARM_MAILBOX_LINE_MAX_BYTES) > 0
+		? Math.max(Math.floor(Number(process.env.PI_SWARM_MAILBOX_LINE_MAX_BYTES)), PI_SWARM_MESSAGE_BODY_MAX_BYTES)
+		: DEFAULT_MAILBOX_LINE_MAX_BYTES;
+
 // === Issue 83b — late-result rejection trace ===
 // Emitted when a worker (the previous assignee) attempts `swarm_update_task` after the node has
 // been reassigned: the caller's `attemptId` is a SUPERSEDED attempt and the node has a NEWER active

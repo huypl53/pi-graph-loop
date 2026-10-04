@@ -15,6 +15,7 @@ import type { MessageRecord, MessageResponseStatus, MessageStatus, Paths, SwarmM
 import type { OrphanClearReason } from "./types/agents.ts";
 import {
 	PI_SWARM_MINIMAL_PROTOCOL,
+	PI_SWARM_MAILBOX_LINE_MAX_BYTES,
 	SEND_SETTLE_MS,
 	MAX_REINJECTS,
 	TERMINAL_NODE_STATUSES,
@@ -180,12 +181,23 @@ export async function readMailboxSince(
 		}
 		const out: SwarmMessage[] = [];
 		let bad = 0;
-		for (const line of text.split("\n").filter(Boolean)) {
-			try {
-				out.push(JSON.parse(line) as SwarmMessage);
-			} catch {
-				bad++;
+		let lineOffset = offset;
+		const lines = text.split("\n");
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i];
+			if (line) {
+				if (isOversizedLine(p, line, file, i + 1, lineOffset)) {
+					// Skip: never parse; the offset loop below still advances past the FULL byte
+					// length so checkpoint math is unchanged.
+				} else {
+					try {
+						out.push(JSON.parse(line) as SwarmMessage);
+					} catch {
+						bad++;
+					}
+				}
 			}
+			lineOffset += Buffer.byteLength(line, "utf8") + (i < lines.length - 1 ? 1 : 0); // +1 newline
 		}
 		if (bad) await trace(p, "mailbox.corrupt_lines_ignored", { agentId, file, bad, incremental: true }).catch(() => {});
 		// Bound the parse per tick (protects a huge single append between ticks).
@@ -219,6 +231,41 @@ export async function readMailboxCached(p: Paths, agentId: string): Promise<Swar
 	return msgs;
 }
 
+// === task-fu-readmailbox-rss — per-line byte-size guard ====================
+// Skips well-formed-but-oversized legacy lines BEFORE JSON.parse so a giant line is never
+// materialized (redteam PoC: 200MB line → +609MB RSS per parse, every pump poll). First
+// encounter per process per file:byteOffset:byteLength writes a durable logSwarmError entry
+// (op=mailbox.oversized_line_skipped); the in-process ledger below is a spam bound, not a
+// swallow — the durable record exists on disk for every first encounter. Skipped lines are
+// INERT (never returned, never delivery targets) and STAY in the file (append-only);
+// readMailboxSince checkpoints still advance past their full byte length. Corrupt-but-SMALL
+// lines keep the distinct mailbox.corrupt_lines_ignored trace path — corrupt ≠ oversized.
+// Consumers outside mailbox.ts (flow/collectors.readMailboxLine) import isOversizedLine.
+const oversizedLineLedger = new Map<string, true>();
+
+export function isOversizedLine(
+	logCwdOrPaths: string | { root?: string } | undefined | null,
+	line: string,
+	file: string,
+	lineIndex1Based: number,
+	byteOffset: number,
+): boolean {
+	const byteLength = Buffer.byteLength(line, "utf8");
+	if (byteLength <= PI_SWARM_MAILBOX_LINE_MAX_BYTES) return false;
+	const key = `${file}:${byteOffset}:${byteLength}`;
+	if (!oversizedLineLedger.has(key)) {
+		oversizedLineLedger.set(key, true);
+		void logSwarmError(logCwdOrPaths, "mailbox", "mailbox.oversized_line_skipped", new Error("mailbox line exceeds PI_SWARM_MAILBOX_LINE_MAX_BYTES"), {
+			file,
+			lineIndex: lineIndex1Based,
+			byteOffset,
+			byteLength,
+			cap: PI_SWARM_MAILBOX_LINE_MAX_BYTES,
+		});
+	}
+	return true;
+}
+
 export async function readMailbox(p: Paths, agentId: string): Promise<SwarmMessage[]> {
 	const file = mailboxPath(p, agentId);
 	if (!existsSync(file)) return [];
@@ -226,13 +273,21 @@ export async function readMailbox(p: Paths, agentId: string): Promise<SwarmMessa
 	const out: SwarmMessage[] = [];
 	let bad = 0;
 	let firstBadLine = 0;
-	for (const [idx, line] of raw.split(/\n+/).filter(Boolean).entries()) {
+	let lineOffset = 0;
+	const lines = raw.split(/\n+/);
+	for (const [i, line] of lines.entries()) {
+		if (!line) continue;
+		if (isOversizedLine(p, line, file, i + 1, lineOffset)) {
+			lineOffset += Buffer.byteLength(line, "utf8") + (i < lines.length - 1 ? 1 : 0);
+			continue;
+		}
 		try {
 			out.push(JSON.parse(line) as SwarmMessage);
 		} catch {
 			bad++;
-			if (!firstBadLine) firstBadLine = idx + 1;
+			if (!firstBadLine) firstBadLine = i + 1;
 		}
+		lineOffset += Buffer.byteLength(line, "utf8") + (i < lines.length - 1 ? 1 : 0);
 	}
 	if (bad) await trace(p, "mailbox.corrupt_lines_ignored", { agentId, file, bad, firstBadLine });
 	return out;

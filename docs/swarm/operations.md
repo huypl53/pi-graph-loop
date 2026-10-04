@@ -174,6 +174,41 @@ state write:
   live lane via `RUN_ASSIGN_CLAMP_LANE=1` with the root-actor env
   `PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1`).
 
+### Mailbox oversized-line read guard (task-fu-readmailbox-rss, reviewer-05 finding B)
+
+The F4 clamps bound NEW writes at tool boundaries; pre-existing or out-of-band legacy mailbox
+lines can still be arbitrarily large and were fully `JSON.parse`d on every read (redteam PoC:
+200 MB line → +609 MB RSS per parse, every pump poll). The read-side guard skips such lines
+BEFORE parsing:
+
+- Cap: `PI_SWARM_MAILBOX_LINE_MAX_BYTES` (env, read at module load; integer > 0), default
+  `DEFAULT_MAILBOX_LINE_MAX_BYTES` = 1 MiB (≈4× headroom over the 256 KiB body cap — envelope,
+  headers and JSON escaping are line-level, and engine-internal senders are deliberately
+  unclamped at send). The effective cap FLOORS at `PI_SWARM_MESSAGE_BODY_MAX_BYTES` so a legal
+  in-band write can never be skipped on read.
+- Guarded sites: `readMailbox` + the `readMailboxSince` incremental loop (`src/mailbox.ts`),
+  `readMailboxLine` (`src/flow/collectors.ts` sync path), and `readJsonlRecords` (`src/state.ts`,
+  consistency). Helper: `isOversizedLine(logCwdOrPaths, line, file, lineIndex, byteOffset)`
+  exported from `src/mailbox.ts`.
+- Skip semantics: oversized lines are INERT — never returned by any reader, never delivery
+  targets, invisible to reconcile retry/reinject lookups (existing "not found" path) — and the
+  line STAYS in the file (append-only contract; no gc/quarantine in the guard).
+- Durable, never silent: first encounter per process per `file:byteOffset:byteLength` writes a
+  `logSwarmError` entry (`op=mailbox.oversized_line_skipped`, extra: `file`, `lineIndex`,
+  `byteOffset`, `byteLength`, `cap`) to `.pi/swarm/traces/errors.jsonl`. The in-process
+  log-once ledger is a spam bound, not a swallow — the durable record exists on disk.
+- Checkpoint semantics unchanged: skipped lines still advance the `readMailboxSince` byte offset
+  past their FULL length; corrupt-but-SMALL lines keep the distinct
+  `mailbox.corrupt_lines_ignored` trace path (corrupt ≠ oversized).
+- gc interplay: front-truncation shifts byte offsets → one fresh ledger entry per truncation,
+  bounded by the errorlog per-source cap. Self-healing.
+- Red-first evidence: `extensions/swarm/tests/mailbox-oversized-line.test.mjs` (observed RED
+  pre-change: no skip entry, oversized line parsed by all three readers; logged in
+  `extensions/swarm/tests/red-first-log.md`). Mock-llm note: the deterministic unit lane (50 MB
+  seeded line + errors.jsonl trace assertion) is the required reproduction; a mock-llm E2E
+  seeded-world lane is deferred — seeding a 50 MB line into a live lane adds no signal beyond
+  the unit lane's byte-exact fixture and a flaky fs setup, per the plan §5 fallback statement.
+
 ### Roles/charter project-root containment (F1, task-redteam-fixnow)
 
 Custom `roles.*` playbook paths and `roles.charter` paths (`.pi/swarm.yml` / global
