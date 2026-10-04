@@ -315,6 +315,31 @@ Every swarm behavior change ships a mock-LLM fixture (AGENTS.md makes this compu
 
 For multi-agent interaction patterns (handoff chains, seeded worlds, parallel lanes) see the `mock-llm-scenarios` skill — the authoring reference for fixtures.
 
+### Terminal manager pin for spawn-based lanes
+
+Any mock-llm lane that spawns a real `pi` subprocess with root identity MUST pin
+`PI_SWARM_TERMINAL_MANAGER=tmux` in the env passed to `spawnSync`/`spawn`. The
+pin is precedence #1 in `getTerminalDriver`, so it overrides any global
+`~/.pi/agent/swarm.yml` `terminalManager: herdr` setting.
+
+**Why:** without the pin, the child pi resolves `terminalManager` from the
+user's global yml and creates REAL herdr workspaces in the user's live daemon
+(observed leak: `swarm-agents-swarm-yml-pool-lane-*` workspaces + `yaml-probe`
+tabs leaking in during suite runs; fixed in 49241ad for `swarm-yml-pool`).
+
+**Exemption:** in-process lanes (those that `await import("…/swarm/index.ts")`
+and never spawn a pi subprocess) do not need the pin. Mark the exemption with a
+one-line comment naming the reason.
+
+**Reference:** `extensions/mock-llm/tests/terminal-manager-pin-demo.test.mjs` is the behavioral proof (two-leg RED/GREEN through real scratch-HOME pi children with fake herdr/tmux stubs on PATH — the live herdr daemon is never touched); `swarm-yml-pool.test.mjs` is the canonical pinned lane; `agent-lifecycle-uat.test.mjs` L41 is the in-process variant.
+
+**Reviewer check:** any new mock-llm lane that adds `spawnSync("pi", …)` or
+`spawn("pi", …)` without the pin is a review-blocking regression. The
+`terminal-manager-pin-guard.test.mjs` driver-test asserts the pin is present
+at the `spawnSync` boundary for all spawn-based lanes; the
+`terminal-manager-pin-demo.test.mjs` behavioral lane proves the leak/fix pair
+end-to-end.
+
 ## Suggested workflow for a non-trivial feature
 
 1. update or write down the invariant/behavior change first

@@ -71,10 +71,17 @@ async function runCell({ id, argv, cwd, env, teeWrap }) {
 	const transcriptsRoot = join("/tmp", `r18-scratch-cell-${id}-${process.pid}-transcripts`);
 	await mkdir(transcriptsRoot, { recursive: true });
 
+	// PI_SWARM_TERMINAL_MANAGER=tmux (test-hermeticity-pin-unpinned-lanes 2026-10-04): the
+	// USER's GLOBAL ~/.pi/agent/swarm.yml (e.g. terminalManager: herdr) merges into every
+	// scratch cwd that does not set inheritGlobal:false — without this pin the child pi
+	// spawns REAL herdr workspaces in the user's live daemon. Env var is precedence #1 in
+	// getTerminalDriver, so this pin makes the lane hermetic regardless of host config.
+	// Same pattern as swarm-yml-pool.test.mjs.
 	const baseEnv = {
 		...process.env,
 		PI_MOCK_LLM_TRANSCRIPTS_DIR: transcriptsRoot,
 		PI_NO_CLAUDE: "1",
+		PI_SWARM_TERMINAL_MANAGER: "tmux",
 		...env,
 	};
 	delete baseEnv.PI_SWARM_AGENT_ID;

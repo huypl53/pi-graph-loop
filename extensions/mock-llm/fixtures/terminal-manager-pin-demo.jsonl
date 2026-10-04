@@ -1,0 +1,10 @@
+# terminal-manager-pin-demo: behavioral demo lane for test-hermeticity-pin-unpinned-lanes.
+# The fixture calls swarm_spawn_agent (root identity) so the child pi resolves the terminal
+# driver from its HOME's global ~/.pi/agent/swarm.yml (seeded terminalManager: herdr by the
+# driver test). The leak shape: without PI_SWARM_TERMINAL_MANAGER=tmux the driver resolves
+# herdr and the spawn goes through pi.exec("herdr", ...) — the exact leak fixed in 49241ad
+# for swarm-yml-pool. The driver test asserts on the fake herdr argv log (sandboxed: the
+# real herdr daemon is NEVER touched — the fake binary intercepts all pi.exec("herdr", ...)
+# calls) and on the spawned agent record's herdrPaneId field.
+{"name":"spawn the demo probe agent","events":[{"type":"text","delayMs":10,"text":"Spawning the terminal-manager demo probe agent."},{"type":"toolcall","delayMs":10,"name":"swarm_spawn_agent","id":"call-1","arguments":{"id":"tmp-demo-probe","role":"probe worker for terminal manager demo","roleKind":"worker"}},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"settle and stop","events":[{"type":"text","delayMs":10,"text":"Lane complete."},{"type":"stop","delayMs":5,"reason":"stop"}]}

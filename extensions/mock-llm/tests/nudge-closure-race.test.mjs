@@ -15,6 +15,10 @@
  *
  * Run: node extensions/mock-llm/tests/nudge-closure-race.test.mjs
  */
+// No PI_SWARM_TERMINAL_MANAGER pin needed: this lane is in-process only
+// (imports swarm/index.ts directly, never spawns a pi subprocess), so the
+// terminal driver is irrelevant. See swarm-yml-pool.test.mjs for the
+// spawn-based pin pattern.
 
 // Interpose fs.promises.stat FIRST — before ANY module that imports node:fs/promises
 // (including ../src/stream.ts transitively via transcripts.ts/fixtures.ts).

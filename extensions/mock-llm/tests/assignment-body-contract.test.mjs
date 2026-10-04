@@ -16,6 +16,10 @@
  *
  * Run: node extensions/mock-llm/tests/assignment-body-contract.test.mjs
  */
+// No PI_SWARM_TERMINAL_MANAGER pin needed: this lane is in-process only
+// (imports swarm/index.ts directly, never spawns a pi subprocess), so the
+// terminal driver is irrelevant. See swarm-yml-pool.test.mjs for the
+// spawn-based pin pattern.
 
 import { mkdtemp, mkdir, writeFile, rm, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";

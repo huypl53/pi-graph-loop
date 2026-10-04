@@ -145,7 +145,13 @@ const res = spawnSync(
 		encoding: "utf8",
 		timeout: 120_000,
 		cwd: scratch,
-		env: { ...process.env, PI_SWARM_AGENT_ID: "root", PI_SWARM_IS_ROOT: "1", PI_MOCK_LLM_TRANSCRIPTS_DIR: transcriptsDir },
+		// PI_SWARM_TERMINAL_MANAGER=tmux (test-hermeticity-pin-unpinned-lanes 2026-10-04): the
+		// USER's GLOBAL ~/.pi/agent/swarm.yml (e.g. terminalManager: herdr) merges into every
+		// scratch cwd that does not set inheritGlobal:false — without this pin the child pi
+		// spawns REAL herdr workspaces in the user's live daemon. Env var is precedence #1 in
+		// getTerminalDriver, so this pin makes the lane hermetic regardless of host config.
+		// Same pattern as swarm-yml-pool.test.mjs.
+		env: { ...process.env, PI_SWARM_AGENT_ID: "root", PI_SWARM_IS_ROOT: "1", PI_MOCK_LLM_TRANSCRIPTS_DIR: transcriptsDir, PI_SWARM_TERMINAL_MANAGER: "tmux" },
 	},
 );
 ok("pi session exited cleanly", res.status === 0 || res.status === undefined, { status: res.status, stderr: String(res.stderr || "").slice(-200) });
