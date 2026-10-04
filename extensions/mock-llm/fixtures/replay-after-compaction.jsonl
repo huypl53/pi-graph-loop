@@ -1,0 +1,8 @@
+# replay-after-compaction: a message the worker already saw, processed, and answered
+# (delivered via inject/input_intercept pre-compaction, so it sits unacked in state) must NOT
+# be re-surfaced by the agent_settled surfaceAgentPending path after session compaction.
+# Worker answers the assignment once; on settle, the lifecycle-progressed record is excluded
+# from pending — the worker re-checks the mailbox and finds nothing new (no duplicate turn).
+{"name":"assignment consumed turn","events":[{"type":"text","delayMs":15,"text":"I received the assignment and I’m acting on it.","chunks":["I received the assignment ","and I’m acting on it."]},{"type":"toolcall","delayMs":10,"name":"swarm_ack_message","id":"ack-1","arguments":{"messageId":"replay-msg-1","status":"processing"}},{"type":"toolcall","delayMs":10,"name":"swarm_send_message","id":"result-1","arguments":{"to":"root","body":"assignment result: done","replyTo":"replay-msg-1","conversationId":"task:task-replay:test","requiresAck":false}}]}
+{"name":"post-compaction settle turn","events":[{"type":"text","delayMs":15,"text":"After compaction I re-checked; the already-answered assignment was not re-surfaced.","chunks":["After compaction I re-checked; ","the already-answered assignment was not re-surfaced."]},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"limit":20}}]}
+{"name":"replay-after-compaction settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"No duplicate surfaced; mailbox is clean.","chunks":["No duplicate surfaced; ","mailbox is clean."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
