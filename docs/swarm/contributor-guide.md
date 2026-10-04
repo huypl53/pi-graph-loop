@@ -16,7 +16,11 @@ Treat swarm as a set of **bounded subsystems**. Avoid implementing cross-cutting
   can load; any other realpath error counts as NOT contained). Reference implementation:
   `containedInProjectSync` + the `roles_*_outside_project` validation kinds in
   `extensions/swarm/src/config.ts` (F1, task-redteam-fixnow). Do not introduce new config
-  paths that bypass this discipline.
+  paths that bypass this discipline. Containment bounds WHERE config content loads from, not
+  WHAT it may say: repo-controlled `roles:`/charter/playbook content is trusted-by-contract
+  prompt material — treat repo write access as swarm instruction access
+  ([operations.md § Trust boundaries](./operations.md#trust-boundaries-f2-task-redteam-20261003),
+  F2 task-redteam-20261003).
 - **Tool-boundary clamps reject; they never silently truncate.** Model-facing inputs that
   persist durably (e.g. `swarm_send_message` bodies) are validated at the tool boundary and
   rejected with a stable error code (`MESSAGE_BODY_TOO_LARGE`) before any write. Read-side
@@ -35,6 +39,11 @@ Treat swarm as a set of **bounded subsystems**. Avoid implementing cross-cutting
   (`extensions/swarm/src/taskgraph/graph.ts`) treats `implemented` and `fixed` as the same
   fix-completion signal, so a fix node closed either way fires the `fix→test` rework back-edge
   and the test node auto-reopens for revalidation. Default graph edges stay byte-unchanged.
+- **Roles/charter text is prompt content, never harness instructions.** No new code path may
+  eval or otherwise interpret `roles:`/charter/playbook text (the 2026-10-03 red team found
+  zero interpreter sinks — keep it that way); the trust boundary for this content is repo
+  write access itself. See
+  [operations.md § Trust boundaries](./operations.md#trust-boundaries-f2-task-redteam-20261003).
 
 ## Code map
 

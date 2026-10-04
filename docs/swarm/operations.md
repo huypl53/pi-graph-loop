@@ -220,6 +220,21 @@ BEFORE parsing:
   seeded-world lane is deferred — seeding a 50 MB line into a live lane adds no signal beyond
   the unit lane's byte-exact fixture and a flaky fs setup, per the plan §5 fallback statement.
 
+**Floor hazard: env ≤ body-cap configs can skip legal cap-sized lines (reviewer-09
+NONBLOCK-1, task-fu-readmailbox-rss):** the floor `max(env, PI_SWARM_MESSAGE_BODY_MAX_BYTES)`
+(`extensions/swarm/src/constants.ts:665-670`) guarantees BODY-frame safety only, not LINE-frame
+safety: a legal cap-sized send (body = 256 KiB cap) plus envelope overhead and worst-case 2×
+JSON-escape inflation measured **524,347 B** and IS skipped when the env floor is active (tester
+floor-probe2/3, `task-fu-readmailbox-rss/artifacts/test-report.md:55-64`; the skip predicate is
+strict `>`, `extensions/swarm/src/mailbox.ts:253-254`). At the default (env unset, 1 MiB ≈ 4× the
+body cap) even the worst-case legal line fits — the default-config safety argument holds. Any
+such false-positive skip is DURABLY logged (`op=mailbox.oversized_line_skipped` with
+`file`/`lineIndex`/`byteOffset`/`byteLength`/`cap`, `extensions/swarm/src/mailbox.ts:258`) —
+detectable in errors.jsonl, never silent. Operator opt-in: setting
+`PI_SWARM_MAILBOX_LINE_MAX_BYTES` at/below body-cap + envelope width reintroduces false-skip risk
+for legal in-band sends; if you must, monitor errors.jsonl for the op and treat hits as envelope
+loss, not corruption.
+
 ### Roles/charter project-root containment (F1, task-redteam-fixnow)
 
 Custom `roles.*` playbook paths and `roles.charter` paths (`.pi/swarm.yml` / global
@@ -238,6 +253,56 @@ project, or a symlink escaping the root produces:
 Missing-but-inside paths keep their existing `roles_*_missing` error kinds (containment is
 ENOENT-tolerant by design: nothing can load from a missing path). Bundled role-skills defaults
 are never flagged (they legitimately live outside arbitrary project cwds).
+
+### Trust boundaries (F2, task-redteam-20261003)
+
+**What is trusted-by-contract prompt content.** `roles.charter` text and per-role playbook
+content resolved from repo-controlled `.pi/swarm.yml` (project layer over global
+`~/.pi/agent/swarm.yml`, per-key precedence project > global > bundled —
+`extensions/swarm/src/config.ts:1-13`, per-sub-key merge `config.ts:469-478`) are PROMPT
+MATERIAL, not inert config: the charter is embedded verbatim into every spawned agent's identity
+markdown (`buildRolePlaybookSection`, `**Charter:** ${charterText.trim()}` —
+`extensions/swarm/src/identity.ts:212-220`) and playbooks are injected as pi skills at spawn via
+additive `--skill <abs-path>` (`childPiArgsWithSkills` `extensions/swarm/src/session.ts:63-80`;
+spawn-boundary resolution `extensions/swarm/src/agents.ts:257-278`). Setting `roles.charter`
+REPLACES the bundled default charter everywhere it surfaces (`ROLE_CHARTER_DEFAULT`,
+`extensions/swarm/src/constants.ts:197-202`).
+
+**The boundary is repo write access itself.** A malicious or compromised repo that commits
+`.pi/swarm.yml` injects instructions into contributor swarms with no warning. Live mock-llm lane
+evidence (task-redteam-20261003): a poisoned charter drove tool calls end-to-end, and a
+worker→root injection relay via `swarm_send_message` reached the root mailbox (attack-edges
+report §4; accepted-with-docs disposition). Operator rule: **treat repo write access as swarm
+instruction access** — review a repo's `roles:` block like you review its code. Red-team framing
+(redteam-report Verdict): every HIT was either inside the self-trust boundary (whoever writes
+`.pi/swarm/` state owns the swarm) or a config/content-trust gap around roles/charter — the one
+theme both attackers converged on.
+
+**What the harness guarantees anyway (why this is trust, not a sandbox escape).** Content is
+harness-inert: zero interpreter sinks consume charter/playbook text (attack-edges §4 PoC —
+interpreter count 0). Tool RBAC held under the same attack: a worker calling
+`swarm_update_task(force:true)` is refused with `FORCE_FORBIDDEN` and a durable
+`task.rbac.force_forbidden` trace (`extensions/swarm/src/tools/tasks/update.ts:166-174`;
+`isRootAuthority` = the `root` id literal only, `extensions/swarm/src/identity.ts:36-38`). The
+relay is design-accepted (deliverMessageLocked is L1; ack-gating hardening deferred — redteam
+follow-up table).
+
+**What F1 containment does and does not do.** Path containment (see
+[Roles/charter project-root containment](#rolescharter-project-root-containment-f1-task-redteam-fixnow)
+above; `containedInProjectSync` `extensions/swarm/src/config.ts:391-409`, mirroring
+`resolveEvidencePath` `extensions/swarm/src/state.ts:376-379`) bounds WHERE content loads from
+(realpath-inside the project root), not WHAT it may say: repo-committed yml legally points
+inside the repo, so contained attacker-authored content still loads into prompts. Global-layer
+note: `roles:` keys in `~/.pi/agent/swarm.yml` apply to every project WITHOUT a local `roles:`
+key (per-key precedence, `config.ts:469-478`) — a compromised dotfiles installer gets persistent
+prompt content into all of that user's swarms.
+
+**Operator guidance.** Before spawning in a repo you don't fully trust: inspect effective config
+with `/swarm roles` (paths + source layer); run `/swarm pool validate` (per-sub-key errors);
+check `errors.jsonl` for `roles_*_outside_project_refused`; read the charter your agent will
+operate under via `swarm_agent_identity`. See also `docs/swarm/tools.md` § roles (canonical
+`roles:` config reference — cross-link to this section is a named follow-up out of this task's
+scope).
 
 ### Recover or debug task execution
 
@@ -2540,6 +2605,67 @@ cause fires first (deliberate anti-spam inheritance; the trace + body carry the 
   also pass `-e extensions/swarm` — the global packages entry already loads it; double registration
   aborts the extension. Companion lane test `extensions/mock-llm/tests/goal-escalation-deadpane.test.mjs`
   (fixture-shape assertions always run; opt-in live lane via `RUN_DEADPANE_LANE=1`).
+
+### Probe-ledger blind window (redteam F9, accepted)
+
+The probe round described above is LEDGER-GATED per agent: an agent probed within
+`GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS` (default 60 s, `extensions/swarm/src/constants.ts:555`;
+env `PI_SWARM_GOAL_DIAG_PROBE_INTERVAL_MS`) is SKIPPED and reports liveness `null`
+(`extensions/swarm/src/nudges/goal-epoch.ts:166-174`); agents beyond the
+`GOAL_ESCALATION_DIAG_PROBE_MAX` = 8 round cap (`constants.ts:556`) also report null
+(`goal-epoch.ts:161-163`). Only agents with a concrete tmux target and `status === "running"` are
+probed at all (`goal-epoch.ts:159`). `classifyPoolAgent` only classifies `busy_dead_pane` when
+the FRESH probe verdict is `false` (`goal-epoch.ts:214-215`); busy + null = plain `busy` —
+alive-by-convention.
+
+**Blind window consequence:** a pane that dies right after a probe (or an agent never probed —
+including callers that skip probing) is classified `busy`, not `busy_dead_pane`, for up to the
+probe interval; escalation for a FRESH pane death can therefore be delayed up to the
+heartbeat-stale window (~10 min, `DEFAULT_AGENT_HEARTBEAT_STALE_MS` = 600 000,
+`constants.ts:541`) unless the ledger re-arms. Accepted per R27-B / redteam F9 (LOW/accepted).
+Freezing the `goalDiagProbeLedger` (`goal-epoch.ts:151-172`) is within the self-trust boundary:
+it requires swarm-state write access, which already owns the swarm (attack-guards Probe 5a).
+
+**Failure semantics — no false escalation:** a failing probe resolves `null` plus a durable
+`goal_diag.probe_failed` entry in errors.jsonl (`goal-epoch.ts:181-186`) — degraded liveness is
+NEVER classified dead.
+
+**Operator guidance:** do not wait out the blind window when you suspect a dead pane — check the
+pane directly (`swarm_agent_status`, tmux/herdr inspect) and `swarm_restart_agent`. Probe health
+is visible via errors.jsonl (`op=goal_diag.probe_failed`). The interval/cap envs exist, but
+shrinking the interval trades pump-lock probe cost (see the Cost bound bullets above).
+
+## Operator: traces-sink degradation — broken .pi/swarm/traces demotes durability to stderr (redteam F10, accepted)
+
+**The funnel.** Every durable trace write goes through `trace()`/`traceTask()` appending to
+`.pi/swarm/traces/events.jsonl` (`extensions/swarm/src/state.ts:342-352` trace, `:316-323`
+traceTask; sink path `state.ts:46`); the internal-error census writes
+`.pi/swarm/traces/errors.jsonl` (`extensions/swarm/src/errorlog.ts:80-82`). On an append
+failure, trace()/traceTask() log durably to errors.jsonl FIRST, then rethrow — call-site
+`.catch(() => {})` nets are non-hiding no-ops by design (AGENTS.md no-silent-swallow choke
+point).
+
+**Accepted degradation.** If the traces sink ITSELF is broken (e.g. a plain file where the
+`.pi/swarm/traces` directory should be, permissions, a read-only mount), `logSwarmError`'s
+persist step also fails and degrades to the stderr breadcrumb
+`[swarm:errorlog] failed to persist internal error (source=… op=…)` — errorlog is self-silent by
+contract (never throws, never recurses; `extensions/swarm/src/errorlog.ts:197-206`, contract
+header `:10-12`). Result: ALL trace+error durability is demoted to stderr while spawns keep
+working; once the whole sink is destroyed there is nowhere durable left. This is the DESIGNED
+choke-point degradation, not a regression (attack-edges §6 PoC `/tmp/rt-edgeb/p6-trace/poc.mjs`,
+archival pointer; the report at `task-redteam-20261003/artifacts/` is the evidence of record).
+
+**What it is NOT.** A MISSING `.pi/swarm/traces` directory is self-healing — `appendJsonl`
+mkdir -p's the whole chain (`extensions/swarm/src/state.ts:273-276`). Degradation requires
+something BLOCKING writes at the path.
+
+**Operator guidance.** After any incident where trace evidence matters, verify the sink:
+`.pi/swarm/traces` must be a writable directory; watch stderr for the
+`[swarm:errorlog] failed to persist internal error` breadcrumb; remember the errorlog budget
+caps (see [The internal-error log (errors.jsonl)](#the-internal-error-log-errorsjsonl):
+`PI_SWARM_ERRORLOG_MAX_ENTRIES` default 2000; a >4 MiB file forces budget 0). Red-team deferred
+disposition noted: a startup health check could warn on an unwritable sink (F10 "Defer") — not
+implemented.
 - Regression surface (full gate must stay green): `r14-goal-empty-pool-escalation`,
   `pool-diag-historical-reproduce`, `vacuous-max-nudges-reproduce`, `tmux-alive-fallback-reproduce`,
   `r27-goal-task-independent-idle-nudge`, `r16-idle-goal-regression`, `r27b-pump-import-guards`,
