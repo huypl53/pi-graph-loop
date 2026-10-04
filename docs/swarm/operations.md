@@ -147,6 +147,32 @@ state write:
   closed at delivery would break nudges over the cap. Out-of-band/legacy giant mailbox lines
   (written directly to the JSONL) are the residual shape the fullBody clamp exists for — the
   send boundary cannot see them, the read view bounds them.
+- `swarm_assign_task` shares the SAME cap at its tool boundary (task-fu-assign-clamp, F4
+  follow-up). Two clamp sites in `extensions/swarm/src/tools/tasks/assign.ts`, same
+  `MESSAGE_BODY_TOO_LARGE` throw, constants reused (never duplicated):
+  1. `params.note` is clamped at the execute boundary immediately after
+     `requireRootAuthority` — BEFORE any lock, state read/write, or mailbox append;
+  2. the composed assignment body is defensively clamped right after
+     `buildAssignmentBody(...)` — the note is not the only body input (task title/goal/
+     acceptanceCriteria, artifact lists, playbook ref are folded in), so site 2 bounds the
+     actual persisted line even when engine-composed segments are large. At this point no
+     `writeTaskState`/`writeState` has run (both happen after delivery), so a rejection
+     persists NOTHING: task.json, swarm-state.json, mailboxes, and the in-memory
+     fencing/supersession counters (lock released unwritten) all stay untouched.
+- `deliverMessageLocked` itself stays UNCLAMPED — the clamp lives at tool boundaries only.
+  Engine-internal assignment producers that deliberately bypass the clamp (fail-open,
+  engine-generated bounded content): the fenced-assignment notice (assign.ts), the issue-context
+  hint (assign.ts), task-cancel notification + task-close/status-change notify
+  (primitives/task-core.ts), ack-debt stop notification (src/agents.ts), settle-driven
+  nudges/escalations (src/hooks/settled.ts), the pump re-delivery path (src/mailbox.ts), and
+  task-update close notifications (tools/tasks/update.ts). The residual out-of-band giant line
+  remains handled by the `FULL_BODY_MAX_CHARS` read-side clamp above.
+- Regression + red-first evidence: `extensions/swarm/tests/assign-body-clamp.test.mjs`
+  (R1–R6, cap=1024 pinned in-process) and mock-llm fixture
+  `extensions/mock-llm/fixtures/assign-body-clamp.jsonl` with companion
+  `extensions/mock-llm/tests/assign-body-clamp.test.mjs` (shape assertions always-on; opt-in
+  live lane via `RUN_ASSIGN_CLAMP_LANE=1` with the root-actor env
+  `PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1`).
 
 ### Roles/charter project-root containment (F1, task-redteam-fixnow)
 

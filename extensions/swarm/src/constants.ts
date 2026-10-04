@@ -634,6 +634,9 @@ export const PI_SWARM_REASSIGN_RATE_WINDOW_MS =
 // Engine-internal senders (nudges, escalations, hints) call deliverMessageLocked directly and
 // stay UNCLAMPED by design: their content is engine-generated and bounded, and failing them
 // closed at delivery would break nudges over the cap.
+// task-fu-assign-clamp: the SAME cap is shared by the swarm_send_message AND swarm_assign_task
+// tool boundaries (assign.ts clamps params.note at its execute boundary and the composed
+// assignment body right after buildAssignmentBody; deliverMessageLocked stays unclamped).
 export const DEFAULT_MESSAGE_BODY_MAX_BYTES = 256 * 1024;
 export const PI_SWARM_MESSAGE_BODY_MAX_BYTES =
 	Number(process.env.PI_SWARM_MESSAGE_BODY_MAX_BYTES) > 0
