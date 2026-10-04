@@ -2268,6 +2268,62 @@ Status surfaces use `paneAlive` / `driver` (`"tmux" | "herdr" | "mock"`) / `targ
 `tmuxAlive`/`tmuxTarget` — correct for mixed tmux+herdr fleets (per-agent driver derivation via
 the terminal driver manager).
 
+## Operator: stopped-agent records GC (stopped-agent-records-gc, 2026-10-04)
+
+Stopped agent records persist in `swarm-state.json` by design (identity/mailbox/history for
+resume + audit), but without GC they accumulate — a day of swarm work carried 11+ stopped
+records flooding census + attention. Three levers, all sharing the pure predicate core
+`extensions/swarm/src/agent-gc.ts`:
+
+### 1. Default view hides stopped agents
+
+`swarm_agent_status` (census + attention) and `swarm_list_agents` hide `status:"stopped"`
+rows by default. Routine supervision shows only live agents. The hidden count surfaces
+truthfully as top-level `stoppedHidden` in the status tool (no flood rows); the hint names
+the purge path when hidden records exist.
+
+- Resurface stopped records: `includeStopped:true` — `view:"full"` / `verbose:true` imply it.
+- Targeted `swarm_agent_status({agentId})` slim rows keep working for ANY id/status — a
+  stopped agent's row is always returned when asked for directly.
+
+### 2. Batch purge (root-only, gated)
+
+Two surfaces, one predicate (`stoppedGcCandidates`):
+
+- Tool: `swarm_gc({ purgeStopped: true, stoppedOlderThanMs?, dryRun? })` — dry-run default.
+- CLI: `/swarm deregister --purge-stopped [--older-than-hours N] [--apply]` — dry-run default.
+
+A stopped record is purge-eligible ONLY when ALL gates pass:
+
+1. **Aged**: stopped ≥ gate (default 24h; age from `lastShutdownAt || updatedAt || createdAt`).
+2. **Unreferenced**: no NON-terminal task node in any `.pi/swarm/tasks/*/task.json` lists the
+   agent as `assignee` (done/failed/skipped/cancelled nodes don't block).
+3. **Debt-free**: no unresolved `requiresResponse` message addressed to it (verified/waived
+   don't block), and no queued/failed actionable messages.
+
+Blocked candidates are REPORTED with reasons (`too-recent` / `task-referenced` /
+`response-debt`) — never removed. Traces: `gc.stopped_purge` (per-agent gate evidence).
+
+### 3. Optional auto-GC (DEFAULT OFF)
+
+```yaml
+# .pi/swarm.yaml
+agentGc:
+  auto: false               # default OFF — zero behavior change unless opted in
+  stoppedOlderThanMs: 86400000  # optional, default 24h
+```
+
+When enabled, the root pump watchdog tick runs the same gated purge (`gc.stopped_auto`
+trace). Auto-GC never throws into the pump; internal failures land in
+`.pi/swarm/traces/errors.jsonl`.
+
+### Loss boundary
+
+Purging deletes ONLY the in-state agent record + its `delivered[agentId]` ledger. Kept
+forever: mailbox JSONL files on disk (`.pi/swarm/mailboxes/<id>.jsonl`), identity cards
+(`.pi/swarm/agents/<id>.md`), all traces (`.pi/swarm/traces/events.jsonl`), and task
+artifacts. History is auditable after purge; the in-state record is not resurrectable.
+
 ### unread semantics (root vs worker)
 
 - Worker: `unread` keys off the shared `st.delivered[agentId]` ledger (the same ledger

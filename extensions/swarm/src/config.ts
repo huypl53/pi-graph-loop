@@ -29,7 +29,7 @@ import type { ModelSlot, RotationConfig, RotationStrategy, SwarmSettings } from 
 
 export type SwarmConfigSource = "swarm.yml" | "swarm.yaml" | "global-swarm.yml" | "global-swarm.yaml";
 
-export type ConfigKey = "modelPool" | "rotation" | "defaultModel" | "defaultProvider" | "terminalManager" | "inheritGlobal";
+export type ConfigKey = "modelPool" | "rotation" | "defaultModel" | "defaultProvider" | "terminalManager" | "inheritGlobal" | "agentGc";
 
 export type SourceLayer = "global" | "project.swarm.yml" | "default";
 
@@ -134,7 +134,7 @@ export function _clearGlobalYmlMemoForTests() {
 	globalYmlMemoHome = undefined;
 }
 
-const RECOGNIZED_KEYS: ConfigKey[] = ["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal"];
+const RECOGNIZED_KEYS: ConfigKey[] = ["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal", "agentGc"];
 
 // Layered merge: global (lowest yml precedence) + project (highest yml precedence).
 // Per-top-level-key winner-takes-all. modelPool is whole-array replacement.

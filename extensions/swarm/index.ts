@@ -35,7 +35,7 @@ export default function (pi: ExtensionAPI) {
 	registerAgentsTools(pi);
 	registerMessagesTools(pi);
 	registerTasksTools(pi);
-	// registerGcTools(pi);
+	// registerGcTools(pi); // retired from default surface — stopped-gc lane drives it via direct module import
 	registerAuditTools(pi);
 	registerSwarmCommand(pi);
 }

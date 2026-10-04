@@ -12,6 +12,9 @@ export interface ParsedFlags {
 	yes: boolean;
 	purge: boolean;
 	inject?: boolean;
+	"purge-stopped"?: boolean;
+	apply?: boolean;
+	"older-than-hours"?: string;
 	kind?: string;
 	model?: string;
 	provider?: string;
@@ -29,6 +32,9 @@ export function parseFlags(tokens: string[]): ParsedFlags {
 		if (t === "--force") out.force = true;
 		else if (t === "--no-kill") out.kill = false;
 		else if (t === "--purge") out.purge = true;
+	else if (t === "--purge-stopped") out["purge-stopped"] = true;
+	else if (t === "--apply") out.apply = true;
+	else if (t === "--older-than-hours") out["older-than-hours"] = tokens[++i];
 		else if (t === "--literal") out.literal = true;
 		else if (t === "--enter") out.enter = true;
 		else if (t === "--inject") out.inject = true;

@@ -31,6 +31,8 @@ import { readMailbox } from "../mailbox.ts";
 import { paths, readState, trace, withLock, writeState } from "../state.ts";
 import { formatSwarmMessageContent } from "../delivery.ts";
 import { maybeRotateTraces } from "../tools/audit.ts";
+import { runAutoStoppedGc } from "../agent-gc-auto.ts";
+import { logSwarmError } from "../errorlog.ts";
 import { pumpRootMailbox } from "../surface.ts";
 import { getSwarmPi } from "./streaks.ts";
 // Post-compaction replay dedupe (task-202610040300): a message whose swarm-visible lifecycle
@@ -115,6 +117,12 @@ export function armRootPumpWatchdog(ctx: any) {
 		}
 		rootMailboxPumpRunning = true;
 		try {
+			// stopped-agent-records-gc: optional auto-GC (config agentGc.auto, default OFF). runAutoStoppedGc
+			// never rejects (errors route to logSwarmError internally); the residual catch nets the
+			// module-load edge and also routes to the durable error census — no silent swallow.
+			void runAutoStoppedGc((myCtx as any).cwd).catch((err: any) =>
+				logSwarmError(paths((myCtx as any).cwd), "pump-manager", "auto_gc_unexpected_rejection", err),
+			);
 			await pumpRootMailbox(getSwarmPi()!, myCtx, paths((myCtx as any).cwd), "watchdog");
 		} catch (err: any) {
 			// === Issue 11 (rework): error classification with watchdog self-heal ===

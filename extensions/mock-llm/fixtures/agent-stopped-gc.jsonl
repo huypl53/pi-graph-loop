@@ -1,0 +1,6 @@
+# agent-stopped-gc: swarm_agent_status default view hides stopped agents (issue
+# stopped-agent-records-gc). The driver seeds fresh-stopped + aged-stopped + task-referenced
+# stopped records and drives the REAL registered swarm_agent_status handler: default call
+# shows no stopped rows and a stoppedHidden counter; includeStopped:true resurfaces them;
+# targeted agentId slim row for a stopped id still returns.
+{"name":"default view hides stopped","events":[{"type":"text","delayMs":10,"text":"Checking swarm health."},{"type":"toolcall","delayMs":10,"name":"swarm_agent_status","id":"call-1","arguments":{}}]}

@@ -313,13 +313,18 @@ const textOf = (r) => r?.content?.[0]?.text ?? "";
 			typeof parsed.census.busy === "number" &&
 			typeof parsed.census.stopped === "number",
 	);
-	ok("§2 census counts 1 stopped", parsed.census?.stopped === 1);
+	ok("§2 stoppedHidden counter present", typeof parsed.stoppedHidden === "number");
+	// stopped-agent-records-gc: default view hides stopped — worker-sick is hidden (stoppedHidden=1),
+	// and resurfaces with includeStopped:true.
+	ok("§2 default view hides stopped (stoppedHidden=1, no flood rows)", parsed.census?.stopped === 0 && parsed.stoppedHidden === 1, `census=${JSON.stringify(parsed.census)} hidden=${parsed.stoppedHidden}`);
+	const rInc = await call("swarm_agent_status", { includeStopped: true });
+	const pInc = JSON.parse(textOf(rInc));
 	ok(
-		"§2 attention rows only for non-healthy-idle agents",
-		Array.isArray(parsed.attention) && parsed.attention.some((a) => a.agentId === "worker-sick") && parsed.attention.length <= 3,
-		`got ${parsed.attention?.length}`,
+		"§2 includeStopped:true resurfaces stopped attention row",
+		pInc.census?.stopped === 1 && (pInc.attention || []).some((a) => a.agentId === "worker-sick"),
+		`census=${JSON.stringify(pInc.census)} attn=${pInc.attention?.length}`,
 	);
-	const sick = (parsed.attention || []).find((a) => a.agentId === "worker-sick");
+	const sick = (pInc.attention || []).find((a) => a.agentId === "worker-sick");
 	ok("§2 attention row has why", typeof sick?.why === "string" && sick.why.length > 0);
 	ok("§2 attention row has paneAlive rename", !!sick && "paneAlive" in sick && !("tmuxAlive" in sick));
 	ok("§2 attention row has target rename", !!sick && "target" in sick && !("tmuxTarget" in sick));
@@ -365,7 +370,11 @@ const textOf = (r) => r?.content?.[0]?.text ?? "";
 	const parsed = JSON.parse(text);
 	ok("§3 swarmId kept", typeof parsed.swarmId === "string");
 	ok("§3 driver top-level field", typeof parsed.driver === "string");
-	ok("§3 agents rows compact", Array.isArray(parsed.agents) && parsed.agents.length === 11);
+	// stopped-agent-records-gc: default phonebook hides the stopped agent (10 live rows);
+	// includeStopped:true resurfaces all 11.
+	ok("§3 agents rows compact (default hides stopped)", Array.isArray(parsed.agents) && parsed.agents.length === 10);
+	const r3i = await call("swarm_list_agents", { includeStopped: true });
+	ok("§3 includeStopped:true resurfaces stopped", JSON.parse(textOf(r3i)).agents.length === 11);
 	const a0 = parsed.agents[0];
 	for (const k of ["id", "roleFirstLine", "roleKind", "status", "driver", "target", "slot"]) {
 		ok(`§3 row keeps ${k}`, k in a0);

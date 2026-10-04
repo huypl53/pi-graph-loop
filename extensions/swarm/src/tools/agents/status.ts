@@ -14,6 +14,7 @@ import { paths, readState, trace } from "../../state.ts";
 import { isDeliveryFailureRetryable } from "../../delivery.ts";
 import { humanAge, now, safeId, textResult } from "../../utils.ts";
 import { responseMissingRecords, verifiedResponseCount } from "../../mailbox.ts";
+import { filterAgentRows } from "../../agent-gc.ts";
 import { wrapSwarmToolInvocation } from "../wrapper.ts";
 
 // === tool-output-slim §3 — phonebook row (first role line, ≤80 bytes) ===
@@ -120,6 +121,12 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 					}),
 				),
 				verbose: Type.Optional(Type.Boolean({ description: "Legacy alias for view:'full'. Defaults to false." })),
+				includeStopped: Type.Optional(
+					Type.Boolean({
+						description:
+							"Include stopped agents in census/attention (default false — routine supervision shows only live agents). view:'full' implies true; targeted agentId queries always include the row.",
+					}),
+				),
 			}),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_agent_status", async () => {
@@ -191,6 +198,15 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						});
 					}
 					await trace(p, "agent.status.read", { agentId: filter, count: rows.length });
+					// stopped-agent-records-gc: default view hides stopped rows unless includeStopped/
+					// view:"full"/targeted agentId. Counts + hidden counter computed from the full set.
+					const includeStopped = params.includeStopped === true || params.view === "full" || params.verbose === true;
+					const stoppedTotal = rows.filter((r) => r.status === "stopped").length;
+					const visibleRows = filterAgentRows(rows as any[], {
+						includeStopped,
+						view: params.view,
+						agentId: params.agentId,
+					}) as typeof rows;
 					// === tool-output-slim §2 + §8 — view resolution ===
 					// view:"full"/verbose:true → legacy 24-field rows (explicit escape hatch). Everything else
 					// is compact: no-filter calls get the attention/census summary; targeted agentId queries
@@ -202,15 +218,19 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						return textResult(JSON.stringify({ count: rows.length, agents: rows }, null, 2), { agents: rows });
 					}
 					if (filter) {
-						// §8 targeted query: slim row(s) — normally exactly one agent
+						// §8 targeted query: slim row(s) — normally exactly one agent (any status, incl. stopped)
 						const slimRows = rows.map((r: any) => slimStatusRow(r));
 						return textResult(JSON.stringify({ count: slimRows.length, agents: slimRows }), { agents: rows });
 					}
+					// stopped-agent-records-gc: census/attention run over VISIBLE rows only; hidden stopped
+					// count surfaces truthfully as stoppedHidden (no flood rows).
+					const visRows = visibleRows;
+					const stoppedHidden = Math.max(0, stoppedTotal - visRows.filter((r) => r.status === "stopped").length);
 					// Census buckets from taskProgressState. Healthy-idle = active|awaiting_input agents with
 					// no pending/dead-letter/response debt. Everything else lands in attention.
 					const census = { idle: 0, busy: 0, stopped: 0, stalled: 0 };
 					const attention: Array<Record<string, unknown>> = [];
-					for (const row of rows as any[]) {
+					for (const row of visRows as any[]) {
 						const unhealthy =
 							row.status === "stopped" ||
 							row.paused ||
@@ -252,13 +272,14 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						slim.why = whyOfRow(row);
 						attention.push(slim);
 					}
-					const hint =
-						census.stopped > 0
+					const hint = stoppedHidden > 0
+						? `${stoppedHidden} stopped agent(s) hidden from this view (includeStopped:true to show; root: /swarm deregister --purge-stopped or swarm_gc purgeStopped to purge aged stopped records).`
+						: census.stopped > 0
 							? `${census.stopped} stopped agent(s) need attention; use view:"full" or agentId for detail.`
 							: attention.length
 								? `${attention.length} agent(s) need attention; use view:"full" or agentId for detail.`
 								: 'All agents healthy; use view:"full" or agentId for detail.';
-					return textResult(JSON.stringify({ census, attention, hint }), { census, attention });
+					return textResult(JSON.stringify({ census, stoppedHidden, attention, hint }), { census, attention });
 				});
 			},
 		}),
@@ -271,8 +292,12 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 			description:
 				"List pi swarm agents for this project as a compact phonebook: ids, role first lines, status, driver target, slot, and mailbox paths.",
 			promptGuidelines: ["Use `swarm_list_agents` before sending swarm messages when you are unsure which agents exist."],
-			parameters: Type.Object({}),
-			async execute(_id, _params, _signal, _onUpdate, ctx) {
+			parameters: Type.Object({
+				includeStopped: Type.Optional(
+					Type.Boolean({ description: "Include stopped agents in the phonebook (default false)." }),
+				),
+			}),
+			async execute(_id, params, _signal, _onUpdate, ctx) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_list_agents", async () => {
 					const p = paths(ctx.cwd);
 					const st = await readState(p, ctx.cwd);
@@ -280,7 +305,9 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 					// tool-output-slim §3: compact phonebook rows. details carries the SAME compact rows —
 					// the full-agent-array details leak (multi-MB per session) dies here. Legacy full records
 					// remain reachable per-agent via swarm_agent_status({agentId, view:"full"}).
-					const rows = Object.values(st.agents).map((agent) => {
+					const rows = Object.values(st.agents)
+					.filter((agent) => params.includeStopped === true || agent.status !== "stopped")
+					.map((agent) => {
 						const { driver: agentDriver, target } = agentDriverAndTarget(agent);
 						// tool-output-slim §3 (root review trim): `mailbox` dropped from default rows —
 						// it is derivable as .pi/swarm/mailboxes/<id>.jsonl; full records stay reachable
