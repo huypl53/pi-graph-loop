@@ -13,6 +13,18 @@ const { validateSwarmSettings } = await import(join(here, "../src/pool.ts"));
 const { registerAgentsTools } = await import(join(here, "../src/tools/agents.ts"));
 const { paths, ensureDirs, readState, writeState } = await import(join(here, "../src/state.ts"));
 const { ensureRoot, claimRootLeader } = await import(join(here, "../src/identity.ts"));
+const { _clearGlobalYmlMemoForTests } = await import(join(here, "../src/config.ts"));
+
+// Hermetic HOME pin: scratch home with NO global ~/.pi/agent/swarm.yml. Check 4 asserts the spawn
+// tool's unconfigured-swarm.yaml warning; a real global yml (terminalManager: herdr) diverts the
+// preflight path so the warning never fires — env-coupled, not a code path.
+const hermeticHome = mkdtempSync(join(tmpdir(), "swarm-yaml-home-"));
+const hermeticGlobalDir = join(hermeticHome, ".pi", "agent");
+mkdirSync(hermeticGlobalDir, { recursive: true });
+const hermeticGlobalYml = join(hermeticGlobalDir, "swarm.yml");
+const origHome = process.env.HOME;
+process.env.HOME = hermeticHome;
+_clearGlobalYmlMemoForTests();
 
 let pass = 0,
 	fail = 0;
@@ -69,12 +81,20 @@ try {
 	rmSync(yamlFile, { force: true });
 
 	// --- Check 3: v4.2 — no warning when no swarm.yaml / swarm.yml is configured (it's normal) ---
+	// The swarm_yaml_missing warning only fires when NEITHER project NOR global yml exists, so this
+	// leg seeds a minimal global yml (checked for existence, contents irrelevant here).
+	writeFileSync(hermeticGlobalYml, "# seeded global config for check 3\n");
+	_clearGlobalYmlMemoForTests();
 	const emptyValidation = validateSwarmSettings(scratch);
 	ok(
 		"validateSwarmSettings does NOT warn when no swarm.yaml/swarm.yml exists (v4.2: normal state)",
 		!emptyValidation.warnings.some((w) => w.kind === "swarm_yaml_missing"),
 		`warnings=${JSON.stringify(emptyValidation.warnings)}`,
 	);
+	// Remove the seeded global yml: check 4 asserts the UNCONFIGURED spawn warning, and the
+	// layered merge counts any existing global config as user config (suppressing the warning).
+	rmSync(hermeticGlobalYml, { force: true });
+	_clearGlobalYmlMemoForTests();
 
 	// --- Check 4: swarm_spawn_agent warns when no swarm.yaml is configured ---
 	const p = paths(scratch);
@@ -126,6 +146,9 @@ try {
 	rmSync(jsonFile, { force: true });
 } finally {
 	rmSync(scratch, { recursive: true, force: true });
+	process.env.HOME = origHome;
+	_clearGlobalYmlMemoForTests();
+	rmSync(hermeticHome, { recursive: true, force: true });
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);

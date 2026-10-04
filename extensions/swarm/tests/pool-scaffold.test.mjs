@@ -51,6 +51,14 @@ async function readTraces(dir, eventName) {
 	return records.filter((r) => r.event === eventName);
 }
 
+// Hermetic HOME pin: scratch home with NO global ~/.pi/agent/swarm.yml. The scaffold-skip leg
+// (case C) pins its own HOME; this top-level pin makes cases A/B (wrote:true) immune to a real
+// global yml declaring modelPool (which makes ensurePoolScaffold skip and never write the file).
+const hermeticHome = await mkdtemp(join(tmpdir(), "pool-scaffold-suite-home-"));
+const origSuiteHome = process.env.HOME;
+process.env.HOME = hermeticHome;
+_clearGlobalYmlMemoForTests();
+
 const fixtureDir = await mkdtemp(join(tmpdir(), "pool-scaffold-fixtures-"));
 
 async function makeCase(name) {
@@ -242,5 +250,8 @@ async function makeCase(name) {
 
 // cleanup
 await rm(fixtureDir, { recursive: true, force: true });
+process.env.HOME = origSuiteHome;
+_clearGlobalYmlMemoForTests();
+await rm(hermeticHome, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -5,7 +5,8 @@ import { deepEqual, equal, ok as assertOk } from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HerdrDriver, getTerminalDriver, tmuxDriver, translateTmuxKeyToHerdr, isPiLikeProcess } from "../src/terminal/index.ts";
+import { HerdrDriver, getTerminalDriver, tmuxDriver, translateTmuxKeyToHerdr, isPiLikeProcess, _resetTerminalManagerMemoForTests } from "../src/terminal/index.ts";
+import { _clearGlobalYmlMemoForTests } from "../src/config.ts";
 import { projectSlug } from "../src/utils.ts";
 import { getAttachCommandsShapeProbe } from "./helpers/herdr-audit-helpers.mjs";
 
@@ -630,6 +631,13 @@ test("10.1 getAttachCommandsShapeProbe returns herdr attach", () => {
 });
 
 test("10.2 corrupt swarm.yml defaults to tmux and environment still takes precedence", () => {
+	// Hermetic: pin HOME to a scratch home WITHOUT a global ~/.pi/agent/swarm.yml for the
+	// corrupt-project-yml leg. With the real global yml declaring terminalManager: herdr, the
+	// layered merge resolves herdr even with a corrupt project yml — env-coupled, not a code path.
+	const prevHome = process.env.HOME;
+	const scratchHome = mkdtempSync(join(tmpdir(), "herdr-audit-home-"));
+	process.env.HOME = scratchHome;
+	_clearGlobalYmlMemoForTests();
 	const previousCwd = process.cwd();
 	const previousManager = process.env.PI_SWARM_TERMINAL_MANAGER;
 	const scratch = mkdtempSync(join(tmpdir(), "herdr-corrupt-config-"));
@@ -637,17 +645,24 @@ test("10.2 corrupt swarm.yml defaults to tmux and environment still takes preced
 		mkdirSync(join(scratch, ".pi"), { recursive: true });
 		writeFileSync(join(scratch, ".pi", "swarm.yml"), "terminalManager: [unterminated\n");
 		process.chdir(scratch); // cfg memo is keyed by cwd; this gets a fresh corrupt-config read.
+		_resetTerminalManagerMemoForTests();
 		delete process.env.PI_SWARM_TERMINAL_MANAGER;
 		const fallback = getTerminalDriver(); // no explicit cfg: corrupt config must not throw.
 		equal(fallback, tmuxDriver, "corrupt config with env unset falls back to tmux");
 
 		process.env.PI_SWARM_TERMINAL_MANAGER = "herdr";
+		_resetTerminalManagerMemoForTests();
 		equal(getTerminalDriver().id, "herdr", "environment override wins despite corrupt config");
 	} finally {
 		process.chdir(previousCwd);
 		if (previousManager === undefined) delete process.env.PI_SWARM_TERMINAL_MANAGER;
 		else process.env.PI_SWARM_TERMINAL_MANAGER = previousManager;
 		rmSync(scratch, { recursive: true, force: true });
+		rmSync(scratchHome, { recursive: true, force: true });
+		if (prevHome === undefined) delete process.env.HOME;
+		else process.env.HOME = prevHome;
+		_clearGlobalYmlMemoForTests();
+		_resetTerminalManagerMemoForTests();
 	}
 });
 

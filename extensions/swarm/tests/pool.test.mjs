@@ -6,7 +6,15 @@ import { stringify } from "yaml";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paths } from "../src/state.ts";
+import { _clearGlobalYmlMemoForTests } from "../src/config.ts";
 import { pickSlot, recordProviderError, recordSlotSuccess, setSlotCooldown, poolStatus, slotKey } from "../src/pool.ts";
+
+// Hermetic HOME pin: scratch home with NO global ~/.pi/agent/swarm.yml so the "no pool -> undefined"
+// and slot-resolution assertions depend only on the project fixture, not the contributor's global config.
+const hermeticHome = await mkdtemp(join(tmpdir(), "pool-test-home-"));
+const origHome = process.env.HOME;
+process.env.HOME = hermeticHome;
+_clearGlobalYmlMemoForTests();
 
 let pass = 0,
 	fail = 0;
@@ -124,4 +132,7 @@ ok("no pool -> undefined", (await pickSlot(p)) === undefined);
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);
 process.chdir("/");
 await rm(dir, { recursive: true, force: true });
+process.env.HOME = origHome;
+_clearGlobalYmlMemoForTests();
+await rm(hermeticHome, { recursive: true, force: true });
 process.exit(fail === 0 ? 0 : 1);

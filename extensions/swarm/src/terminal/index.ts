@@ -17,6 +17,9 @@ export const herdrDriver = new HerdrDriver();
 // when unset, the swarm.yml/settings.json value is consulted (memoized per cwd — config
 // files do not change mid-run in practice; /swarm pool validate re-reads explicitly).
 let cfgTerminalManagerMemo: { cwd: string; value: string | undefined } | null = null;
+export function _resetTerminalManagerMemoForTests() {
+	cfgTerminalManagerMemo = null;
+}
 function cfgTerminalManager(): string | undefined {
 	if (cfgTerminalManagerMemo && cfgTerminalManagerMemo.cwd === process.cwd()) return cfgTerminalManagerMemo.value;
 	let value: string | undefined;
