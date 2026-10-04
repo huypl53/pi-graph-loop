@@ -91,9 +91,14 @@ A long-lived root pi process keeps serving OLD module code from Node's ESM modul
 `extensions/swarm` sources change on disk. Workers spawned from such a root silently lack whatever
 new code landed. The stamp feature makes this visible.
 
-- **What it is**: a sha256 over the sorted `relPath<NUL>sizeBytes<NUL>mtimeMs<LF>` lines of
-  `extensions/swarm/index.ts` + `extensions/swarm/src/**/*.ts`. Captured once per process at
-  extension load (sync `statSync` over ~45 small files, <5 ms) and memoized.
+- **What it is**: a sha256 single streaming pass over the sorted `src/<relPath><NUL>sizeBytes<NUL>mtimeMs<LF>`
+  lines of `extensions/swarm/index.ts` + `extensions/swarm/src/**/*.ts` with each file's **raw content bytes**
+  interleaved (line + bytes + LF per file). Since 2026-10-04 (task-fu-stamp-digest, red-team F5) the stamp
+  folds CONTENT alongside metadata: a same-length in-place edit with the mtime restored afterwards now
+  changes the hash (the metadata-only v1 stamp was blind to it — PoC `poc-stamp3.mjs` reported
+  `sameHash:true` at pre-fix HEAD). Captured once per process at extension load (readdir + stat + read +
+  hash over ~133 small files, measured ~3.2 ms on this host; budget 20 ms) and memoized. The 512-file cap
+  (`EXT_CODE_STAMP_MAX_FILES`) is unchanged.
 - **Where it lives**: `SwarmState.rootLeader.extCodeStamp` (additive optional field). Written by
   `claimRootLeader` AND `heartbeatRootLeader` — both rebuild the lease from scratch, so the stamp
   must ride BOTH writers or heartbeats silently drop it.
@@ -110,6 +115,12 @@ new code landed. The stamp feature makes this visible.
   traces `ext.stamp.changed`. The notify is best-effort; the durable stamp is the source of truth.
 - **How to clear**: restart the root process, or `/reload` it. The new process captures the
   current on-disk generation at load and stamps it on the next lease write.
+- **Mixed-format durable stamps (no migration needed)**: durable stamps are compare-only values — never
+  parsed — so a legacy v1 (metadata-only) or pre-digest lease hash needs no shape migration. Any such hash
+  can never equal a v2 self hash ⇒ it renders `stale`, the safe direction (an operator prompt to restart;
+  a false `current` would mask staleness). The next session_start re-stamps the lease through the existing
+  changed-generation path (one-shot notify + `ext.stamp.changed` trace), so the stale verdict self-heals on
+  the next root boot.
 - **What it does NOT detect**: same-mtime in-place edits within the filesystem's mtime granularity
   (rare; conservative `STALE` is the safe failure direction). Per-worker stale detection is
   out of scope (worker identity content is already versioned/hashed per agent).

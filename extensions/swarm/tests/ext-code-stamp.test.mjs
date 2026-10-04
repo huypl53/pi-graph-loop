@@ -29,10 +29,14 @@
  *     counting stub pi → ZERO pi.sendMessage / ctx.abort / ctx.reload crossings,
  *     NO pi.registerTool growth from session_start
  *   - no-silent-swallow: no bare `catch {}` introduced under extensions/swarm/src
+ *   - R1 (task-fu-stamp-digest, redteam F5): same-length in-place content edit with
+ *     restored mtime CHANGES the hash (content digest folded alongside size+mtime).
+ *     Observed RED at pre-fix HEAD (sameHash:true — metadata-only stamp was blind);
+ *     PoC /tmp/rt-guarda/poc-stamp3.mjs ported verbatim.
  *
  * Run: PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1 node extensions/swarm/tests/ext-code-stamp.test.mjs
  */
-import { mkdtempSync, cpSync, existsSync, readFileSync, readdirSync, appendFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, cpSync, existsSync, readFileSync, readdirSync, appendFileSync, writeFileSync, mkdirSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -128,6 +132,69 @@ if (!stampMod) {
 	process.exit(1);
 }
 
+// --- RED-4 (task-fu-stamp-digest, R1): same-length content edit + restored mtime --------
+// PoC /tmp/rt-guarda/poc-stamp3.mjs ported verbatim (red-team F5, task-redteam-20261003):
+// the metadata-only stamp folds only size+mtime, so an in-place same-length edit with
+// the mtime restored via utimesSync was INVISIBLE (sameHash:true at pre-fix HEAD —
+// observed and logged in task-fu-stamp-digest/artifacts/red-first-log.md before any
+// src change was authored). This section IS the regression test (red-first mandate
+// 2026-08-31): pre-fix it FAILS on the `hash CHANGED` assertion; post-fix it passes.
+if (stampMod) {
+	console.log("\n== R1: same-length content edit with restored mtime must CHANGE the hash (redteam F5) ==");
+	const r1Dir = mkdtempSync(join(tmpdir(), "swarm-ext-stamp-r1-"));
+	cpSync(extRoot, r1Dir, { recursive: true });
+	rmSync(join(r1Dir, "tests"), { recursive: true, force: true });
+	const victim = join(r1Dir, "src", "observability.ts");
+	// Normalize the victim's mtime to whole-ms FIRST (utimesSync round-trip), so the
+	// post-edit restore below is EXACT — otherwise a sub-ms original mtime would make
+	// the floored restore itself change the mtime and the assertion would pass for the
+	// wrong reason (fixture flake, not the fix). This mirrors the PoC's stable state.
+	const initialStat = statSync(victim);
+	const initialMs = Math.floor(initialStat.mtimeMs);
+	utimesSync(victim, new Date(initialMs), new Date(initialMs));
+	const s1 = stampMod.computeCodeStampSync(r1Dir);
+	const victimStat = statSync(victim);
+	const victimMtimeMs = Math.floor(victimStat.mtimeMs); // floor to whole ms like utimes can set
+	const victimContent = readFileSync(victim, "utf8");
+	// same-length content edit: swap two 1-byte codepoints, byte length identical
+	const editedContent = victimContent.includes("0") ? victimContent.replace("0", "1") : victimContent.replace("1", "2");
+	if (editedContent.length !== victimContent.length) {
+		throw new Error("R1 fixture broken: edited content is not same-length");
+	}
+	writeFileSync(victim, editedContent, "utf8");
+	utimesSync(victim, new Date(victimMtimeMs), new Date(victimMtimeMs)); // restore the mtime
+	const restoredStat = statSync(victim);
+	ok(
+		"R1 fixture: size restored byte-for-byte (same-length edit)",
+		restoredStat.size === victimStat.size,
+		`${restoredStat.size} vs ${victimStat.size}`,
+	);
+	ok(
+		"R1 fixture: mtime restored (utimesSync round-trip)",
+		Math.floor(restoredStat.mtimeMs) === victimMtimeMs,
+		`${Math.floor(restoredStat.mtimeMs)} vs ${victimMtimeMs}`,
+	);
+	const s2 = stampMod.computeCodeStampSync(r1Dir);
+	ok(
+		"R1: same-length content edit + restored mtime ⇒ hash CHANGED (was sameHash:true — RED at pre-fix HEAD)",
+		s2.hash !== s1.hash,
+		`s1=${s1.hash.slice(0, 8)} s2=${s2.hash.slice(0, 8)} sameHash=${s1.hash === s2.hash}`,
+	);
+	ok("R1: file count stable across the edit", s2.files === s1.files, `${s1.files} vs ${s2.files}`);
+
+	// Control: mtime-ONLY touch (content byte-identical) must NOT change the hash alone,
+	// and must not lose mtime sensitivity — the folded line keeps size+mtime, so an
+	// mtime-only change still moves the hash. Both directions are pinned here.
+	utimesSync(victim, new Date(victimMtimeMs + 5_000), new Date(victimMtimeMs + 5_000));
+	const s3 = stampMod.computeCodeStampSync(r1Dir);
+	ok(
+		"R1 control: mtime-only touch changes the hash (mtime sensitivity kept in v2)",
+		s3.hash !== s2.hash,
+		`s2=${s2.hash.slice(0, 8)} s3=${s3.hash.slice(0, 8)}`,
+	);
+	rmSync(r1Dir, { recursive: true, force: true });
+}
+
 // ===========================================================================
 // GREEN PHASE — permanent regression suite
 // ===========================================================================
@@ -144,6 +211,48 @@ ok("hash is sha256-sized (64 hex)", /^[0-9a-f]{64}$/.test(h1.hash), h1.hash);
 ok("file count plausible (≥20 ts files)", h1.files >= 20, h1.files);
 ok("computedAt present", typeof h1.computedAt === "string");
 ok("sync twin agrees with async walker", (await computeCodeStampSync(tmpTree)).hash === h1.hash);
+
+// Budget pin (plan §1/§4): full computeCodeStampSync ≤ 20 ms for the current ~132-file
+// tree (measured ~3.2–4.2 ms on this host). Assert the src file COUNT matches the folded
+// count (readdir+stat+read over exactly the .ts files, < 512 cap) and the wall-time budget.
+{
+	const srcTsCount = (() => {
+		let n = 0;
+		const walk = (d) => {
+			for (const e of readdirSync(d, { withFileTypes: true })) {
+				const p = join(d, e.name);
+				if (e.isDirectory()) walk(p);
+				else if (e.isFile() && e.name.endsWith(".ts")) n++;
+			}
+		};
+		walk(join(tmpTree, "src"));
+		return n;
+	})();
+	ok("budget: folded file count === src/*.ts count (+ root index)", h1.files === srcTsCount + 1, `files=${h1.files} srcTs=${srcTsCount}`);
+	ok("budget: file count under the 512 cap", h1.files < stampMod.EXT_CODE_STAMP_MAX_FILES, h1.files);
+	computeCodeStampSync(tmpTree); // warm (module cache + fs cache)
+	const t0 = performance.now();
+	computeCodeStampSync(tmpTree);
+	const budgetMs = performance.now() - t0;
+	ok("budget: full computeCodeStampSync < 20 ms for the ~132-file tree (plan §1)", budgetMs < 20, `${budgetMs.toFixed(3)} ms`);
+}
+
+console.log("\n== mixed-format durable stamps (v1 legacy / pre-digest leases) ==");
+// Durable stamps are compare-only values; a v1 (metadata-only) or legacy-shaped hash can
+// never equal a v2 self hash ⇒ renders stale — the SAFE direction (operator prompt to
+// reboot). One explicit non-64-len pin next to the seeded "0".repeat(64) integration pins.
+{
+	const vLegacyShort = renderCodeStampLine({ hash: "OLDSTALE", files: 9, stampedAt: new Date().toISOString() }, h1, { now: Date.now() });
+	ok("legacy non-64-len durable hash (OLDSTALE) ⇒ stale", vLegacyShort.verdict === "stale", JSON.stringify(vLegacyShort));
+	const vLegacyHex64 = renderCodeStampLine({ hash: "a".repeat(64), files: 9, stampedAt: new Date().toISOString() }, h1, {
+		now: Date.now(),
+	});
+	ok(
+		"64-hex v1 (metadata-only) durable hash ≠ v2 self ⇒ stale (safe-by-construction)",
+		vLegacyHex64.verdict === "stale",
+		JSON.stringify({ verdict: vLegacyHex64.verdict }),
+	);
+}
 
 console.log("\n== verdict rendering (pure formatter) ==");
 const durableStale = { hash: h1.hash, files: h1.files, stampedAt: new Date(Date.now() - 3 * 3600 * 1000).toISOString() };

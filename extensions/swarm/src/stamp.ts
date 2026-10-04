@@ -6,9 +6,20 @@
 // per process at extension load and compared against the CURRENT on-disk generation
 // at surface time ("/swarm status"). Mismatch means the running process is stale.
 //
+// 2026-10-04 (task-fu-stamp-digest, red-team F5): the original stamp folded only
+// per-file METADATA (size+mtime) and was blind to a same-length in-place content edit
+// whose mtime was restored afterwards (PoC /tmp/rt-guarda/poc-stamp3.mjs:
+// sameHash:true at pre-fix HEAD — observed red in
+// task-fu-stamp-digest/artifacts/red-first-log.md). The stamp now folds raw file
+// CONTENT alongside the metadata: one sha256 streaming pass over the sorted
+// metadata lines INTERLEAVED with each file's bytes (stdlib crypto, no new dep;
+// benchmarked ~3.2 ms for the 132-file/1.5 MB tree vs ~20 ms budget — plan §1).
+//
 // Docs: docs/swarm/operations.md (Extension code stamp, stale-root detection);
-// docs/swarm/pi-runtime-contract.md section 10 row F23.
-import { readdirSync, statSync } from "node:fs";
+// docs/swarm/pi-runtime-contract.md section 10 row F23 (unchanged: no Pi-runtime
+// boundary crossing — content digest is L1-compare-only, no sendMessage/abort/
+// reload/registerTool/notify surface).
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { hostname } from "node:os";
 import { join, posix, relative } from "node:path";
@@ -17,7 +28,7 @@ import { createHash } from "node:crypto";
 import { logSwarmError, expected } from "./errorlog.ts";
 
 export type CodeStamp = {
-	/** sha256 hex over the sorted "relPath<NUL>sizeBytes<NUL>mtimeMs<LF>" lines; "unavailable" when the scan failed. */
+	/** sha256 hex over the sorted "src/<rel><NUL>sizeBytes<NUL>mtimeMs<LF>" lines with each file's raw content bytes interleaved (line + bytes + LF per file); "unavailable" when the scan failed. */
 	hash: string;
 	/** number of files folded into the hash (0 when unavailable). */
 	files: number;
@@ -64,16 +75,34 @@ function collectStampInputsSync(rootDir: string): { hash: string; files: number 
 	}
 	if (existsRootIndex(rootDir)) relPaths.push(ROOT_INDEX_REL);
 	relPaths.sort();
-	const lines: string[] = [];
+	const hash = createHash("sha256");
 	let files = 0;
 	for (const rel of relPaths.slice(0, EXT_CODE_STAMP_MAX_FILES)) {
 		const abs = rel === ROOT_INDEX_REL ? join(rootDir, "index.ts") : join(srcDir, rel);
 		const st = statSync(abs);
-		// stamp line: src/<relPath> <NUL> size <NUL> mtimeMs <LF>
-		lines.push("src/" + rel + "\u0000" + String(st.size) + "\u0000" + String(Math.floor(st.mtime.getTime())) + "\n");
+		// stamp line: src/<relPath> <NUL> size <NUL> mtimeMs <LF> — followed by the file's
+		// raw content bytes and a trailing <LF> (task-fu-stamp-digest: content folded into
+		// the same single streaming pass so same-length in-place edits change the hash).
+		hash.update("src/" + rel + "\u0000" + String(st.size) + "\u0000" + String(Math.floor(st.mtime.getTime())) + "\n");
+		let content: Buffer;
+		try {
+			content = readFileSync(abs);
+		} catch (err: any) {
+			if (err?.code === "ENOENT") {
+				// File vanished between stat and read: expected transient, rethrow to the
+				// caller's unavailable degradation (never silently skipped — the digest of a
+				// partially-read tree must not masquerade as a generation).
+				expected("stamp_read_enoent");
+			} else {
+				void logSwarmError(process.cwd(), "stamp", "ext_code_read_failed", err, { code: err?.code, file: "src/" + rel });
+			}
+			throw err;
+		}
+		hash.update(content);
+		hash.update("\n");
 		files++;
 	}
-	return { hash: createHash("sha256").update(lines.join(""), "utf8").digest("hex"), files };
+	return { hash: hash.digest("hex"), files };
 }
 
 let rootIndexProbeWarned = false;
