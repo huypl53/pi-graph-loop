@@ -44,10 +44,48 @@ the original history. Imports of `./src/...` were rewritten to `../src/...`.
   non-zero when any non-quarantined suite fails** — the old `for … || true` loop exit 0 was
   vacuous and is gone.
 - Run the mock-llm gate: `npm run test:mockllm` (same runner, ambient env).
+- Run the runner regression net: `npm run test:runner` (overlap/bound/group/contract legs
+  through the real runner as a child process).
 - Quarantine: `scripts/suite-quarantine.json` is the ONLY sanctioned exclusion path. Every
   entry carries a reason + tracking pointer; quarantined suites are listed in every gate run
   and excluded from the exit code. Adding to quarantine requires a named reason in the task
   report — never a silent skip. New suites must be individually green before review.
+
+### Parallel runner + serialization groups
+
+`scripts/run-suites.mjs --parallel N` runs up to N suites concurrently through a bounded
+worker pool (the package.json gates pass `--parallel 6`; without the flag the runner is
+sequential and byte-identical to its pre-parallel form). Output contract is unchanged: same
+PASS/FAIL/TIMEOUT/QUARANTINED/SKIP table, same footer, same exit code — the parallel-mode
+`mode: parallel(N) — groups: …` line goes to STDERR so stdout-grepping consumers cannot
+mis-parse it.
+
+Isolation under parallel:
+
+- every suite is a separate process with a fresh env copy, its own process group, and its own
+  `TMPDIR` (a suite's `os.tmpdir()` resolves to a per-suite directory — no tmpdir collisions);
+- `HOME` is never set by the runner — suites that pin `HOME` (see the hermeticity lanes) keep
+  doing so;
+- nothing in either test tree binds a TCP port, so there is no port-collision surface;
+- a suite that exceeds `--timeout` is SIGKILLed as a whole process group (its pi children die
+  too) and marked TIMEOUT; the pool slot is freed immediately.
+
+**Serialization groups** — suites contending on shared runtime resources run ONE AT A TIME
+within their group (defined in `SERIALIZATION_GROUPS` inside the runner):
+
+| group | protects | members |
+|---|---|---|
+| `repo-pi-state` | fixed paths under the repo's own `.pi/` (`.pi/swarm/tasks/task-202609020643-r18-…/artifacts`, `.pi/mock-llm/transcripts/ct*`, `.pi/swarm-uat/runs/<second-granularity STAMP>`) + repo-cwd child pi sessions + repo `tmux-snapshots/` writes | `r18-scratch-startup`, `ct-phase2-probes`, `agent-lifecycle-uat`, `messaging-uat`, `uat-goal-nudge` |
+| `live-terminal` | lanes that can reach the live herdr daemon / create real tmux windows (`PI_SWARM_TMUX_OK` + `$TMUX` inheritance) | `swarm-yml-pool`, `terminal-manager-pin-demo` |
+
+Everything else (~193/200 suites) is verified parallel-safe: each uses its own `mkdtemp`
+scratch cwd, mocks the tmux/herdr boundary or pins `PI_SWARM_TERMINAL_MANAGER=tmux`, and
+shares no fixed path, port, or daemon with its neighbors.
+
+**Adding a new suite:** if it writes into repo-root `.pi/` or `tmux-snapshots/`, touches the
+live herdr daemon, or spawns into a fixed tmux session name, it MUST join a serialization
+group (add a path substring to the group array in the runner). Reviewer-checked. If it
+collides on a fixed `/tmp` path, give the path a `process.pid` / `mkdtemp` component instead.
 
 Pre-existing failures (kept byte-identical by this refactor — do NOT fix in this
 refactor; record new R-rows for fixes):
