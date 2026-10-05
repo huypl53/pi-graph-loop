@@ -52,6 +52,9 @@ export type IssueRun = {
 	advancement?: "waiting-manual";
 	advancementMode?: "auto" | "manual";
 	workflowMode?: "feature-dev" | "single";
+	// issues-sequencer-restart-dedup: true when /swarm issues start was invoked with
+	// --force-all, deliberately bypassing the prior-completion dedup scan.
+	forceAll?: boolean;
 };
 
 export type Guard = { ok: true } | { ok: false; code: string; message: string };

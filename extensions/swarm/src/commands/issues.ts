@@ -10,7 +10,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { currentAgentId } from "../session.ts";
-import { readState, withLock, writeState } from "../state.ts";
+import { readState, withLock, writeState, trace } from "../state.ts";
 import { validateIssuesSource, classifyDocPath } from "../issues/source.ts";
 import { captureIssueSnapshot, sourceHashOf } from "../issues/snapshot.ts";
 import { setIssueFooter } from "../issues/footer.ts";
@@ -19,11 +19,13 @@ import {
 	reconcileIssueRun, type IssueQueueEntry,
 } from "../issues/state.ts";
 import { activateIssueLocked, safeIdleBlockers, fenceActiveLinkedGoal } from "../issues/controller.ts";
+import { findPriorCompletions } from "../issues/dedup.ts";
+import { logSwarmError } from "../errorlog.ts";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const USAGE =
-	"Usage: /swarm issues validate | status | start | pause | resume | abandon <issue-id> <reason...> | stop\n  advancement: auto (default) | manual — via .pi/swarm.yml issue-sequencer.advancement or PI_SWARM_ISSUES_ADVANCEMENT; manual holds each done issue for /swarm issues resume";
+	"Usage: /swarm issues validate | status | start [--force-all] | pause | resume | abandon <issue-id> <reason...> | stop\n  advancement: auto (default) | manual — via .pi/swarm.yml issue-sequencer.advancement or PI_SWARM_ISSUES_ADVANCEMENT; manual holds each done issue for /swarm issues resume\n  start --force-all: deliberately re-run every issue (bypasses prior-completion dedup)";
 
 /** Root-interactive gate. Mirrors the goal command's root check. */
 function requireRoot(ctx: any): boolean {
@@ -94,6 +96,12 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 		}
 		const done = run.queue.filter((q) => q.status === "done").length;
 		lines.push(`  queue: ${run.queue.length} (done ${done}, queued ${run.queue.filter((q) => q.status === "queued").length})`);
+		// issues-sequencer-restart-dedup: surface deduped entries (done with reason starting
+		// "already completed in run") so the human can see which issues were skipped.
+		const deduped = run.queue.filter((q) => q.status === "done" && (q.reason ?? "").startsWith("already completed in run"));
+		if (deduped.length > 0) {
+			lines.push(`  deduped from prior runs: ${deduped.map((q) => `${q.issueId} (${q.reason})`).join(", ")}`);
+		}
 		// source drift (queued entries only)
 		try {
 			const text = await loadSource(root);
@@ -112,6 +120,18 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 	}
 
 	if (sub === "start") {
+		// issues-sequencer-restart-dedup: parse --force-all / -F BEFORE any mutation.
+		// When set, deliberately bypass the prior-completion dedup scan.
+		let forceAll = false;
+		const filteredRest: string[] = [];
+		for (const arg of rest) {
+			if (arg === "--force-all" || arg === "-F") {
+				forceAll = true;
+			} else {
+				filteredRest.push(arg);
+			}
+		}
+		rest = filteredRest;
 		await withLock(p, async () => {
 			const st = await readState(p, ctx.cwd);
 			if (st.goal) {
@@ -151,22 +171,86 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 				throw err;
 			}
 			const run = getIssueRun(st);
+			// Capture the PRIOR runId BEFORE we overwrite it with the new run's id.
+			// The backfill seeds the ledger with the prior run's done entries, so the
+			// runId in the ledger must point to the run that actually did the work.
+			const priorRunId = run.runId;
 			run.status = "running";
 			run.runId = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 			run.startedAt = new Date().toISOString();
 			run.advancementMode = advancementMode;
 			run.workflowMode = workflowMode;
-			run.queue = v.issues.map<IssueQueueEntry>((i) => ({ issueId: i.id, title: i.title, sourceHash: sourceHashOf(i), status: "queued" }));
+			run.forceAll = forceAll;
+			// issues-sequencer-restart-dedup: backfill the completion ledger from the PRIOR
+			// run's done entries on first start after this fix lands. Idempotent: if the
+			// ledger already exists, seedCompletionLedger is a no-op. We read the state
+			// BEFORE the new run is created so the prior run's queue is still intact.
+			try {
+				const { seedCompletionLedger } = await import("../issues/dedup.ts");
+				const bf = await seedCompletionLedger(p.root, { issueRun: { runId: priorRunId, queue: run.queue } });
+				if (bf.seeded > 0) {
+					await trace(p, "issues.restart_dedup_backfill", { seeded: bf.seeded, skipped: bf.skipped });
+				}
+			} catch (err: unknown) {
+				await logSwarmError(ctx.cwd, "issues-dedup", "backfill_failed", err, { runId: run.runId });
+			}
+			// issues-sequencer-restart-dedup: build the queue, then consult the completion
+			// ledger for prior completions. Content-hash match → mark as done with reason.
+			// --force-all bypasses the scan entirely.
+			const queueEntries: IssueQueueEntry[] = v.issues.map<IssueQueueEntry>((i) => ({
+				issueId: i.id,
+				title: i.title,
+				sourceHash: sourceHashOf(i),
+				status: "queued",
+			}));
+			if (!forceAll) {
+				const prior = await findPriorCompletions(
+					p.root,
+					queueEntries.map((q) => ({ id: q.issueId, sourceHash: q.sourceHash })),
+				);
+				for (const entry of queueEntries) {
+					const pc = prior.get(entry.issueId);
+					if (pc && pc.sourceHash === entry.sourceHash) {
+						entry.status = "done";
+						entry.reason = `already completed in run ${pc.priorRunId}`;
+						entry.completedAt = pc.completedAt;
+						await trace(p, "issues.restart_dedup_skip", {
+							issueId: entry.issueId,
+							priorRunId: pc.priorRunId,
+							sourceHash: entry.sourceHash,
+						});
+					}
+				}
+			} else {
+				await trace(p, "issues.restart_dedup_force_all", { runId: run.runId });
+			}
+			run.queue = queueEntries;
 			run.updatedAt = run.startedAt;
 			await writeState(p, st);
 			try {
 				const first = run.queue.find((q) => q.status === "queued");
-				if (!first) throw new Error("empty queue");
+				if (!first) {
+					// All entries deduped (or queue empty) — run is terminal-complete.
+					// Use guardCompleteRun to assert the all-done invariant; if it fails,
+					// surface the error rather than silently marking complete.
+					const { guardCompleteRun } = await import("../issues/state.ts");
+					const g = guardCompleteRun(st);
+					if (!g.ok) {
+						throw new Error(`all-deduped completion guard failed: ${g.message}`);
+					}
+					await writeState(p, st);
+					await setIssueFooter(undefined, ctx, st, p);
+					const deduped = run.queue.filter((q) => q.status === "done" && q.reason?.startsWith("already completed in run")).length;
+					ctx.ui.notify(`Issue run ${run.runId}: no issues to activate (${deduped} deduped from prior runs). Run complete.`, "info");
+					return;
+				}
 				const source = v.issues.find((i) => i.id === first.issueId)!;
 				await activateIssueLocked(p, ctx, st, run.runId, source);
 				await writeState(p, st);
 				await setIssueFooter(undefined, ctx, st, p);
-				ctx.ui.notify(`Issue run ${run.runId} started: ${run.queue.length} queued; "${first.issueId}" active${advancementMode === "manual" ? "; advancement: manual" : ""}.`, "info");
+				const deduped = run.queue.filter((q) => q.status === "done" && q.reason?.startsWith("already completed in run")).length;
+				const dedupNote = deduped > 0 ? `; ${deduped} deduped from prior runs` : "";
+				ctx.ui.notify(`Issue run ${run.runId} started: ${run.queue.length} queued; "${first.issueId}" active${advancementMode === "manual" ? "; advancement: manual" : ""}${dedupNote}${forceAll ? "; --force-all" : ""}.`, "info");
 			} catch (err: unknown) {
 				const st2 = await readState(p, ctx.cwd);
 				const r2 = getIssueRun(st2);

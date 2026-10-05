@@ -53,3 +53,4 @@ You are working in a swarm that runs a sequential issue auto-run. This skill is 
 - The scripts are **read-only**: they write nothing.
 - There are exactly two scripts; neither renders run status (use `/swarm issues status`).
 - Hint bodies carry only issue id/title + this skill's name — never fetch or inject a full snapshot into a message.
+- **Restart dedup**: `/swarm issues start` skips issues whose content-hash matches a prior completed run; the status notice names the prior run. Editing an issue's `content` or `title` re-opens it (content-hash changes). Editing only `docs` does NOT re-open (sourceHash covers `id`/`title`/`content` only). Use `--force-all` to deliberately re-run everything.

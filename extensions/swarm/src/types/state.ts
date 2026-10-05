@@ -177,6 +177,8 @@ export type Paths = {
 	memoryDir: string;
 	iterationsDir: string;
 	loopsDir: string;
+	/** Append-only completion ledger for issue-run restart dedup (issues-sequencer-restart-dedup). */
+	completionsLedger: string;
 };
 
 export type ReconcileAction = { messageId: string; action: string; reason: string; taskId?: string; nodeId?: string };

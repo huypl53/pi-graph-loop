@@ -210,6 +210,37 @@ completion by design — all-done is required — so the run keeps resting until
 (see above); the exhausted notice covers the RUNNING orphan shape. Paused/stopped runs and
 runs with a queued successor never emit it.
 
+### Restart dedup (content-hash, not id-only)
+
+`/swarm issues start` on a fresh run consults the completion ledger
+(`.pi/swarm/issues/completions.jsonl`, append-only, written by the controller at
+issue-done time) and skips issues whose content-hash matches a prior completed run.
+The match key is `sourceHash` (sha256 of `{id, title, content}`), NOT the issue id —
+editing an issue's `content` or `title` legitimately re-opens it. Editing only `docs`
+does NOT re-open (sourceHash covers `id`/`title`/`content` only).
+
+Skipped entries carry `status: "done"` with `reason: "already completed in run <id>"`
+and emit an `issues.restart_dedup_skip` trace. The `/swarm issues status` command
+surfaces deduped entries under `deduped from prior runs:`.
+
+**`--force-all` escape**: `/swarm issues start --force-all` (or `-F`) deliberately
+bypasses the prior-completion scan and re-runs every issue. The flag is recorded on
+the run as `run.forceAll: true` for audit and emits an `issues.restart_dedup_force_all`
+trace.
+
+**Known limitation**: `--force-all` after a complete run hits the pre-existing
+deterministic taskId collision (phase-05 limitation) — the run pauses durably with
+"Task already exists". Clean up the prior run's tasks (or use a fresh scratch cwd)
+to work around this. The dedup path itself is unaffected.
+
+**Backfill (first start after this fix lands)**: On the first `/swarm issues start`
+after this fix lands, if the completion ledger is absent, the start handler seeds it
+from the current `swarm-state.json` `issueRun.queue[].status === "done"` entries.
+The seed is atomic (temp-file + rename) and idempotent (skips if the ledger already
+exists). **Seed source = last run's state; ledger is the durable record going forward.**
+If the prior run's state is deleted before the next start, those completions are
+invisible to dedup — the ledger is the only durable record from that point on.
+
 ### Advancement modes (auto | manual)
 
 The sequential issue auto-run supports two advancement modes (`issue-sequencer.advancement` in

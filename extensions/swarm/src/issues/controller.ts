@@ -316,6 +316,24 @@ export async function observeLinkedTaskLocked(
 		const gm = guardMarkIssueTerminal(st, entry.issueId, "done");
 		if (!gm.ok) return { acted: false }; // already-terminal replay — no-op
 		await writeState(p, st);
+		// issues-sequencer-restart-dedup: append to the completion ledger so future
+		// /swarm issues start runs can dedup this issue by content-hash. Failure to
+		// append is logged but does NOT block the done transition (the run state is
+		// already durable; the ledger is a dedup aid, not a source of truth).
+		try {
+			const { appendJsonl } = await import("../state.ts");
+			await appendJsonl(p.completionsLedger, {
+				issueId: entry.issueId,
+				sourceHash: entry.sourceHash,
+				priorRunId: run.runId,
+				completedAt: new Date().toISOString(),
+			});
+		} catch (err: unknown) {
+			await logSwarmError(ctx.cwd, "issues-controller", "completion_ledger_append_failed", err, {
+				issueId: entry.issueId,
+				runId: run.runId,
+			});
+		}
 		// advancement-mode seam: manual mode holds the advance for the human (exactly-once
 		// notice) — but ONLY when a queued successor exists; completion is not advancement
 		// (guardCompleteRun still fires on an exhausted queue, in both modes).

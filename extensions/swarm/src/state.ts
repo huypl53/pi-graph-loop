@@ -48,6 +48,8 @@ export function paths(cwd: string): Paths {
 		memoryDir: join(root, "memory"),
 		iterationsDir: join(root, "iterations"),
 		loopsDir: join(root, "loops"),
+		// issues-sequencer-restart-dedup: append-only completion ledger for restart dedup.
+		completionsLedger: join(root, "issues", "completions.jsonl"),
 	};
 }
 
