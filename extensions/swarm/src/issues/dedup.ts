@@ -128,8 +128,15 @@ export async function seedCompletionLedger(
 	} catch (err: unknown) {
 		void expected("ledger_atomic_seed_expected");
 		await logSwarmError(root, "issues-dedup", "ledger_atomic_seed_failed", err, { ledgerPath, tmpPath, candidateCount: candidates.length });
-		// Clean up temp file if rename failed
-		try { await rename(tmpPath, `${tmpPath}.failed`); } catch { /* best-effort */ }
+		// Clean up temp file if rename failed. EEXPECTED: ENOENT — writeFile itself
+		// failed, so the temp never existed; anything else is logged, never swallowed.
+		try {
+			await rename(tmpPath, `${tmpPath}.failed`);
+		} catch (cleanupErr: unknown) {
+			if ((cleanupErr as NodeJS.ErrnoException)?.code !== "ENOENT") {
+				await logSwarmError(root, "issues-dedup", "ledger_seed_tmp_cleanup_failed", cleanupErr, { tmpPath });
+			}
+		}
 		return { seeded: 0, skipped: candidates.length };
 	}
 
