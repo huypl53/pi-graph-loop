@@ -648,8 +648,13 @@ process.exit(0);
 		orphanPids = "PGREP-UNAVAILABLE";
 	}
 	const tag = fullMatrix ? "A6" : "A7";
-	if (fullMatrix) {
-		ok(`A6a mid-run ${SIGNAL} lands on both suites (probe peak === 2 before signal)`, peak === 2, `peak=${peak}`);
+	// Reviewer finding (e2d2f9e follow-up): the peak precondition must hold for BOTH legs —
+	// a signal fired before suites start yields banner "killing 0" + exit 130 + no orphans
+	// and would otherwise pass A7 vacuously. Fail this leg loudly instead.
+	ok(`${tag}a mid-run ${SIGNAL} lands on both suites (probe peak === 2 before signal)`, peak === 2, `peak=${peak}`);
+	if (peak !== 2) {
+		rmSync(scratch, { recursive: true, force: true });
+		return;
 	}
 	ok(
 		`${tag}b ${SIGNAL}: no orphaned scratch suites after runner exit (process group killed)`,
