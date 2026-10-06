@@ -55,6 +55,12 @@ export type IssueRun = {
 	// issues-sequencer-restart-dedup: true when /swarm issues start was invoked with
 	// --force-all, deliberately bypassing the prior-completion dedup scan.
 	forceAll?: boolean;
+	/** Consecutive automatically-created runs; reset by each explicit human start. */
+	autoContinueCount?: number;
+	/** Set by explicit stop; only a later explicit start clears this kill-switch. */
+	autoContinueDisabled?: boolean;
+	/** Prevents repeating the cap notice on every pump tick. */
+	autoContinueCapNotified?: boolean;
 };
 
 export type Guard = { ok: true } | { ok: false; code: string; message: string };

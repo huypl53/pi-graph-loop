@@ -5,6 +5,20 @@ import { readSwarmYml } from "../config.ts";
 
 export type IssueAdvancement = "auto" | "manual";
 
+// Auto-continue resolvers intentionally RE-THROW: the caller (autoContinueCompletedRunLocked)
+// is the durability boundary that routes config failures to logSwarmError. Fail-fast on a
+// corrupt yml beats silently treating opt-in as off (default-off is only for ABSENT config).
+export function resolveIssueAutoContinue(cwd: string): boolean {
+	const cfg = readSwarmYml(cwd);
+	return (cfg as any)?.issues?.autoContinue === true;
+}
+
+export function resolveIssueAutoContinueCap(cwd: string): number {
+	const cfg = readSwarmYml(cwd);
+	const raw = (cfg as any)?.issues?.autoContinueCap ?? (cfg as any)?.issues?.consecutiveCap;
+	return Number.isInteger(raw) && raw >= 1 && raw <= 20 ? raw : 3;
+}
+
 const VALID: ReadonlySet<string> = new Set(["auto", "manual"]);
 
 function normalize(raw: unknown): IssueAdvancement | undefined {

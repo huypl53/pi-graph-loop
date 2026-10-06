@@ -25,7 +25,7 @@ import {
 } from "../nudges/graph-advance.ts";
 import { evaluateIdleGoalNudgeLocked, updateIdleEpochLocked } from "../nudges/goal-epoch.ts";
 import { proxyMetricEmitLocked, staleOpenAssignmentScanLocked, staleOpenNudgeLocked } from "../taskgraph.ts";
-import { observeLinkedTaskLocked } from "../issues/controller.ts";
+import { observeLinkedTaskLocked, autoContinueCompletedRunLocked } from "../issues/controller.ts";
 
 export async function runPumpMaintenancePhasesLocked(
 	pi: ExtensionAPI,
@@ -213,6 +213,12 @@ export async function runPumpMaintenancePhasesLocked(
 		}
 	} catch (err: any) {
 		await logSwarmError(p, "surface", "issues.tick_failed", err, { reason });
+	}
+	// Opt-in cross-run continuation is evaluated inside the same pump lock after issue observation.
+	try {
+		if ((st as any).issueRun?.status === "complete" && (st as any).issueRun?.runId) await autoContinueCompletedRunLocked(p, { cwd: ctx.cwd }, st, { pi });
+	} catch (err: unknown) {
+		await logSwarmError(p, "surface", "issues.auto_continue_failed", err, { reason });
 	}
 	// === footer-status (2026-10-01): advisory issue-run line after the issues tick phase ===
 	// L3 visible surface (contract §1); hasUI-guarded, never throws into the tick.

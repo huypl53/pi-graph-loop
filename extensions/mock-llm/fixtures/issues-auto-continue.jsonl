@@ -1,0 +1,1 @@
+{"name":"root observes automatic continuation start","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"The completed run automatically started the remaining issue because issues.autoContinue is enabled."}]}

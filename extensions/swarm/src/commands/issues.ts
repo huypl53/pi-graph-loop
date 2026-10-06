@@ -181,6 +181,10 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 			run.advancementMode = advancementMode;
 			run.workflowMode = workflowMode;
 			run.forceAll = forceAll;
+			// An explicit human start renews the automatic-run budget and clears stop's kill-switch.
+			run.autoContinueCount = 0;
+			run.autoContinueDisabled = false;
+			run.autoContinueCapNotified = false;
 			// issues-sequencer-restart-dedup: backfill the completion ledger from the PRIOR
 			// run's done entries on first start after this fix lands. Idempotent: if the
 			// ledger already exists, seedCompletionLedger is a no-op. We read the state
@@ -398,7 +402,12 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 			const st = await readState(p, ctx.cwd);
 			const run = getIssueRun(st);
 			if (run.status === "complete" || run.status === "stopped" || run.status === "inactive") {
-				ctx.ui.notify(`stop: run is already "${run.status}".`, "info");
+				// stop is also the cross-run auto-continue kill-switch, even if the current
+				// run already reached a terminal state.
+				run.autoContinueDisabled = true;
+				run.updatedAt = new Date().toISOString();
+				await writeState(p, st);
+				ctx.ui.notify(`stop: run is already "${run.status}"; auto-continue disabled until explicit start.`, "info");
 				return;
 			}
 			// detach/clear the linked goal (controller-only), NEVER cancel the child task
@@ -413,6 +422,7 @@ export async function handleIssuesCommand(cmd: "issues", rest: string[], ctx: an
 				run.activeIssueId = undefined;
 			}
 			run.status = "stopped";
+			run.autoContinueDisabled = true;
 			run.updatedAt = new Date().toISOString();
 			await writeState(p, st);
 			await setIssueFooter(undefined, ctx, st, p);

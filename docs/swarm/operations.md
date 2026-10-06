@@ -493,13 +493,26 @@ or `/swarm issues validate`.
 **Run lifecycle:** `start` → one active issue (immutable snapshot at
 `.pi/swarm/issues/snapshots/<runId>/<issueId>.json`, hash-recorded in the queue entry)
 with a linked worker task + fenced goal. On linked done + safe idle, exactly one next
-issue activates. Terminal-unsuccessful linked work (blocked/failed/cancelled) freezes
+issue activates. At each advance decision the controller re-reads `issues.yml` and appends
+new issue IDs not already represented in the queue and not content-hash-deduped against
+`.pi/swarm/issues/completions.jsonl`; appended entries go to the queue tail in file order,
+are traced as `issues.queue_appended`, and activate through the same snapshot/task/goal,
+staffing, and hint path as the original queue. Terminal-unsuccessful linked work (blocked/failed/cancelled) freezes
 the run (`paused`); later issues emit nothing until a human disposition:
 `abandon <issue-id> <reason…>` (entry → cancelled, then `resume` advances) or `stop`
 (entry → cancelled, run → stopped; the child task is NEVER cancelled). After `stop`,
 `start` opens a FRESH run — restart after stop currently collides on the deterministic
 task id and pauses durably ("Task already exists"); treat stop as terminal for that
-queue (known limitation, phase-05).
+queue (known limitation, phase-05). The stop command also disables cross-run auto-continue
+until the next explicit `start`.
+
+**Cross-run auto-continue (opt-in):** `.pi/swarm.yml` may set `issues: { autoContinue: true }`;
+absent/false is the default. A pump tick may start a new run only after an all-successful
+completed run and only when current source contains entries not already complete by the
+content-hash ledger. Any failed/blocked/cancelled entry is a hard triage stop. The consecutive
+auto-start cap defaults to 3 (`issues.autoContinueCap`, integer 1–20); reaching it emits
+`auto-continue paused: cap reached`. Only automatic starts consume this budget; each explicit
+human `/swarm issues start` resets it and clears the stop latch.
 
 **Agent context (read-only):** the `swarm-issues` discoverable skill ships
 `show-active-issue.mjs` — renders the active issue's linkage-derived snapshot

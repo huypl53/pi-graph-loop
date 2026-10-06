@@ -131,6 +131,7 @@ await t("observation: provenance mismatch ignored; linked done → goal cleared 
 	const cwd = mkdtempSync(join(tmpdir(), "issues-ctl-"));
 	const swarmRoot = join(cwd, ".pi", "swarm");
 	mkdirSync(swarmRoot, { recursive: true });
+	writeFileSync(join(swarmRoot, "issues.yml"), "issues:\n  - id: a\n    title: A\n    content: Do A.\n    docs: []\n");
 	const p = paths(cwd);
 	await ensureDirs(p);
 	const st = await readState(p, cwd);
