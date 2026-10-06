@@ -17,6 +17,10 @@ export type SwarmAgent = {
 	status: AgentStatus;
 	runtimeStatus: RuntimeStatus;
 	health: HealthStatus;
+	// Cached tmux pane liveness from the most recent probe (status tool / heartbeat GC /
+	// stopAgent). Stale-by-design: callers needing FRESH liveness must probe (swarm_agent_status
+	// does, feeding ctx.tmuxAlive). Absent == unknown on legacy/synthetic records.
+	tmuxAlive?: boolean;
 	lastHeartbeatAt?: string;
 	lastSessionStartAt?: string;
 	lastAgentStartAt?: string;

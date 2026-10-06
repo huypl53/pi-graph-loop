@@ -33,10 +33,23 @@ const transcriptRoot = join(scratch, ".pi/mock-llm/transcripts");
 // MOCK_LLM_API_KEY: preflightSpawn probes provider credentials (a spawned pi would exit with
 // "No API key found" for real providers). mock-llm is local and keyless — the conventional
 // <PROVIDER>_API_KEY env (suggested by the probe's own error text) marks it authenticated.
+// PI_SWARM_TMUX_OK=1: the suite's scratch cwd has no terminalManager override, so the driver
+// resolves to tmux and checkTmuxSession gates on $TMUX. Run-suites lanes from a herdr pane have
+// no $TMUX (agent-lifecycle-uat pins the driver the same way); PI_SWARM_TMUX_OK is the
+// documented bypass (pool.ts checkTmuxSession) and does NOT touch the spawn boundary under
+// test (the real child spawn still runs; a fake $TMUX would fail at tmux has-session).
+// PI_SWARM_TERMINAL_MANAGER=tmux (RED-first fix 2026-10-04): the USER's GLOBAL
+// ~/.pi/agent/swarm.yml (e.g. terminalManager: herdr) merges into every scratch cwd that does
+// not set inheritGlobal:false — without this pin the child pi spawns REAL herdr workspaces in
+// the user's live daemon (observed: swarm-agents-swarm-yml-pool-lane-* workspaces + yaml-probe
+// tabs leaked into the shared daemon while suites ran). Env var is precedence #1 in
+// getTerminalDriver, so this pin makes the suite hermetic regardless of host config.
 const env = {
 	...process.env,
 	PI_SWARM_AGENT_ID: "root",
 	PI_SWARM_IS_ROOT: "1",
+	PI_SWARM_TERMINAL_MANAGER: "tmux",
+	PI_SWARM_TMUX_OK: process.env.TMUX ? process.env.PI_SWARM_TMUX_OK : "1",
 	PI_MOCK_LLM_TRANSCRIPTS_DIR: transcriptRoot,
 	MOCK_LLM_API_KEY: "mock",
 };

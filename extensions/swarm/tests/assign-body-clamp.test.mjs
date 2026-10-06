@@ -8,7 +8,7 @@
 // persists a 2 MB mailbox line TODAY.
 //
 // RED symptoms (pre-fix, observed before any source change):
-//   [R1] an oversized note (2KB, cap 1024) on swarm_assign_task SUCCEEDS instead of
+//   [R1] an oversized note (2x the 4KB test cap) on swarm_assign_task SUCCEEDS instead of
 //        throwing MESSAGE_BODY_TOO_LARGE (with formatted size, cap, and env-var name);
 //   [R2] the oversized assignment IS persisted (mailbox JSONL line + st.messages record +
 //        node mutation) instead of rejected with nothing persisted;
@@ -29,7 +29,7 @@
 //     assigns (the clamp adds NO new Pi-runtime boundary crossing).
 //
 // DEVIATION from mailbox-body-clamp.test.mjs (documented in plan §4): this suite pins
-// process.env.PI_SWARM_MESSAGE_BODY_MAX_BYTES = "1024" BEFORE the dynamic import instead of
+// process.env.PI_SWARM_MESSAGE_BODY_MAX_BYTES = "4096" BEFORE the dynamic import instead of
 // SKIPping — env-tunability is already proven by mailbox-body-clamp [6]; this suite pins the
 // assign boundary. Safe because run-suites.mjs isolates each suite in its own process.
 //
@@ -43,7 +43,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 // Pin the cap at process boot, BEFORE the dynamic import below: constants.ts reads
 // PI_SWARM_MESSAGE_BODY_MAX_BYTES at module load.
-const CAP = 1024;
+const CAP = 4096;
 process.env.PI_SWARM_MESSAGE_BODY_MAX_BYTES = String(CAP);
 
 const scratch = mkdtempSync(join(tmpdir(), `swarm-assgnclamp-${process.pid}-`));
@@ -139,7 +139,7 @@ ok("setup: task created", existsSync(taskJsonPath));
 // ===========================================================================
 console.log("\n[R1] oversized note rejected with MESSAGE_BODY_TOO_LARGE");
 {
-	const oversized = "N".repeat(2 * CAP); // 2KB note under the 1KB test cap
+	const oversized = "N".repeat(2 * CAP); // 2x-cap note under the test cap
 	let threw = null;
 	try {
 		await call("swarm_assign_task", { taskId, nodeId: "plan", agentId: "clamp-worker", note: oversized });
@@ -154,8 +154,8 @@ console.log("\n[R1] oversized note rejected with MESSAGE_BODY_TOO_LARGE");
 	ok(
 		"error carries formatted actual size, cap, and env var name",
 		threw !== null &&
-			String(threw.message).includes("2.0KB") &&
-			String(threw.message).includes("1.0KB") &&
+			String(threw.message).includes("8.0KB") &&
+			String(threw.message).includes("4.0KB") &&
 			String(threw.message).includes("PI_SWARM_MESSAGE_BODY_MAX_BYTES"),
 		threw ? `message=${String(threw.message).slice(0, 240)}` : "no throw",
 	);
@@ -233,8 +233,11 @@ console.log("\n[R5] composed-body clamp (site 2): giant task content + tiny note
 	}
 	await call("swarm_update_task", { taskId, nodeId: "plan", status: "done", outcome: "planned", force: true, cwd: scratch });
 	const tf = JSON.parse(readFileSync(taskJsonPath, "utf8"));
-	// Giant acceptanceCriteria folded into the composed body by buildAssignmentBody.
-	tf.acceptanceCriteria = ["Y".repeat(2 * CAP)];
+	// Giant task-content channel folded into the composed body by buildAssignmentBody.
+	// (Pre-merge the giant acceptanceCriteria echo carried this; master's Ergonomics Fix 2
+	// trimmed that echo to a one-liner, so the site-2 repro now seeds giant artifact lists
+	// on the target node — still task.json content, still only boundable post-compose.)
+	tf.nodes.implement.writeArtifacts = Array.from({ length: 24 }, (_, i) => `artifacts/r5-giant-report-${"Z".repeat(Math.ceil((2 * CAP) / 24))}-${i}.md`);
 	writeFileSync(taskJsonPath, JSON.stringify(tf, null, 2));
 
 	// Byte-identity baselines for the reject-nothing-persisted proof (root review round 1):

@@ -31,8 +31,16 @@ import { readMailbox } from "../mailbox.ts";
 import { paths, readState, trace, withLock, writeState } from "../state.ts";
 import { formatSwarmMessageContent } from "../delivery.ts";
 import { maybeRotateTraces } from "../tools/audit.ts";
+import { runAutoStoppedGc } from "../agent-gc-auto.ts";
+import { logSwarmError } from "../errorlog.ts";
 import { pumpRootMailbox } from "../surface.ts";
 import { getSwarmPi } from "./streaks.ts";
+// Post-compaction replay dedupe (task-202610040300): a message whose swarm-visible lifecycle
+// already progressed past DELIVERY (seen/processed/responded — stamped by input_intercept,
+// tool_execution, reply.verify) was fully consumed by the agent; re-surfacing it after session
+// compaction is a duplicate the agent already acted on. Filter it from the pending set.
+const lifecycleProgressedPastDelivery = (r: any): boolean =>
+	Boolean(r.seenAt || r.processingAt || r.respondedAt || (r.response && r.response.status === "verified"));
 
 // Root mailbox pump state. Module-level so the PM pump can be (re)started from outside the
 // session_start hook — notably by `/swarm register here root`, which opts a running session in
@@ -109,6 +117,12 @@ export function armRootPumpWatchdog(ctx: any) {
 		}
 		rootMailboxPumpRunning = true;
 		try {
+			// stopped-agent-records-gc: optional auto-GC (config agentGc.auto, default OFF). runAutoStoppedGc
+			// never rejects (errors route to logSwarmError internally); the residual catch nets the
+			// module-load edge and also routes to the durable error census — no silent swallow.
+			void runAutoStoppedGc((myCtx as any).cwd).catch((err: any) =>
+				logSwarmError(paths((myCtx as any).cwd), "pump-manager", "auto_gc_unexpected_rejection", err),
+			);
 			await pumpRootMailbox(getSwarmPi()!, myCtx, paths((myCtx as any).cwd), "watchdog");
 		} catch (err: any) {
 			// === Issue 11 (rework): error classification with watchdog self-heal ===
@@ -184,7 +198,16 @@ export async function surfaceAgentPending(pi: ExtensionAPI, ctx: any, p: Paths, 
 		st.agentSurfaced ||= {};
 		const surfaced = new Set(st.agentSurfaced[agentId] || []);
 		const pending = Object.values(st.messages || {})
-			.filter((r) => r.to === agentId && !r.ackedAt && r.status !== "dead_letter" && !r.superseded && !surfaced.has(r.id))
+			.filter(
+				(r) =>
+					r.to === agentId &&
+					!r.ackedAt &&
+					r.status !== "dead_letter" &&
+					!r.superseded &&
+					!surfaced.has(r.id) &&
+					// compaction-replay dedupe: already seen/processed/responded by this agent
+					!lifecycleProgressedPastDelivery(r),
+			)
 			.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
 			.slice(0, 10);
 		if (pending.length) {

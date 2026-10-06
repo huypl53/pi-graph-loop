@@ -245,7 +245,8 @@ export async function evaluateTaskGraphStallNudgeLocked(
 //
 //   swarm_update_task(taskId=..., nodeId=..., status=done|failed|blocked, outcome=...)
 //   swarm_send_message(to="root", replyTo="<assignment msg id>", subject=..., body=...)
-//   swarm_ack_message(messageId="<assignment msg id>", status=done, resultMessageId=...)
+//   swarm_ack_message(...)   — legacy lane (PI_SWARM_MINIMAL_PROTOCOL=0) only; retired under
+//                              minimal protocol (task-202610031339 Fix B)
 //
 // The triple is the canonical R16/R19 lesson: the failure mode that R20 fixes is the worker
 // completing real work but never issuing close calls. The body tells the agent, step by step,

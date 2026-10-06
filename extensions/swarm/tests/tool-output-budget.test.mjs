@@ -313,13 +313,18 @@ const textOf = (r) => r?.content?.[0]?.text ?? "";
 			typeof parsed.census.busy === "number" &&
 			typeof parsed.census.stopped === "number",
 	);
-	ok("§2 census counts 1 stopped", parsed.census?.stopped === 1);
+	ok("§2 stoppedHidden counter present", typeof parsed.stoppedHidden === "number");
+	// stopped-agent-records-gc: default view hides stopped — worker-sick is hidden (stoppedHidden=1),
+	// and resurfaces with includeStopped:true.
+	ok("§2 default view hides stopped (stoppedHidden=1, no flood rows)", parsed.census?.stopped === 0 && parsed.stoppedHidden === 1, `census=${JSON.stringify(parsed.census)} hidden=${parsed.stoppedHidden}`);
+	const rInc = await call("swarm_agent_status", { includeStopped: true });
+	const pInc = JSON.parse(textOf(rInc));
 	ok(
-		"§2 attention rows only for non-healthy-idle agents",
-		Array.isArray(parsed.attention) && parsed.attention.some((a) => a.agentId === "worker-sick") && parsed.attention.length <= 3,
-		`got ${parsed.attention?.length}`,
+		"§2 includeStopped:true resurfaces stopped attention row",
+		pInc.census?.stopped === 1 && (pInc.attention || []).some((a) => a.agentId === "worker-sick"),
+		`census=${JSON.stringify(pInc.census)} attn=${pInc.attention?.length}`,
 	);
-	const sick = (parsed.attention || []).find((a) => a.agentId === "worker-sick");
+	const sick = (pInc.attention || []).find((a) => a.agentId === "worker-sick");
 	ok("§2 attention row has why", typeof sick?.why === "string" && sick.why.length > 0);
 	ok("§2 attention row has paneAlive rename", !!sick && "paneAlive" in sick && !("tmuxAlive" in sick));
 	ok("§2 attention row has target rename", !!sick && "target" in sick && !("tmuxTarget" in sick));
@@ -331,11 +336,11 @@ const textOf = (r) => r?.content?.[0]?.text ?? "";
 	);
 	ok("§2 hint present", typeof parsed.hint === "string");
 
-	// targeted query → full row regardless of view
+	// targeted query → slim row by default (§8, 2026-10-03); full row only via view:"full"
 	const rt = await call("swarm_agent_status", { agentId: "worker-03" });
 	const row = JSON.parse(textOf(rt));
-	const fullRow = row.agents?.[0] || row;
-	ok("§2 targeted query returns full row (pendingMessages etc.)", fullRow.agentId === "worker-03" && "pendingMessages" in fullRow);
+	const slimRow = row.agents?.[0] || row;
+	ok("§2 targeted query returns slim row (details keep full)", slimRow.agentId === "worker-03" && !("pid" in slimRow) && Array.isArray(rt.details?.agents));
 
 	// view:"full" legacy reachability
 	const rv = await call("swarm_agent_status", { view: "full" });
@@ -365,7 +370,11 @@ const textOf = (r) => r?.content?.[0]?.text ?? "";
 	const parsed = JSON.parse(text);
 	ok("§3 swarmId kept", typeof parsed.swarmId === "string");
 	ok("§3 driver top-level field", typeof parsed.driver === "string");
-	ok("§3 agents rows compact", Array.isArray(parsed.agents) && parsed.agents.length === 11);
+	// stopped-agent-records-gc: default phonebook hides the stopped agent (10 live rows);
+	// includeStopped:true resurfaces all 11.
+	ok("§3 agents rows compact (default hides stopped)", Array.isArray(parsed.agents) && parsed.agents.length === 10);
+	const r3i = await call("swarm_list_agents", { includeStopped: true });
+	ok("§3 includeStopped:true resurfaces stopped", JSON.parse(textOf(r3i)).agents.length === 11);
 	const a0 = parsed.agents[0];
 	for (const k of ["id", "roleFirstLine", "roleKind", "status", "driver", "target", "slot"]) {
 		ok(`§3 row keeps ${k}`, k in a0);
@@ -530,6 +539,70 @@ const textOf = (r) => r?.content?.[0]?.text ?? "";
 	// the real git stat shape (no summary line) falls back to line count
 	const noTotal = fmt({ available: true, stat: " src/a.ts | 10 ++++--" });
 	ok("F2 stat without summary line → files = line count", /files: 1 /.test(noTotal), JSON.stringify(noTotal));
+}
+
+// ============================================================
+// §8 targeted agentId query — compact row by default (tool-output-slim round 2, 2026-10-03)
+// Live evidence (root session, post-unread-drain-fix): swarm_agent_status({agentId}) — the most
+// routine per-agent supervision call — fell back to the legacy 24-field pretty-printed row
+// (~1.1KB): duplicated fields (tmuxAlive+paneAlive, tmuxTarget+target), dead counters under
+// minimal protocol (unackedMessages/ackMissing), ISO timestamps instead of ages, pid/session/
+// shutdown plumbing. The targeted query must return the SAME slim vocabulary as attention rows,
+// with view:"full" as the explicit escape hatch (legacy envelope preserved there).
+// ============================================================
+{
+	console.log("\n--- §8 targeted agentId query — compact default ---");
+	const r = await call("swarm_agent_status", { agentId: "worker-03" });
+	const text = textOf(r);
+	console.log(`      [baseline-capture] targeted query bytes: ${bytes(text)}`);
+	ok("§8 budget: targeted agentId row ≤ 450B", bytes(text) <= 450, `got ${bytes(text)}B`);
+
+	const parsed = JSON.parse(text);
+	const row = parsed.agents?.[0] || parsed;
+	ok("§8 envelope is agents[0] slim row", parsed.agents?.length === 1 && row.agentId === "worker-03");
+	// same vocabulary as attention rows (renamed fields, no duplicates)
+	ok("§8 row uses paneAlive (no tmuxAlive duplicate)", "paneAlive" in row && !("tmuxAlive" in row));
+	ok("§8 row uses target (no tmuxTarget duplicate)", "target" in row && !("tmuxTarget" in row));
+	ok("§8 row has taskProgressState + why-style health signal", typeof row.taskProgressState === "string");
+	ok("§8 row has driver + slot", row.driver === "tmux" && typeof row.slot === "string");
+	// human ages, not ISO timestamps
+	ok("§8 row uses heartbeatAge (no ISO lastHeartbeatAt)", "heartbeatAge" in row && !("lastHeartbeatAt" in row));
+	// dead counters under minimal protocol are gone
+	ok(
+		"§8 dead counters dropped (unackedMessages/ackMissing)",
+		!("unackedMessages" in row) && !("ackMissing" in row),
+	);
+	// debt counters only when non-zero
+	ok(
+		"§8 debt counters present only when non-zero",
+		["pendingMessages", "deadLetters", "responseMissing", "mailboxDelivered", "responsesVerified", "blockedFromReuse"].every(
+			(k) => !(k in row) || row[k] > 0,
+		),
+		Object.keys(row).join(","),
+	);
+	// plumbing fields gone from the slim row
+	ok(
+		"§8 plumbing fields dropped (pid/session/shutdown ISOs)",
+		["pid", "lastSessionStartAt", "lastAgentStartAt", "lastShutdownAt", "lastToolAt", "lastHeartbeatAt", "lastAgentSettledAt"].every(
+			(k) => !(k in row),
+		),
+		Object.keys(row).join(","),
+	);
+
+	// view:"full" stays the legacy escape hatch for targeted queries too
+	const rf = await call("swarm_agent_status", { agentId: "worker-03", view: "full" });
+	const rowF = JSON.parse(textOf(rf)).agents?.[0] || {};
+	ok(
+		"§8 targeted + view:full keeps legacy 24-field row",
+		rowF.agentId === "worker-03" && "pendingMessages" in rowF && "lastHeartbeatAt" in rowF,
+		Object.keys(rowF).join(","),
+	);
+	// verbose:true ≡ view:"full" for targeted queries
+	ok(
+		"§8 schema description steers: full is the escape hatch",
+		/view:"full"/.test(tools.swarm_agent_status.parameters?.properties?.view?.description || "") ||
+			/full/.test(tools.swarm_agent_status.description || ""),
+	);
 }
 
 // cleanup

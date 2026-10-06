@@ -1,5 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerAgent, stopAgent } from "../agents.ts";
+import { DEFAULT_STOPPED_OLDER_THAN_MS, stoppedGcCandidates, applyStoppedGc } from "../agent-gc.ts";
+import { loadTaskGraphsForGc } from "../agent-gc-io.ts";
+import { logSwarmError } from "../errorlog.ts";
 import { SWARM_GUEST_ID } from "../constants.ts";
 import { expected } from "../errorlog.ts";
 import { startRootPump } from "../hooks.ts";
@@ -137,6 +140,47 @@ export async function handleRegisterCommand(rest: string[], ctx: any, p: Paths, 
 
 export async function handleDeregisterCommand(rest: string[], ctx: any, p: Paths, pi: ExtensionAPI): Promise<void> {
 	const flags = parseFlags(rest);
+	// stopped-agent-records-gc: --purge-stopped = batch purge of gated stopped records (root-only).
+	// Dry-run by default; --apply commits. Reuses the same pure predicate as swarm_gc purgeStopped.
+	if (flags["purge-stopped"]) {
+		const me = currentAgentId();
+		if (me !== "root") {
+			ctx.ui.notify("deregister --purge-stopped is root-only: run it in the PM session (PI_SWARM_IS_ROOT=1 or /swarm register here root)", "warning");
+			return;
+		}
+		const hours = Number(flags["older-than-hours"]);
+		const stoppedOlderThanMs = Number.isFinite(hours) && hours >= 0 ? hours * 3_600_000 : DEFAULT_STOPPED_OLDER_THAN_MS;
+		const apply = flags.apply === true;
+		try {
+			const out = await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const taskGraphs = await loadTaskGraphsForGc(p);
+				const candidates = stoppedGcCandidates(st, { nowMs: Date.now(), taskGraphs, stoppedOlderThanMs });
+				const applied = applyStoppedGc(st, candidates, { dryRun: !apply });
+				if (apply) await writeState(p, st);
+				return { applied, candidates };
+			});
+			await trace(p, "gc.stopped_purge", {
+				via: "cli.deregister",
+				dryRun: !apply,
+				stoppedOlderThanMs,
+				purged: out.applied.purged,
+				blocked: out.candidates.filter((c) => !c.eligible).map((c) => ({ agentId: c.agentId, blocked: c.blocked })),
+			});
+			const blockedLine = out.candidates
+				.filter((c) => !c.eligible)
+				.map((c) => `${c.agentId} (${c.blocked.join("/")})`)
+				.join("; ");
+			ctx.ui.notify(
+				`Stopped-agent purge ${apply ? "applied" : "dry run"}: ${out.applied.purged.length} purged${out.applied.purged.length ? `: ${out.applied.purged.join(", ")}` : ""}.${blockedLine ? ` Blocked: ${blockedLine}.` : ""}${apply ? "" : " Pass --apply to commit."}`,
+				"info",
+			);
+		} catch (err: any) {
+			await logSwarmError(p, "commands.registration", "purge_stopped_failed", err, { stoppedOlderThanMs, apply });
+			ctx.ui.notify(`Stopped-agent purge failed: ${err?.message || err}`, "warning");
+		}
+		return;
+	}
 	const target = flags.rest.shift();
 	if (!target) {
 		ctx.ui.notify(

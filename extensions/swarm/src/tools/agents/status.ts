@@ -14,6 +14,7 @@ import { paths, readState, trace } from "../../state.ts";
 import { isDeliveryFailureRetryable } from "../../delivery.ts";
 import { humanAge, now, safeId, textResult } from "../../utils.ts";
 import { responseMissingRecords, verifiedResponseCount } from "../../mailbox.ts";
+import { filterAgentRows } from "../../agent-gc.ts";
 import { wrapSwarmToolInvocation } from "../wrapper.ts";
 
 // === tool-output-slim §3 — phonebook row (first role line, ≤80 bytes) ===
@@ -40,15 +41,76 @@ function agentSlot(agent: any): string {
 	return `${agent.provider || "?"}/${agent.model || "?"}`;
 }
 
+// tool-output-slim §8 (2026-10-03): compact row for targeted agentId queries — same vocabulary as
+// attention rows. Renamed fields (paneAlive/target), human ages (heartbeatAge/settledAge),
+// dead counters dropped (unackedMessages/ackMissing are always 0 under minimal protocol), debt
+// counters only when non-zero, plumbing ISOs/pid gone. view:"full" keeps the legacy 24-field row.
+function slimStatusRow(row: any): Record<string, unknown> {
+	const slim: Record<string, unknown> = {
+		agentId: row.agentId,
+		taskProgressState: row.taskProgressState,
+		status: row.status,
+		runtimeStatus: row.runtimeStatus,
+		health: row.health,
+		paneAlive: row.paneAlive,
+		driver: row.driver,
+		target: row.target,
+		heartbeatAge: row.lastHeartbeatAgeSec,
+		slot: row.slot,
+	};
+	if (row.paused) slim.paused = true;
+	if (row.runtimeStatus === "busy" || row.runtimeStatus === "tool_running") slim.lastToolAge = row.lastToolAt ? humanAge(row.lastToolAt) : undefined;
+	if (row.lastHeartbeatAgeSec === undefined) delete slim.heartbeatAge;
+	const settledAgeSec = row.lastAgentSettledAt ? Math.round((Date.now() - new Date(row.lastAgentSettledAt).getTime()) / 1000) : undefined;
+	if (settledAgeSec !== undefined) slim.settledAge = settledAgeSec;
+	// debt counters only when non-zero; `why` mirrors the attention-row sentence
+	if (row.pendingMessages > 0) slim.pendingMessages = row.pendingMessages;
+	if (row.deadLetters > 0) slim.deadLetters = row.deadLetters;
+	if (row.responseMissing > 0) slim.responseMissing = row.responseMissing;
+	if (row.responsesVerified > 0) slim.responsesVerified = row.responsesVerified;
+	if (row.blockedFromReuse) slim.blockedFromReuse = true;
+	if (row.unackedMessages > 0) slim.unackedMessages = row.unackedMessages;
+	if (row.ackMissing > 0) slim.ackMissing = row.ackMissing;
+	slim.why = whyOfRow(row);
+	return slim;
+}
+
+// why: first matching derived fact wins (one sentence) — shared by attention rows and slim
+// targeted rows so both views speak the same health vocabulary.
+function whyOfRow(row: any): string {
+	if (row.status === "stopped" && row.paneAlive) return "pane alive but agent stopped";
+	if (row.status === "stopped") return "agent stopped";
+	if (row.taskProgressState === "dead") {
+		// task-202610040001: tool-running agents never get the stale-heartbeat sentence —
+		// either the pane died mid-tool (rare, truthful) or the verdict was pane-probed.
+		if (row.runtimeStatus === "busy" || row.runtimeStatus === "tool_running")
+			return row.paneAlive ? "tool running (heartbeat deferred)" : "pane died mid-tool";
+		return "no pane / stale heartbeat";
+	}
+	if (row.deadLetters > 0) return `${row.deadLetters} dead-letter message(s)`;
+	if (row.responseMissing > 0) return `${row.responseMissing} response(s) missing (blocked from reuse)`;
+	if (row.pendingMessages > 0) return `${row.pendingMessages} pending message(s)`;
+	if (row.paused) return "paused";
+	if (row.taskProgressState === "stalled") return "stalled (active task, no recent tool activity)";
+	if (row.taskProgressState === "completed_unverified") return "artifact fresh but result unverified";
+	// task-202610040400: pane-alive evidence outranks heartbeat staleness, so an idle agent with
+	// a stale heartbeat no longer lands in dead. Keep the stale-hb observation visible (truthfully
+	// scoped) instead of dropping it on the deferred shapes — slim/targeted rows only; the census
+	// view stays quiet for healthy-idle agents (tool-output-budget §2).
+	if (row.taskProgressState === "awaiting_input" && row.paneAlive && row.lastHeartbeatAgeSec > 60)
+		return "idle (pane alive, heartbeat stale)";
+	return row.taskProgressState;
+}
+
 export function registerAgentStatusTools(pi: ExtensionAPI): void {
 	pi.registerTool(
 		defineTool({
 			name: "swarm_agent_status",
 			label: "Swarm Agent Status",
 			description:
-				"Report runtime/liveness status for swarm agents using pi lifecycle state, tmux pane liveness, and mailbox message counts. Default view is a compact attention/census summary; view:'full' (or verbose:true) returns the legacy 24-field rows; pass agentId for a targeted full-row query.",
+				"Report runtime/liveness status for swarm agents using pi lifecycle state, tmux pane liveness, and mailbox message counts. Default view is a compact attention/census summary and is the correct shape for routine supervision; view:'full' (or verbose:true) returns the legacy 24-field rows — reserve it for debugging ONE agent (pass agentId with it); pass agentId alone for a targeted full-row query.",
 			promptGuidelines: [
-				"Use `swarm_agent_status` to inspect which swarm agents are idle, busy, tool-running, stopped, alive in tmux, or have pending/unacked/dead-letter messages. The default attention view summarizes the whole swarm; pass agentId (or view:'full') for per-agent detail.",
+				"Use `swarm_agent_status` to inspect which swarm agents are idle, busy, tool-running, stopped, alive in tmux, or have pending/unacked/dead-letter messages. The default attention view summarizes the whole swarm; use view:'full' only when debugging a specific agent (pass agentId).",
 			],
 			parameters: Type.Object({
 				agentId: Type.Optional(Type.String({ description: "Optional agent id. If omitted, returns all agents." })),
@@ -59,6 +121,12 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 					}),
 				),
 				verbose: Type.Optional(Type.Boolean({ description: "Legacy alias for view:'full'. Defaults to false." })),
+				includeStopped: Type.Optional(
+					Type.Boolean({
+						description:
+							"Include stopped agents in census/attention (default false — routine supervision shows only live agents). view:'full' implies true; targeted agentId queries always include the row.",
+					}),
+				),
 			}),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_agent_status", async () => {
@@ -130,22 +198,39 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						});
 					}
 					await trace(p, "agent.status.read", { agentId: filter, count: rows.length });
-					// === tool-output-slim §2 — attention/census default view ===
-					// Targeted queries and view:"full"/verbose:true keep the legacy envelope.
-					const view =
-						params.agentId || params.view === "full" || params.verbose === true
-							? "full"
-							: params.view === "census"
-								? "census"
-								: "attention";
+					// stopped-agent-records-gc: default view hides stopped rows unless includeStopped/
+					// view:"full"/targeted agentId. Counts + hidden counter computed from the full set.
+					const includeStopped = params.includeStopped === true || params.view === "full" || params.verbose === true;
+					const stoppedTotal = rows.filter((r) => r.status === "stopped").length;
+					const visibleRows = filterAgentRows(rows as any[], {
+						includeStopped,
+						view: params.view,
+						agentId: params.agentId,
+					}) as typeof rows;
+					// === tool-output-slim §2 + §8 — view resolution ===
+					// view:"full"/verbose:true → legacy 24-field rows (explicit escape hatch). Everything else
+					// is compact: no-filter calls get the attention/census summary; targeted agentId queries
+					// get ONE slim row (same vocabulary as attention rows) — the routine per-agent
+					// supervision call no longer pays the 24-field ~1.1KB envelope by default.
+					const viewFull = params.view === "full" || params.verbose === true;
+					const view = viewFull ? "full" : params.view === "census" ? "census" : "attention";
 					if (view === "full") {
 						return textResult(JSON.stringify({ count: rows.length, agents: rows }, null, 2), { agents: rows });
 					}
+					if (filter) {
+						// §8 targeted query: slim row(s) — normally exactly one agent (any status, incl. stopped)
+						const slimRows = rows.map((r: any) => slimStatusRow(r));
+						return textResult(JSON.stringify({ count: slimRows.length, agents: slimRows }), { agents: rows });
+					}
+					// stopped-agent-records-gc: census/attention run over VISIBLE rows only; hidden stopped
+					// count surfaces truthfully as stoppedHidden (no flood rows).
+					const visRows = visibleRows;
+					const stoppedHidden = Math.max(0, stoppedTotal - visRows.filter((r) => r.status === "stopped").length);
 					// Census buckets from taskProgressState. Healthy-idle = active|awaiting_input agents with
 					// no pending/dead-letter/response debt. Everything else lands in attention.
 					const census = { idle: 0, busy: 0, stopped: 0, stalled: 0 };
 					const attention: Array<Record<string, unknown>> = [];
-					for (const row of rows as any[]) {
+					for (const row of visRows as any[]) {
 						const unhealthy =
 							row.status === "stopped" ||
 							row.paused ||
@@ -162,18 +247,7 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						else if (row.taskProgressState === "stalled" || row.taskProgressState === "idle_blocked") census.stalled++;
 						else census.idle++;
 						if (!unhealthy) continue;
-						// why: first matching derived fact wins (one sentence).
-						let why: string;
-						if (row.status === "stopped" && row.paneAlive) why = "pane alive but agent stopped";
-						else if (row.status === "stopped") why = "agent stopped";
-						else if (row.taskProgressState === "dead") why = "no pane / stale heartbeat";
-						else if (row.deadLetters > 0) why = `${row.deadLetters} dead-letter message(s)`;
-						else if (row.responseMissing > 0) why = `${row.responseMissing} response(s) missing (blocked from reuse)`;
-						else if (row.pendingMessages > 0) why = `${row.pendingMessages} pending message(s)`;
-						else if (row.paused) why = "paused";
-						else if (row.taskProgressState === "stalled") why = "stalled (active task, no recent tool activity)";
-						else if (row.taskProgressState === "completed_unverified") why = "artifact fresh but result unverified";
-						else why = row.taskProgressState;
+						// why: shared whyOfRow (one sentence; same vocabulary as slim targeted rows)
 						const slim: Record<string, unknown> = {
 							agentId: row.agentId,
 							taskProgressState: row.taskProgressState,
@@ -195,16 +269,17 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						if (row.ackMissing > 0) slim.ackMissing = row.ackMissing;
 						if (row.responsesVerified > 0) slim.responsesVerified = row.responsesVerified;
 						if (row.paused) slim.paused = true;
-						slim.why = why;
+						slim.why = whyOfRow(row);
 						attention.push(slim);
 					}
-					const hint =
-						census.stopped > 0
+					const hint = stoppedHidden > 0
+						? `${stoppedHidden} stopped agent(s) hidden from this view (includeStopped:true to show; root: /swarm deregister --purge-stopped or swarm_gc purgeStopped to purge aged stopped records).`
+						: census.stopped > 0
 							? `${census.stopped} stopped agent(s) need attention; use view:"full" or agentId for detail.`
 							: attention.length
 								? `${attention.length} agent(s) need attention; use view:"full" or agentId for detail.`
 								: 'All agents healthy; use view:"full" or agentId for detail.';
-					return textResult(JSON.stringify({ census, attention, hint }), { census, attention });
+					return textResult(JSON.stringify({ census, stoppedHidden, attention, hint }), { census, attention });
 				});
 			},
 		}),
@@ -217,8 +292,12 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 			description:
 				"List pi swarm agents for this project as a compact phonebook: ids, role first lines, status, driver target, slot, and mailbox paths.",
 			promptGuidelines: ["Use `swarm_list_agents` before sending swarm messages when you are unsure which agents exist."],
-			parameters: Type.Object({}),
-			async execute(_id, _params, _signal, _onUpdate, ctx) {
+			parameters: Type.Object({
+				includeStopped: Type.Optional(
+					Type.Boolean({ description: "Include stopped agents in the phonebook (default false)." }),
+				),
+			}),
+			async execute(_id, params, _signal, _onUpdate, ctx) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_list_agents", async () => {
 					const p = paths(ctx.cwd);
 					const st = await readState(p, ctx.cwd);
@@ -226,7 +305,9 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 					// tool-output-slim §3: compact phonebook rows. details carries the SAME compact rows —
 					// the full-agent-array details leak (multi-MB per session) dies here. Legacy full records
 					// remain reachable per-agent via swarm_agent_status({agentId, view:"full"}).
-					const rows = Object.values(st.agents).map((agent) => {
+					const rows = Object.values(st.agents)
+					.filter((agent) => params.includeStopped === true || agent.status !== "stopped")
+					.map((agent) => {
 						const { driver: agentDriver, target } = agentDriverAndTarget(agent);
 						// tool-output-slim §3 (root review trim): `mailbox` dropped from default rows —
 						// it is derivable as .pi/swarm/mailboxes/<id>.jsonl; full records stay reachable

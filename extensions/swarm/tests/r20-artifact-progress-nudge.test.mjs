@@ -324,7 +324,12 @@ console.log("\n=== R20-S1: artifact detected + node open + agent settled idle (R
 	const body = mailboxMessages[mailboxMessages.length - 1]?.body ?? "";
 	ok("C-R20-8: body contains swarm_update_task", body.includes("swarm_update_task"), "no update_task in body");
 	ok("C-R20-8: body contains swarm_send_message", body.includes("swarm_send_message"), "no send_message in body");
-	ok("C-R20-8: body contains swarm_ack_message", body.includes("swarm_ack_message"), "no ack_message in body");
+	if (process.env.PI_SWARM_MINIMAL_PROTOCOL === "0") {
+		ok("C-R20-8: body contains swarm_ack_message (legacy gate=0 lane)", body.includes("swarm_ack_message"), "no ack_message in body");
+	} else {
+		passed++;
+		console.log("  SKIP (minimal protocol by-design): C-R20-8 ack line now gate=0 only (task-202610031339 Fix B)");
+	}
 	ok("C-R20-8: body contains replyTo placeholder", body.includes("replyTo="), "no replyTo placeholder in body");
 	await rm(dir, { recursive: true, force: true });
 }

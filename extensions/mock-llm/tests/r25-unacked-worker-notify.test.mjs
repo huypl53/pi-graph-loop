@@ -137,10 +137,17 @@ writeFileSync(statePath, JSON.stringify(st, null, 2) + "\n");
 // env hygiene (strip PI_SWARM_IS_ROOT; set PI_SWARM_AGENT_ID=r25-worker). Without this
 // the engine reads the repo's real swarm state (worker absent), double-loads swarm_audit
 // (exit 1), and the parent's root identity env collides.
+// PI_SWARM_TERMINAL_MANAGER=tmux (test-hermeticity-pin-unpinned-lanes 2026-10-04): the
+// USER's GLOBAL ~/.pi/agent/swarm.yml (e.g. terminalManager: herdr) merges into every
+// scratch cwd that does not set inheritGlobal:false — without this pin the child pi
+// spawns REAL herdr workspaces in the user's live daemon. Env var is precedence #1 in
+// getTerminalDriver, so this pin makes the lane hermetic regardless of host config.
+// Same pattern as swarm-yml-pool.test.mjs.
 const env = { ...process.env };
 delete env.PI_SWARM_IS_ROOT;
 env.PI_SWARM_AGENT_ID = "r25-worker";
 env.PI_MOCK_LLM_TRANSCRIPTS_DIR = join(scratch, ".pi/mock-llm/transcripts");
+env.PI_SWARM_TERMINAL_MANAGER = "tmux";
 
 const r = spawnSync(
 	"pi",

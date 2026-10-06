@@ -30,7 +30,7 @@ src/nudges/goal-epoch.ts       swarm-level idle epoch + goal-floor emission
 src/nudges/graph-advance.ts    graph-advance / stall / artifact / heartbeat GC nudges
 src/nudges/status-predicates.ts pure predicates over TaskState["status"]
 src/surface.ts                 facade — root-facing message surface machinery (canonical logic in src/surface/)
-src/issues/controller.ts       sequential issue auto-run: activate/observe/fence/safe-idle + context hints
+src/issues/controller.ts       sequential issue auto-run: activate/observe/fence/safe-idle + live queue append/auto-continue + context hints
 src/issues/state.ts            issueRun queue guards/updates (activate, terminal, pause/resume)
 src/issues/source.ts           issues.yml parsing/validation (canonical validateIssuesSource)
 src/issues/snapshot.ts         immutable activation snapshots (bounded, sha256-recorded)

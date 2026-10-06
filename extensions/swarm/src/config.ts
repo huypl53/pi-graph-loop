@@ -33,7 +33,7 @@ export type SwarmConfigSource = "swarm.yml" | "swarm.yaml" | "global-swarm.yml" 
 
 // Needs "fileURLToPath" for bundledRolePlaybookPath (see bottom of file).
 
-export type ConfigKey = "modelPool" | "rotation" | "defaultModel" | "defaultProvider" | "terminalManager" | "inheritGlobal" | "roles";
+export type ConfigKey = "modelPool" | "rotation" | "defaultModel" | "defaultProvider" | "terminalManager" | "inheritGlobal" | "roles" | "agentGc";
 
 export type SourceLayer = "global" | "project.swarm.yml" | "default";
 
@@ -138,7 +138,7 @@ export function _clearGlobalYmlMemoForTests() {
 	globalYmlMemoHome = undefined;
 }
 
-const RECOGNIZED_KEYS: ConfigKey[] = ["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal", "roles"];
+const RECOGNIZED_KEYS: ConfigKey[] = ["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal", "roles", "agentGc"];
 
 // Layered merge: global (lowest yml precedence) + project (highest yml precedence).
 // Per-top-level-key winner-takes-all. modelPool is whole-array replacement.

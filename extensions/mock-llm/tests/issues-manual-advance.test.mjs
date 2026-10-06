@@ -7,6 +7,10 @@
  * handleIssuesCommand, drives the REAL pump tick (no auto-advance), asserts exactly one
  * issues-manual-wait notice, then resume-advances through the real command.
  */
+// No PI_SWARM_TERMINAL_MANAGER pin needed: this lane is in-process only
+// (imports swarm/index.ts directly, never spawns a pi subprocess), so the
+// terminal driver is irrelevant. See swarm-yml-pool.test.mjs for the
+// spawn-based pin pattern.
 import { existsSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";

@@ -30,6 +30,7 @@ import { markGoalDoneCore } from "../primitives/goal-core.ts";
 import { allEffectiveIdleAgents } from "../nudges/goal-epoch.ts";
 import { deliverMessageLocked } from "../mailbox.ts";
 import { shouldAutoAdvance, resolveIssueWorkflow } from "./config.ts";
+import { findPriorCompletions } from "./dedup.ts";
 import { logSwarmError } from "../errorlog.ts";
 
 export type ControllerDeps = {
@@ -316,6 +317,24 @@ export async function observeLinkedTaskLocked(
 		const gm = guardMarkIssueTerminal(st, entry.issueId, "done");
 		if (!gm.ok) return { acted: false }; // already-terminal replay — no-op
 		await writeState(p, st);
+		// issues-sequencer-restart-dedup: append to the completion ledger so future
+		// /swarm issues start runs can dedup this issue by content-hash. Failure to
+		// append is logged but does NOT block the done transition (the run state is
+		// already durable; the ledger is a dedup aid, not a source of truth).
+		try {
+			const { appendJsonl } = await import("../state.ts");
+			await appendJsonl(p.completionsLedger, {
+				issueId: entry.issueId,
+				sourceHash: entry.sourceHash,
+				priorRunId: run.runId,
+				completedAt: new Date().toISOString(),
+			});
+		} catch (err: unknown) {
+			await logSwarmError(ctx.cwd, "issues-controller", "completion_ledger_append_failed", err, {
+				issueId: entry.issueId,
+				runId: run.runId,
+			});
+		}
 		// advancement-mode seam: manual mode holds the advance for the human (exactly-once
 		// notice) — but ONLY when a queued successor exists; completion is not advancement
 		// (guardCompleteRun still fires on an exhausted queue, in both modes).
@@ -387,10 +406,97 @@ export async function observeLinkedTaskLocked(
 	return { acted: false };
 }
 
+/** Start an opt-in follow-on run while the caller holds the pump/command lock. */
+export async function autoContinueCompletedRunLocked(p: Paths, ctx: { cwd: string }, st: any, deps?: Partial<ControllerDeps>): Promise<boolean> {
+	const priorRun = getIssueRun(st);
+	if (priorRun.status !== "complete" || priorRun.autoContinueDisabled) return false;
+	if (priorRun.queue.some((q: any) => ["failed", "blocked", "cancelled"].includes(q.status))) return false;
+	const { resolveIssueAutoContinue, resolveIssueAutoContinueCap } = await import("./config.ts");
+	let enabled = false;
+	let cap = 3;
+	try {
+		enabled = resolveIssueAutoContinue(ctx.cwd);
+		if (!enabled) return false;
+		cap = resolveIssueAutoContinueCap(ctx.cwd);
+	} catch (err: unknown) {
+		await logSwarmError(ctx.cwd, "issues-controller", "auto_continue_config_failed", err, { runId: priorRun.runId });
+		return false;
+	}
+	const count = priorRun.autoContinueCount ?? 0;
+	if (count >= cap) {
+		if (!priorRun.autoContinueCapNotified) {
+			const d = deps?.deliverMessageLocked ?? deliverMessageLocked;
+			await d(deps?.pi as any, ctx.cwd, p, st, { to: "root", body: "auto-continue paused: cap reached", subject: "[issues] auto-continue paused", idempotencyKey: `issues-auto-continue-cap:${priorRun.runId}` });
+			await trace(p, "issues.auto_continue_paused", { runId: priorRun.runId, reason: "cap_reached", cap });
+			priorRun.autoContinueCapNotified = true;
+			await writeState(p, st);
+		}
+		return false;
+	}
+	const { readFile } = await import("node:fs/promises");
+	const { validateIssuesSource } = await import("./source.ts");
+	let text: string;
+	try {
+		text = await readFile(p.root + "/issues.yml", "utf8");
+	} catch (err: unknown) {
+		await logSwarmError(ctx.cwd, "issues-controller", "auto_continue_source_read_failed", err, { runId: priorRun.runId });
+		return false;
+	}
+	const validated = validateIssuesSource(text);
+	if (!validated.ok) return false;
+	const prior = await findPriorCompletions(p.root, validated.issues.map((i) => ({ id: i.id, sourceHash: sourceHashOf(i) })));
+	const queue = validated.issues.map((i) => {
+		const sourceHash = sourceHashOf(i);
+		const completion = prior.get(i.id);
+		return { issueId: i.id, title: i.title, sourceHash, status: completion?.sourceHash === sourceHash ? "done" as const : "queued" as const,
+			reason: completion?.sourceHash === sourceHash ? `already completed in run ${completion.priorRunId}` : undefined,
+			completedAt: completion?.sourceHash === sourceHash ? completion.completedAt : undefined };
+	}).filter((q) => q.status === "queued");
+	if (!queue.length) return false;
+	const runId = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+	const { resolveIssueAdvancement, resolveIssueWorkflow } = await import("./config.ts");
+	st.issueRun = { status: "running", runId, queue, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), advancementMode: resolveIssueAdvancement(ctx.cwd), workflowMode: resolveIssueWorkflow(ctx.cwd), autoContinueCount: count + 1, autoContinueDisabled: false };
+	await writeState(p, st);
+	await activateIssueLocked(p, ctx, st, runId, validated.issues.find((i) => i.id === queue[0].issueId)!, deps);
+	await writeState(p, st);
+	await trace(p, "issues.auto_continue_started", { priorRunId: priorRun.runId, runId, issueId: queue[0].issueId, count: count + 1 });
+	const d = deps?.deliverMessageLocked ?? deliverMessageLocked;
+	await d(deps?.pi as any, ctx.cwd, p, st, { to: "root", body: `[issues] auto-continue started run ${runId}; "${queue[0].issueId}" active.`, subject: "[issues] auto-continue started", idempotencyKey: `issues-auto-continue:${priorRun.runId}` });
+	return true;
+}
+
 /** Advance to the next queued issue when the current one completed safely. */
 export async function advanceNextIssueLocked(p: Paths, ctx: { cwd: string }, st: any, deps?: Partial<ControllerDeps>): Promise<boolean> {
 	const run = getIssueRun(st);
 	if (run.status !== "running") return false;
+	// Live queue refresh: each advance decision re-reads the authoritative source and
+	// appends unseen, not-already-completed entries in file order. Existing entries (even
+	// dedup-skipped terminal entries) are never duplicated by id.
+	try {
+		const { readFile } = await import("node:fs/promises");
+		const { validateIssuesSource } = await import("./source.ts");
+		const text = await readFile(p.root + "/issues.yml", "utf8");
+		const validated = validateIssuesSource(text);
+		if (!validated.ok) throw new Error(`issues.yml invalid (${validated.errors.length} error(s))`);
+		const candidates = validated.issues.map((issue) => ({ id: issue.id, sourceHash: sourceHashOf(issue) }));
+		const prior = await findPriorCompletions(p.root, candidates);
+		const present = new Set(run.queue.map((entry: any) => entry.issueId));
+		for (const issue of validated.issues) {
+			if (present.has(issue.id)) continue;
+			const sourceHash = sourceHashOf(issue);
+			const completion = prior.get(issue.id);
+			if (completion?.sourceHash === sourceHash) continue;
+			run.queue.push({ issueId: issue.id, title: issue.title, sourceHash, status: "queued" });
+			present.add(issue.id);
+			await trace(p, "issues.queue_appended", { runId: run.runId, issueId: issue.id, sourceHash });
+		}
+	} catch (err: unknown) {
+		run.status = "paused";
+		run.updatedAt = new Date().toISOString();
+		await writeState(p, st);
+		await logSwarmError(ctx.cwd, "issues-controller", "queue_refresh_failed", err, { runId: run.runId });
+		return false;
+	}
 	const next = run.queue.find((q) => q.status === "queued");
 	if (!next) {
 		// whole queue done → complete

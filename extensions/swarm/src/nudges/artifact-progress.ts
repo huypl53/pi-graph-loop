@@ -19,6 +19,8 @@ import type { Paths, SwarmState, TaskPaths, TaskState } from "../types.ts";
 import { deliverMessageLocked, findIdempotentMessage } from "../mailbox.ts";
 import { logSwarmError } from "../errorlog.ts";
 import { readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "../state.ts";
+import { outgoingOutcomes } from "../taskgraph/graph.ts";
+import { PI_SWARM_MINIMAL_PROTOCOL } from "../constants.ts";
 
 export async function evaluateArtifactProgressNudgeLocked(
 	pi: ExtensionAPI,
@@ -139,6 +141,31 @@ export async function evaluateArtifactProgressNudgeLocked(
 					}).catch(() => {});
 					// Lightweight root escalation: durable mailbox delivery so the root
 					// sees the "node stalled with N ignored nudges" line on its next pump tick.
+					// F-2 follow-up: the escalation path is closure-aware too — same re-read
+					// as the nudge path (Fix C) so a node that closed mid-sweep never escalates.
+					try {
+						const freshCap = await readTaskState(tp.taskJson);
+						const freshCapNode = freshCap?.nodes?.[nodeId];
+						if (freshCapNode && (freshCapNode.status === "done" || freshCapNode.status === "failed" || freshCapNode.status === "skipped")) {
+							await trace(p, "worker.artifact_progress_race_lost", {
+								taskId: task.taskId,
+								nodeId,
+								assignee: node.assignee,
+								snapshotStatus: node.status,
+								diskStatus: freshCapNode.status,
+								path: "cap-escalation",
+							}).catch(() => {});
+							continue;
+						}
+					} catch (err: any) {
+						if (err?.code !== "ENOENT") {
+							await logSwarmError(p, "graph-advance", "artifact_progress.cap_closure_recheck_failed", err, {
+								taskId: task.taskId,
+								nodeId,
+							});
+						}
+						// unreadable task.json: escalate anyway (same policy as the nudge path)
+					}
 					try {
 						await deliverMessageLocked(pi, cwd, p, st, {
 							to: "root",
@@ -169,14 +196,21 @@ export async function evaluateArtifactProgressNudgeLocked(
 			const lastProgressIso = node.lastProgressAt ?? "never";
 			const fileMtimeIso = new Date(maxMtimeMs).toISOString();
 			const assignmentMsgId = node.assignmentMessageId ?? `<assignment msg id for ${task.taskId}:${nodeId}>`;
-			const body = [
+			// Fix A (task-202610031339): the outcome vocabulary must match the node's actual outgoing
+			// edge `when` values (edgeMatchesActivation compares from.outcome === edge.when). Advertising
+			// the old generic list caused workers to close with outcome=tested when the edge required
+			// passed (live incident msg-1791033710946). Terminal/no-outgoing-edge nodes get a pointer
+			// hint instead of any vocabulary list.
+			const outcomes = outgoingOutcomes(task, nodeId);
+			const outcomeArg = outcomes.length > 0 ? `<one of: ${outcomes.join("|")}>` : `<see task.md edges for this node's valid outcomes>`;
+			const bodyLines = [
 				`[PI-SWARM ARTIFACT-PROGRESS NUDGE] (high-priority)`,
 				`File detected: ${contributingFile} (mtime ${fileMtimeIso})`,
 				`Node ${nodeId} still ${node.status}. Last update: ${lastProgressIso}.`,
 				``,
 				`You are 1 step from closing the task. To finish:`,
 				``,
-				`  swarm_update_task(taskId="${task.taskId}", nodeId="${nodeId}", status=done|failed|blocked, outcome=<one of: planned|implemented|tested|reviewed|approved|rejected|failed>)`,
+				`  swarm_update_task(taskId="${task.taskId}", nodeId="${nodeId}", status=done|failed|blocked, outcome=${outcomeArg})`,
 				``,
 				`  swarm_send_message(`,
 				`    to="root",`,
@@ -185,11 +219,52 @@ export async function evaluateArtifactProgressNudgeLocked(
 				`    body="<1-line summary>"`,
 				`  )`,
 				``,
-				`  swarm_ack_message(messageId="${assignmentMsgId}", status=done, resultMessageId="<result msg id>")`,
-				``,
 				`If the work is genuinely incomplete, call swarm_update_task(status=blocked, note=<reason>) instead.`,
 				`(Auto-backoff: ${Math.round(ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS / 60000)} min between nudges; cap ${ARTIFACT_PROGRESS_NUDGE_CAP} then escalate to root.)`,
-			].join("\n");
+			];
+			// Fix B (task-202610031339): swarm_ack_message is retired under minimal protocol — the ack
+			// step is engine-derived (mirror delivery.ts showAckHint). Only the legacy lane
+			// (PI_SWARM_MINIMAL_PROTOCOL=0) keeps the ack triple. F-1/F-3 follow-up: insert by MARKER
+			// (before the incomplete-work note), not by position-coupled splice index — the baseline
+			// bd71726 order was ack line -> blank -> note, which a numeric index silently drifted from.
+			if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
+				const noteIdx = bodyLines.findIndex((l) => l.startsWith("If the work is genuinely incomplete"));
+				if (noteIdx !== -1) {
+					bodyLines.splice(
+						noteIdx,
+						0,
+						`  swarm_ack_message(messageId="${assignmentMsgId}", status=done, resultMessageId="<result msg id>")`,
+						``,
+					);
+				}
+			}
+			const body = bodyLines.join("\n");
+			// Fix C (task-202610031339): closure-aware re-check. The sweep snapshot may predate the
+			// worker's closure — three live "nudge raced the closure" replies in task-202610031216.
+			// Re-read task.json from disk right before delivery (we already hold the swarm lock in
+			// production) and skip if the node went terminal between snapshot and now.
+			try {
+				const fresh = await readTaskState(tp.taskJson);
+				const freshNode = fresh?.nodes?.[nodeId];
+				if (freshNode && (freshNode.status === "done" || freshNode.status === "failed" || freshNode.status === "skipped")) {
+					await trace(p, "worker.artifact_progress_race_lost", {
+						taskId: task.taskId,
+						nodeId,
+						assignee: node.assignee,
+						snapshotStatus: node.status,
+						diskStatus: freshNode.status,
+					}).catch(() => {});
+					continue;
+				}
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") {
+					await logSwarmError(p, "graph-advance", "artifact_progress.closure_recheck_failed", err, {
+						taskId: task.taskId,
+						nodeId,
+					});
+				}
+				// unreadable task.json: deliver anyway (same policy as the snapshot phase)
+			}
 			try {
 				await deliverMessageLocked(pi, cwd, p, st, {
 					to: node.assignee,
@@ -237,12 +312,33 @@ export async function evaluateArtifactProgressNudgeLocked(
 		}
 	}
 	// Persist any task.json mutations (node.artifactProgressNudgeAt / Count). The in-memory
-	// `task` reference holds our mutations; writeTaskState serializes the LIVE object (no
-	// fresh re-read, which would lose the in-memory mutations because readTaskState deserializes
-	// a new copy). Updated updatedAt is stamped inside writeTaskState.
+	// Persist any task.json mutations (node.artifactProgressNudgeAt / Count). Fix C
+	// (task-202610031339): merge the nudge bookkeeping onto a FRESH disk read instead of
+	// serializing the sweep's in-memory snapshot — serializing the snapshot clobbers a node that
+	// closed concurrently (the closure would be reverted to assigned, resurrecting the nudge cycle).
 	for (const tp of Array.from(dirtyTaskPaths)) {
 		try {
-			await writeTaskState(tp, tpToTask.get(tp)!);
+			let persisted = false;
+			try {
+				const fresh = await readTaskState(tp.taskJson);
+				if (fresh) {
+					const snap = tpToTask.get(tp)!;
+					for (const [nodeId, node] of Object.entries(snap.nodes)) {
+						const freshNode = fresh.nodes[nodeId];
+						if (!freshNode || !node) continue;
+						if (node.artifactProgressNudgeAt !== undefined) freshNode.artifactProgressNudgeAt = node.artifactProgressNudgeAt;
+						if (node.artifactProgressNudgeCount !== undefined) freshNode.artifactProgressNudgeCount = node.artifactProgressNudgeCount;
+						if (node.artifactProgressCapSurfaced !== undefined) freshNode.artifactProgressCapSurfaced = node.artifactProgressCapSurfaced;
+					}
+					await writeTaskState(tp, fresh);
+					persisted = true;
+				}
+			} catch (err: any) {
+				if (err?.code !== "ENOENT") throw err;
+				// task.json vanished (task deleted mid-sweep): nothing to persist — expected branch
+				persisted = true;
+			}
+			if (!persisted) await writeTaskState(tp, tpToTask.get(tp)!);
 		} catch (err) {
 			// Losing a nudge-timestamp write re-triggers the nudge next tick (visible); losing it
 			// SILENTLY would also hide systemic write failures. Log it.

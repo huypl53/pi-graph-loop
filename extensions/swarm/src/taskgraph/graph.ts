@@ -337,6 +337,18 @@ export function hasOutgoingTaskEdge(task: TaskState, id: string) {
 	return task.edges.some((e) => e.from === id) || Object.values(task.nodes).some((n) => (n.dependsOn || []).includes(id));
 }
 
+// task-202610031339 Fix A: the outcome vocabulary a node may legally signal with is exactly the
+// set of its outgoing edges' `when` values (edgeMatchesActivation: from.outcome === edge.when).
+// Unique, edge-order preserved. Empty for terminal / unknown nodes — callers must fall back to a
+// pointer hint instead of a generic vocabulary list.
+export function outgoingOutcomes(task: TaskState, nodeId: string): string[] {
+	const outs: string[] = [];
+	for (const e of task.edges || []) {
+		if (e.from === nodeId && !outs.includes(e.when)) outs.push(e.when);
+	}
+	return outs;
+}
+
 export function isGraphTerminalNode(task: TaskState, nodeId: string) {
 	const node = task.nodes[nodeId];
 	return Boolean(node && (node.terminal || !hasOutgoingTaskEdge(task, nodeId)));

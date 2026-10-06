@@ -2,15 +2,17 @@ import { ok as assertOk, equal, deepEqual } from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	HerdrDriver,
-	herdrDriver,
-	tmuxDriver,
-	getTerminalDriver,
-	translateTmuxKeyToHerdr,
-	isPiLikeProcess,
-} from "../src/terminal/index.ts";
-import { checkTmuxSession, checkTerminalSession } from "../src/pool.ts";
+
+// Hermetic HOME pin: resolve the driver from a scratch home with NO global ~/.pi/agent/swarm.yml,
+// so "defaults to tmux" legs test the true default regardless of the contributor's global config.
+// Must run before the src modules are imported (HOME is read at call time, but pin early anyway).
+const hermeticHome = mkdtempSync(join(tmpdir(), "herdr-driver-home-"));
+const origHome = process.env.HOME;
+process.env.HOME = hermeticHome;
+
+const { HerdrDriver, herdrDriver, tmuxDriver, getTerminalDriver, translateTmuxKeyToHerdr, isPiLikeProcess, _resetTerminalManagerMemoForTests } = await import("../src/terminal/index.ts");
+const { checkTmuxSession, checkTerminalSession } = await import("../src/pool.ts");
+const { _clearGlobalYmlMemoForTests } = await import("../src/config.ts");
 
 let pass = 0;
 let fail = 0;
@@ -288,7 +290,11 @@ await asyncTest("spawnAgent creates tab in dedicated agents workspace (G4 herdr-
 	const wsCreateCall = mockPi.calls.find((c) => c.args[0] === "workspace" && c.args[1] === "create");
 	assertOk(wsCreateCall, "driver must call workspace create when agents workspace is absent");
 	assertOk(wsCreateCall.args.includes("--label"), "workspace create must include --label");
-	assertOk(wsCreateCall.args.includes("swarm-agents"), "workspace create must use the swarm-agents label");
+	// Per-project label (task-202610040005-herdr-agents-workspace-p): the label is
+	// `swarm-agents-<projectSlug(cwd)>`; the G4 isolation contract (own workspace, not root)
+	// is unchanged.
+	const wsLabel = wsCreateCall.args[wsCreateCall.args.indexOf("--label") + 1];
+	assertOk(wsLabel.startsWith("swarm-agents-"), `workspace create must use the per-project swarm-agents-<slug> label; got: ${wsLabel}`);
 });
 
 await asyncTest("listPanes queries panes scoped to workspace", async () => {
@@ -392,6 +398,7 @@ console.log("\n=== Terminal Driver Resolution & Preflight Tests ===");
 
 test("getTerminalDriver defaults safely to tmuxDriver", () => {
 	delete process.env.PI_SWARM_TERMINAL_MANAGER;
+	_resetTerminalManagerMemoForTests();
 	// H2: config (swarm.yml terminalManager) is consulted when env is unset. Run from a
 	// config-neutral cwd so the default branch is exercised regardless of the repo's own yml.
 	const prevCwd = process.cwd();
@@ -497,4 +504,11 @@ await asyncTest("checkTmuxSession succeeds without TMUX when swarm.yml declares 
 });
 
 console.log(`\nHerdr Driver Tests: ${pass} passed, ${fail} failed\n`);
+
+// Hermetic cleanup: restore the real HOME and clear both config memos so later
+// same-process consumers (none today, but keep the suite self-contained) see truth.
+process.env.HOME = origHome;
+_clearGlobalYmlMemoForTests();
+_resetTerminalManagerMemoForTests();
+
 if (fail > 0) process.exit(1);

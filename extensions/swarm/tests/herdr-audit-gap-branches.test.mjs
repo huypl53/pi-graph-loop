@@ -5,7 +5,9 @@ import { deepEqual, equal, ok as assertOk } from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HerdrDriver, getTerminalDriver, tmuxDriver, translateTmuxKeyToHerdr, isPiLikeProcess } from "../src/terminal/index.ts";
+import { HerdrDriver, getTerminalDriver, tmuxDriver, translateTmuxKeyToHerdr, isPiLikeProcess, _resetTerminalManagerMemoForTests } from "../src/terminal/index.ts";
+import { _clearGlobalYmlMemoForTests } from "../src/config.ts";
+import { projectSlug } from "../src/utils.ts";
 import { getAttachCommandsShapeProbe } from "./helpers/herdr-audit-helpers.mjs";
 
 let pass = 0;
@@ -155,7 +157,11 @@ function createMockPi(state = {}) {
 	return { exec, calls, state };
 }
 
-const WS = [{ workspace_id: "w99", label: "swarm-agents", active_tab_id: "w99:t1" }];
+// Per-project agents-workspace label (task-202610040005-herdr-agents-workspace-p):
+// fixtures must seed the label THIS driver resolves — `swarm-agents-<projectSlug(cwd)>`.
+// The pre-fix constant "swarm-agents" no longer matches by design.
+const AGENTS_WS_LABEL = `swarm-agents-${projectSlug(process.cwd())}`;
+const WS = [{ workspace_id: "w99", label: AGENTS_WS_LABEL, active_tab_id: "w99:t1" }];
 const PANE_WORKER = { pane_id: "w99:p2", tab_id: "w99:t2", workspace_id: "w99" };
 const PANE_FOREIGN = { pane_id: "w99:p9", tab_id: "w99:t9", workspace_id: "w99" };
 
@@ -408,7 +414,7 @@ await asyncTest("5.1 root tab closed after FIRST agent spawn only; close failure
 console.log("=== 6. tracked-vs-foreign teardown (maybeCloseAgentsWorkspace) ===");
 
 await asyncTest(
-	"6.1 two tracked panes + one foreign: first kill keeps ws, final kill closes it, foreign-only never triggers close",
+	"6.1 two tracked panes + one foreign: first kill keeps ws, final kill VETOED by foreign pane (close only when zero panes remain), foreign-only never triggers close",
 	async () => {
 		const state = {
 			workspaces: [...WS],
@@ -426,6 +432,10 @@ await asyncTest(
 		equal(r1.killed, true);
 		equal((state.closedWorkspaces || []).length, 0, "workspace survives while another tracked agent remains");
 
+		// Foreign-pane teardown guard (task-202610040005-herdr-agents-workspace-p): after the
+		// final tracked pane dies, the foreign w99:p9 STILL LIVES in the workspace — the close
+		// is vetoed. (Pre-fix this closed the ws out from under the foreign pane; that close
+		// was the bug.)
 		const r2 = await d.killAgent(pi, { target: "w99:p3", session: "w99", window: "w99:t3", paneId: "w99:p3" });
 		equal(r2.killed, true);
 		// fu-herdr-workspace-loss: the FOREIGN pane (PANE_FOREIGN) is still alive per the
@@ -433,6 +443,14 @@ await asyncTest(
 		// co-tenant Hangup-kill bug behind the 6-incident workspace losses (pre-fix this read
 		// `deepEqual(state.closedWorkspaces || [], ["w99"])` under the own-set criterion).
 		equal((state.closedWorkspaces || []).length, 0, "workspace survives while a foreign/live pane remains (authoritative census)");
+		equal((state.panes || []).some((p) => p.pane_id === "w99:p9"), true, "foreign pane untouched");
+
+		// Close fires only when the workspace's live pane list is EMPTY: clear the foreign
+		// pane (simulating its own lifecycle ending), then the next teardown decision closes.
+		// (Double-census: the confirmation re-probe reads the same empty list.)
+		state.panes = [];
+		await d.maybeCloseAgentsWorkspace(pi);
+		deepEqual(state.closedWorkspaces || [], ["w99"], "close fires once zero panes remain");
 
 		// foreign-only pane state must NOT trigger close: fresh driver that tracked nothing
 		const state2 = { workspaces: [...WS], panes: [{ ...PANE_FOREIGN }] };
@@ -618,6 +636,13 @@ test("10.1 getAttachCommandsShapeProbe returns herdr attach", () => {
 });
 
 test("10.2 corrupt swarm.yml defaults to tmux and environment still takes precedence", () => {
+	// Hermetic: pin HOME to a scratch home WITHOUT a global ~/.pi/agent/swarm.yml for the
+	// corrupt-project-yml leg. With the real global yml declaring terminalManager: herdr, the
+	// layered merge resolves herdr even with a corrupt project yml — env-coupled, not a code path.
+	const prevHome = process.env.HOME;
+	const scratchHome = mkdtempSync(join(tmpdir(), "herdr-audit-home-"));
+	process.env.HOME = scratchHome;
+	_clearGlobalYmlMemoForTests();
 	const previousCwd = process.cwd();
 	const previousManager = process.env.PI_SWARM_TERMINAL_MANAGER;
 	const scratch = mkdtempSync(join(tmpdir(), "herdr-corrupt-config-"));
@@ -625,17 +650,24 @@ test("10.2 corrupt swarm.yml defaults to tmux and environment still takes preced
 		mkdirSync(join(scratch, ".pi"), { recursive: true });
 		writeFileSync(join(scratch, ".pi", "swarm.yml"), "terminalManager: [unterminated\n");
 		process.chdir(scratch); // cfg memo is keyed by cwd; this gets a fresh corrupt-config read.
+		_resetTerminalManagerMemoForTests();
 		delete process.env.PI_SWARM_TERMINAL_MANAGER;
 		const fallback = getTerminalDriver(); // no explicit cfg: corrupt config must not throw.
 		equal(fallback, tmuxDriver, "corrupt config with env unset falls back to tmux");
 
 		process.env.PI_SWARM_TERMINAL_MANAGER = "herdr";
+		_resetTerminalManagerMemoForTests();
 		equal(getTerminalDriver().id, "herdr", "environment override wins despite corrupt config");
 	} finally {
 		process.chdir(previousCwd);
 		if (previousManager === undefined) delete process.env.PI_SWARM_TERMINAL_MANAGER;
 		else process.env.PI_SWARM_TERMINAL_MANAGER = previousManager;
 		rmSync(scratch, { recursive: true, force: true });
+		rmSync(scratchHome, { recursive: true, force: true });
+		if (prevHome === undefined) delete process.env.HOME;
+		else process.env.HOME = prevHome;
+		_clearGlobalYmlMemoForTests();
+		_resetTerminalManagerMemoForTests();
 	}
 });
 

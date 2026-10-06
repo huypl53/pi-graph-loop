@@ -418,6 +418,37 @@ completion by design — all-done is required — so the run keeps resting until
 (see above); the exhausted notice covers the RUNNING orphan shape. Paused/stopped runs and
 runs with a queued successor never emit it.
 
+### Restart dedup (content-hash, not id-only)
+
+`/swarm issues start` on a fresh run consults the completion ledger
+(`.pi/swarm/issues/completions.jsonl`, append-only, written by the controller at
+issue-done time) and skips issues whose content-hash matches a prior completed run.
+The match key is `sourceHash` (sha256 of `{id, title, content}`), NOT the issue id —
+editing an issue's `content` or `title` legitimately re-opens it. Editing only `docs`
+does NOT re-open (sourceHash covers `id`/`title`/`content` only).
+
+Skipped entries carry `status: "done"` with `reason: "already completed in run <id>"`
+and emit an `issues.restart_dedup_skip` trace. The `/swarm issues status` command
+surfaces deduped entries under `deduped from prior runs:`.
+
+**`--force-all` escape**: `/swarm issues start --force-all` (or `-F`) deliberately
+bypasses the prior-completion scan and re-runs every issue. The flag is recorded on
+the run as `run.forceAll: true` for audit and emits an `issues.restart_dedup_force_all`
+trace.
+
+**Known limitation**: `--force-all` after a complete run hits the pre-existing
+deterministic taskId collision (phase-05 limitation) — the run pauses durably with
+"Task already exists". Clean up the prior run's tasks (or use a fresh scratch cwd)
+to work around this. The dedup path itself is unaffected.
+
+**Backfill (first start after this fix lands)**: On the first `/swarm issues start`
+after this fix lands, if the completion ledger is absent, the start handler seeds it
+from the current `swarm-state.json` `issueRun.queue[].status === "done"` entries.
+The seed is atomic (temp-file + rename) and idempotent (skips if the ledger already
+exists). **Seed source = last run's state; ledger is the durable record going forward.**
+If the prior run's state is deleted before the next start, those completions are
+invisible to dedup — the ledger is the only durable record from that point on.
+
 ### Advancement modes (auto | manual)
 
 The sequential issue auto-run supports two advancement modes (`issue-sequencer.advancement` in
@@ -670,13 +701,26 @@ or `/swarm issues validate`.
 **Run lifecycle:** `start` → one active issue (immutable snapshot at
 `.pi/swarm/issues/snapshots/<runId>/<issueId>.json`, hash-recorded in the queue entry)
 with a linked worker task + fenced goal. On linked done + safe idle, exactly one next
-issue activates. Terminal-unsuccessful linked work (blocked/failed/cancelled) freezes
+issue activates. At each advance decision the controller re-reads `issues.yml` and appends
+new issue IDs not already represented in the queue and not content-hash-deduped against
+`.pi/swarm/issues/completions.jsonl`; appended entries go to the queue tail in file order,
+are traced as `issues.queue_appended`, and activate through the same snapshot/task/goal,
+staffing, and hint path as the original queue. Terminal-unsuccessful linked work (blocked/failed/cancelled) freezes
 the run (`paused`); later issues emit nothing until a human disposition:
 `abandon <issue-id> <reason…>` (entry → cancelled, then `resume` advances) or `stop`
 (entry → cancelled, run → stopped; the child task is NEVER cancelled). After `stop`,
 `start` opens a FRESH run — restart after stop currently collides on the deterministic
 task id and pauses durably ("Task already exists"); treat stop as terminal for that
-queue (known limitation, phase-05).
+queue (known limitation, phase-05). The stop command also disables cross-run auto-continue
+until the next explicit `start`.
+
+**Cross-run auto-continue (opt-in):** `.pi/swarm.yml` may set `issues: { autoContinue: true }`;
+absent/false is the default. A pump tick may start a new run only after an all-successful
+completed run and only when current source contains entries not already complete by the
+content-hash ledger. Any failed/blocked/cancelled entry is a hard triage stop. The consecutive
+auto-start cap defaults to 3 (`issues.autoContinueCap`, integer 1–20); reaching it emits
+`auto-continue paused: cap reached`. Only automatic starts consume this budget; each explicit
+human `/swarm issues start` resets it and clears the stop latch.
 
 **Agent context (read-only):** the `swarm-issues` discoverable skill ships
 `show-active-issue.mjs` — renders the active issue's linkage-derived snapshot
@@ -845,25 +889,37 @@ method-by-method mapping and live-binary verification evidence.
 
 ### Workspace isolation
 
-Under herdr mode, worker tabs are created in a **dedicated `swarm-agents` workspace** —
+Under herdr mode, worker tabs are created in a **dedicated per-project agents workspace** —
 not the root workspace. This keeps root tabs visually separate from swarm-spawned
 workers and makes teardown deterministic (one workspace to close when no workers remain).
 
-- **Label**: `swarm-agents` (constant, overridable via `PI_SWARM_HERDR_WS_LABEL`).
+- **Label (per-project)**: `swarm-agents-<projectSlug(cwd)>` — the same per-project
+  convention the tmux driver uses for session naming. Two projects on one herdr
+  instance get two separate agents workspaces; a workspace is never shared across
+  projects by default. `PI_SWARM_HERDR_WS_LABEL` is a **full-label override**: exactly
+  what it says wins, no slug appended (use it to pin one shared workspace explicitly).
+  Migration: existing shared `swarm-agents` workspaces are NOT auto-migrated — new
+  spawns resolve (or create) the per-project workspace, leaving the old shared
+  workspace untouched. Post-fix, no swarm driver owns the old label anymore, so the
+  old workspace is never auto-closed by swarm teardown either (drivers only close a
+  workspace they have tracked panes in); when its last pane ends, herdr closes an
+  empty workspace natively — or close it manually with `herdr workspace close <id>`.
 - **Creation**: on first spawn, the driver calls `workspace list` → if no workspace
-  with the label exists, calls `workspace create --label swarm-agents`. The workspace
-  id is cached on the driver instance.
+  with the label exists, calls `workspace create --label <per-project label>`. The
+  workspace id is cached on the driver instance.
 - **Stale-cache recovery**: if the cached workspace id no longer resolves
   (`workspace_not_found`), the driver re-creates it on the next spawn.
-- **Teardown** (hardened by task-fu-herdr-workspace-loss, 2026-10-04): after every
-  `killAgent`, the driver takes an AUTHORITATIVE workspace-wide pane census via
-  `pane list --workspace <wsId>` (queried live on every probe — never trusting this
-  driver instance's tracked `swarmPaneIds` subset alone). Only when the census reports
-  zero panes AND a confirmation re-probe (second consecutive census) still reports zero
-  does it call `workspace close <wsId>` and clear the cache. A pane appearing between
-  the two probes (mid-flight spawn race) vetoes the close for that round. The tracked
-  set remains as best-effort pre-tracking for observability only. Any pane-list failure
-  aborts the close (durable-logged via `logSwarmError`, never silently swallowed).
+- **Teardown** (hardened twice: per-project isolation in master 0be3e86 + shared-workspace
+  census in task-fu-herdr-workspace-loss, 2026-10-04): after every `killAgent`, the driver
+  takes an AUTHORITATIVE workspace-wide pane census via `pane list --workspace <wsId>`
+  (queried live on every probe — never trusting this driver instance's tracked
+  `swarmPaneIds` subset alone). Only when the census reports zero panes AND a confirmation
+  re-probe (second consecutive census) still reports zero does it call `workspace close
+  <wsId>` and clear the cache. A pane appearing between the two probes (mid-flight spawn
+  race) vetoes the close for that round. Foreign panes (another project's workers under a
+  shared label, or user-created tabs) likewise hold the workspace open. The tracked set
+  remains as best-effort pre-tracking for observability only. Any pane-list failure aborts
+  the close (durable-logged via `logSwarmError`, never silently swallowed).
 - **Root workspace**: never touched. `spawnAgent` never resolves the root workspace id
   for tab placement; the root workspace id is used only for root-pane detection.
 - **herdr 0.8.2 commands used**: `workspace list`, `workspace create --label`,
@@ -1285,6 +1341,44 @@ N is bounded by `agent.maxConcurrentTasks`. This is **extra I/O vs the pre-83a b
 - `/swarm trace` to view `stale_open_surfaced` events.
 - `swarm_task_status` shows `node.staleOpenSurfacedAt` per node.
 
+## Operator: Stale-replyTo completion redirect (assignment ergonomics, 2026-10-03)
+
+When a node is reassigned, its prior assignment message record is superseded +
+waived, but the old id often remains the most recent assignment-shaped message in
+the worker's context — so the worker's first completion reply can land on the
+STALE id. Left alone, that reply is unanchored traffic: root sees two
+near-identical "done" messages per node and no verified completion on the live
+assignment (observed in the 2026-10-03 tool-output live probe).
+
+**Engine behavior (minimal protocol, gate=1):** when a reply's `replyTo` names a
+SUPERSEDED assignment whose `conversationId` is `task:<taskId>:<nodeId>` and the
+task's node has a live (non-superseded, `requiresResponse`, same from/to pair,
+not yet verified) `assignmentMessageId`, `deliverMessageLocked` redirects the
+verification credit to that live record: trace `message.response.redirected`
+(`redirectedFrom` / `redirectedTo` / `taskId` / `nodeId`), then the normal
+`message.response.verified` trace with `via: "stale_replyto_redirect"`. The
+stale record's supersession evidence (waived status) is never erased. Scope
+guards: assignment-class replies only; cross-node stale replies and
+non-assignment messages keep the legacy fence (`message.reply_rejected_superseded`
++ advisory `message.response.sent`). Any resolution failure (missing task.json,
+unreadable node, dead target) fails soft back to the legacy fence and emits
+`message.response.redirect_failed` — never throws out of the delivery hot path.
+Gate=0 behavior is byte-unchanged.
+
+**Worker-side contract that prevents the miss in the first place:** assignment
+bodies name their own message id (`replyTo=<id>`) and state the
+reply-BEFORE-update fencing order — see tools.md §Message completion protocol.
+
+**Mock-LLM fixture**: `extensions/mock-llm/fixtures/assignment-stale-replyto-redirect.jsonl` —
+worker replies to the stale assignment id; the engine redirects the credit to the
+active assignment. Lane command: `pi --provider mock-llm --model
+assignment-stale-replyto-redirect -e ./extensions/mock-llm -e ./extensions/swarm`.
+
+**Regression**: `extensions/swarm/tests/assignment-ergonomics-fix1.test.mjs` (redirect +
+direct-reply no-redirect + cross-node no-redirect controls);
+`extensions/mock-llm/tests/assignment-stale-replyto-redirect.test.mjs` (real
+`deliverMessageLocked` on seeded supersession state).
+
 ## Operator: Late-result fencing (Issue 83 sub-task b, P1)
 
 Two related guards protect against late worker results and reassign churn:
@@ -1459,6 +1553,29 @@ Rules governing which messages mint response debt and how debt clears (source:
   a `response_missing` runtimeStatus. What stays gate=1-only is the v2 lifecycle derivation:
   under gate=0 no `respondedAt`/`lifecycleStage`/`lifecycleSource`/`terminalAt` is stamped
   (Phase-1 shadow-only contract preserved).
+
+### Artifact-progress nudge template contract (task-202610031339, 2026-10-03)
+
+- **Edge-aware outcome vocabulary (Fix A)** — the nudge's `swarm_update_task` line advertises the
+  node's ACTUAL outgoing-edge `when` values (`outgoingOutcomes(task, nodeId)` in
+  `extensions/swarm/src/taskgraph/graph.ts`), e.g. `outcome=<one of: passed|failed>`. Terminal /
+  no-outgoing-edge nodes fall back to a `see task.md edges` pointer hint. The old generic list
+  (`planned|implemented|tested|reviewed|approved|rejected|failed`) caused workers to close with
+  `outcome=tested` when the edge required `passed`.
+- **Protocol-gated ack line (Fix B)** — the `swarm_ack_message(...)` body line renders only under
+  the legacy lane (`PI_SWARM_MINIMAL_PROTOCOL=0`); under minimal protocol the ack step is
+  engine-derived and the body omits it (mirror of `delivery.ts showAckHint`). Gate=0 bodies keep
+  the baseline line ORDER — the ack triple is inserted by marker (before the incomplete-work
+  note), not a position-coupled splice index (review F-1/F-3 follow-up, 2026-10-03).
+- **Closure-aware delivery (Fix C)** — immediately before nudge (and cap-escalation, review F-2
+  follow-up) delivery the
+  sweep re-reads `task.json` from disk (lock-held) and skips when the node went terminal between
+  snapshot and delivery, emitting a `worker.artifact_progress_race_lost` census trace. The nudge
+  bookkeeping persist merges onto a fresh disk read so the sweep can no longer clobber a
+  concurrent closure (previously it reverted `done` back to `assigned`, resurrecting the cycle).
+  Red-first lane: `extensions/swarm/tests/nudge-closure-race.test.mjs` (fs.stat interposition;
+  the patch must precede the first `node:fs/promises` import in the process — Node 26 pins named
+  core-module exports at first import) + mock-llm fixture `nudge-closure-race.jsonl`.
 
 ### Goal idle-streak nudge (Issue 18, redesigned R27)
 
@@ -2115,6 +2232,8 @@ A second, related improvement: `swarm_agent_status` now returns a single top-lev
 - **Cap-exceeded fires but the worker is still active:** the worker is ignoring nudges. Restart the agent (`swarm_restart_agent`) or force-close the node (`swarm_update_task force=true`).
 - **No nudge fires on a clearly-stuck node:** verify `node.allowedFiles` is non-empty. The predicate skips nodes with empty allowed-files (too noisy to track whole-project mtime).
 - **`taskProgressState` shows `awaiting_input` but the worker is clearly working:** stale `agent.lastToolAt`. The heartbeat hook (`tool_execution_end`) should keep it fresh; a worker stuck between tool calls may have a stale stamp. Cross-check with `swarm_audit({mode:"events", event:"tool_execution_end"})`.
+- **`taskProgressState` `dead` verdicts and long tool calls (task-202610040001):** heartbeats stamp only at tool-call boundaries — ONE tool running >60s (gates, test suites) leaves `lastHeartbeatAt` stale mid-tool. Since the fix, `runtimeStatus busy|tool_running` defers the heartbeat-dead verdict (the agent classifies `active`/`stalled` honestly; the pane probe still catches real death, and `why` for a mid-tool dead-row now says `tool running (heartbeat deferred)` / `pane died mid-tool` instead of the misleading `no pane / stale heartbeat`). Before declaring an agent dead, cross-check `runtimeStatus` — a `tool_running` agent with a stale heartbeat is mid-tool, not dead.
+- **`taskProgressState` `dead` verdicts and idle agents (task-202610040400):** idle agents fire no heartbeats between assignments — waiting >60s is the NORMAL quiescent posture (root included), so stale-hb alone is not death. Since the fix, POSITIVE pane-alive evidence (the live tmux probe returning true) on a `status:"running"` record outranks heartbeat staleness: the agent classifies `awaiting_input` (or `stalled`/`idle_blocked` when tasks/debt demand it) instead of a false `dead`. Absence of pane evidence (unknown/legacy records) still reads dead — no masking; pane-dead and stopped records stay dead unconditionally. The stale-heartbeat signal stays visible: slim/targeted rows show `heartbeatAge` + why="idle (pane alive, heartbeat stale)", and heartbeat-gc gate 3 downgrades `health` to `stale`. Triangulate before declaring death: `taskProgressState` + `paneAlive` + `heartbeatAge`/`health`. A dead verdict with `paneAlive:true` is a bug, not a triage cue.
 
 ### Verify the fix locally
 
@@ -2514,16 +2633,83 @@ Status surfaces use `paneAlive` / `driver` (`"tmux" | "herdr" | "mock"`) / `targ
 `tmuxAlive`/`tmuxTarget` — correct for mixed tmux+herdr fleets (per-agent driver derivation via
 the terminal driver manager).
 
+## Operator: stopped-agent records GC (stopped-agent-records-gc, 2026-10-04)
+
+Stopped agent records persist in `swarm-state.json` by design (identity/mailbox/history for
+resume + audit), but without GC they accumulate — a day of swarm work carried 11+ stopped
+records flooding census + attention. Three levers, all sharing the pure predicate core
+`extensions/swarm/src/agent-gc.ts`:
+
+### 1. Default view hides stopped agents
+
+`swarm_agent_status` (census + attention) and `swarm_list_agents` hide `status:"stopped"`
+rows by default. Routine supervision shows only live agents. The hidden count surfaces
+truthfully as top-level `stoppedHidden` in the status tool (no flood rows); the hint names
+the purge path when hidden records exist.
+
+- Resurface stopped records: `includeStopped:true` — `view:"full"` / `verbose:true` imply it.
+- Targeted `swarm_agent_status({agentId})` slim rows keep working for ANY id/status — a
+  stopped agent's row is always returned when asked for directly.
+
+### 2. Batch purge (root-only, gated)
+
+Two surfaces, one predicate (`stoppedGcCandidates`):
+
+- Tool: `swarm_gc({ purgeStopped: true, stoppedOlderThanMs?, dryRun? })` — dry-run default.
+- CLI: `/swarm deregister --purge-stopped [--older-than-hours N] [--apply]` — dry-run default.
+
+A stopped record is purge-eligible ONLY when ALL gates pass:
+
+1. **Aged**: stopped ≥ gate (default 24h; age from `lastShutdownAt || updatedAt || createdAt`).
+2. **Unreferenced**: no NON-terminal task node in any `.pi/swarm/tasks/*/task.json` lists the
+   agent as `assignee` (done/failed/skipped/cancelled nodes don't block).
+3. **Debt-free**: no unresolved `requiresResponse` message addressed to it (verified/waived
+   don't block), and no queued/failed actionable messages.
+
+Blocked candidates are REPORTED with reasons (`too-recent` / `task-referenced` /
+`response-debt`) — never removed. Traces: `gc.stopped_purge` (per-agent gate evidence).
+
+### 3. Optional auto-GC (DEFAULT OFF)
+
+```yaml
+# .pi/swarm.yaml
+agentGc:
+  auto: false               # default OFF — zero behavior change unless opted in
+  stoppedOlderThanMs: 86400000  # optional, default 24h
+```
+
+When enabled, the root pump watchdog tick runs the same gated purge (`gc.stopped_auto`
+trace). Auto-GC never throws into the pump; internal failures land in
+`.pi/swarm/traces/errors.jsonl`.
+
+### Loss boundary
+
+Purging deletes ONLY the in-state agent record + its `delivered[agentId]` ledger. Kept
+forever: mailbox JSONL files on disk (`.pi/swarm/mailboxes/<id>.jsonl`), identity cards
+(`.pi/swarm/agents/<id>.md`), all traces (`.pi/swarm/traces/events.jsonl`), and task
+artifacts. History is auditable after purge; the in-state record is not resurrectable.
+
 ### unread semantics (root vs worker)
 
 - Worker: `unread` keys off the shared `st.delivered[agentId]` ledger (the same ledger
   `pendingOnly` uses; read-only in the scan path).
-- Root: `unread` keys off the durable `surfacedAt` stamp on the message record — NOT
-  `st.delivered.root` and NOT the pump's per-pid ledger. A root message surfaced by the pump (or
-  stamped via the informational-consume path) reads `unread:false`. Validation note: in a fresh
-  lane the pump can surface seeded messages ~130ms before a scripted scan, so `unread:0` there is
-  correct-by-design (tester verdict in test-evidence.md, trace-confirmed:
-  `notification.batch.surfaced` → `mailbox.poll` → `surfacedAt` stamp).
+- Root: `unread` keys off durable read markers on the message record — `surfacedAt` (informational
+  path), a `consumerReceipts.root.entries[id]` entry (actionable messages the pump surfaced —
+  `surfacedAt` is deliberately NOT stamped for those), or `ackedAt` (legacy pre-minimal-protocol
+  acks) — NOT `st.delivered.root` and NOT the pump's per-pid ledger. A root message surfaced by
+  the pump (or stamped via the informational-consume path) reads `unread:false`.
+  **unread-drain fix (2026-10-02)**: before the fix, root unread keyed ONLY on `surfacedAt`, so
+  actionable messages with a consumer receipt (task-stall / graph-advance / goal-escalation
+  nudges) counted as unread forever — with `swarm_ack_message` unregistered there was no ack
+  path, and the model re-polled `fullBody` re-reading the same bodies 5+ times per session
+  (live evidence: same 5,841B result repeated in one root session). `markDelivered:true` now
+  also writes a consumer receipt for actionable messages (mirroring the pump), and both the
+  envelope count and the per-row flag consult all three markers. Worker semantics unchanged.
+  Regression test: `node extensions/swarm/tests/root-unread-drain.test.mjs`; mock-llm lane:
+  fixture `root-unread-drain` (seeded world: actionable+receipt / informational+surfaced /
+  fresh). Validation note: in a fresh lane the pump can surface seeded messages ~130ms before a
+  scripted scan, so `unread:0` there is correct-by-design (tester verdict in test-evidence.md,
+  trace-confirmed: `notification.batch.surfaced` → `mailbox.poll` → `surfacedAt` stamp).
 
 ### Verify commands
 

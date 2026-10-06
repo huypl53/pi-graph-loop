@@ -18,6 +18,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paths } from "../src/state.ts";
+import { _clearGlobalYmlMemoForTests } from "../src/config.ts";
 import {
 	classifySwarmSettings,
 	implicitSingletonPool,
@@ -37,6 +38,13 @@ const ok = (name, cond) => {
 		console.error("  FAIL:", name);
 	}
 };
+
+// Hermetic HOME pin: point HOME at a scratch home with NO global ~/.pi/agent/swarm.yml so the
+// layered merge / corrupt-global / pool-attribution paths below depend only on the fixtures.
+const hermeticHome = await mkdtemp(join(tmpdir(), "pool-config-home-"));
+const origHome = process.env.HOME;
+process.env.HOME = hermeticHome;
+_clearGlobalYmlMemoForTests();
 
 process.env.TMUX ||= "/tmp/tmux-test,1234,0";
 process.env.OPENAI_API_KEY ||= "mock-key";
@@ -266,4 +274,7 @@ await writeFile(ymlFile, validPool);
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);
 process.chdir("/");
 await rm(dir, { recursive: true, force: true });
+process.env.HOME = origHome;
+_clearGlobalYmlMemoForTests();
+await rm(hermeticHome, { recursive: true, force: true });
 process.exit(fail === 0 ? 0 : 1);

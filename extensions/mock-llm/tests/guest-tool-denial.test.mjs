@@ -11,7 +11,13 @@ const repo = process.cwd();
 const scratch = mkdtempSync(join(tmpdir(), "guest-tool-denial-lane-"));
 const transcriptRoot = join(scratch, ".pi/mock-llm/transcripts");
 
-const env = { ...process.env, PI_MOCK_LLM_TRANSCRIPTS_DIR: transcriptRoot };
+// PI_SWARM_TERMINAL_MANAGER=tmux (test-hermeticity-pin-unpinned-lanes 2026-10-04): the
+// USER's GLOBAL ~/.pi/agent/swarm.yml (e.g. terminalManager: herdr) merges into every
+// scratch cwd that does not set inheritGlobal:false — without this pin the child pi
+// spawns REAL herdr workspaces in the user's live daemon. Env var is precedence #1 in
+// getTerminalDriver, so this pin makes the lane hermetic regardless of host config.
+// Same pattern as swarm-yml-pool.test.mjs.
+const env = { ...process.env, PI_MOCK_LLM_TRANSCRIPTS_DIR: transcriptRoot, PI_SWARM_TERMINAL_MANAGER: "tmux" };
 delete env.PI_SWARM_AGENT_ID;
 delete env.PI_SWARM_IS_ROOT;
 delete env.PI_SWARM_ADMIN_MODE;

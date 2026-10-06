@@ -1,0 +1,6 @@
+# taskprogress-dead-false-positive: swarm_agent_status on a tool-running agent whose heartbeat
+# went stale mid-tool (90s) must NOT report dead / "no pane / stale heartbeat" — the live
+# incident shape from 2026-10-03 (nudge-fixer running long gates). The driver seeds the agent
+# record with runtimeStatus=tool_running, lastHeartbeatAt=now-90s, lastToolAt=now-5s, and a
+# fake tmux probe so paneAlive=true deterministically.
+{"name":"status probe on mid-tool agent","events":[{"type":"text","delayMs":10,"text":"Checking the suspect agent now."},{"type":"toolcall","delayMs":10,"name":"swarm_agent_status","id":"call-1","arguments":{"agentId":"incident-agent"}}]}

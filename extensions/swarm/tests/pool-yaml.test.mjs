@@ -20,6 +20,7 @@ import { existsSync } from "node:fs";
 import { readSwarmSettings } from "../src/session.ts";
 import { classifySwarmSettings, effectiveConfig, effectiveBenchMs, validateSwarmSettings } from "../src/pool.ts";
 import { ensurePoolScaffold } from "../src/pool-scaffold.ts";
+import { _clearGlobalYmlMemoForTests } from "../src/config.ts";
 import { _clearQuotaResetCacheForTests } from "../src/pool.ts";
 
 let pass = 0,
@@ -33,6 +34,14 @@ const ok = (name, cond) => {
 };
 
 const scratch = await mkdtemp(join(tmpdir(), "pool-yaml-test-"));
+
+// Hermetic HOME pin: scratch home with NO global ~/.pi/agent/swarm.yml. With a real global yml
+// declaring modelPool, ensurePoolScaffold takes the modelpool_present skip path and never writes
+// the project yml — an env-coupled failure, not a code path.
+const hermeticHome = await mkdtemp(join(tmpdir(), "pool-yaml-home-"));
+const origHome = process.env.HOME;
+process.env.HOME = hermeticHome;
+_clearGlobalYmlMemoForTests();
 await mkdir(join(scratch, ".pi"), { recursive: true });
 const ymlPath = join(scratch, ".pi", "swarm.yml");
 
@@ -161,5 +170,8 @@ rotation:
 // cleanup
 process.chdir("/");
 await rm(scratch, { recursive: true, force: true });
+process.env.HOME = origHome;
+_clearGlobalYmlMemoForTests();
+await rm(hermeticHome, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

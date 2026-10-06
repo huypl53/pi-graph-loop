@@ -39,6 +39,11 @@ const RED = process.env.UAT_RED === "1";
 // terminal driver to tmux regardless of the repo root's real .pi/swarm.yml (a repo-root
 // `terminalManager: herdr` made spawnAgent go through the herdr driver and L2b-L3c failed).
 process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
+// preflightSpawn's checkTmuxSession gates on $TMUX; run-suites lanes from a herdr pane have no
+// $TMUX (same env gap that pinned the driver above). PI_SWARM_TMUX_OK is the documented bypass
+// (pool.ts checkTmuxSession); the tmux exec boundary itself is MOCKED here (pi.exec stub), so
+// the bypass cannot mask a real spawn failure.
+if (!process.env.TMUX) process.env.PI_SWARM_TMUX_OK = "1";
 const STAMP =
 	process.env.UAT_STAMP ||
 	`uat-${new Date()

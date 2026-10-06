@@ -10,12 +10,24 @@
 // Run: node extensions/swarm/tests/root-register-scaffold.test.mjs
 
 process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
+
+// Hermetic HOME pin: must precede the extension import below. With the real global
+// ~/.pi/agent/swarm.yml declaring modelPool, the register/init pool scaffold takes the
+// modelpool_present skip path and never writes .pi/swarm.yml — env-coupled, not a code path.
+const { mkdtemp } = await import("node:fs/promises");
+import { tmpdir as _tmpdir } from "node:os";
+const hermeticHome = await mkdtemp(join(_tmpdir(), "rrs-suite-home-"));
+const origSuiteHome = process.env.HOME;
+process.env.HOME = hermeticHome;
+
 import { rmSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const { _clearGlobalYmlMemoForTests } = await import(join(here, "..", "src", "config.ts"));
+_clearGlobalYmlMemoForTests();
 const mod = await import(join(here, "..", "index.ts"));
 const factory = mod.default;
 const { stopRootPump } = await import(join(here, "..", "src", "hooks.ts"));
@@ -137,4 +149,7 @@ console.log("\n[2] '/swarm init' also scaffolds .pi/swarm.yml if not yet initiat
 }
 
 console.log(`\nRESULTS: ${pass} passed, ${fail} failed`);
+process.env.HOME = origSuiteHome;
+_clearGlobalYmlMemoForTests();
+await rmSync(hermeticHome, { recursive: true, force: true });
 process.exit(fail > 0 ? 1 : 0);

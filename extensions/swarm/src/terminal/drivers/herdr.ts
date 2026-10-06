@@ -1,7 +1,7 @@
 // === swarm/terminal/drivers/herdr.ts — Herdr Terminal Driver ===
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TerminalDriver, TerminalTargetRef, TerminalPaneInfo, SpawnAgentOptions, FocusStatus, AttachCommands } from "../types.ts";
-import { sleep } from "../../utils.ts";
+import { sleep, projectSlug } from "../../utils.ts";
 import { expected, logSwarmError } from "../../errorlog.ts";
 import { PANE_SEND_ENTER_DEBOUNCE_MS } from "../../constants.ts";
 import { PI_COMMANDS } from "./tmux.ts";
@@ -76,8 +76,17 @@ export class HerdrDriver implements TerminalDriver {
 	// pane → never close" (foreign-only guard).
 	private everTrackedSwarmPanes = false;
 
+	/**
+	 * Per-project agents-workspace label (task-202610040005-herdr-agents-workspace-p):
+	 * `swarm-agents-<projectSlug(cwd)>` — the same per-project convention the tmux driver
+	 * uses for session naming (state.ts `pi-swarm-${projectSlug(cwd)}-…`). Before this fix
+	 * every project on one herdr instance converged on the SAME "swarm-agents" workspace
+	 * by label, and teardown could close it out from under foreign projects' workers.
+	 * `PI_SWARM_HERDR_WS_LABEL` is a FULL-label override: exactly what it says wins, no
+	 * slug appended.
+	 */
 	private getAgentsWorkspaceLabel(): string {
-		return process.env.PI_SWARM_HERDR_WS_LABEL || "swarm-agents";
+		return process.env.PI_SWARM_HERDR_WS_LABEL || `swarm-agents-${projectSlug(process.cwd())}`;
 	}
 
 	private async ensureAgentsWorkspace(pi: ExtensionAPI): Promise<string> {
@@ -368,17 +377,19 @@ export class HerdrDriver implements TerminalDriver {
 	}
 
 	/**
-	 * G4 teardown, hardened by task-fu-herdr-workspace-loss: if no panes remain in the
-	 * shared agents workspace, close it. The close decision uses the AUTHORITATIVE
-	 * workspace-wide pane census — queried live from herdr via `pane list --workspace`
-	 * on every probe — NEVER this driver instance's own tracked subset alone.
-	 * `swarmPaneIds` is per-driver-instance state while the agents workspace is a
-	 * shared singleton (main checkout + worktrees share ONE workspace by label):
+	 * G4 teardown, hardened twice — per-project isolation (master 0be3e86) + shared-workspace
+	 * census (task-fu-herdr-workspace-loss): if no panes remain in the agents workspace,
+	 * close it. The close decision uses the AUTHORITATIVE workspace-wide pane census —
+	 * queried live from herdr via `pane list --workspace` on every probe — NEVER this
+	 * driver instance's own tracked subset alone. `swarmPaneIds` is per-driver-instance
+	 * state while the workspace label may be shared (per-project slug by default;
+	 * PI_SWARM_HERDR_WS_LABEL override collapses projects back to one workspace):
 	 * closing on "my own set is empty" Hangup-killed co-tenant panes from other driver
-	 * instances six times in two days (wV, wW, wX, wY, wZ, w11 + the w13-w17 close
-	 * storm — see task-fu-herdr-workspace-loss/artifacts/diagnosis.md). A confirmation
-	 * re-probe (second consecutive zero census) guards against prune races with
-	 * mid-flight spawns. Never touches the root workspace.
+	 * instances six times in two days (wV, wW, wX, wY, wZ, w11 + the w13-w17 close storm —
+	 * see task-fu-herdr-workspace-loss/artifacts/diagnosis.md). Foreign panes (other
+	 * projects' workers under a shared label, or user tabs) VETO the close; a
+	 * confirmation re-probe (second consecutive zero census) guards against prune races
+	 * with mid-flight spawns. Never touches the root workspace.
 	 *
 	 * Failure policy: pane listing errors that are not a removed workspace are
 	 * durable-logged and ABORT the close — we never close blindly. `swarmPaneIds`
@@ -418,15 +429,16 @@ export class HerdrDriver implements TerminalDriver {
 		}
 		this.swarmPaneIds.clear();
 		for (const id of stillAlive) this.swarmPaneIds.add(id);
-		// AUTHORITATIVE close criterion (workspace-loss fix): close only when HERDR
-		// itself reports zero panes in the shared workspace. Other driver instances'
-		// panes are co-tenants we must not Hangup-kill; they live in wsPanes, so their
-		// presence naturally holds the workspace open.
-		if (wsPanes.length > 0) return;
-		// Confirmation re-probe (prune-race guard vs mid-flight spawns): confirm the
-		// zero-pane census with a second consecutive live listing before closing. A
-		// pane appearing between the two probes vetoes the close this round; teardown
-		// will re-arm on the next killAgent.
+	// AUTHORITATIVE close criterion (workspace-loss fix): close only when HERDR
+	// itself reports zero panes in the workspace. Foreign panes (other projects'
+	// co-tenants under a shared label, or user tabs) and other driver instances'
+	// panes all live in wsPanes — their presence naturally holds the workspace open.
+	// (Own-set emptiness is NOT re-asserted: swarmPaneIds is observability-only.)
+	if (wsPanes.length > 0) return;
+	// Confirmation re-probe (prune-race guard vs mid-flight spawns): confirm the
+	// zero-pane census with a second consecutive live listing before closing. A
+	// pane appearing between the two probes vetoes the close this round; teardown
+	// will re-arm on the next killAgent.
 		try {
 			const confirmList = await this.herdrJson(pi, ["pane", "list", "--workspace", wsId], 5_000);
 			const rawConfirm = Array.isArray(confirmList?.result?.panes) ? confirmList.result.panes : [];

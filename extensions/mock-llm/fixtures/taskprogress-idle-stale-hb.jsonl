@@ -1,0 +1,8 @@
+# taskprogress-idle-stale-hb: swarm_agent_status on an IDLE agent whose heartbeat went stale
+# (90s) while its pane probe proves alive must NOT report dead / "no pane / stale heartbeat" —
+# the live incident shape from 2026-10-04 02:45 UTC (idle-death-probe: taskProgressState="dead"
+# with paneAlive=true, runtimeStatus="idle", health="healthy"). The driver seeds the agent record
+# with status=running, runtimeStatus=idle, lastHeartbeatAt=now-90s, lastToolAt=now-90s, and a
+# mocked tmux probe so paneAlive=true deterministically. Positive pane-alive evidence on a
+# status=running record outranks heartbeat staleness (task-202610040400, plan §3/§5).
+{"name":"status probe on alive-idle agent with stale heartbeat","events":[{"type":"text","delayMs":10,"text":"Checking the idle agent with the stale heartbeat now."},{"type":"toolcall","delayMs":10,"name":"swarm_agent_status","id":"call-1","arguments":{"agentId":"idle-stale-agent"}}]}

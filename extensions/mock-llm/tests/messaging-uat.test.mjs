@@ -18,6 +18,10 @@
  *   M6  (R10-1 boundary) pump delivery counted at the REAL pi.sendMessage boundary:
  *       batch call count == 1, batch ids length == 3.
  *   M7  deterministic replay — second stream yields identical captured sequence.
+// No PI_SWARM_TERMINAL_MANAGER pin needed: this lane is in-process only
+// (imports swarm/index.ts directly, never spawns a pi subprocess), so the
+// terminal driver is irrelevant. See swarm-yml-pool.test.mjs for the
+// spawn-based pin pattern.
  *
  * RED mode (UAT_RED=1): seeds the node WITHOUT a newer active attempt (the pre-fence shape:
  * stale attemptId IS the active one) so the "stale" close lands — asserting the fence's absence

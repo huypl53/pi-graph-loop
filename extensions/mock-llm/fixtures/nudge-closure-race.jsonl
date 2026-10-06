@@ -1,0 +1,8 @@
+# nudge-closure-race: the artifact-progress nudge must NOT fire when the node closes between
+# the sweep's mtime snapshot and nudge delivery (task-202610031339 Fix C). The worker writes
+# its artifact (seeded mtime), then closes the node via swarm_update_task(done, outcome=passed —
+# the edge-required value per Fix A). A sweep tick that starts before the closure and delivers
+# after it must re-read task.json, observe the terminal status, and stay silent — the worker's
+# transcript proves no [PI-SWARM ARTIFACT-PROGRESS NUDGE] line ever reached it.
+{"name":"closure-race turn 1 — worker writes the artifact then closes with the edge-required outcome","events":[{"type":"text","delayMs":15,"text":"Artifact written; node passes its review edge, so I close with outcome=passed (not the old generic list).","chunks":["Artifact written; node passes its review edge, ","so I close with outcome=passed ","(not the old generic list)."]},{"type":"toolcall","delayMs":15,"name":"swarm_update_task","id":"upd-race-1","arguments":{"taskId":"task-nudge-closure-race","nodeId":"implement","status":"done","outcome":"passed"}}]}
+{"name":"closure-race turn 2 — settle","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"Node closed; any artifact-progress nudge that races this closure must be dropped.","chunks":["Node closed; any artifact-progress nudge ","that races this closure must be dropped."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

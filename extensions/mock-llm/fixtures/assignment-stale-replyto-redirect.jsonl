@@ -1,0 +1,8 @@
+# assignment-stale-replyto-redirect: worker completion reply aimed at a SUPERSEDED assignment
+# message id (still visible in context from the previous node) is redirected at the engine
+# boundary — verification credit lands on the CURRENT assignment record, exactly one verified
+# completion per node attempt. Reproduces the live-probe duplicate-"done" shape
+# (task-202610031143 forensics: first reply landed on the plan assignment, second on implement).
+{"name":"stale replyTo turn 1 — worker checks mailbox, sees stale + current assignments","events":[{"type":"text","delayMs":15,"text":"I'm checking the mailbox; the implement assignment is current and the older one is still in my context.","chunks":["I'm checking the mailbox; ","the implement assignment is current ","and the older one is still in my context."]},{"type":"toolcall","delayMs":15,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"markDelivered":true}}]}
+{"name":"stale replyTo turn 2 — completion reply targets the STALE assignment id","events":[{"type":"text","delayMs":20,"text":"Work is done; I'm replying to the assignment thread I have in context.","chunks":["Work is done; ","I'm replying to the assignment thread I have in context."]},{"type":"toolcall","delayMs":15,"name":"swarm_send_message","id":"done-1","arguments":{"to":"root","body":"Implement done","replyTo":"assignment-msg-stale-a1","conversationId":"task:task-ergo-stale-redirect:implement"}}]}
+{"name":"stale replyTo turn 3 — settle","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"The completion reply is sent; the engine owns the credit routing.","chunks":["The completion reply is sent; ","the engine owns the credit routing."]},{"type":"stop","delayMs":5,"reason":"stop"}]}
