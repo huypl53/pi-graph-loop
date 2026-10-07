@@ -12,9 +12,21 @@ import {
 	PI_SWARM_MINIMAL_PROTOCOL,
 } from "./constants.ts";
 import { currentAgentId, currentModel, currentProvider } from "./session.ts";
+import { readCharterText, resolveRolePlaybook } from "./config.ts";
 import { identityPath, mailboxPath, paths, trace } from "./state.ts";
 import { now, safeId } from "./utils.ts";
 import { tmux } from "./tmux.ts";
+import { getProcessCodeStamp, getBootIdentity } from "./stamp.ts";
+
+// Durable ext-code stamp for the leader lease (see types/state.ts RootLeader.extCodeStamp).
+// Fresh stampedAt on every write — the heartbeat/surface comparison uses it for the boot-age.
+function stampWithStampedAt(stamp: ReturnType<typeof getProcessCodeStamp>): {
+	hash: string;
+	files: number;
+	stampedAt: string;
+} {
+	return { hash: stamp.hash, files: stamp.files, stampedAt: new Date().toISOString() };
+}
 export { isRootHostPane } from "./terminal/index.ts";
 
 // Centralized authority check used by every server-side mutation that depends on identity. Phase 1
@@ -64,9 +76,22 @@ function isPidAlive(pid: number): boolean {
 	}
 }
 
+// Boot-scope gate (redteam F3, 2026-10-04). True ONLY for a concrete cross-boot mismatch:
+// legacy leases (absent bootId) and any "unknown" resolution (either side) fold into the
+// historical pid-only scope (D4 legacy-trusted migration — a force re-claim would deny the
+// LIVE root's own heartbeat for >=1 stale TTL on every running swarm post-upgrade).
+export function leaseScopeMismatch(lease: { bootId?: string } | undefined | null, meBootId: string): boolean {
+	if (!lease?.bootId) return false; // legacy lease → legacy-trusted
+	if (lease.bootId === "unknown") return false; // unresolvable at write time → pid-only scope
+	if (meBootId === "unknown") return false; // we cannot compare → pid-only scope
+	return lease.bootId !== meBootId; // concrete mismatch = foreign boot
+}
+
 export function claimRootLeader(st: SwarmState, nowMs: number, me: number) {
 	const cur = readRootLeader(st, nowMs);
-	if (cur.kind === "claimed" && cur.leader.pid !== me) return { kind: "denied" as const, currentLeader: cur.leader, ageMs: cur.ageMs };
+	const meBootId = getBootIdentity().id;
+	if (cur.kind === "claimed" && (cur.leader.pid !== me || leaseScopeMismatch(cur.leader, meBootId)))
+		return { kind: "denied" as const, currentLeader: cur.leader, ageMs: cur.ageMs };
 	const ts = new Date(nowMs).toISOString();
 	st.rootLeader = {
 		pid: me,
@@ -74,16 +99,34 @@ export function claimRootLeader(st: SwarmState, nowMs: number, me: number) {
 		claimedAt: ts,
 		lastHeartbeatAt: ts,
 		agentRecordId: "root",
+		// Stale-root detection (2026-10-03): record WHICH code generation this leader
+		// loaded at claim time; /swarm status compares it against the on-disk generation.
+		extCodeStamp: stampWithStampedAt(getProcessCodeStamp()),
+		// Boot-identity binding (redteam F3): every lease write re-binds the boot scope.
+		bootId: meBootId,
 	};
 	return { kind: "claimed" as const, leader: st.rootLeader };
 }
 
 export function heartbeatRootLeader(st: SwarmState, nowMs: number, me: number, _source: string) {
 	const cur = readRootLeader(st, nowMs);
-	if (cur.kind === "claimed" && cur.leader.pid !== me)
-		throw new Error(
-			`${ERR_ROOT_LEADER_DENIED}: live root leader pid=${cur.leader.pid} (heartbeat ${cur.ageMs}ms ago). Refusing to mutate from pid=${me}.`,
-		);
+	if (cur.kind === "claimed") {
+		const meBootId = getBootIdentity().id;
+		if (cur.leader.pid !== me) {
+			throw new Error(
+				`${ERR_ROOT_LEADER_DENIED}: live root leader pid=${cur.leader.pid} (heartbeat ${cur.ageMs}ms ago). Refusing to mutate from pid=${me}.`,
+			);
+		}
+		// Boot-scope gate (redteam F3): a pid-COLLIDING foreign-boot process must not
+		// restamp the lease (it used to overwrite extCodeStamp, masking a stale root).
+		// Refuse-and-leave: recovery stays owned by the stale path; deny message names BOTH
+		// boot ids — today a foreign restamp is invisible, which is the finding.
+		if (leaseScopeMismatch(cur.leader, meBootId)) {
+			throw new Error(
+				`${ERR_ROOT_LEADER_DENIED}: lease pid=${cur.leader.pid} held by a DIFFERENT BOOT (lease bootId=${cur.leader.bootId ?? "(none)"}, this process bootId=${meBootId}). Foreign process with a colliding pid refused.`,
+			);
+		}
+	}
 	const ts = new Date(nowMs).toISOString();
 	st.rootLeader = {
 		pid: me,
@@ -91,6 +134,12 @@ export function heartbeatRootLeader(st: SwarmState, nowMs: number, me: number, _
 		claimedAt: cur.kind === "vacant" ? ts : cur.leader.claimedAt,
 		lastHeartbeatAt: ts,
 		agentRecordId: "root",
+		// Stale-root detection (2026-10-03): this record is rebuilt from scratch on every
+		// heartbeat, so restamp HERE or the stamp would be silently dropped on each beat.
+		extCodeStamp: stampWithStampedAt(getProcessCodeStamp()),
+		// Boot-identity binding (redteam F3): must ride BOTH writers or heartbeats
+		// silently drop it (the extCodeStamp lesson, asserted by bootid-lease R3).
+		bootId: getBootIdentity().id,
 	};
 }
 
@@ -156,6 +205,21 @@ export function ensureRoot(st: SwarmState, cwd: string, p: Paths): SwarmAgent {
 // read-only when appending the `## Memory protocol` link to generated agent identity, so there is no
 // redeclaration here. Both regions stay disjoint; the constant value is shared and identical.
 
+// Role Playbook section (task-role-playbooks). Renders the agent's always-loaded
+// role playbook (a pi skill injected at spawn via --skill) plus the charter it
+// operates under. Config reads are synchronous (readSwarmYml); any failure falls
+// back to bundled defaults and logs durably — identity generation never throws.
+function buildRolePlaybookSection(agent: SwarmAgent): string {
+	const playbook = resolveRolePlaybook(agent.roleKind, { role: agent.role });
+	if (!playbook) return "";
+	const charterText = readCharterText(agent.cwd);
+	return (
+		`## Role Playbook\n\n` +
+		`Your role playbook (pi skill, always loaded): \`${playbook}\`\n\n` +
+		`**Charter:** ${charterText.trim()}\n\n`
+	);
+}
+
 export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 	return (
 		`# Swarm Agent Identity: ${agent.id}\n\n` +
@@ -181,6 +245,7 @@ export function buildIdentityMarkdown(state: SwarmState, agent: SwarmAgent) {
 		(["root", "reviewer", "auditor"].includes(agent.roleKind)
 			? `7. Qualification responsibility: read the package skill \`extensions/swarm/qualification-skills/qualification-gate/SKILL.md\` when preparing, challenging, or auditing a task's qualification gate. Keep it private to qualification roles; implementers follow the frozen artifact instead.\n\n`
 			: "\n") +
+		buildRolePlaybookSection(agent) +
 		(PI_SWARM_MINIMAL_PROTOCOL === 1
 			? `## Reply Protocol\n\n` +
 				`- Replies are auto-verified; do NOT call \`swarm_ack_message\` for normal workflow.\n` +

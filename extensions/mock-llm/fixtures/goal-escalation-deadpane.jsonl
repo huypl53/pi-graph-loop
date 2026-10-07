@@ -1,0 +1,34 @@
+# goal-escalation-deadpane — busy-but-dead-pane classifier E2E scenario.
+#
+# Validates the goal-escalation classifier distinguishes busy-but-dead-pane from
+# live busy by probing panes via the existing isTmuxRunning facade (active
+# terminal driver — tmux/herdr/mock parity for free).
+#
+# Plan §3.7 scenario (Pattern 2 — seeded world + single-actor script):
+#   "seed scratch .pi/swarm/swarm-state.json with a user-origin goal + worker
+#    record (runtimeStatus=busy, fresh heartbeat, tmuxTarget pointing at a tmux
+#    target that does not exist in the lane, e.g. goal-deadpane-probe:9999.0 →
+#    real tmux probe returns dead deterministically, no herdr dependency).
+#    Root turns: turn 1 sleeps so a pump tick fires the escalation; turn 2
+#    verifies the escalation message in its mailbox and reports the poolDiag
+#    classification."
+#
+# This fixture is the engine-side artifact: it provides a deterministic terminal
+# turn so the root pi session reaches a stable state where the pump tick can
+# fire the escalation. The pre-existing dead-pane worker is seeded on disk by
+# the lane harness BEFORE the lane starts (see agents/mock-llm-scenarios
+# pattern 2: "seeded world + single-actor script"). Without seeding, the
+# classifier sees no busy worker and the vacuous branch fires instead — this
+# is by design; the fixture itself does not write swarm state, it documents
+# the scenario + gives the lane a clean terminal turn.
+#
+# Model id = goal-escalation-deadpane. Lane form:
+#   pi -e ./extensions/swarm -e ./extensions/mock-llm --provider mock-llm \
+#      --model goal-escalation-deadpane -p 'idle' \
+#      # with PI_SWARM_AGENT_ID=root + cwd seeded with the dead-pane worker
+#
+# Three turns: text acknowledge-seed → text verify-escalation → text confirm-stop.
+# Total runtime <120ms; lane then exits cleanly so the engine fires agent_settled.
+{"name":"deadpane turn 0 acknowledge-seed","events":[{"type":"text","delayMs":15,"text":"deadpane turn 0: root session_start detected a seeded busy-but-dead-pane worker (runtimeStatus=busy, fresh heartbeat, tmuxTarget=goal-deadpane-probe:9999.0 — does not exist in this lane). The pump tick will probe the pane via isTmuxRunning and classify the worker as busy_dead_pane. Standing by for the escalation."}]}
+{"name":"deadpane turn 1 verify-escalation","events":[{"type":"text","delayMs":15,"text":"deadpane turn 1: the goal.escalation.pool_empty trace has fired with cause=busy_dead_pane. The poolDiag row classifies the worker as busy_dead_pane with paneAlive=false. The high-priority escalation message has been appended to the root mailbox with the restart hint. Heartbeat freshness was irrelevant — fresh + dead pane still classified dead."}]}
+{"name":"deadpane turn 2 final-stop","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"deadpane lane complete. After this stop, the root settles; the probe ledger and cooldown stamp have been persisted durably."},{"type":"stop","delayMs":5,"reason":"stop"}]}

@@ -3,11 +3,16 @@
 
 import { Type } from "typebox";
 import { PI_SWARM_MINIMAL_PROTOCOL } from "../../constants.ts";
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	defineTool,
+	formatSize,
+	type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
+	PI_SWARM_MESSAGE_BODY_MAX_BYTES,
 	PREFLIGHT_ASSIGN_GRACE_MS,
 	REASSIGN_RATE_LIMITED,
 	TERMINAL_NODE_STATUSES,
@@ -105,6 +110,16 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 					await ensureDirs(p);
 					const me = currentAgentId();
 					requireRootAuthority(me, "swarm_assign_task");
+					// F4 follow-up (task-fu-assign-clamp) — assignment note clamp at the tool boundary.
+					// Mirrors messages.ts swarm_send_message: reject (throw, pi-runtime-contract §9) BEFORE
+					// any lock, state read/write, or mailbox append. deliverMessageLocked stays unclamped —
+					// engine-internal senders must not fail closed at delivery.
+					const noteBytes = Buffer.byteLength(params.note ?? "", "utf8");
+					if (noteBytes > PI_SWARM_MESSAGE_BODY_MAX_BYTES) {
+						throw new Error(
+							`MESSAGE_BODY_TOO_LARGE: body is ${formatSize(noteBytes)} (cap ${formatSize(PI_SWARM_MESSAGE_BODY_MAX_BYTES)} — PI_SWARM_MESSAGE_BODY_MAX_BYTES). Trim the body or reference an artifact path instead.`,
+						);
+					}
 					const reusePolicy = params.reusePolicy || "prefer_idle_existing";
 					let spawned = false;
 					const result = await withLock(p, async () => {
@@ -494,11 +509,25 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 
 						const replyTarget = params.replyTarget || me;
 						const conversationId = `task:${task.taskId}:${params.nodeId}`;
-						// Ergonomics Fix 2 (task-202610031216): pre-mint the assignment message id so the
-						// body can name it literally (replyTo contract) and deliverMessageLocked adopts it
-						// via idOverride — body, state record, and mailbox line carry the identical id.
-						const assignmentMsgId = mintMessageId();
-						const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note, attemptId, assignmentMsgId);
+					// Ergonomics Fix 2 (task-202610031216): pre-mint the assignment message id so the
+					// body can name it literally (replyTo contract) and deliverMessageLocked adopts it
+					// via idOverride — body, state record, and mailbox line carry the identical id.
+					const assignmentMsgId = mintMessageId();
+					const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note, attemptId, assignmentMsgId);
+					// F4 follow-up (task-fu-assign-clamp) — defensive clamp of the COMPOSED assignment body
+					// (site 2). params.note is not the only body input: task title/goal/acceptanceCriteria,
+					// artifact lists, and the playbook ref are folded in by buildAssignmentBody, so the note
+					// clamp alone does not bound the persisted line. At this point NO writeTaskState/
+					// writeState has run (both happen after delivery), so a throw here persists NOTHING —
+					// task.json, swarm-state.json, mailboxes, and the in-memory fencing/supersession counters
+					// (lock released unwritten) all stay untouched. deliverMessageLocked stays unclamped —
+					// engine-internal senders must not fail closed at delivery.
+					const bodyBytes = Buffer.byteLength(body, "utf8");
+					if (bodyBytes > PI_SWARM_MESSAGE_BODY_MAX_BYTES) {
+						throw new Error(
+							`MESSAGE_BODY_TOO_LARGE: body is ${formatSize(bodyBytes)} (cap ${formatSize(PI_SWARM_MESSAGE_BODY_MAX_BYTES)} — PI_SWARM_MESSAGE_BODY_MAX_BYTES). Trim the body or reference an artifact path instead.`,
+						);
+					}
 						// Deterministic idempotency key: same task/node/assignee/attempt -> same message (no duplicate on retry).
 						const idempotencyKey = `assign:${task.taskId}:${params.nodeId}:${assignee.id}:${node.attempts}`;
 						// Lifecycle-fencing (issue 9, site 8, defense-in-depth): per-node staleness check right

@@ -85,6 +85,48 @@ captured errors through `logSwarmError()` / `traceLogged()` from `extensions/swa
 - `swarm_agent_status`
 - `swarm_task_status`
 
+### Extension code stamp (stale-root detection)
+
+A long-lived root pi process keeps serving OLD module code from Node's ESM module cache after
+`extensions/swarm` sources change on disk. Workers spawned from such a root silently lack whatever
+new code landed. The stamp feature makes this visible.
+
+- **What it is**: a sha256 single streaming pass over the sorted `src/<relPath><NUL>sizeBytes<NUL>mtimeMs<LF>`
+  lines of `extensions/swarm/index.ts` + `extensions/swarm/src/**/*.ts` with each file's **raw content bytes**
+  interleaved (line + bytes + LF per file). Since 2026-10-04 (task-fu-stamp-digest, red-team F5) the stamp
+  folds CONTENT alongside metadata: a same-length in-place edit with the mtime restored afterwards now
+  changes the hash (the metadata-only v1 stamp was blind to it — PoC `poc-stamp3.mjs` reported
+  `sameHash:true` at pre-fix HEAD). Captured once per process at extension load (readdir + stat + read +
+  hash over ~133 small files, measured ~3.2 ms on this host; budget 20 ms) and memoized. The 512-file cap
+  (`EXT_CODE_STAMP_MAX_FILES`) is unchanged.
+- **Where it lives**: `SwarmState.rootLeader.extCodeStamp` (additive optional field). Written by
+  `claimRootLeader` AND `heartbeatRootLeader` — both rebuild the lease from scratch, so the stamp
+  must ride BOTH writers or heartbeats silently drop it.
+- **Where you see it**: `/swarm status` renders an `ext code:` line with the verdict:
+  - `current (self=<h8>)` — the leader process loaded the same generation as the on-disk tree.
+  - `STALE — root boot (<h> ago) predates current on-disk code (self=<h8>, root=<h8>); restart root or /reload`
+    — the leader process predates an on-disk code change. Restart the root or `/reload` it.
+  - `unknown — root predates ext-code stamping (self=<h8>); reboot root to enable stamping`
+    — the leader was booted before this feature landed. Reboot to enable stamping.
+  - `unavailable (could not scan extension sources; see errors.jsonl)` — the scan failed; check
+    `.pi/swarm/traces/errors.jsonl` for the cause.
+- **One-shot notify**: when a root `session_start` finds a prior durable stamp that differs from
+  the current process's stamp, it emits a `warn`-level `ctx.ui.notify` once (hasUI-guarded) and
+  traces `ext.stamp.changed`. The notify is best-effort; the durable stamp is the source of truth.
+- **How to clear**: restart the root process, or `/reload` it. The new process captures the
+  current on-disk generation at load and stamps it on the next lease write.
+- **Mixed-format durable stamps (no migration needed)**: durable stamps are compare-only values — never
+  parsed — so a legacy v1 (metadata-only) or pre-digest lease hash needs no shape migration. Any such hash
+  can never equal a v2 self hash ⇒ it renders `stale`, the safe direction (an operator prompt to restart;
+  a false `current` would mask staleness). The next session_start re-stamps the lease through the existing
+  changed-generation path (one-shot notify + `ext.stamp.changed` trace), so the stale verdict self-heals on
+  the next root boot.
+- **What it does NOT detect**: same-mtime in-place edits within the filesystem's mtime granularity
+  (rare; conservative `STALE` is the safe failure direction). Per-worker stale detection is
+  out of scope (worker identity content is already versioned/hashed per agent).
+- **Excluded from the stamp**: `tests/`, `role-skills/`, `docs/`, `issue-skills/` — they are read
+  fresh from disk at use time, so they cannot be served stale by a cached module.
+
 ### Recover or debug delivery
 
 - `swarm_message_status`
@@ -95,6 +137,172 @@ captured errors through `logSwarmError()` / `traceLogged()` from `extensions/swa
 - See [`flow.md` message lifecycle](./flows/flow.md#message-lifecycle) for the
   durable mailbox → tmux inject → input hook intercept → ack → reconcile
   retry / dead-letter path with real payload examples.
+
+### Mailbox body clamp (F4, task-redteam-fixnow)
+
+`swarm_send_message` bodies are clamped at the tool boundary BEFORE any mailbox append or
+state write:
+
+- Cap: `PI_SWARM_MESSAGE_BODY_MAX_BYTES` (env, read at module load; integer > 0), default
+  `262144` (256 KiB). An oversized body is REJECTED with a
+  `MESSAGE_BODY_TOO_LARGE: body is <size> (cap <cap> — PI_SWARM_MESSAGE_BODY_MAX_BYTES). Trim
+  the body or reference an artifact path instead.` throw — never truncated silently mid-write;
+  nothing is persisted on rejection (0 mailbox lines, 0 `st.messages` records).
+- `swarm_check_mailbox fullBody:true` row bodies are clamped to `FULL_BODY_MAX_CHARS`
+  (20 000 chars, constant) with an escape-hint suffix naming the durable mailbox JSONL path
+  (`…[+N chars truncated — full body durable in mailbox JSONL: <path>]`). The complete body
+  stays durable in the mailbox and in the tool result's `details.messages` (raw,
+  programmatic/harness escape — never model context).
+- Engine-internal senders (nudges, escalations, hints) call `deliverMessageLocked` directly
+  and are UNCLAMPED by design: their content is engine-generated and bounded, and failing them
+  closed at delivery would break nudges over the cap. Out-of-band/legacy giant mailbox lines
+  (written directly to the JSONL) are the residual shape the fullBody clamp exists for — the
+  send boundary cannot see them, the read view bounds them.
+- `swarm_assign_task` shares the SAME cap at its tool boundary (task-fu-assign-clamp, F4
+  follow-up). Two clamp sites in `extensions/swarm/src/tools/tasks/assign.ts`, same
+  `MESSAGE_BODY_TOO_LARGE` throw, constants reused (never duplicated):
+  1. `params.note` is clamped at the execute boundary immediately after
+     `requireRootAuthority` — BEFORE any lock, state read/write, or mailbox append;
+  2. the composed assignment body is defensively clamped right after
+     `buildAssignmentBody(...)` — the note is not the only body input (task title/goal/
+     acceptanceCriteria, artifact lists, playbook ref are folded in), so site 2 bounds the
+     actual persisted line even when engine-composed segments are large. At this point no
+     `writeTaskState`/`writeState` has run (both happen after delivery), so a rejection
+     persists NOTHING: task.json, swarm-state.json, mailboxes, and the in-memory
+     fencing/supersession counters (lock released unwritten) all stay untouched.
+- `deliverMessageLocked` itself stays UNCLAMPED — the clamp lives at tool boundaries only.
+  Engine-internal assignment producers that deliberately bypass the clamp (fail-open,
+  engine-generated bounded content): the fenced-assignment notice (assign.ts), the issue-context
+  hint (assign.ts), task-cancel notification + task-close/status-change notify
+  (primitives/task-core.ts), ack-debt stop notification (src/agents.ts), settle-driven
+  nudges/escalations (src/hooks/settled.ts), the pump re-delivery path (src/mailbox.ts), and
+  task-update close notifications (tools/tasks/update.ts). The residual out-of-band giant line
+  remains handled by the `FULL_BODY_MAX_CHARS` read-side clamp above.
+- Regression + red-first evidence: `extensions/swarm/tests/assign-body-clamp.test.mjs`
+  (R1–R6, cap=1024 pinned in-process) and mock-llm fixture
+  `extensions/mock-llm/fixtures/assign-body-clamp.jsonl` with companion
+  `extensions/mock-llm/tests/assign-body-clamp.test.mjs` (shape assertions always-on; opt-in
+  live lane via `RUN_ASSIGN_CLAMP_LANE=1` with the root-actor env
+  `PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1`).
+
+### Mailbox oversized-line read guard (task-fu-readmailbox-rss, reviewer-05 finding B)
+
+The F4 clamps bound NEW writes at tool boundaries; pre-existing or out-of-band legacy mailbox
+lines can still be arbitrarily large and were fully `JSON.parse`d on every read (redteam PoC:
+200 MB line → +609 MB RSS per parse, every pump poll). The read-side guard skips such lines
+BEFORE parsing:
+
+- Cap: `PI_SWARM_MAILBOX_LINE_MAX_BYTES` (env, read at module load; integer > 0), default
+  `DEFAULT_MAILBOX_LINE_MAX_BYTES` = 1 MiB (≈4× headroom over the 256 KiB body cap — envelope,
+  headers and JSON escaping are line-level, and engine-internal senders are deliberately
+  unclamped at send). The effective cap FLOORS at `PI_SWARM_MESSAGE_BODY_MAX_BYTES` so a legal
+  in-band write can never be skipped on read.
+- Guarded sites: `readMailbox` + the `readMailboxSince` incremental loop (`src/mailbox.ts`),
+  `readMailboxLine` (`src/flow/collectors.ts` sync path), and `readJsonlRecords` (`src/state.ts`,
+  consistency). Helper: `isOversizedLine(logCwdOrPaths, line, file, lineIndex, byteOffset)`
+  exported from `src/mailbox.ts`.
+- Skip semantics: oversized lines are INERT — never returned by any reader, never delivery
+  targets, invisible to reconcile retry/reinject lookups (existing "not found" path) — and the
+  line STAYS in the file (append-only contract; no gc/quarantine in the guard).
+- Durable, never silent: first encounter per process per `file:byteOffset:byteLength` writes a
+  `logSwarmError` entry (`op=mailbox.oversized_line_skipped`, extra: `file`, `lineIndex`,
+  `byteOffset`, `byteLength`, `cap`) to `.pi/swarm/traces/errors.jsonl`. The in-process
+  log-once ledger is a spam bound, not a swallow — the durable record exists on disk.
+- Checkpoint semantics unchanged: skipped lines still advance the `readMailboxSince` byte offset
+  past their FULL length; corrupt-but-SMALL lines keep the distinct
+  `mailbox.corrupt_lines_ignored` trace path (corrupt ≠ oversized).
+- gc interplay: front-truncation shifts byte offsets → one fresh ledger entry per truncation,
+  bounded by the errorlog per-source cap. Self-healing.
+- Red-first evidence: `extensions/swarm/tests/mailbox-oversized-line.test.mjs` (observed RED
+  pre-change: no skip entry, oversized line parsed by all three readers; logged in
+  `extensions/swarm/tests/red-first-log.md`). Mock-llm note: the deterministic unit lane (50 MB
+  seeded line + errors.jsonl trace assertion) is the required reproduction; a mock-llm E2E
+  seeded-world lane is deferred — seeding a 50 MB line into a live lane adds no signal beyond
+  the unit lane's byte-exact fixture and a flaky fs setup, per the plan §5 fallback statement.
+
+**Floor hazard: env ≤ body-cap configs can skip legal cap-sized lines (reviewer-09
+NONBLOCK-1, task-fu-readmailbox-rss):** the floor `max(env, PI_SWARM_MESSAGE_BODY_MAX_BYTES)`
+(`extensions/swarm/src/constants.ts:665-670`) guarantees BODY-frame safety only, not LINE-frame
+safety: a legal cap-sized send (body = 256 KiB cap) plus envelope overhead and worst-case 2×
+JSON-escape inflation measured **524,347 B** and IS skipped when the env floor is active (tester
+floor-probe2/3, `task-fu-readmailbox-rss/artifacts/test-report.md:55-64`; the skip predicate is
+strict `>`, `extensions/swarm/src/mailbox.ts:253-254`). At the default (env unset, 1 MiB ≈ 4× the
+body cap) even the worst-case legal line fits — the default-config safety argument holds. Any
+such false-positive skip is DURABLY logged (`op=mailbox.oversized_line_skipped` with
+`file`/`lineIndex`/`byteOffset`/`byteLength`/`cap`, `extensions/swarm/src/mailbox.ts:258`) —
+detectable in errors.jsonl, never silent. Operator opt-in: setting
+`PI_SWARM_MAILBOX_LINE_MAX_BYTES` at/below body-cap + envelope width reintroduces false-skip risk
+for legal in-band sends; if you must, monitor errors.jsonl for the op and treat hits as envelope
+loss, not corruption.
+
+### Roles/charter project-root containment (F1, task-redteam-fixnow)
+
+Custom `roles.*` playbook paths and `roles.charter` paths (`.pi/swarm.yml` / global
+`~/.pi/agent/swarm.yml`) must resolve INSIDE the project root — same realpath containment as
+`resolveEvidencePath` (state.ts). A relative `../` traversal, an absolute path outside the
+project, or a symlink escaping the root produces:
+
+- preflight validation errors `roles_charter_outside_project` /
+  `roles_playbook_outside_project` (surfaced by `validateRolesConfig` → preflight spawn /
+  `/swarm pool validate`);
+- a durable refusal at load time: `readCharterText` returns `ROLE_CHARTER_DEFAULT` and
+  `resolveRolePlaybook` returns `null` (spawn never receives the escaping path as `--skill`),
+  each logging `roles_charter_outside_project_refused` / `roles_playbook_outside_project_refused`
+  to `errors.jsonl` (memoized once per path per process).
+
+Missing-but-inside paths keep their existing `roles_*_missing` error kinds (containment is
+ENOENT-tolerant by design: nothing can load from a missing path). Bundled role-skills defaults
+are never flagged (they legitimately live outside arbitrary project cwds).
+
+### Trust boundaries (F2, task-redteam-20261003)
+
+**What is trusted-by-contract prompt content.** `roles.charter` text and per-role playbook
+content resolved from repo-controlled `.pi/swarm.yml` (project layer over global
+`~/.pi/agent/swarm.yml`, per-key precedence project > global > bundled —
+`extensions/swarm/src/config.ts:1-13`, per-sub-key merge `config.ts:469-478`) are PROMPT
+MATERIAL, not inert config: the charter is embedded verbatim into every spawned agent's identity
+markdown (`buildRolePlaybookSection`, `**Charter:** ${charterText.trim()}` —
+`extensions/swarm/src/identity.ts:212-220`) and playbooks are injected as pi skills at spawn via
+additive `--skill <abs-path>` (`childPiArgsWithSkills` `extensions/swarm/src/session.ts:63-80`;
+spawn-boundary resolution `extensions/swarm/src/agents.ts:257-278`). Setting `roles.charter`
+REPLACES the bundled default charter everywhere it surfaces (`ROLE_CHARTER_DEFAULT`,
+`extensions/swarm/src/constants.ts:197-202`).
+
+**The boundary is repo write access itself.** A malicious or compromised repo that commits
+`.pi/swarm.yml` injects instructions into contributor swarms with no warning. Live mock-llm lane
+evidence (task-redteam-20261003): a poisoned charter drove tool calls end-to-end, and a
+worker→root injection relay via `swarm_send_message` reached the root mailbox (attack-edges
+report §4; accepted-with-docs disposition). Operator rule: **treat repo write access as swarm
+instruction access** — review a repo's `roles:` block like you review its code. Red-team framing
+(redteam-report Verdict): every HIT was either inside the self-trust boundary (whoever writes
+`.pi/swarm/` state owns the swarm) or a config/content-trust gap around roles/charter — the one
+theme both attackers converged on.
+
+**What the harness guarantees anyway (why this is trust, not a sandbox escape).** Content is
+harness-inert: zero interpreter sinks consume charter/playbook text (attack-edges §4 PoC —
+interpreter count 0). Tool RBAC held under the same attack: a worker calling
+`swarm_update_task(force:true)` is refused with `FORCE_FORBIDDEN` and a durable
+`task.rbac.force_forbidden` trace (`extensions/swarm/src/tools/tasks/update.ts:166-174`;
+`isRootAuthority` = the `root` id literal only, `extensions/swarm/src/identity.ts:36-38`). The
+relay is design-accepted (deliverMessageLocked is L1; ack-gating hardening deferred — redteam
+follow-up table).
+
+**What F1 containment does and does not do.** Path containment (see
+[Roles/charter project-root containment](#rolescharter-project-root-containment-f1-task-redteam-fixnow)
+above; `containedInProjectSync` `extensions/swarm/src/config.ts:391-409`, mirroring
+`resolveEvidencePath` `extensions/swarm/src/state.ts:376-379`) bounds WHERE content loads from
+(realpath-inside the project root), not WHAT it may say: repo-committed yml legally points
+inside the repo, so contained attacker-authored content still loads into prompts. Global-layer
+note: `roles:` keys in `~/.pi/agent/swarm.yml` apply to every project WITHOUT a local `roles:`
+key (per-key precedence, `config.ts:469-478`) — a compromised dotfiles installer gets persistent
+prompt content into all of that user's swarms.
+
+**Operator guidance.** Before spawning in a repo you don't fully trust: inspect effective config
+with `/swarm roles` (paths + source layer); run `/swarm pool validate` (per-sub-key errors);
+check `errors.jsonl` for `roles_*_outside_project_refused`; read the charter your agent will
+operate under via `swarm_agent_identity`. See also `docs/swarm/tools.md` § roles (canonical
+`roles:` config reference — cross-link to this section is a named follow-up out of this task's
+scope).
 
 ### Recover or debug task execution
 
@@ -561,6 +769,47 @@ for authority-sensitive mutations. The durable record lives in `swarm-state.json
 The leadership blind spot is a documented trade-off, not a semantic failure: the harness treats the
 stale record as recoverable state, not evidence that a worker may take over.
 
+### Boot-identity binding for the leader lease (redteam F3, 2026-10-04)
+
+The leader lease carries `rootLeader.bootId` — a composite `"<hostname>::<bootMarker>"` written by
+BOTH lease writers (`claimRootLeader` and `heartbeatRootLeader`). It binds the lease to the boot
+that minted it, so a foreign process with a COLLIDING pid (containers, shared volumes, a state file
+copied across hosts) can no longer restamp `rootLeader.extCodeStamp` and mask a stale root.
+
+- **Boot marker resolution** (`getBootIdentity()` in `src/stamp.ts`, memoized per process):
+  Linux reads `/proc/sys/kernel/random/boot_id`; darwin/BSD parses `sysctl -n kern.boottime`
+  (there is no `kern.bootid` oid on darwin — verified 2026-10-04). When neither resolves, the id
+  is `"unknown"` and the lease degrades to the historical pid-only scope (once, durably logged in
+  `errors.jsonl` with an `expected` marker — never a silent swallow).
+- **Deny meanings:** `ROOT_LEADER_DENIED: lease pid=<pid> held by a DIFFERENT BOOT (lease
+  bootId=…, this process bootId=…) …` means one of: (a) a foreign-boot process with a colliding pid
+  tried to write the lease — refused, the lease is left untouched; (b) the state file was copied
+  across hosts and both sides are live; (c) the hostname was renamed mid-boot (the composite is
+  hostname-prefixed) — the lease self-heals when the ≤60s stale TTL expires and a fresh claim
+  re-stamps the new composite.
+- **Remedy:** wait out the ≤60s TTL (`ROOT_LEADER_STALE_MS`) — the stale path reclaims the lease
+  and stamps the current boot id. Do NOT hand-edit `swarm-state.json` while a deny is firing.
+- **Legacy migration:** leases written before this change have no `bootId` and are legacy-trusted
+  (pid-only scope, exactly the pre-change behavior — a force re-claim would have denied the LIVE
+  root's own first post-upgrade heartbeat for ≥1 TTL on every running swarm). The next claim or
+  stale-reclaim stamps `bootId`; at worst a legacy lease survives one root lifetime.
+- **Same-boot pid reuse is out of scope:** within one boot, a dead root's pid reused by an
+  unrelated process is indistinguishable (bootId matches, pid matches). Behavior is unchanged
+  (a fresh root waits out the ≤60s TTL); the residual risk is accepted and observably mitigated
+  by `extCodeStamp` + `sessionStartedAt`.
+- **bootId is a collision guard, not an authenticator:** an attacker who controls a host's
+  hostname and clock can forge a matching composite — deliberate forgery with state-file write
+  access is inside the documented self-trust boundary (R27 goal-epoch precedent). F3's threat —
+  ACCIDENTAL cross-boot collision — is what this closes.
+- **Deterministic coverage:** `extensions/swarm/tests/bootid-lease.test.mjs` (R1–R9) seeds the
+  exact red-team PoC state; no mock-llm lane exercises the boot deny because the deny precondition
+  (lease pid === caller pid with a foreign bootId) cannot be seeded deterministically there — a
+  lane's pid is unknowable before spawn and the only seeding window (mutating `bootId` in
+  `swarm-state.json` after the lane's own first heartbeat) races the lane's per-tick pump
+  heartbeat, which re-stamps a legit bootId between turns. A deny asserted on the pid rule alone
+  would NOT exercise the changed code path; the unit suite is the compulsory reproduction
+  (AGENTS.md mock-llm fallback clause).
+
 ## Trace audit + retention
 
 `swarm audit` is the supported reader for `.pi/swarm/traces/events.jsonl` and the gzip generations produced by trace rotation.
@@ -660,17 +909,89 @@ workers and makes teardown deterministic (one workspace to close when no workers
   workspace id is cached on the driver instance.
 - **Stale-cache recovery**: if the cached workspace id no longer resolves
   (`workspace_not_found`), the driver re-creates it on the next spawn.
-- **Teardown**: after every `killAgent`, the driver calls `pane list --workspace <wsId>`
-  and intersects with its tracked swarm pane ids. It then applies the **foreign-pane
-  teardown guard**: `workspace close` fires ONLY when the workspace's total live pane
-  count is zero. Any remaining pane — a tracked survivor or a foreign pane (another
-  project's workers, or a user-created tab) — vetoes the close, so a driver can never
-  close a workspace out from under panes it did not spawn. When the close does fire it
-  clears the cache.
+- **Teardown** (hardened twice: per-project isolation in master 0be3e86 + shared-workspace
+  census in task-fu-herdr-workspace-loss, 2026-10-04): after every `killAgent`, the driver
+  takes an AUTHORITATIVE workspace-wide pane census via `pane list --workspace <wsId>`
+  (queried live on every probe — never trusting this driver instance's tracked
+  `swarmPaneIds` subset alone). Only when the census reports zero panes AND a confirmation
+  re-probe (second consecutive census) still reports zero does it call `workspace close
+  <wsId>` and clear the cache. A pane appearing between the two probes (mid-flight spawn
+  race) vetoes the close for that round. Foreign panes (another project's workers under a
+  shared label, or user-created tabs) likewise hold the workspace open. The tracked set
+  remains as best-effort pre-tracking for observability only. Any pane-list failure aborts
+  the close (durable-logged via `logSwarmError`, never silently swallowed).
 - **Root workspace**: never touched. `spawnAgent` never resolves the root workspace id
   for tab placement; the root workspace id is used only for root-pane detection.
 - **herdr 0.8.2 commands used**: `workspace list`, `workspace create --label`,
   `workspace get`, `workspace close`, `pane list --workspace`.
+
+
+### Herdr workspace-loss runbook (task-fu-herdr-workspace-loss, 2026-10-04)
+
+Six-plus incidents over two days (wV, wW, wX, wY, wZ, w11 + the w13-w17 close storm)
+where ALL panes of the shared `swarm-agents` workspace vanished while the herdr server
+stayed alive. Root cause (fully evidenced in
+`.pi/swarm/tasks/task-fu-herdr-workspace-loss/artifacts/diagnosis.md`): every loss was an
+API-driven `cli:workspace:close` issued by a swarm `HerdrDriver` teardown that trusted
+its OWN tracked pane set (per-driver-instance state) while the workspace itself is a
+shared singleton — driver A retiring its last agent closed the workspace underneath
+driver B's live panes (`pane.exit signal=Hangup` milliseconds after the close in
+`~/.config/herdr/herdr-server.log`). Fixed by the authoritative-census + confirmation
+re-probe criterion described above; this runbook covers detection and response for any
+future recurrence of the user-visible symptom.
+
+**Step 1 — DETECT.** Swarm agents unresponsive / spawning stalls, plus one or more of:
+
+```bash
+herdr workspace list | grep -q swarm-agents || echo "MISSING: agents workspace is gone"
+herdr status                                        # server still running? (usually yes)
+grep 'workspace.close' ~/.config/herdr/herdr-server.log | tail
+# incident signature: the close line immediately follows a cli:pane:close request whose
+# request_id prefix is exactly "cli:" (ours), e.g.:
+#   ... request_id="cli:pane:close"      method="pane.close"
+#   ... request_id="cli:workspace:close" method="workspace.close"
+#   ... workspace closed ... workspace_id="wX"
+#   ... pane child exited ... pane_id=N ... signal=Hangup   <- victims (co-tenants)
+```
+
+Corroborate in `.pi/swarm/traces/events.jsonl`: right after the close timestamp you will
+see a cluster of `agent.status` events flipping victims to `stopped/unhealthy` while NONE
+of them has an `agent.stop` record (they were passengers). Killing-side trace shows an
+`agent.stop` from ANOTHER pi session (main checkout root / another worktree) within
+±500 ms.
+
+**Step 2 — VERIFY DISK WORK before anything else.** Agent state never lived in the
+panes; it lives in `.pi/swarm/`:
+
+```bash
+git status                      # working tree intact?
+ls .pi/swarm/tasks/*/task.json  # task graphs + statuses survived?
+ls .pi/swarm/agents/*.md        # identity cards intact?
+tail -5 .pi/swarm/traces/errors.jsonl
+```
+
+In all six incidents the disk work survived 100% — mailboxes, task graphs, identity
+cards, trace tails. Panic respawning before this check wastes the one chance to see the
+pre-respawn state.
+
+**Step 3 — RESPAWN.** Restart the parked root normally; it re-creates the missing
+workspace automatically. Standard worker brief (adjust agent id + task pointer):
+
+```text
+/swarm spawn <id> "<role>. You are <agent-id>. Read your identity card
+(.pi/swarm/agents/<agent-id>.md) first, then your task: .pi/swarm/tasks/<task-id>.
+It was interrupted by a terminal-workspace loss at <time>; your pane was killed.
+All durable state (task.json, mailbox, artifacts dir) survived — resume from your
+last commit/artifact, do NOT redo finished work. Cite evidence paths from the
+artifact dir. Update your node in task.json when done: outcome + status + reply root."
+```
+
+Then verify recovery: next `agent.spawn.ok` in traces + `/swarm status` shows the
+agents; `.pi/swarm/traces/events.jsonl` shows heartbeats again.
+
+**Step 4 — RECORD.** Append the incident row to the evidence timeline: close timestamp
+(from `herdr-server.log`), triggering `agent.stop` (which session), victims, next
+`agent.spawn.ok` (downtime cost), artifact paths of any node work lost mid-turn.
 
 ### Surface coverage (H6, 2026-09-26)
 
@@ -2401,3 +2722,139 @@ artifacts. History is auditable after purge; the in-state record is not resurrec
 - Pre-existing suite failures (identical on main, stash-verified): cancellation 41/1,
   minimal-protocol-shadow 24/7, reconcile-reinject 16/4, root-wake 31/3, functional/attestation
   env crashes.
+
+## Operator: busy-but-dead-pane classifier — goal-escalation distinguishes dead panes from live busy (2026-10-03)
+
+Task `task-r-deadpane-goal-classifier`. The goal-escalation classifier's `!allIdle` branch
+previously returned the opaque `{emitted:false, reason:"agent_busy"}` for busy agents without
+ever consulting the existing pane-liveness probe (`isTmuxRunning` facade → terminal driver).
+A busy-but-dead-pane worker (herdr workspace closed externally, tmux session killed) was
+therefore reported as a live busy worker for the full heartbeat-stale window (~10 min) while
+the worker was physically dead. Live incident 2026-10-03: implementer-02 pane wV:p4 died,
+swarm-state kept `runtimeStatus=busy` on a fresh heartbeat, goal-escalation classifier
+reported a live busy worker, recovery delayed ~10 min.
+
+### What changed
+
+- `extensions/swarm/src/nudges/goal-epoch.ts` — new exports `probeAgentPaneLiveness` (ledger-gated
+  + capped probe round via the existing `isTmuxRunning` facade) and `classifyPoolAgent` (pure,
+  synchronous, mutually-exclusive classification: `busy_dead_pane` | `busy` | `stopped` | `stale`
+  | `boot_failed` | `idle`). New `emitPoolEmptyEscalationLocked` shared emitter extracted from the
+  vacuous branch — two call sites: vacuous branch (`cause: "pool_empty"`, behavior byte-identical)
+  and busy-dead route (`cause: "busy_dead_pane"`). The `!allIdle` branch gains a dead-pane
+  classification insertion: busy agents are probed, probe-dead agents are consumed by either the
+  effective-pool-empty route (fires the same escalation body with `cause: "busy_dead_pane"`) or
+  the mixed-pool route (trace-only `goal.escalation.dead_pane_detected`).
+- `extensions/swarm/src/constants.ts` — `GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS = 60_000` (per-agent
+  probe cooldown; env `PI_SWARM_GOAL_DIAG_PROBE_INTERVAL_MS`) and `GOAL_ESCALATION_DIAG_PROBE_MAX = 8`
+  (max probes per round; env `PI_SWARM_GOAL_DIAG_PROBE_MAX`).
+- `extensions/swarm/src/types/state.ts` — `SwarmIdleNudgeState.goalDiagProbeLedger?: Record<string, string>`
+  (additive optional field; ISO last-probe-at per agent id).
+
+### Why this matters
+
+Heartbeats are event-driven, not wall-clock — `lastHeartbeatAt` only advances on
+`tool_execution_start`/`tool_execution_end`, `agent_settled`, and session hooks. A worker parked
+in a long tool call — or one whose pane just died mid-work — stops heartbeating. Heartbeat age
+is therefore a weak liveness signal for busy agents, which is exactly what the incident exploited.
+The classifier now probes the pane directly via the existing `isTmuxRunning` facade (active
+terminal driver — tmux/herdr/mock parity for free; herdr `isTargetAlive` = `inspectProcess().piLike`).
+
+### Cost bound
+
+- **Ledger-gated**: an agent probed within `GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS` (default 60s)
+  is skipped — liveness `null` (unknown ⇒ treated alive-by-convention, matching
+  `deriveTaskProgressState`).
+- **Cap**: at most `GOAL_ESCALATION_DIAG_PROBE_MAX` (default 8) probes per round — bounds
+  worst-case pump-lock hold (same discipline as the heartbeat-GC gate-2 probe ledger).
+- **Read-only**: never mutates `agent.tmuxAlive`/`status` — the heartbeat GC stays the sole
+  writer of agent liveness fields (keeps the classifier pure, avoids write-during-nudge edge cases).
+- **No silent swallow**: per-agent probe errors are routed to `logSwarmError(p, "goal-epoch",
+  "goal_diag.probe_failed", err, { agentId })` and resolve `null` (unknown liveness) — one failing
+  probe never fails the round (per-agent, no unhandled rejection; `Promise.all` stays safe because
+  every promise resolves).
+
+### Idempotency
+
+Reuses the SAME key family `goal:<id>:escalation:pool-empty:<hour-bucket>` +
+`lastPoolEmptyEscalationAt` cooldown → at most one pool escalation per goal per hour, whichever
+cause fires first (deliberate anti-spam inheritance; the trace + body carry the cause).
+
+### Verify commands
+
+- `node extensions/swarm/tests/goal-escalation-deadpane-classify.test.mjs` — 53 assertions
+  (S1 THE REPRODUCTION red-first + S1b tool_running variant + S2 control + S3 probe ledger + cap
+  + S4 mixed pool + S5 probe failure routing + S6 parity + R10-1 boundary counters + R27-B static
+  import-integrity guard + AGENTS.md no-silent-swallow mandate).
+- Mock-LLM lane: `pi --provider mock-llm --model goal-escalation-deadpane` in a seeded scratch cwd
+  (fixture `extensions/mock-llm/fixtures/goal-escalation-deadpane.jsonl`, 3 turns). WARNING: do NOT
+  also pass `-e extensions/swarm` — the global packages entry already loads it; double registration
+  aborts the extension. Companion lane test `extensions/mock-llm/tests/goal-escalation-deadpane.test.mjs`
+  (fixture-shape assertions always run; opt-in live lane via `RUN_DEADPANE_LANE=1`).
+
+### Probe-ledger blind window (redteam F9, accepted)
+
+The probe round described above is LEDGER-GATED per agent: an agent probed within
+`GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS` (default 60 s, `extensions/swarm/src/constants.ts:555`;
+env `PI_SWARM_GOAL_DIAG_PROBE_INTERVAL_MS`) is SKIPPED and reports liveness `null`
+(`extensions/swarm/src/nudges/goal-epoch.ts:166-174`); agents beyond the
+`GOAL_ESCALATION_DIAG_PROBE_MAX` = 8 round cap (`constants.ts:556`) also report null
+(`goal-epoch.ts:161-163`). Only agents with a concrete tmux target and `status === "running"` are
+probed at all (`goal-epoch.ts:159`). `classifyPoolAgent` only classifies `busy_dead_pane` when
+the FRESH probe verdict is `false` (`goal-epoch.ts:214-215`); busy + null = plain `busy` —
+alive-by-convention.
+
+**Blind window consequence:** a pane that dies right after a probe (or an agent never probed —
+including callers that skip probing) is classified `busy`, not `busy_dead_pane`, for up to the
+probe interval; escalation for a FRESH pane death can therefore be delayed up to the
+heartbeat-stale window (~10 min, `DEFAULT_AGENT_HEARTBEAT_STALE_MS` = 600 000,
+`constants.ts:541`) unless the ledger re-arms. Accepted per R27-B / redteam F9 (LOW/accepted).
+Freezing the `goalDiagProbeLedger` (`goal-epoch.ts:151-172`) is within the self-trust boundary:
+it requires swarm-state write access, which already owns the swarm (attack-guards Probe 5a).
+
+**Failure semantics — no false escalation:** a failing probe resolves `null` plus a durable
+`goal_diag.probe_failed` entry in errors.jsonl (`goal-epoch.ts:181-186`) — degraded liveness is
+NEVER classified dead.
+
+**Operator guidance:** do not wait out the blind window when you suspect a dead pane — check the
+pane directly (`swarm_agent_status`, tmux/herdr inspect) and `swarm_restart_agent`. Probe health
+is visible via errors.jsonl (`op=goal_diag.probe_failed`). The interval/cap envs exist, but
+shrinking the interval trades pump-lock probe cost (see the Cost bound bullets above).
+
+## Operator: traces-sink degradation — broken .pi/swarm/traces demotes durability to stderr (redteam F10, accepted)
+
+**The funnel.** Every durable trace write goes through `trace()`/`traceTask()` appending to
+`.pi/swarm/traces/events.jsonl` (`extensions/swarm/src/state.ts:342-352` trace, `:316-323`
+traceTask; sink path `state.ts:46`); the internal-error census writes
+`.pi/swarm/traces/errors.jsonl` (`extensions/swarm/src/errorlog.ts:80-82`). On an append
+failure, trace()/traceTask() log durably to errors.jsonl FIRST, then rethrow — call-site
+`.catch(() => {})` nets are non-hiding no-ops by design (AGENTS.md no-silent-swallow choke
+point).
+
+**Accepted degradation.** If the traces sink ITSELF is broken (e.g. a plain file where the
+`.pi/swarm/traces` directory should be, permissions, a read-only mount), `logSwarmError`'s
+persist step also fails and degrades to the stderr breadcrumb
+`[swarm:errorlog] failed to persist internal error (source=… op=…)` — errorlog is self-silent by
+contract (never throws, never recurses; `extensions/swarm/src/errorlog.ts:197-206`, contract
+header `:10-12`). Result: ALL trace+error durability is demoted to stderr while spawns keep
+working; once the whole sink is destroyed there is nowhere durable left. This is the DESIGNED
+choke-point degradation, not a regression (attack-edges §6 PoC `/tmp/rt-edgeb/p6-trace/poc.mjs`,
+archival pointer; the report at `task-redteam-20261003/artifacts/` is the evidence of record).
+
+**What it is NOT.** A MISSING `.pi/swarm/traces` directory is self-healing — `appendJsonl`
+mkdir -p's the whole chain (`extensions/swarm/src/state.ts:273-276`). Degradation requires
+something BLOCKING writes at the path.
+
+**Operator guidance.** After any incident where trace evidence matters, verify the sink:
+`.pi/swarm/traces` must be a writable directory; watch stderr for the
+`[swarm:errorlog] failed to persist internal error` breadcrumb; remember the errorlog budget
+caps (see [The internal-error log (errors.jsonl)](#the-internal-error-log-errorsjsonl):
+`PI_SWARM_ERRORLOG_MAX_ENTRIES` default 2000; a >4 MiB file forces budget 0). Red-team deferred
+disposition noted: a startup health check could warn on an unwritable sink (F10 "Defer") — not
+implemented.
+- Regression surface (full gate must stay green): `r14-goal-empty-pool-escalation`,
+  `pool-diag-historical-reproduce`, `vacuous-max-nudges-reproduce`, `tmux-alive-fallback-reproduce`,
+  `r27-goal-task-independent-idle-nudge`, `r16-idle-goal-regression`, `r27b-pump-import-guards`,
+  `uat-goal-nudge`, `idle-nudge`, `r19-goal-graph-deadlock`, `r29-spawn-boot-grace-false-escalation`,
+  `goal-max-nudges`, `task-liveness`, `heartbeat-gc`.
+- Pi runtime contract §10 F24 row with L1-L4 accounting + counters C-F24-1/2/3.

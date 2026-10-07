@@ -6,6 +6,45 @@ Use this guide when implementing or refactoring swarm features.
 
 Treat swarm as a set of **bounded subsystems**. Avoid implementing cross-cutting behavior in the nearest tool handler just because it is convenient.
 
+## House conventions
+
+- **Config-side path resolution must enforce project-root realpath containment.** Any config
+  path that will be read or handed to a subprocess (roles playbooks, charter, evidence, etc.)
+  resolves through a realpath containment check mirroring `resolveEvidencePath`
+  (`extensions/swarm/src/state.ts`): contained iff `target === base || target.startsWith(base + sep)`,
+  with fail-closed error mapping (ENOENT/ENOTDIR on the target tolerated only because nothing
+  can load; any other realpath error counts as NOT contained). Reference implementation:
+  `containedInProjectSync` + the `roles_*_outside_project` validation kinds in
+  `extensions/swarm/src/config.ts` (F1, task-redteam-fixnow). Do not introduce new config
+  paths that bypass this discipline. Containment bounds WHERE config content loads from, not
+  WHAT it may say: repo-controlled `roles:`/charter/playbook content is trusted-by-contract
+  prompt material — treat repo write access as swarm instruction access
+  ([operations.md § Trust boundaries](./operations.md#trust-boundaries-f2-task-redteam-20261003),
+  F2 task-redteam-20261003).
+- **Tool-boundary clamps reject; they never silently truncate.** Model-facing inputs that
+  persist durably (e.g. `swarm_send_message` bodies) are validated at the tool boundary and
+  rejected with a stable error code (`MESSAGE_BODY_TOO_LARGE`) before any write. Read-side
+  model views (e.g. `fullMailboxRow`) bound their output with an escape-hint suffix naming the
+  durable store. Raw data stays reachable through `details` (programmatic escape, never model
+  context) — keep that split intact when adding new surfaces.
+- **Id-based privilege is root-only.** Any new privilege check must align with
+  `isRootAuthority` (identity.ts): the id literal is `root` and nothing else. Recovery
+  escape-hatches are env-based (`PI_SWARM_ADMIN_MODE=1`), never hard-coded ids (F8,
+  task-redteam-fixnow removed the last one).
+- **Spot-verify reverts are worktree/tmp-only; live-tree checkout/reset/stash is a
+  review-blocking defect.** Testers must never run `git checkout`/`git restore`/`git reset`/
+  `git stash` in the live shared working tree (see the tester playbook's spot-verify discipline,
+  incident task-redteam-fixnow 2026-10-04).
+- **Fix-completion outcomes are equivalent for edge activation.** `edgeMatchesActivation`
+  (`extensions/swarm/src/taskgraph/graph.ts`) treats `implemented` and `fixed` as the same
+  fix-completion signal, so a fix node closed either way fires the `fix→test` rework back-edge
+  and the test node auto-reopens for revalidation. Default graph edges stay byte-unchanged.
+- **Roles/charter text is prompt content, never harness instructions.** No new code path may
+  eval or otherwise interpret `roles:`/charter/playbook text (the 2026-10-03 red team found
+  zero interpreter sinks — keep it that way); the trust boundary for this content is repo
+  write access itself. See
+  [operations.md § Trust boundaries](./operations.md#trust-boundaries-f2-task-redteam-20261003).
+
 ## Code map
 
 Implementation entrypoint:
@@ -316,10 +355,18 @@ task-creation modes.
 
 The package-shipped task-role staffing playbook is
 `extensions/swarm/role-skills/task-role-staffing/SKILL.md`. It is a root-only
-reference doc (not wired into identity) that explains how to staff a freshly
-created task with role-specific agents using the existing `swarm_spawn_agent`
-and `swarm_assign_task` tools. The `swarm_create_task` result text ends with a
-concise hint naming this skill.
+reference doc (not wired into identity, NOT auto-injected — see the note below)
+that explains how to staff a freshly created task with role-specific agents using
+the existing `swarm_spawn_agent` and `swarm_assign_task` tools. The
+`swarm_create_task` result text ends with a concise hint naming this skill.
+
+> **Mount status note (2026-10-03):** unlike the five role playbooks, this skill
+> is NOT mounted anywhere — `role-skills/` is not a pi skill-discovery location,
+> and no `--skill` flag is injected for root. It is only reachable when a model
+> follows the path in the `swarm_create_task` hint text (same shelf-not-mechanism
+> pattern as qualification-skills/). Root sessions that want it as a real skill
+can add `"skills": ["extensions/swarm/role-skills/task-role-staffing"]` to
+`.pi/settings.json` or pass `--skill` manually.
 
 ## Documentation update checklist
 

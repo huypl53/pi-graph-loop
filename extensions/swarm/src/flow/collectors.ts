@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expected, logSwarmError } from "../errorlog.ts";
+import { isOversizedLine } from "../mailbox.ts";
 import { readRecentEvents } from "../observability.ts";
 import { computeReadyNodes, computeTaskClosure, hasOutgoingTaskEdge } from "../taskgraph.ts";
 import type { Paths, SwarmState, TaskPaths, TaskState } from "../types.ts";
@@ -16,9 +17,21 @@ export function readMailboxLine(p: Paths, agentId: string, messageId: string): {
 		const content = readFileSync(mailboxPath, "utf-8");
 		const lines = content.split("\n").reverse();
 		const SCAN_LIMIT = 500;
+		// Oversized-line guard (task-fu-readmailbox-rss): the reversed index maps to forward line
+		// numbers; byte offsets for the log-once ledger are unknown here without a forward scan,
+		// so use the line start offset computed from forward lengths via a single pre-pass.
+		const forward = content.split("\n");
+		const fwdOffsets: number[] = [];
+		let acc = 0;
+		for (const l of forward) {
+			fwdOffsets.push(acc);
+			acc += Buffer.byteLength(l, "utf8") + 1;
+		}
 		for (let i = 0; i < Math.min(lines.length, SCAN_LIMIT); i++) {
 			const line = lines[i].trim();
 			if (!line) continue;
+			const fwdIdx = forward.length - 1 - i; // reversed index -> forward line index (0-based)
+			if (isOversizedLine(p, line, mailboxPath, fwdIdx + 1, fwdOffsets[fwdIdx] ?? 0)) continue; // inert: never materialize
 			try {
 				const msg = JSON.parse(line);
 				if (msg.id === messageId) {

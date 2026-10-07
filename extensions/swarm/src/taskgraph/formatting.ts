@@ -6,6 +6,10 @@ import { NODE_ICON, PI_SWARM_MINIMAL_PROTOCOL } from "../constants.ts";
 import { readCommitEvidence } from "./evidence.ts";
 import type { TaskState } from "../types.ts";
 
+// === task-role-playbooks ===
+import { inferRoleKind } from "../utils.ts";
+import { resolveRolePlaybook } from "../config.ts";
+
 export function buildTaskMarkdown(task: TaskState) {
 	const allowed = task.allowedFiles.length
 		? task.allowedFiles
@@ -172,6 +176,14 @@ export function buildAssignmentBody(
 		);
 	} else {
 		lines.push(`Reply to ${replyTarget} when done, blocked, or needing clarification.`);
+	}
+	// task-role-playbooks: the playbook reference line. Belt-and-braces for adopted panes
+	// and PI_SWARM_CHILD_ARGS overrides (which skip spawn-time --skill injection): the
+	// assignment body re-fires on every reassign, guaranteeing mid-task consistency.
+	{
+		const roleKind = inferRoleKind(nodeId, node.role || "");
+		const playbook = resolveRolePlaybook(roleKind, { nodeId, role: node.role });
+		if (playbook) lines.push(`Role playbook: ${playbook} — read it before starting this node.`);
 	}
 	const scope =
 		node.allowedFiles && node.allowedFiles.length

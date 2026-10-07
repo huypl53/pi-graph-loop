@@ -99,6 +99,19 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 # Options: tmux | herdr
 # terminalManager: tmux
 
+# --- Role playbooks + charter (optional; default = bundled, correctness-first) -----
+# Top-level \`roles:\` selects per-role playbook skills injected ADDITIVELY at spawn
+# via \`--skill <path>\` (your existing skills are never removed) and the shared
+# charter. Precedence per key: project yml > global yml > bundled default.
+# Inspect the effective config any time with /swarm roles.
+# roles:
+#   charter: ./TEAM-RULES.md      # optional; replaces the embedded default charter
+#   planner: default              # "default" = bundled extensions/swarm/role-skills/planner
+#   implementer: default          # custom: a dir containing SKILL.md or a direct .md path
+#   fixer: ./playbooks/fixer      # missing/invalid paths are preflight errors (never silent)
+#   tester: default
+#   reviewer: default
+
 # --- Singleton default (optional — used when no modelPool is declared) --------
 # defaultModel: glm-5.1
 # defaultProvider: zai-coding-cn
@@ -171,6 +184,24 @@ export const POOL_SCAFFOLD_GLOBAL_YML_NOTIFY_TEXT =
 // Stable doc anchor the notify links to. Kept as a constant so the deep-link
 // can be updated in one place.
 export const POOL_SCAFFOLD_DOC_HINT = "docs/swarm/tools.md#configuration";
+
+// === Role playbooks (task-role-playbooks) ==============================
+// Five bundled pi skills under extensions/swarm/role-skills/{planner,implementer,fixer,tester,reviewer}
+// injected at spawn via `--skill` (additive). Top-level `roles:` config in swarm.yml
+// can override each playbook per-key (project yml > global yml > bundled default).
+
+// The kind ids that carry a bundled playbook. Roles without a playbook
+// (root / observer / worker / auditor) resolve to null.
+export const ROLE_PLAYBOOK_KINDS = ["planner", "implementer", "fixer", "tester", "reviewer"];
+
+// Embedded default charter ("không sai > đẹp" — correctness beats beauty). A project
+// can override with `roles.charter: <path>` in swarm.yml; the custom file REPLACES
+// this text everywhere the charter is surfaced (identity, /swarm roles).
+export const ROLE_CHARTER_DEFAULT =
+	"Correctness first: không sai > đẹp — not-wrong beats beautiful. " +
+	"Minimal diff inside your node's scope. Every claim you make must carry evidence: " +
+		"the command you ran and the path you read. Missing evidence counts as failure. " +
+	"Ask (blocked) instead of guessing outside scope.";
 
 // === Issue 17: engine-retry gate constants (extracted to constants.ts in Issue 19) ===
 // The pi engine retries a failed provider request up to retry.maxRetries (default 3) times with
@@ -515,6 +546,18 @@ export const DEFAULT_AGENT_HEARTBEAT_STALE_MS = 600_000; // 10 minutes
 // R29 (2026-09-20): Grace window for freshly spawned workers to launch tmux process & record first heartbeat (default: 3 minutes)
 export const DEFAULT_AGENT_BOOT_GRACE_MS = 180_000;
 
+// === task-r-deadpane-goal-classifier (2026-10-03) — goal-escalation dead-pane probe bounds ===
+// The goal-floor dead-pane classifier probes busy/tool_running agents' panes via the existing
+// isTmuxRunning facade. Two knobs bound the worst-case subprocess fan-out under the pump lock
+// (same discipline as the heartbeat-GC gate-2 probe ledger):
+//   - GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS: per-agent probe cooldown; an agent probed within
+//     this window is skipped (liveness unknown ⇒ treated alive-by-convention). Default 60s;
+//     env PI_SWARM_GOAL_DIAG_PROBE_INTERVAL_MS.
+//   - GOAL_ESCALATION_DIAG_PROBE_MAX: max probes per evaluator round. Default 8;
+//     env PI_SWARM_GOAL_DIAG_PROBE_MAX.
+export const GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS = 60_000;
+export const GOAL_ESCALATION_DIAG_PROBE_MAX = 8;
+
 // === Issue 83a — stale-open surfacing threshold ===
 // Window (ms) after which an `assigned`/`in_progress` node WITHOUT a `lastProgressAt` update
 // is surfaced to the root via `stale_open_surfaced` + an root mailbox nudge.
@@ -575,6 +618,57 @@ export const PI_SWARM_REASSIGN_RATE_WINDOW_MS =
 	Number(process.env.PI_SWARM_REASSIGN_RATE_WINDOW_MS) > 0
 		? Math.floor(Number(process.env.PI_SWARM_REASSIGN_RATE_WINDOW_MS))
 		: DEFAULT_REASSIGN_RATE_WINDOW_MS;
+
+// === F4 (task-redteam-fixnow) — mailbox body clamp =========================
+// swarm_send_message bodies are clamped at the tool boundary BEFORE any mailbox append or
+// state write: an oversized body is REJECTED with MESSAGE_BODY_TOO_LARGE (throw per
+// pi-runtime-contract §9), never truncated silently mid-write. Without the clamp an
+// unbounded body persists as an unbounded JSONL line (redteam PoC: 200MB line → +609MB RSS
+// per reader parse).
+//   DEFAULT_MESSAGE_BODY_MAX_BYTES  — 256 KiB in-band default.
+//   PI_SWARM_MESSAGE_BODY_MAX_BYTES — env read at module load (integer > 0 else default),
+//                                     same pattern as PI_SWARM_REASSIGN_RATE_LIMIT.
+//   FULL_BODY_MAX_CHARS             — chars for check_mailbox fullBody:true row bodies
+//                                     (constant, NOT env: tests import it; out-of-band/legacy
+//                                     giant lines are the only thing it can bite because the
+//                                     send cap already bounds in-band bodies). Truncated rows
+//                                     carry an escape-hint suffix naming the durable mailbox
+//                                     JSONL path.
+// Engine-internal senders (nudges, escalations, hints) call deliverMessageLocked directly and
+// stay UNCLAMPED by design: their content is engine-generated and bounded, and failing them
+// closed at delivery would break nudges over the cap.
+// task-fu-assign-clamp: the SAME cap is shared by the swarm_send_message AND swarm_assign_task
+// tool boundaries (assign.ts clamps params.note at its execute boundary and the composed
+// assignment body right after buildAssignmentBody; deliverMessageLocked stays unclamped).
+export const DEFAULT_MESSAGE_BODY_MAX_BYTES = 256 * 1024;
+export const PI_SWARM_MESSAGE_BODY_MAX_BYTES =
+	Number(process.env.PI_SWARM_MESSAGE_BODY_MAX_BYTES) > 0
+		? Math.floor(Number(process.env.PI_SWARM_MESSAGE_BODY_MAX_BYTES))
+		: DEFAULT_MESSAGE_BODY_MAX_BYTES;
+export const FULL_BODY_MAX_CHARS = 20_000;
+
+// === task-fu-readmailbox-rss — read-side per-line cap ======================
+// F4 bounds NEW writes at the send/assign tool boundaries; pre-existing or out-of-band
+// legacy mailbox lines can still be arbitrarily large and were fully JSON.parse'd on every
+// read (redteam PoC: 200MB line → +609MB RSS per parse, per pump poll). The read guard
+// skips any line whose serialized byteLength exceeds PI_SWARM_MAILBOX_LINE_MAX_BYTES before
+// parsing; first encounter per process writes a durable logSwarmError entry
+// (op=mailbox.oversized_line_skipped, extra: file/lineIndex/byteOffset/byteLength/cap);
+// an in-process log-once ledger keys file:byteOffset:byteLength. Skipped lines are INERT
+// (never returned, never delivery targets) and STAY in the file (append-only contract);
+// readMailboxSince checkpoints still advance past their full byte length.
+//   DEFAULT_MAILBOX_LINE_MAX_BYTES — 1 MiB default (≈4× headroom over the 256 KiB body cap:
+//                                    envelope + headers + JSON escaping are line-level, and
+//                                    engine-internal senders (nudges/escalations) are
+//                                    deliberately unclamped at send).
+//   PI_SWARM_MAILBOX_LINE_MAX_BYTES — env read at module load (integer > 0 else default).
+//                                    FLOORED at PI_SWARM_MESSAGE_BODY_MAX_BYTES: a legal
+//                                    in-band write must never be skipped on read.
+export const DEFAULT_MAILBOX_LINE_MAX_BYTES = 1024 * 1024;
+export const PI_SWARM_MAILBOX_LINE_MAX_BYTES =
+	Number(process.env.PI_SWARM_MAILBOX_LINE_MAX_BYTES) > 0
+		? Math.max(Math.floor(Number(process.env.PI_SWARM_MAILBOX_LINE_MAX_BYTES)), PI_SWARM_MESSAGE_BODY_MAX_BYTES)
+		: DEFAULT_MAILBOX_LINE_MAX_BYTES;
 
 // === Issue 83b — late-result rejection trace ===
 // Emitted when a worker (the previous assignee) attempts `swarm_update_task` after the node has

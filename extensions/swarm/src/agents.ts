@@ -8,6 +8,7 @@ import {
 	formatSize,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -22,7 +23,8 @@ import {
 } from "./constants.ts";
 import { capturePane, isTmuxRunning, resolveRegisterTarget, sendToPane, tmux, waitForPaneReady } from "./tmux.ts";
 import { getTerminalDriver } from "./terminal/index.ts";
-import { childPiArgs, currentAgentId, currentModel, currentProvider } from "./session.ts";
+import { childPiArgs, childPiArgsWithSkills, currentAgentId, currentModel, currentProvider } from "./session.ts";
+import { resolveRolePlaybook } from "./config.ts";
 import { pickSlot, poolStatus, preflightSpawn, formatPreflightError } from "./pool.ts";
 import { ensureAgentDefaults, inferRoleKind, now, safeId, shellQuote, sleep } from "./utils.ts";
 import { identityPath, mailboxPath, paths, readState, trace, withLock, writeState } from "./state.ts";
@@ -182,6 +184,9 @@ export async function spawnAgent(
 		provider?: string;
 		initialPrompt?: string;
 		isNewRecord?: boolean;
+		// task-role-playbooks: the graph node id, used by the fix-node remap
+		// (an implementer filling the `fix` node resolves the fixer playbook).
+		nodeId?: string;
 	},
 ) {
 	const id = safeId(input.id || input.role || `agent-${randomUUID().slice(0, 6)}`);
@@ -249,6 +254,39 @@ export async function spawnAgent(
 			provider,
 			note: "no provider configured for model; fell back to DEFAULT_PROVIDER at spawn boundary",
 		}).catch(() => {});
+	// === Role playbook resolution (task-role-playbooks) =======================
+	// Resolve the role's playbook at the spawn boundary. Fix-node remap:
+	// spawnAgent has no nodeId, but the CALLER may pass a `role` text that
+	// indicates a fix node — the fix-node selection is done at the ASSIGN
+	// site (swarm_assign_task passes role text/name through) and here via
+	// role keywords. resolveRolePlaybook implements the same remap.
+	const resolvedRoleKind = input.roleKind || inferRoleKind(id, input.role);
+	const playbook = resolveRolePlaybook(resolvedRoleKind, { nodeId: input.nodeId, role: input.role }, cwd);
+	// Defense-in-depth: a CUSTOM configured path raced into nonexistence
+	// between validation and this spawn? Bundled paths cannot miss; a custom
+	// path might (deleted dir). Never block a spawn on a missing OPTIONAL
+	// playbook — log durably and spawn without the flag.
+	let playbookSkills: string[] = [];
+	if (playbook) {
+		const custom = !playbook.includes("/role-skills/");
+		if (!custom || existsSync(playbook)) {
+			playbookSkills = [playbook];
+		} else {
+			await logSwarmError(p, "agents", "spawn.playbook_custom_missing", new Error(`custom playbook missing: ${playbook}`), {
+				agentId: id,
+				roleKind: resolvedRoleKind,
+				nodeId: input.nodeId,
+			});
+		}
+	}
+	if (playbook) {
+		await trace(p, "agent.spawn.playbook", {
+			agentId: id,
+			roleKind: resolvedRoleKind,
+			playbook,
+			nodeId: input.nodeId || undefined,
+		}).catch(() => {});
+	}
 	const window = id;
 	const envPrefix = [
 		`PI_SWARM_AGENT_ID=${shellQuote(id)}`,
@@ -256,7 +294,7 @@ export async function spawnAgent(
 		`PI_SWARM_DEFAULT_MODEL=${shellQuote(model)}`,
 		`PI_SWARM_DEFAULT_PROVIDER=${shellQuote(provider)}`,
 	].join(" ");
-	const cmd = `${envPrefix} pi --model ${shellQuote(model)} --provider ${shellQuote(provider)} ${childPiArgs()}`;
+	const cmd = `${envPrefix} pi --model ${shellQuote(model)} --provider ${shellQuote(provider)} ${childPiArgsWithSkills(playbookSkills)}`;
 	// G2 (followup-g2-herdr-spawn-seam): spawn through the terminal driver seam so
 	// PI_SWARM_TERMINAL_MANAGER=herdr creates a herdr tab (and records its pane id)
 	// instead of a raw tmux window. TMUX mode keeps the identical command sequence

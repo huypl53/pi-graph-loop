@@ -22,6 +22,8 @@ import { wrapSwarmToolInvocation } from "./wrapper.ts";
 import {
 	ERR_RECONCILE_RATE_LIMITED,
 	ERR_SCOPE_FORBIDDEN,
+	FULL_BODY_MAX_CHARS,
+	PI_SWARM_MESSAGE_BODY_MAX_BYTES,
 	PI_SWARM_MINIMAL_PROTOCOL,
 	PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS,
 	TRACE_LIFECYCLE_DERIVED,
@@ -94,7 +96,10 @@ function slimMailboxRow(m: any, st: any, agentId: string, previewLen: number): a
 }
 
 // Full-body row: legacy envelope minus the transport fields that never belonged in the model view.
-function fullMailboxRow(m: any): any {
+// Bodies are clamped to FULL_BODY_MAX_CHARS chars + an escape-hint suffix naming the durable
+// mailbox JSONL path so a 200MB legacy/out-of-band line cannot blow the model context. The raw
+// full body remains available via details.messages (programmatic/harness escape, never model context).
+function fullMailboxRow(m: any, mailboxFile: string): any {
 	const {
 		swarmId: _s,
 		to: _to,
@@ -104,21 +109,30 @@ function fullMailboxRow(m: any): any {
 		requiresAck: _ra,
 		idempotencyKey: _ik,
 		headers: _h,
+		body,
 		...rest
 	} = m;
+	const rawBody = typeof body === "string" ? body : "";
+	if (rawBody.length > FULL_BODY_MAX_CHARS) {
+		const truncated = rawBody.length - FULL_BODY_MAX_CHARS;
+		rest.body = `${rawBody.slice(0, FULL_BODY_MAX_CHARS)}\n…[+${truncated} chars truncated — full body durable in mailbox JSONL: ${mailboxFile}]`;
+	} else {
+		rest.body = rawBody;
+	}
 	return rest;
 }
 
 // Serialize the lock result into the model-visible view. Default = compact scan;
-// fullBody:true = complete bodies. `details` keeps the raw full messages for programmatic use.
-function serializeMailboxView(result: any, opts: { fullBody: boolean; previewLen: number }) {
+// fullBody:true = complete bodies (clamped to FULL_BODY_MAX_CHARS + escape-hint naming mailboxFile).
+// `details` keeps the raw full messages for programmatic use.
+function serializeMailboxView(result: any, opts: { fullBody: boolean; previewLen: number; mailboxFile: string }) {
 	const { agentId, unread, matchedCount, returnedCount, messages } = result;
 	if (opts.fullBody) {
 		const full: Record<string, unknown> = {
 			agentId,
 			unread,
 			returned: returnedCount,
-			messages: messages.map(fullMailboxRow),
+			messages: messages.map((m: any) => fullMailboxRow(m, opts.mailboxFile)),
 		};
 		if (matchedCount !== returnedCount) full.matched = matchedCount;
 		return full;
@@ -171,6 +185,17 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			}),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_send_message", async () => {
+					// F4 — mailbox body clamp at the tool boundary (plan §5). Reject (throw, not
+					// isError-return per pi-runtime-contract §9) BEFORE any mailbox append or state
+					// write. The clamp lives at the tool boundary only — deliverMessageLocked stays
+					// unclamped on purpose: engine-internal senders (nudges, escalations, hints) must
+					// not fail closed at delivery; their content is engine-generated and bounded.
+					const bodyBytes = Buffer.byteLength(params.body ?? "", "utf8");
+					if (bodyBytes > PI_SWARM_MESSAGE_BODY_MAX_BYTES) {
+						throw new Error(
+							`MESSAGE_BODY_TOO_LARGE: body is ${formatSize(bodyBytes)} (cap ${formatSize(PI_SWARM_MESSAGE_BODY_MAX_BYTES)} — PI_SWARM_MESSAGE_BODY_MAX_BYTES). Trim the body or reference an artifact path instead.`,
+						);
+					}
 					const p = paths(ctx.cwd);
 					const { msg, delivery } = await enqueueAndDeliver(pi, ctx.cwd, p, params);
 					const injected = Boolean(delivery?.delivered) && !delivery?.mailboxOnly;
@@ -535,7 +560,11 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 					// tool-output-slim §1: serialization happens AFTER the withLock returns — the lock
 					// block above is untouched except for the read-only unread computation inside the
 					// returned envelope. Default scan: compact rows, no pretty-print, no raw bodies.
-					const compact = serializeMailboxView(result, { fullBody, previewLen: bodyPreviewGiven ? previewLen : 0 });
+					const compact = serializeMailboxView(result, {
+						fullBody,
+						previewLen: bodyPreviewGiven ? previewLen : 0,
+						mailboxFile: join(p.mailboxes, `${agentId}.jsonl`),
+					});
 					return textResult(JSON.stringify(compact), { ...compact, messages: result.messages });
 				});
 			},
@@ -592,7 +621,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 					// agent record (lastReconcileDryRunAt) under the same withLock — no nested lock.
 					const me = currentAgentId();
 					const isOrch = me === "root";
-					const isAdmin = process.env.PI_SWARM_ADMIN_MODE === "1" || me === "admin";
+					const isAdmin = process.env.PI_SWARM_ADMIN_MODE === "1";
 					const isPrivileged = isOrch || isAdmin;
 					const requestedScope = params.scope || (isPrivileged ? "all" : "self");
 					if (!isPrivileged && requestedScope !== "self") {

@@ -438,11 +438,16 @@ await asyncTest(
 		// was the bug.)
 		const r2 = await d.killAgent(pi, { target: "w99:p3", session: "w99", window: "w99:t3", paneId: "w99:p3" });
 		equal(r2.killed, true);
-		equal((state.closedWorkspaces || []).length, 0, "foreign pane still in the workspace vetoes the close");
+		// fu-herdr-workspace-loss: the FOREIGN pane (PANE_FOREIGN) is still alive per the
+		// authoritative census, so the workspace must survive — closing here is exactly the
+		// co-tenant Hangup-kill bug behind the 6-incident workspace losses (pre-fix this read
+		// `deepEqual(state.closedWorkspaces || [], ["w99"])` under the own-set criterion).
+		equal((state.closedWorkspaces || []).length, 0, "workspace survives while a foreign/live pane remains (authoritative census)");
 		equal((state.panes || []).some((p) => p.pane_id === "w99:p9"), true, "foreign pane untouched");
 
 		// Close fires only when the workspace's live pane list is EMPTY: clear the foreign
 		// pane (simulating its own lifecycle ending), then the next teardown decision closes.
+		// (Double-census: the confirmation re-probe reads the same empty list.)
 		state.panes = [];
 		await d.maybeCloseAgentsWorkspace(pi);
 		deepEqual(state.closedWorkspaces || [], ["w99"], "close fires once zero panes remain");

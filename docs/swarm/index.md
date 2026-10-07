@@ -16,6 +16,10 @@ Use it when you need to understand, extend, or debug swarm without reading one l
 - [Operations guide](./operations.md) — quickstart, runtime files, debugging, validation entrypoints
   - Start with [Model pool configuration](./operations.md#model-pool-multi-provider-rotation)
     (canonical format, legacy singleton, discover/show/validate commands, preflight)
+  - Start with [Trust boundaries](./operations.md#trust-boundaries-f2-task-redteam-20261003) —
+    repo-controlled `.pi/swarm.yml` roles/charter/playbooks are trusted-by-contract prompt
+    content (treat repo write access as swarm instruction access); probe-ledger blind window +
+    traces-sink degradation dispositions
 - [Tooling reference](./tools.md) — grouped tools and `/swarm` commands
 
 ### I want to change swarm

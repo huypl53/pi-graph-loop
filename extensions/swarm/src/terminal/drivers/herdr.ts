@@ -377,15 +377,24 @@ export class HerdrDriver implements TerminalDriver {
 	}
 
 	/**
-	 * G4 teardown: close the agents workspace only when NOTHING remains in it. Counts only
-	 * panes the driver spawned (tracked by pane id in `swarmPaneIds`), then consults the
-	 * workspace's LIVE pane list (`pane list --workspace <wsId>`): close fires only when
-	 * zero panes remain at all. Foreign panes (never tracked by this driver — other
-	 * projects' workers sharing one herdr instance, or user-created tabs) VETO the close,
-	 * so this driver can never close a workspace out from under them
-	 * (task-202610040005-herdr-agents-workspace-p RED 2: the tracked-set-only close killed
-	 * live workers of unrelated projects in the shared workspace). Never touches the root
-	 * workspace.
+	 * G4 teardown, hardened twice — per-project isolation (master 0be3e86) + shared-workspace
+	 * census (task-fu-herdr-workspace-loss): if no panes remain in the agents workspace,
+	 * close it. The close decision uses the AUTHORITATIVE workspace-wide pane census —
+	 * queried live from herdr via `pane list --workspace` on every probe — NEVER this
+	 * driver instance's own tracked subset alone. `swarmPaneIds` is per-driver-instance
+	 * state while the workspace label may be shared (per-project slug by default;
+	 * PI_SWARM_HERDR_WS_LABEL override collapses projects back to one workspace):
+	 * closing on "my own set is empty" Hangup-killed co-tenant panes from other driver
+	 * instances six times in two days (wV, wW, wX, wY, wZ, w11 + the w13-w17 close storm —
+	 * see task-fu-herdr-workspace-loss/artifacts/diagnosis.md). Foreign panes (other
+	 * projects' workers under a shared label, or user tabs) VETO the close; a
+	 * confirmation re-probe (second consecutive zero census) guards against prune races
+	 * with mid-flight spawns. Never touches the root workspace.
+	 *
+	 * Failure policy: pane listing errors that are not a removed workspace are
+	 * durable-logged and ABORT the close — we never close blindly. `swarmPaneIds`
+	 * remains as best-effort pre-tracking for observability; it no longer gates the
+	 * close.
 	 */
 	private async maybeCloseAgentsWorkspace(pi: ExtensionAPI): Promise<void> {
 		if (!this.agentsWorkspaceId) return;
@@ -395,14 +404,10 @@ export class HerdrDriver implements TerminalDriver {
 		// after the FINAL tracked pane dies the set is legitimately empty and the workspace must
 		// still close. A driver that never owned a pane never closes.
 		if (!this.everTrackedSwarmPanes) return;
-		// Prune the tracking set: remove pane ids that no longer exist.
-		// Use `pane list --workspace <wsId>` to get the authoritative pane set for the
-		// agents workspace, then intersect with our tracked set. This avoids false
-		// negatives from `isTargetAlive` racing with a freshly-spawned pane that hasn't
-		// fully started its foreground process yet.
+		const wsId = this.agentsWorkspaceId;
 		let wsPanes: string[] = [];
 		try {
-			const list = await this.herdrJson(pi, ["pane", "list", "--workspace", this.agentsWorkspaceId], 5_000);
+			const list = await this.herdrJson(pi, ["pane", "list", "--workspace", wsId], 5_000);
 			const rawList = Array.isArray(list?.result?.panes) ? list.result.panes : [];
 			wsPanes = rawList.map((p: any) => p?.pane_id || p?.paneId).filter(Boolean);
 		} catch (err: any) {
@@ -411,29 +416,61 @@ export class HerdrDriver implements TerminalDriver {
 				expected("agents_workspace_already_closed", err);
 			} else {
 				await logSwarmError(process.cwd(), "herdr", "maybe_close_agents_workspace.list_failed", err, {
-					workspaceId: this.agentsWorkspaceId,
+					workspaceId: wsId,
 				});
 			}
 			return;
 		}
+		// House-keep own tracked set (observability only — it must NOT gate the close:
+		// the authoritative census below does).
 		const stillAlive = new Set<string>();
 		for (const paneId of this.swarmPaneIds) {
 			if (wsPanes.includes(paneId)) stillAlive.add(paneId);
 		}
 		this.swarmPaneIds.clear();
 		for (const id of stillAlive) this.swarmPaneIds.add(id);
-		if (this.swarmPaneIds.size > 0) return;
-		// Foreign-pane teardown guard: close ONLY when the workspace's total LIVE pane count
-		// is zero. `wsPanes` is the authoritative `pane list --workspace` result fetched above;
-		// any remaining pane (tracked-by-us survivor or foreign) vetoes the close. A foreign
-		// pane holding the workspace open is a normal, expected condition — skip silently.
-		if (wsPanes.length > 0) return;
-		// No swarm panes remain — close the agents workspace.
+	// AUTHORITATIVE close criterion (workspace-loss fix): close only when HERDR
+	// itself reports zero panes in the workspace. Foreign panes (other projects'
+	// co-tenants under a shared label, or user tabs) and other driver instances'
+	// panes all live in wsPanes — their presence naturally holds the workspace open.
+	// (Own-set emptiness is NOT re-asserted: swarmPaneIds is observability-only.)
+	if (wsPanes.length > 0) return;
+	// Confirmation re-probe (prune-race guard vs mid-flight spawns): confirm the
+	// zero-pane census with a second consecutive live listing before closing. A
+	// pane appearing between the two probes vetoes the close this round; teardown
+	// will re-arm on the next killAgent.
 		try {
-			await this.herdr(pi, ["workspace", "close", this.agentsWorkspaceId], 5_000);
+			const confirmList = await this.herdrJson(pi, ["pane", "list", "--workspace", wsId], 5_000);
+			const rawConfirm = Array.isArray(confirmList?.result?.panes) ? confirmList.result.panes : [];
+			if (rawConfirm.length > 0) {
+				await logSwarmError(
+					process.cwd(),
+					"herdr",
+					"maybe_close_agents_workspace.confirm_saw_pane",
+					new Error(`re-probe veto: ${rawConfirm.length} pane(s) appeared; not closing`),
+					{ workspaceId: wsId, paneCount: rawConfirm.length },
+				);
+				return;
+			}
+		} catch (err: any) {
+			// Abort the close on ANY re-probe failure — never close while blind.
+			// Removed-workspace is the expected benign case (another driver closed it
+			// concurrently between our probe and close).
+			if (/workspace_not_found/i.test(String(err?.message || err))) {
+				expected("agents_workspace_already_closed_during_confirm", err);
+			} else {
+				await logSwarmError(process.cwd(), "herdr", "maybe_close_agents_workspace.confirm_failed", err, {
+					workspaceId: wsId,
+				});
+			}
+			return;
+		}
+		// Census zero twice in a row — safe to close the agents workspace.
+		try {
+			await this.herdr(pi, ["workspace", "close", wsId], 5_000);
 			this.agentsWorkspaceId = undefined;
 		} catch (err: any) {
-			await logSwarmError(process.cwd(), "herdr", "maybe_close_agents_workspace.failed", err, { wsId: this.agentsWorkspaceId });
+			await logSwarmError(process.cwd(), "herdr", "maybe_close_agents_workspace.failed", err, { wsId });
 		}
 	}
 

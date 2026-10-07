@@ -27,6 +27,20 @@ export type RootLeader = {
 	claimedAt: string;
 	lastHeartbeatAt: string;
 	agentRecordId?: string;
+	// Which CODE GENERATION of extensions/swarm this leader process loaded (2026-10-03
+	// stale-root incident). Absent = the leader predates ext-code stamping (unknown).
+	// Written ONLY by claimRootLeader/heartbeatRootLeader — both rebuild this record from
+	// scratch, so the stamp must ride BOTH writers or heartbeats silently drop it.
+	extCodeStamp?: {
+		hash: string;
+		files: number;
+		stampedAt: string;
+	};
+	// Per-boot identity binding (redteam F3, 2026-10-04): composite "<hostname>::<bootMarker>"
+	// (Linux /proc/sys/kernel/random/boot_id; darwin sysctl kern.boottime; "unknown" when neither
+	// resolves). Absent = legacy lease predating boot binding (legacy-trusted, pid-only scope).
+	// Rides BOTH writers exactly like extCodeStamp above, or heartbeats silently drop it.
+	bootId?: string;
 };
 
 // Per-task task-graph-state idle nudge state (Issue 23). One entry per stalled task; the root
@@ -138,6 +152,13 @@ export type SwarmIdleNudgeState = {
 	goalIdleCheckCount?: number;
 	goalIdleLastCheckAt?: string;
 	lastLongRunningToolNudges?: Record<string, string>;
+	// === task-r-deadpane-goal-classifier (2026-10-03): per-agent pane-probe cooldown ledger ===
+	// goalDiagProbeLedger[agentId] = ISO timestamp of the last dead-pane probe issued by the
+	// goal-escalation classifier for that agent. An agent probed within
+	// GOAL_ESCALATION_DIAG_PROBE_INTERVAL_MS is skipped (liveness null = treated
+	// alive-by-convention, matching deriveTaskProgressState). Entries for pruned agents are
+	// dropped on each probe round (bounded by the agent count).
+	goalDiagProbeLedger?: Record<string, string>;
 };
 
 // Checkpoint marker created via /swarm mark / /swarm-mark for timeline debugging.
