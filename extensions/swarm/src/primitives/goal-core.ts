@@ -144,6 +144,16 @@ export async function setGoalCore(p: Paths, cwd: string, params: SetGoalInput, d
 	delete st.goal.lastNudgeAt;
 	delete st.goal.lastResolvedAt;
 	delete st.goal.backoffTicksRemaining;
+	// === task-202610071614 (root-goal-pool-empty-escalation, 2026-10-08) ===
+	// Reset the swarm-level lastWasVacuous transition flag on a fresh goal SET so the
+	// new goal's first vacuous tick re-fires the goal.nudge.held_no_live_workers trace.
+	// The pre-fix behavior left the flag set across goal boundaries (the flag is
+	// swarm-level, not goal-scoped), so a new goal created while the pool was already
+	// vacuous produced zero held traces and zero escalation messages. UPDATE path is
+	// intentionally NOT reset (an update is a continuation of the existing goal).
+	const idleNudgeState = (st.idleNudgeState ||= {});
+	const previousLastWasVacuous = idleNudgeState.lastWasVacuous === true;
+	idleNudgeState.lastWasVacuous = false;
 	await deps.trace(p, "goal.set", {
 		goalId,
 		previousId,
@@ -157,6 +167,14 @@ export async function setGoalCore(p: Paths, cwd: string, params: SetGoalInput, d
 		origin: newOrigin,
 		setByScope: requestedSetByScope,
 	});
+	if (previousLastWasVacuous) {
+		await deps.trace(p, "goal.set.lastWasVacuous_reset", {
+			goalId,
+			previousId,
+			via: deps.via,
+			actor: deps.actor,
+		});
+	}
 	await deps.writeState(p, st);
 	return { updated: false, goalId, previousId, goal: st.goal };
 }

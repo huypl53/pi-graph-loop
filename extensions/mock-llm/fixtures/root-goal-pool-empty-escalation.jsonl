@@ -1,0 +1,28 @@
+# root-goal-pool-empty-escalation — root-origin goal with empty worker pool
+# must emit ONE bounded, durable, high-priority escalation nudge (not spam every 5s).
+#
+# Reproduces the 2026-10-07 incident: goal goal-1791377290938, origin=root,
+# set via issue-controller at 12:48Z; by 12:55Z all 27 workers stopped, census
+# idle:0 busy:0 stopped:27; zero goal.nudge.* traces for that goalId, no
+# escalation message; only graph.advance_nudge_emitted kept flowing. The pump
+# is in a deadlock state — the root sees nothing; the operator sees only the
+# graph-advance traces.
+#
+# Deterministic: scripted turns drive the lane in a single replay. delayMs gates
+# the pump-tick timing. The lane calls swarm_check_mailbox + swarm_set_goal +
+# swarm_mark_goal_done to exercise the R27 surface end-to-end.
+#
+# Pattern 2 (seeded world + single-actor script) per the mock-llm-scenarios skill:
+# the engine does the real work, the scripted turns just give the lane a clean
+# terminal. The lane harness seeds the scratch state with a root-origin goal +
+# 3 dead workers BEFORE the lane starts.
+#
+# Model id = root-goal-pool-empty-escalation. Lane form:
+#   pi -e ./extensions/swarm -e ./extensions/mock-llm --provider mock-llm \
+#      --model root-goal-pool-empty-escalation -p 'idle' \
+#      # with PI_SWARM_AGENT_ID=root + cwd seeded with the root-origin goal + dead workers
+#
+# Three turns: text acknowledge-seed → text verify-escalation → text confirm-stop.
+{"name":"r27 baseline (inspect goal + worker pool state, RED lane confirms 0 escalations for root-origin goal)","events":[{"type":"text","delayMs":15,"text":"R27 lane: this is the active-root-goal-with-empty-pool incident shape. The root has a standing root-origin goal (set via issue-controller) and the worker pool has been empty for hours. I will inspect the trace to confirm the silence, then drive the fix-shape lane.","chunks":["R27 lane: ","this is the active-root-goal-with-empty-pool incident shape."," The root has a standing root-origin goal (set via issue-controller) ","and the worker pool has been empty for hours."," I will inspect the trace to confirm the silence, ","then drive the fix-shape lane."],"actions":[{"type":"toolcall","name":"swarm_check_mailbox","id":"mb-0","arguments":{"pendingOnly":true,"markDelivered":false,"limit":20}}]}]}
+{"name":"r27 set goal (re-arm goal idempotently with root origin)","events":[{"type":"text","delayMs":20,"text":"The trace confirms the silence shape; the root-visible surface is empty. The fix's job is to add a bounded escalation path so the root-origin goal surfaces a recovery nudge via the existing R13 high-priority surface. Re-arming the goal with the same origin + text tests idempotency.","chunks":["The trace confirms the silence shape; ","the root-visible surface is empty."," The fix's job is to add a bounded escalation path ","so the root-origin goal surfaces a recovery nudge ","via the existing R13 high-priority surface."," Re-arming the goal with the same origin + text tests idempotency."],"actions":[{"type":"toolcall","name":"swarm_set_goal","id":"goal-0","arguments":{"text":"R27 root-origin goal test","idempotencyKey":"r27-red-2026-10-08","origin":"root","intervalMs":5000,"setByScope":"issue-controller"}}]}]}
+{"name":"r27 settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Lane complete: R27 fix surfaces exactly one bounded high-priority root nudge per cooldown when the worker pool is genuinely vacuous for a root-origin goal (predicate widening + lastWasVacuous reset per plan §3). The existing user-origin path is preserved byte-identically (S3 control).","chunks":["Lane complete: ","R27 fix surfaces exactly one bounded high-priority root nudge ","per cooldown when the worker pool is genuinely vacuous ","for a root-origin goal ","(predicate widening + lastWasVacuous reset per plan §3)."," The existing user-origin path is preserved byte-identically ","(S3 control)."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

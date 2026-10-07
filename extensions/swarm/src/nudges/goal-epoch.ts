@@ -54,6 +54,16 @@ const AGENT_BOOT_GRACE_MS = Number(process.env.PI_SWARM_AGENT_SPAWN_BOOT_GRACE_M
 import { currentAgentId } from "../session.ts";
 import { TERMINAL_NODE_STATUSES } from "../constants.ts";
 import { isStallNudgeEligibleTaskStatus, isTerminalOrAbandonedTaskStatus } from "./status-predicates.ts";
+import type { GoalOrigin } from "../goals.ts";
+
+// === task-202610071614 (root-goal-pool-empty-escalation, 2026-10-08) ===
+// All four GoalOrigin values escalate on an empty worker pool. The pre-fix predicate
+// excluded "root" (the issue-controller's default origin), which silently held the
+// goal nudge for active issue runs whose pool emptied — the run stalled with zero
+// recovery nudges until a human poked it. Exported for direct unit testing.
+export function goalOriginEscalatesOnEmptyPool(origin: GoalOrigin | undefined): boolean {
+	return origin === "user" || origin === "root" || origin === "system" || origin === "batch";
+}
 
 export function resolveGoalNudgeIntervalMs(nudgeIntervalMs?: number | null): number {
 	if (typeof nudgeIntervalMs === "number" && Number.isFinite(nudgeIntervalMs) && nudgeIntervalMs > 0) return Math.floor(nudgeIntervalMs);
@@ -638,14 +648,19 @@ export async function evaluateIdleGoalNudgeLocked(
 		}
 		idleStateVac.lastWasVacuous = true;
 		// R14 Fix C (2026-09-02): bounded, durable, high-priority root recovery
-		// nudge for an active USER-ORIGIN goal whose pool is genuinely vacuous. Cooldown-
+		// nudge for an active goal whose pool is genuinely vacuous. Cooldown-
 		// bounded by NOTIFY_DEFAULT_COOLDOWN_MS (5min). Stops emitting when the goal
 		// clears/cancels (consult `st.goal` at the top of the evaluator; the no_goal
 		// guard short-circuits before this branch). Bypasses idle gates via the R13 P0
 		// high-priority surface — the root's tmuxTarget is `unknown` so the
 		// message is durably enqueued in the mailbox and the pump surfaces it once the
 		// root is idle (R13 P0 path; unchanged).
-		if (goal.origin === "user" || goal.origin === "system" || goal.origin === "batch") {
+		//
+		// task-202610071614 (2026-10-08): predicate widened from {user, system, batch}
+		// to ALL four origins via goalOriginEscalatesOnEmptyPool. The pre-fix predicate
+		// excluded "root" (the issue-controller's default origin), which silently held
+		// the goal nudge for active issue runs whose pool emptied.
+		if (goalOriginEscalatesOnEmptyPool(goal.origin)) {
 			const effectiveMaxNudges = resolveGoalMaxNudges(goal.maxNudges);
 			const isInfinite = effectiveMaxNudges === -1;
 			const isCapped = !isInfinite && (goal.consecutiveNoResolveNudges ?? 0) >= effectiveMaxNudges;
@@ -720,7 +735,7 @@ export async function evaluateIdleGoalNudgeLocked(
 					const cooldownUntilMs = idleState.lastPoolEmptyEscalationAt
 						? new Date(idleState.lastPoolEmptyEscalationAt).getTime() + NOTIFY_DEFAULT_COOLDOWN_MS
 						: 0;
-					if (goal.origin === "user" || goal.origin === "system" || goal.origin === "batch") {
+					if (goalOriginEscalatesOnEmptyPool(goal.origin)) {
 						if (!isCapped && nowMs >= cooldownUntilMs) {
 							// Call site B: same emitter, busy-dead cause. Mark the probe ledger BEFORE
 							// the emitter may early-return so the cooldown stamp + ledger survive via

@@ -1662,6 +1662,33 @@ The root's durable goal plus an anti-loop nudge that fires when the swarm has no
 - **No new public schema beyond those env knobs**: only the two declared tools + the two slash
   command subcommands. No new event hooks.
 
+### Root-origin goal escalation (task-202610071614, 2026-10-08)
+
+All four `GoalOrigin` values (`user`, `root`, `system`, `batch`) escalate on an empty worker pool.
+The pre-fix predicate excluded `root` (the issue-controller's default origin), which silently held
+the goal nudge for active issue runs whose pool emptied — the run stalled with zero recovery
+nudges until a human poked it (live incident 2026-10-07: `goal-1791377290938`, origin=root, set via
+issue-controller at 12:48Z; by 12:55Z all 27 workers stopped, census `idle:0 busy:0 stopped:27`;
+zero `goal.nudge.*` traces for that goalId, no escalation message).
+
+- **Predicate widening**: `goalOriginEscalatesOnEmptyPool(origin)` in
+  `extensions/swarm/src/nudges/goal-epoch.ts` returns `true` for all four origins. Both the
+  vacuous branch and the busy-dead route use this helper (replacing the pre-fix
+  `goal.origin === "user" || goal.origin === "system" || goal.origin === "batch"` predicate).
+  The escalation body, trace fields, idempotency key family, and mailbox priority are
+  byte-identical to the user-origin path — only the predicate widens.
+- **`lastWasVacuous` reset on `goal.set`**: the swarm-level `lastWasVacuous` transition flag is
+  reset to `false` in `setGoalCore` (`extensions/swarm/src/primitives/goal-core.ts`) on the SET
+  path (not UPDATE — an update is a continuation of the existing goal). This guarantees a fresh
+  goal always re-fires the `goal.nudge.held_no_live_workers` trace on its first vacuous tick.
+  The reset is paired with a `goal.set.lastWasVacuous_reset` trace (informational; not
+  load-bearing) so the reset is observable in the trace stream.
+- **Cap + cooldown preserved**: the `consecutiveNoResolveNudges` cap and `NOTIFY_DEFAULT_COOLDOWN_MS`
+  cooldown apply identically to root-origin goals. The predicate widening does NOT bypass the
+  cap (S5 control) or the cooldown (S4 control).
+- **No new public schema**: the helper is exported for direct unit testing but is not part of
+  the public tool/command surface. No new event hooks.
+
 ### Pipeline-stall nudge (Issue 23)
 
 The goal-nudge (Issue 18) only fires when the root has set an explicit `swarm_goal`. If
@@ -1963,7 +1990,7 @@ Three coupled fixes (live `reconcile.ts`):
 | --------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------- |
 | `idleAgentsCount`                 | `reconcile.ts:318` filter                      | `>0` for settled-but-alive pool (Fix A); `0` for genuinely-vacuous pool |
 | `heldNoLiveWorkersTraceCount`     | `reconcile.ts:520` trace                       | `1` per false→true transition (Fix B); `0` once the pool recovers       |
-| `escalationSendCount`             | `reconcile.ts:escalation.deliverMessageLocked` | `1` per cooldown (Fix C); `0` for root-origin goals                     |
+| `escalationSendCount`             | `reconcile.ts:escalation.deliverMessageLocked` | `1` per cooldown (Fix C); all four origins escalate (task-202610071614) |
 | `mailboxAppendCount`              | `mailbox.ts:362,445` durable append            | `1` per escalation (durable contract intact)                            |
 | `sendMessageCallCount`            | `reconcile.ts:1763-1773` pump                  | `1` per escalation when root idle (R13 path; unchanged)                 |
 | `escalationCancelledOnClearCount` | `goals.ts:32-51` clear                         | `1` when goal clears mid-cooldown; `0` escalations after clear          |
