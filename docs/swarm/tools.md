@@ -203,7 +203,13 @@ Bundled playbooks live in `extensions/swarm/role-skills/{planner,implementer,fix
 `/swarm pool validate` (and the root's launch-time pool-health check) also runs **live
 resolvability checks** per slot when the model registry is available in the session:
 `slot_unresolvable` for a provider/model pair not in the registry, and `slot_no_credential`
-for a provider without a stored API key. The root session surfaces a warning at launch when
+for a provider without a stored credential. Credentials are recognized in auth.json as
+either `type: "api_key"` (with a non-empty key) or `type: "oauth"` (with an `access` or
+`refresh` token — OAuth providers like a ccs-managed proxy spawn fine; pi refreshes them
+at request time), or via the conventional `<PROVIDER>_API_KEY` env vars. Project-layer
+recognized keys include `issues` and `issue-sequencer` (issue-sequencer config is read from
+the project yml only — a global `issues:` block is genuinely ignored and still warns).
+The root session surfaces a warning at launch when
 the pool config has errors (or an advisory when warnings exist), traced as `pool.launch_health`.
 
 ### Per-key + per-slot provenance

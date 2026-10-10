@@ -59,9 +59,17 @@ export function scrubErrorIdentity(message: string): string {
 	return (message || "").toLowerCase().replace(/\d+/g, "n").replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
-// Credential probe for preflightSpawn (3b): does this provider have a usable API key?
+// Credential probe for preflightSpawn (3b): does this provider have a usable credential?
 // Mirrors pi's own lookup order: ~/.pi/agent/auth.json entries, then the conventional
 // <PROVIDER>_API_KEY / <PROVIDER>_APIKEY env vars. Returns undefined when a key exists.
+//
+// 2026-10-10 (live report): OAuth entries count as credentials. pi core (pi-ai
+// resolveProviderAuth) resolves type:"oauth" entries — refreshing them at request time when
+// near expiry — so a slot whose provider is OAuth-authenticated (e.g. cliproxyapi managed by
+// ccs: {access, refresh, expires}) spawns fine and must NOT be flagged. Only an oauth entry
+// with NEITHER access NOR refresh is unresolvable. (pi-ai also requires provider.auth.oauth
+// support; this sync probe can't see provider config, so we accept any oauth entry — a
+// provider that lacks oauth support would surface its own error at spawn, not 'No API key'.)
 function missingProviderCredential(provider: string): string | undefined {
 	if (!provider) return "no provider";
 	try {
@@ -69,8 +77,14 @@ function missingProviderCredential(provider: string): string | undefined {
 		if (home) {
 			const auth = JSON.parse(readFileSync(join(getGlobalAgentDir(), "auth.json"), "utf8")) as Record<string, any>;
 			const entry = auth?.[provider];
-			if (entry && typeof entry === "object" && entry.type === "api_key" && String(entry.key || entry.apiKey || "").trim())
-				return undefined;
+			if (entry && typeof entry === "object") {
+				if (entry.type === "api_key" && String(entry.key || entry.apiKey || "").trim()) return undefined;
+				if (
+					entry.type === "oauth" &&
+					(String(entry.access || "").trim() || String(entry.refresh || "").trim())
+				)
+					return undefined;
+			}
 		}
 	} catch (err: any) {
 		// Expected branches: no HOME or auth.json absent. A CORRUPT/unreadable auth.json silently
@@ -393,14 +407,19 @@ export function validateSwarmSettings(
 	const cfg = resolved.cfg;
 	// v4.2: unknown-key warning (plain list, no suggestions) for both layers.
 	// MUST fire before the empty-cfg early return, because unknown keys are stripped from cfg.
-	const RECOGNIZED = new Set(["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal", "roles"]);
+	// 2026-10-10: `issues` + `issue-sequencer` are project-layer keys (issues/config.ts reads
+	// readSwarmYml(cwd) only) and are documented in the project scaffold (constants.ts) —
+	// recognizing them only at the project layer keeps the global warning truthful (a global
+	// `issues:` block really is ignored).
+	const RECOGNIZED_BOTH = new Set(["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal", "roles"]);
+	const RECOGNIZED_PROJECT = new Set([...RECOGNIZED_BOTH, "issues", "issue-sequencer"]);
 	const projFile = findSwarmYamlFile(cwd);
 	if (projFile) {
 		try {
 			const projYml = readSwarmYml(cwd);
 			if (projYml) {
 				for (const key of Object.keys(projYml)) {
-					if (!RECOGNIZED.has(key)) {
+					if (!RECOGNIZED_PROJECT.has(key)) {
 						warnings.push({
 							kind: "unknown_top_level_key",
 							field: key,
@@ -428,7 +447,7 @@ export function validateSwarmSettings(
 			const globalYml = readGlobalSwarmYml(true);
 			if (globalYml) {
 				for (const key of Object.keys(globalYml)) {
-					if (!RECOGNIZED.has(key)) {
+					if (!RECOGNIZED_BOTH.has(key)) {
 						warnings.push({
 							kind: "unknown_top_level_key",
 							field: key,
