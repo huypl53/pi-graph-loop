@@ -6,9 +6,6 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { sendToPane } from "../src/tmux.ts";
-import { sendKeys, spawnAgent } from "../src/agents.ts";
-import { ensureDirs, paths } from "../src/state.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // This suite intentionally tests TmuxDriver command behavior even when the repo's .pi/swarm.yml
@@ -16,8 +13,15 @@ const here = dirname(fileURLToPath(import.meta.url));
 // mocked tmux-only ExtensionAPI.exec surface to the Herdr driver.
 const previousTerminalManager = process.env.PI_SWARM_TERMINAL_MANAGER;
 const previousTmuxOk = process.env.PI_SWARM_TMUX_OK;
+const previousSpawnSettle = process.env.PI_SWARM_SPAWN_SETTLE_MS;
 process.env.PI_SWARM_TERMINAL_MANAGER = "tmux";
 process.env.PI_SWARM_TMUX_OK = "1";
+// This test checks dash-safe send-keys argv, not pane startup timing. Avoid the production
+// readiness timeout against its intentionally marker-free mocked pane.
+process.env.PI_SWARM_SPAWN_SETTLE_MS = "10";
+const { sendToPane } = await import(join(here, "..", "src", "tmux.ts"));
+const { sendKeys, spawnAgent } = await import(join(here, "..", "src", "agents.ts"));
+const { ensureDirs, paths } = await import(join(here, "..", "src", "state.ts"));
 const scratch = join(tmpdir(), `swarm-dash-prompt-${process.pid}-${Date.now()}`);
 rmSync(scratch, { recursive: true, force: true });
 mkdirSync(join(scratch, ".pi", "swarm"), { recursive: true });
@@ -203,4 +207,6 @@ if (previousTerminalManager === undefined) delete process.env.PI_SWARM_TERMINAL_
 else process.env.PI_SWARM_TERMINAL_MANAGER = previousTerminalManager;
 if (previousTmuxOk === undefined) delete process.env.PI_SWARM_TMUX_OK;
 else process.env.PI_SWARM_TMUX_OK = previousTmuxOk;
+if (previousSpawnSettle === undefined) delete process.env.PI_SWARM_SPAWN_SETTLE_MS;
+else process.env.PI_SWARM_SPAWN_SETTLE_MS = previousSpawnSettle;
 if (fail > 0) process.exit(1);

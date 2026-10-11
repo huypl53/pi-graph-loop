@@ -20,6 +20,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 // Force the env var so the constants module picks it up on import. Setting it here (before import)
 // is critical — Number(process.env.PI_SWARM_ORPHAN_TIMEOUT_MS) is evaluated at module load time.
 process.env.PI_SWARM_ORPHAN_TIMEOUT_MS = "50";
+// This suite tests the orphan watchdog, not terminal startup readiness. Keep the spawn readiness
+// poll short; otherwise every mocked pane burns the production 10s readiness timeout.
+process.env.PI_SWARM_SPAWN_SETTLE_MS = "10";
 // Isolation: mock pi.exec serves the tmux boundary — pin the terminal driver to tmux so the
 // repo root's real .pi/swarm.yml (terminalManager: herdr) cannot route spawn/stop through
 // the herdr driver (whose `workspace list` would fail against the mock and throw).
