@@ -21,13 +21,17 @@ const pi = {
 };
 factory(pi);
 
+const failures = [];
 const removed = tools.filter((n) => /^(swarm_(metric|run|memory|iteration|loop)_)/.test(n));
-if (removed.length) {
-	console.error("Removed experimentation tools still registered:", removed);
+if (removed.length) failures.push(`removed experimentation tools still registered: ${removed.join(", ")}`);
+if (cmds.includes("swarm-loop")) failures.push("removed loop command still registered");
+if (typeof mod.validateRunAgainstContract === "function") failures.push("validateRunAgainstContract export still present");
+if (typeof mod.computeIterationBest === "function") failures.push("computeIterationBest export still present");
+const coreTools = ["swarm_create_task", "swarm_update_task", "swarm_task_status"];
+const missingCore = coreTools.filter((name) => !tools.includes(name));
+if (missingCore.length) failures.push(`core task tools missing: ${missingCore.join(", ")}`);
+if (failures.length) {
+	console.error(failures.join("\n"));
 	process.exit(1);
 }
-if (cmds.includes("swarm-loop")) {
-	console.error("Removed loop command still registered");
-	process.exit(1);
-}
-console.log("RECONCILE-LOOP PASS: experimentation subsystem removed from registration");
+console.log("RETIRED-SUBSYSTEM PASS: removed exports, tools, and command absent; core task tools remain");
