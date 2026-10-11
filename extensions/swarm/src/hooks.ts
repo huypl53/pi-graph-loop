@@ -40,7 +40,7 @@ import {
 	stopRootPump,
 	surfaceAgentPending,
 } from "./hooks/pump-manager.ts";
-import { registerPoolSwapHook } from "./hooks/pool-swap.ts";
+import { registerPoolSwapHook, registerTurnStartLivenessHook } from "./hooks/pool-swap.ts";
 import { SWARM_RESOLVE_TOOLS, registerTurnHooks, turnEndIsResolveAction } from "./hooks/turns.ts";
 import { registerSessionHooks } from "./hooks/session.ts";
 import { registerSettledHook } from "./hooks/settled.ts";
@@ -165,6 +165,9 @@ export function registerSwarmHooks(pi: ExtensionAPI) {
 	//   - session_shutdown registered after tool hooks (no ordering coupling, kept for diff parity).
 	registerPoolSwapHook(pi);
 	registerTurnHooks(pi);
+	// Incident 2026-10-11 B: registered AFTER registerTurnHooks so handlers["turn_start"][0]
+	// stays the turns.ts root-epoch handler (existing tests drive it by index).
+	registerTurnStartLivenessHook(pi);
 	registerSessionHooks(pi, startRootPump);
 	registerSettledHook(pi);
 	registerToolHooks(pi);

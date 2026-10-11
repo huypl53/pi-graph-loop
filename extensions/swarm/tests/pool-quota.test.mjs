@@ -44,14 +44,14 @@ await mkdir(join(dir, ".pi"), { recursive: true });
 await writeFile(
 	join(dir, ".pi", "swarm.yml"),
 	stringify({
-					defaultModel: "glm-5.1",
-			defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-			],
-			rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
+		defaultModel: "glm-5.1",
+		defaultProvider: "zai-coding-cn",
+		modelPool: [
+			{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
+			{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+			{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+		],
+		rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
 	}),
 );
 process.chdir(dir);
@@ -205,23 +205,31 @@ registerSwarmHooks(fakePi);
 // =============================================================
 // F1: mutating resets_in_seconds must NOT reset the incident
 // =============================================================
-// Two strikes on the same slot whose bodies differ only in resets_in_seconds. Expected:
-// one incident, count 1 then exhausted on 2 -> bench + swap + notify (ENGINE_MAX_RETRIES=2).
+// Two strikes on the same slot whose bodies differ only in resets_in_seconds. Incident
+// 2026-10-11 A: quota is now SINGLE-STRIKE (pi fail-fasts quota errors — isRetryableAssistantError
+// matches NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN and returns false, so no second turn_end
+// ever arrives from the engine). Each strike independently opens the gate; the Issue 70
+// normalization contract this suite pins is that the mutating bodies collapse to ONE incident
+// identity (no gated events) and both strikes bench/swap instead of oscillating at count:1.
 {
 	await freshSession();
 	await errTurn(1, quotaBody(11508));
 	ok(
-		"F1: count 1 recorded — NOT pinned at 1 across mutating bodies",
-		JSON.stringify(await gatedCounts()) === "[1]",
+		"F1: single-strike quota is never pinned at gated count:1",
+		JSON.stringify(await gatedCounts()) === "[]",
 		JSON.stringify(await gatedCounts()),
 	);
 	await errTurn(2, quotaBody(11504));
-	ok("F1: second strike exhausts and swaps", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
-	ok("F1: swap left the dead slot", setModelCalls[0] !== "zai-coding-cn/glm-5.1", `to=${setModelCalls[0]}`);
+	ok("F1: both mutating-body strikes swapped (identity collapsed)", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
+	ok(
+		"F1: swaps left the dead slot",
+		setModelCalls.every((t) => t !== "zai-coding-cn/glm-5.1"),
+		setModelCalls.join(","),
+	);
 	const exhausted = await countTraceEvents("pool.engine_retry_exhausted");
-	ok("F1: pool.engine_retry_exhausted fired once", exhausted === 1, `exhausted=${exhausted}`);
+	ok("F1: pool.engine_retry_exhausted fired per strike", exhausted === 2, `exhausted=${exhausted}`);
 	const swaps = await countTraceEvents("pool.swap");
-	ok("F1: pool.swap trace fired", swaps === 1, `swaps=${swaps}`);
+	ok("F1: pool.swap trace fired", swaps === 2, `swaps=${swaps}`);
 	const ps = await poolStatus(p);
 	const glm = ps.slots.find((s) => s.model === "glm-5.1");
 	ok("F1: quota slot benched (in cooldown)", Boolean(glm.inCooldown), JSON.stringify(glm.health));
@@ -243,35 +251,50 @@ registerSwarmHooks(fakePi);
 	await freshSession();
 	await errTurn(1, "fetch failed: ECONNREFUSED");
 	await errTurn(2, quotaBody(9136));
+	// Incident 2026-10-11 A: the quota strike is single-strike — it swaps immediately. The
+	// identity contract remains: the transient strike is gated (different kind → fresh
+	// incident), never merged with the quota one.
 	ok(
-		"F2: two gated strikes, no swap",
-		setModelCalls.length === 0 && (await gatedCounts()).length === 2,
-		`gated=${JSON.stringify(await gatedCounts())}`,
+		"F2: transient strike gated; quota strike single-strike swaps",
+		setModelCalls.length === 1 && (await gatedCounts()).length === 1,
+		`gated=${JSON.stringify(await gatedCounts())} calls=${setModelCalls.length}`,
 	);
-	ok("F2: no exhausted trace", (await countTraceEvents("pool.engine_retry_exhausted")) === 0);
+	ok(
+		"F2: no exhausted trace for the gated transient",
+		(await countTraceEvents("pool.engine_retry_exhausted")) === 1,
+		`exhausted=${await countTraceEvents("pool.engine_retry_exhausted")}`,
+	);
 }
 
 // =============================================================
 // F3: a different providerKey starts a fresh incident
 // =============================================================
-// Same scrubbed message shape on glm then gpt: fresh incident per slot, still gated.
+// Same scrubbed message shape on glm then gpt: fresh incident per slot. Incident 2026-10-11 A:
+// quota strikes are single-strike, so BOTH swap (one per slot) — the providerKey separation is
+// still observable: two separate exhaustion traces, neither gated.
 {
 	await freshSession();
 	await errTurn(1, quotaBody(9136), fakeModelGlm);
 	await errTurn(2, quotaBodyOpenAI(9136), fakeModelGpt);
 	ok(
-		"F3: two gated strikes across slots, no swap",
-		setModelCalls.length === 0 && (await gatedCounts()).length === 2,
-		`gated=${JSON.stringify(await gatedCounts())}`,
+		"F3: per-slot single-strike quota swaps, no gated strikes",
+		setModelCalls.length === 2 && (await gatedCounts()).length === 0,
+		`gated=${JSON.stringify(await gatedCounts())} calls=${setModelCalls.length}`,
 	);
-	ok("F3: no exhausted trace", (await countTraceEvents("pool.engine_retry_exhausted")) === 0);
+	ok(
+		"F3: one exhaustion trace per slot",
+		(await countTraceEvents("pool.engine_retry_exhausted")) === 2,
+		`exhausted=${await countTraceEvents("pool.engine_retry_exhausted")}`,
+	);
 }
 
 // =============================================================
 // F4: successful turn clears the incident
 // =============================================================
-// 1 quota strike, a stop turn, then 1 more strike: the incident must
-// have been cleared, so nothing exhausts and no swap fires.
+// 1 quota strike (single-strike swap), a stop turn, then 1 more strike: the stop turn clears
+// the (already-exhausted-and-cleared) incident state and traces recovery; the second strike
+// is a FRESH single-strike incident that swaps again. Pin: recovered fires exactly once, and
+// the post-recovery strike is never gated.
 {
 	await freshSession();
 	await errTurn(1, quotaBody(9136));
@@ -290,10 +313,17 @@ registerSwarmHooks(fakePi);
 		},
 		{ ...ctx, model: fakeModelGlm },
 	);
-	ok("F4: recovered trace fired", (await countTraceEvents("pool.engine_retry_recovered")) === 1);
+	// The quota strike was single-strike: the incident was consumed (deleted) at exhaustion,
+	// so the stop turn finds NO open incident and emits no recovery trace — recovery only
+	// traces for burst-gated kinds whose incident was still open when the engine recovered.
+	ok(
+		"F4: no recovered trace (single-strike incident already consumed)",
+		(await countTraceEvents("pool.engine_retry_recovered")) === 0,
+		`recovered=${await countTraceEvents("pool.engine_retry_recovered")}`,
+	);
 	await errTurn(2, quotaBody(9128));
-	ok("F4: post-recovery strikes stay gated (fresh incident), no swap", setModelCalls.length === 0, `calls=${setModelCalls.length}`);
-	ok("F4: recovered fired exactly once", (await countTraceEvents("pool.engine_retry_recovered")) === 1);
+	ok("F4: post-recovery strike swaps (fresh single-strike incident)", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
+	ok("F4: still no recovered trace", (await countTraceEvents("pool.engine_retry_recovered")) === 0);
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);

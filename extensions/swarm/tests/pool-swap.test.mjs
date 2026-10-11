@@ -50,14 +50,14 @@ await mkdir(join(dir, ".pi"), { recursive: true });
 await writeFile(
 	join(dir, ".pi", "swarm.yml"),
 	stringify({
-					defaultModel: "glm-5.1",
-			defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-			],
-			rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
+		defaultModel: "glm-5.1",
+		defaultProvider: "zai-coding-cn",
+		modelPool: [
+			{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
+			{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+			{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+		],
+		rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
 	}),
 );
 process.chdir(dir);
@@ -154,15 +154,17 @@ async function errBurst(turnIndexBase, { model = fakeModelGlm, provider = "zai-c
 	}
 }
 
-// Simulate a QUOTA error turn from glm/zai. Issue 17: emit a 3-strike burst so the engine-retry
-// gate opens on the 3rd strike and the swap path fires.
+// Simulate a QUOTA error turn from glm/zai. Incident 2026-10-11 A: pi fail-fasts
+// non-retryable quota errors (isRetryableAssistantError → false), so the gate opens on the
+// FIRST strike (singleStrike). A 3-strike burst therefore attempts one swap per strike,
+// bounded by MAX_SWAP_CHAIN=2: exactly 2 swaps, then the 3rd strike is swap_chain_capped.
 await errBurst(1, {
 	model: fakeModelGlm,
 	provider: "zai-coding-cn",
 	errorMessage: "Error 429: You exceeded your current quota, please check your plan and billing details",
 });
 
-ok("quota error swapped model in-process", setModelCalls.length === 1);
+ok("quota error swapped model in-process", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
 ok("swapped to a DIFFERENT slot", setModelCalls[0] !== "zai-coding-cn/glm-5.1");
 let ps = await poolStatus(p);
 const glm = ps.slots.find((s) => s.model === "glm-5.1");
@@ -186,7 +188,11 @@ ok(
 				return false;
 			}
 		}).length;
-	ok("issue 17: pool.swap_gated_by_engine_retry fired for gated strikes", gated === 2, `gated=${gated}`);
+	// Incident 2026-10-11 A: quota is single-strike now (pi never retries it) — a quota burst
+	// emits NO gated events. Burst-gated kinds (transient/rate_limit) are pinned by
+	// pool-retry.test.mjs fixtures 1/2 and pool-slow-attempt-window.test.mjs.
+	ok("issue 17 + incident A: quota strikes are never gated (single-strike)", gated === 0, `gated=${gated}`);
+	ok("issue 17 + incident A: 3rd quota strike hit the swap-chain cap", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
 }
 
 // Non-provider errors must NOT swap (e.g. context overflow). Issue 17: kind === "unknown"
@@ -211,22 +217,34 @@ ok("context overflow does NOT swap", setModelCalls.length === before);
 
 // Transient errors need a streak (maxRetries=2) before benching — but swap happens after engine
 // retries exhaust on the slot. Issue 17: emit a 3-strike burst so the engine-retry gate opens on
-// the 3rd strike; recordProviderError fires once (failures=1, no bench yet — streak threshold 2
-// is the BENCH threshold, separate from the gate's 3-retry budget).
-const transientBefore = setModelCalls.length;
-await errBurst(3, {
-	model: fakeModelGpt,
-	provider: "openai",
-	errorMessage: "fetch failed: ECONNREFUSED",
-});
-ok("transient: 1 swap after engine retries exhaust", setModelCalls.length === transientBefore + 1, `calls=${setModelCalls.length}`);
-ps = await poolStatus(p);
-const gpt = ps.slots.find((s) => s.model === "gpt-5.4-mini");
-ok(
-	"1st transient does NOT bench (streak 1 < maxRetries 2)",
-	!gpt.inCooldown && gpt.health.failures === 1,
-	`inCooldown=${gpt.inCooldown} failures=${gpt.health?.failures}`,
-);
+// the 2nd strike (ENGINE_MAX_RETRIES=2); recordProviderError fires once (failures=1, no bench
+// yet — streak threshold 2 is the BENCH threshold, separate from the gate's budget). The 3rd
+// strike opens a fresh incident (the exhausted one is cleared) and stays gated.
+// NOTE the quota block above consumed the agent's swap-chain budget (2 swaps, now at cap), so
+// this burst runs under a FRESH agent id — otherwise every strike here would be
+// swap_chain_capped and no slot_failure would ever land on gpt.
+{
+	process.env.PI_SWARM_AGENT_ID = "transient-test-agent";
+	const transientBefore = setModelCalls.length;
+	await errBurst(3, {
+		model: fakeModelGpt,
+		provider: "openai",
+		errorMessage: "fetch failed: ECONNREFUSED",
+	});
+	ok(
+		"transient: 1 swap after engine retries exhaust",
+		setModelCalls.length === transientBefore + 1,
+		`calls=${setModelCalls.length - transientBefore}`,
+	);
+	ps = await poolStatus(p);
+	const gpt = ps.slots.find((s) => s.model === "gpt-5.4-mini");
+	ok(
+		"1st transient does NOT bench (streak 1 < maxRetries 2)",
+		!gpt.inCooldown && gpt.health?.failures === 1,
+		`inCooldown=${gpt.inCooldown} failures=${gpt.health?.failures}`,
+	);
+	process.env.PI_SWARM_AGENT_ID = "worker-a";
+}
 
 // Guest sessions never rotate. Issue 17: guest short-circuits at the top of turn_end BEFORE the
 // engine-retry gate; a single emission is still sufficient.

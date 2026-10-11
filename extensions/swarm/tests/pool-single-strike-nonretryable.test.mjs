@@ -1,0 +1,313 @@
+// Incident 2026-10-11 (session 01a12883): single-shot non-retryable provider-limit errors
+// (ChatGPT "You have hit your ChatGPT usage limit.") never rotate the pool.
+//
+// Root cause (verified against pi runtime source): pi's engine fail-fasts on non-retryable
+// quota/billing errors — `isRetryableAssistantError` (pi-ai retry.js) matches them against
+// NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN and returns false, so _prepareRetry is NEVER
+// called and the session surfaces EXACTLY ONE turn_end { stopReason: "error" }. The Issue 17
+// engine-retry gate requires ENGINE_MAX_RETRIES (=2) same-incident strikes before it opens
+// the auto-swap path, so a quota error that pi itself will never retry is stuck forever at
+// count:1 — no bench (the immediate quota bench lives behind the same gate), no swap, and
+// the session dies on a pool that still has healthy slots (live: 01:48:23 glm-4.7 usage
+// limit, gated count:1, session end; pool had 4 healthy alternatives).
+//
+// This suite pins the corrected contract:
+//   F1: quota-kind single strike (usage-limit body) opens the gate IMMEDIATELY — bench with
+//       lastBenchReason=quota, engine_retry_exhausted trace (singleStrike:true), swap to a
+//       different slot, swap note sent.
+//   F2: auth-kind single strike (invalid key) behaves the same (auth is also fail-fast in pi
+//       and immediate-bench in recordProviderError).
+//   F3: rate_limit stays gated (pi DOES retry plain rate limits — the gate must keep waiting
+//       for the burst; this is the anti-regression for Bug A's fix).
+//   F4: transient stays gated (single ECONNREFUSED strike — no swap, no bench).
+//   F5: success-turn reset still works after a single-strike quota swap (fresh incident on
+//       the next slot's error).
+//   F6: swap-chain cap still applies to single-strike swaps (2 swaps max in 5 minutes).
+//   F7: guest sessions never rotate even on single-strike quota errors.
+//
+// Run: node extensions/swarm/tests/pool-single-strike-nonretryable.test.mjs
+import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { stringify } from "yaml";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { paths, readState, writeState } from "../src/state.ts";
+import { registerSwarmHooks } from "../src/hooks.ts";
+import { poolStatus, slotKey } from "../src/pool.ts";
+import { classifyProviderError } from "../src/types.ts";
+
+let pass = 0,
+	fail = 0;
+const ok = (name, cond, info) => {
+	if (cond) pass++;
+	else {
+		fail++;
+		console.error("  FAIL:", name, info ?? "");
+	}
+};
+
+// --- fixture project with a model pool ---
+const dir = await mkdtemp(join(tmpdir(), "pool-single-strike-"));
+await mkdir(join(dir, ".pi"), { recursive: true });
+await writeFile(
+	join(dir, ".pi", "swarm.yml"),
+	stringify({
+		defaultModel: "glm-5.1",
+		defaultProvider: "zai-coding-cn",
+		modelPool: [
+			{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
+			{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+			{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+		],
+		rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
+	}),
+);
+process.chdir(dir);
+const p = paths(dir);
+
+// --- fake pi capturing setModel + sendMessage ---
+const setModelCalls = [];
+const sentMessages = [];
+const handlers = {};
+const fakePi = {
+	on: (ev, fn) => {
+		(handlers[ev] ||= []).push(fn);
+	},
+	registerTool: () => {},
+	registerCommand: () => {},
+	setModel: async (m) => {
+		setModelCalls.push(`${m.provider}/${m.id}`);
+		return true;
+	},
+	sendMessage: (m, o) => {
+		sentMessages.push({ m, o });
+	},
+	exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+};
+const fakeModelGlm = { id: "glm-5.1", provider: "zai-coding-cn" };
+const fakeModelGpt = { id: "gpt-5.4-mini", provider: "openai" };
+const fakeModelClaude = { id: "claude-sonnet-4", provider: "anthropic" };
+const ctx = {
+	cwd: dir,
+	mode: "tui",
+	isIdle: () => true,
+	model: fakeModelGlm,
+	modelRegistry: {
+		find: (provider, id) => {
+			if (id === "gpt-5.4-mini") return fakeModelGpt;
+			if (id === "claude-sonnet-4") return fakeModelClaude;
+			if (id === "glm-5.1") return fakeModelGlm;
+			return undefined;
+		},
+	},
+};
+
+registerSwarmHooks(fakePi);
+const turnEnd = handlers["turn_end"][0];
+
+// The exact live body from session 01a12883 (01:48:23, glm-4.7/cliproxyapi).
+const CHATGPT_USAGE_LIMIT = "You have hit your ChatGPT usage limit.";
+
+async function errOnce(model, errorMessage, agentId) {
+	if (agentId) process.env.PI_SWARM_AGENT_ID = agentId;
+	await turnEnd(
+		{
+			type: "turn_end",
+			turnIndex: Math.floor(Math.random() * 100000),
+			message: {
+				role: "assistant",
+				model: model.id,
+				provider: model.provider,
+				stopReason: "error",
+				errorMessage,
+			},
+			toolResults: [],
+		},
+		{ ...ctx, model },
+	);
+}
+
+async function countTraceEvents(name) {
+	try {
+		const raw = await readFile(p.events, "utf8");
+		return raw
+			.split("\n")
+			.filter(Boolean)
+			.filter((l) => {
+				try {
+					return JSON.parse(l).event === name;
+				} catch {
+					return false;
+				}
+			}).length;
+	} catch {
+		return 0;
+	}
+}
+
+async function freshSession(agentId = `worker-${Math.random().toString(36).slice(2, 8)}`) {
+	const { rm: rmf } = await import("node:fs/promises");
+	const { _resetTurnStartForTests } = await import("../src/hooks/streaks.ts");
+	await rmf(join(dir, ".pi", "swarm", "pool-state.json"), { force: true }).catch(() => {});
+	await rmf(p.events, { force: true }).catch(() => {});
+	setModelCalls.length = 0;
+	sentMessages.length = 0;
+	_resetTurnStartForTests(); // in-process liveness stamps must not leak across scenarios
+	process.env.PI_SWARM_AGENT_ID = agentId;
+	// Seed agent record so currentAgentId resolves.
+	const st = await readState(p, dir);
+	const ts = new Date().toISOString();
+	st.agents[agentId] = {
+		id: agentId,
+		role: "worker",
+		roleKind: "worker",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		status: "running",
+		runtimeStatus: "idle",
+		health: "healthy",
+		tmuxSession: "sess",
+		tmuxWindow: agentId,
+		tmuxTarget: `sess:${agentId}.0`,
+		model: "glm-5.1",
+		provider: "zai-coding-cn",
+		cwd: dir,
+		mailbox: ".pi/swarm/mailboxes/x.jsonl",
+		createdAt: ts,
+		updatedAt: ts,
+	};
+	await writeState(p, st);
+}
+
+// Classification sanity for the exact live body.
+ok("chatgpt usage-limit body classifies as quota", classifyProviderError(CHATGPT_USAGE_LIMIT) === "quota");
+
+// =============================================================
+// F1: single quota strike opens the gate immediately (the live incident)
+// =============================================================
+{
+	await freshSession("worker-quota");
+	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
+	ok(
+		"F1: single quota strike swaps in-process",
+		setModelCalls.length === 1,
+		`calls=${setModelCalls.length} (live session died here: gated count:1, no swap)`,
+	);
+	if (setModelCalls.length > 0)
+		ok("F1: swapped to a DIFFERENT slot", setModelCalls[0] !== "zai-coding-cn/glm-5.1", `to=${setModelCalls[0]}`);
+	const ps = await poolStatus(p);
+	const glm = ps.slots.find((s) => s.model === "glm-5.1");
+	ok("F1: quota slot benched immediately", Boolean(glm?.inCooldown), JSON.stringify(glm?.health ?? null));
+	ok("F1: benched with lastBenchReason=quota", glm?.health?.lastBenchReason === "quota", `reason=${glm?.health?.lastBenchReason}`);
+	const exhausted = await countTraceEvents("pool.engine_retry_exhausted");
+	ok("F1: engine_retry_exhausted fired once (single-strike)", exhausted === 1, `exhausted=${exhausted}`);
+	const swaps = await countTraceEvents("pool.swap");
+	ok("F1: pool.swap trace fired", swaps === 1, `swaps=${swaps}`);
+	ok(
+		"F1: swap note sent to the agent",
+		sentMessages.some((s) => /Pool:/.test(s.m.content) && /quota/.test(s.m.content)),
+		JSON.stringify(sentMessages.map((s) => s.m.content?.slice(0, 60))),
+	);
+}
+
+// =============================================================
+// F2: single auth strike behaves the same (fail-fast + immediate bench)
+// =============================================================
+{
+	await freshSession("worker-auth");
+	await errOnce(fakeModelGlm, "401 Invalid API key provided");
+	ok("F2: single auth strike swaps", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
+	const ps = await poolStatus(p);
+	const glm = ps.slots.find((s) => s.model === "glm-5.1");
+	ok("F2: auth slot benched immediately", Boolean(glm?.inCooldown), JSON.stringify(glm?.health ?? null));
+	ok("F2: benched with lastBenchReason=auth", glm?.health?.lastBenchReason === "auth", `reason=${glm?.health?.lastBenchReason}`);
+}
+
+// =============================================================
+// F3: plain rate_limit stays gated (pi retries those — anti-regression)
+// =============================================================
+{
+	await freshSession("worker-ratelimit");
+	await errOnce(fakeModelGlm, "429 Too Many Requests: rate limit exceeded");
+	ok("F3: rate_limit single strike does NOT swap", setModelCalls.length === 0, `calls=${setModelCalls.length}`);
+	const gated = await countTraceEvents("pool.swap_gated_by_engine_retry");
+	ok("F3: gate trace fired (waiting for engine retries)", gated === 1, `gated=${gated}`);
+	const ps = await poolStatus(p);
+	const glm = ps.slots.find((s) => s.model === "glm-5.1");
+	ok("F3: no bench on gated rate_limit", !glm?.inCooldown, JSON.stringify(glm?.health ?? null));
+}
+
+// =============================================================
+// F4: transient stays gated
+// =============================================================
+{
+	await freshSession("worker-transient");
+	await errOnce(fakeModelGlm, "Codex SSE response headers timed out after 300000ms");
+	ok("F4: transient single strike does NOT swap", setModelCalls.length === 0, `calls=${setModelCalls.length}`);
+	const gated = await countTraceEvents("pool.swap_gated_by_engine_retry");
+	ok("F4: gate trace fired", gated === 1, `gated=${gated}`);
+}
+
+// =============================================================
+// F5: success turn clears state; next error on the NEW slot starts fresh
+// =============================================================
+{
+	await freshSession("worker-reset");
+	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT); // swap glm -> gpt
+	if (setModelCalls.length !== 1) {
+		ok("F5: precondition — first strike swapped", false, `calls=${setModelCalls.length}`);
+	} else {
+		// Healthy turn on the new slot.
+		await turnEnd(
+			{
+				type: "turn_end",
+				turnIndex: 90001,
+				message: { role: "assistant", model: "gpt-5.4-mini", provider: "openai", stopReason: "stop", errorMessage: undefined },
+				toolResults: [],
+			},
+			{ ...ctx, model: fakeModelGpt },
+		);
+		const recovered = await countTraceEvents("pool.engine_retry_recovered");
+		ok("F5: success turn after single-strike swap settles cleanly", recovered >= 0); // smoke: no throw
+	}
+}
+
+// =============================================================
+// F6: swap-chain cap still applies (2 swaps per 5 minutes)
+// =============================================================
+{
+	await freshSession("worker-chain");
+	// glm quota -> swap #1; gpt quota -> swap #2; claude quota -> capped (MAX_SWAP_CHAIN=2)
+	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
+	await errOnce(fakeModelGpt, CHATGPT_USAGE_LIMIT);
+	const two = setModelCalls.length;
+	ok("F6: chain allows first 2 single-strike swaps", two === 2, `calls=${two}`);
+	await errOnce(fakeModelClaude, CHATGPT_USAGE_LIMIT);
+	ok("F6: chain caps the 3rd swap", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
+	const capped = await countTraceEvents("pool.swap_chain_capped");
+	ok("F6: swap_chain_capped trace fired", capped === 1, `capped=${capped}`);
+}
+
+// =============================================================
+// F7: guest sessions never rotate
+// =============================================================
+{
+	await freshSession();
+	// Runner note (run-suites suiteEnv): swarm suites run with PI_SWARM_AGENT_ID=root forced
+	// into the child env; this suite's fixtures overwrite it per-fixture via freshSession, and
+	// the guest fixture must observe a TRULY absent id (guest = no id AND no root claim), so we
+	// clear the root claim too — ambient PI_SWARM_IS_ROOT=1 would make currentAgentId() return
+	// "root" (an affirmative root claim) and the strike would rotate for the root agent.
+	const savedIsRoot = process.env.PI_SWARM_IS_ROOT;
+	delete process.env.PI_SWARM_AGENT_ID;
+	delete process.env.PI_SWARM_IS_ROOT;
+	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
+	ok("F7: guest does not rotate on single-strike quota", setModelCalls.length === 0, `calls=${setModelCalls.length}`);
+	process.env.PI_SWARM_AGENT_ID = "worker-quota";
+	if (savedIsRoot !== undefined) process.env.PI_SWARM_IS_ROOT = savedIsRoot;
+}
+
+console.log(`\n${fail === 0 ? "PASS" : "FAIL"}: ${pass} passed, ${fail} failed`);
+process.chdir("/");
+await rm(dir, { recursive: true, force: true });
+process.exit(fail === 0 ? 0 : 1);

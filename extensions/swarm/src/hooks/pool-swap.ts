@@ -17,10 +17,29 @@ import { currentAgentId } from "../session.ts";
 import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "../pool.ts";
 import { paths, readState, trace, withLock } from "../state.ts";
 import { logSwarmError } from "../errorlog.ts";
-import { bumpSwapChain, engineRetryIncidentsMap, MAX_SWAP_CHAIN, peekSwapChain, SWAP_CHAIN_RESET_MS } from "./streaks.ts";
+import {
+	bumpSwapChain,
+	engineRetryIncidentsMap,
+	hasAttemptSinceIncident,
+	MAX_SWAP_CHAIN,
+	noteTurnStart,
+	peekSwapChain,
+	SWAP_CHAIN_RESET_MS,
+} from "./streaks.ts";
+
+// Slow-attempt liveness stamp (Incident 2026-10-11 B): called from registerSwarmHooks AFTER
+// registerTurnHooks so handlers["turn_start"][0] keeps pointing at the turns.ts root-epoch
+// handler that existing tests drive directly. Within a single turn_start dispatch the order
+// does not matter — the stamp only needs to land before the NEXT turn_end.
+export function registerTurnStartLivenessHook(pi: ExtensionAPI) {
+	pi.on("turn_start", async () => {
+		const agentId = currentAgentId();
+		if (agentId === SWARM_GUEST_ID) return;
+		noteTurnStart(agentId);
+	});
+}
 
 export function registerPoolSwapHook(pi: ExtensionAPI) {
-	// === In-process model-pool auto-swap (Option 1: the agent fixes itself, no respawn) ===
 	// pi does NOT exit on provider errors — the turn fails with stopReason "error" and the
 	// process keeps running. So the RIGHT detection point is here, inside the agent's own pi
 	// process, not a tmux pane watcher. On a provider/quota error turn:
@@ -102,6 +121,22 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 		// slots were never benched/rotated (live: 39x gated count:1, 0x exhausted). Scrubbed
 		// identity + kind keeps distinct transient messages distinct while collapsing mutating
 		// quota bodies into one incident.
+		//
+		// Incident 2026-10-11 A (single-strike non-retryable kinds — live session 01a12883):
+		// pi's engine FAIL-FASTS on quota/billing/subscription-limit errors —
+		// isRetryableAssistantError (pi-ai utils/retry.js) matches them against
+		// NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN ("insufficient_quota", "billing",
+		// "Monthly usage limit reached", ...), returns false, and _prepareRetry is NEVER called.
+		// The session therefore surfaces EXACTLY ONE turn_end {error} (live: "You have hit your
+		// ChatGPT usage limit." at 01:48:23, gated count:1, session dead with 4 healthy slots
+		// idle in the pool). Waiting for a second strike that pi will never emit is wrong: the
+		// gate models "the engine exhausted its retries" — and for non-retryable kinds that is
+		// true on the FIRST strike. Pass quota/auth through immediately (singleStrike); the
+		// bench policy behind the gate is already immediate for those kinds, and the swap-chain
+		// cap still bounds cascades. rate_limit/transient/unknown keep the full burst-count gate
+		// (pi genuinely retries those: RETRYABLE_PROVIDER_ERROR_PATTERN matches 429/5xx/network/
+		// timeout text).
+		const singleStrike = kind === "quota" || kind === "auth";
 		const providerKey = slotKey(currentSlot);
 		const scrubErr = scrubErrorIdentity(errorText);
 		const prevIncident = engineRetryIncidentsMap().get(agentId);
@@ -112,7 +147,20 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 			prevIncident.providerKey === providerKey &&
 			prevIncident.kind === kind &&
 			prevIncident.errorMessage === scrubErr &&
-			nowMs - prevIncident.lastSeenAt <= ENGINE_RETRY_WINDOW_MS
+			(nowMs - prevIncident.lastSeenAt <= ENGINE_RETRY_WINDOW_MS ||
+				// Incident 2026-10-11 B (slow-attempt liveness): the window is calibrated for pi's
+				// backoff budget (2s+4s+8s), not the request duration. A "Codex SSE response headers
+				// timed out after 300000ms" retry attempt takes ~5 minutes, so consecutive strikes
+				// land ~302s apart and each one aged the previous incident out into count:1 forever
+				// (live: three identical timeout strikes at 01:36/01:41/01:46, all gated count:1,
+				// rescued only by a MANUAL model change). But every engine retry re-enters via
+				// agent.continue() → runAgentLoopContinue, which emits a fresh turn_start BEFORE the
+				// next attempt (pi-agent-core agent-loop.js). So "turn_start observed after the last
+				// error strike" proves a new attempt on the SAME incident is in flight — keep
+				// accumulating past the wall-clock window. No turn_start since the strike means the
+				// agent settled idle (e.g. the user read the error and much later retried): fresh
+				// incident, exactly as before.
+				hasAttemptSinceIncident(agentId, prevIncident.lastSeenAt))
 		) {
 			prevIncident.count++;
 			prevIncident.lastSeenAt = nowMs;
@@ -127,6 +175,13 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 				lastSeenAt: nowMs,
 				count: 1,
 			});
+		}
+		if (singleStrike) {
+			// Non-retryable kind: pi already gave up on the first strike. Treat the incident as
+			// exhausted NOW (count 1); the shared exhaustion site below clears it and traces with
+			// singleStrike:true so the next failure (on the post-swap slot) starts fresh.
+			engineExhausted = true;
+			incidentCount = Math.max(incidentCount, 1);
 		}
 		if (!engineExhausted) {
 			// Transient within the engine's retry budget — DO NOT swap, DO NOT bench, DO NOT pollute
@@ -147,7 +202,13 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 		// (on the new slot, after the swap) starts a fresh observation. Trace the exhaustion so
 		// dashboards can distinguish "engine retried and recovered" from "engine gave up".
 		engineRetryIncidentsMap().delete(agentId);
-		await trace(p, "pool.engine_retry_exhausted", { agentId, providerKey, kind, count: incidentCount }).catch(() => {});
+		await trace(p, "pool.engine_retry_exhausted", {
+			agentId,
+			providerKey,
+			kind,
+			count: incidentCount,
+			singleStrike: singleStrike || undefined,
+		}).catch(() => {});
 		await recordProviderError(p, currentSlot, kind, errorText).catch((err) =>
 			logSwarmError(p, "hooks", "recordProviderError.failed", err),
 		);

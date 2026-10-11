@@ -1,0 +1,10 @@
+# pool-single-strike-usage-limit: Incident 2026-10-11 A (live session 01a12883, glm-4.7 via
+# cliproxyapi) — pi FAIL-FASTS non-retryable provider-limit errors (isRetryableAssistantError
+# returns false on "usage limit" text), so the session surfaces EXACTLY ONE error turn_end.
+# Pre-fix behavior: the engine-retry gate waited for a 2nd strike that never arrives → gated
+# count:1 forever → no bench, no swap, session dead. Post-fix: a quota-kind single strike
+# opens the gate immediately (singleStrike) → bench + in-process swap → the NEXT scripted turn
+# runs on the new slot and completes the task normally.
+{"name":"usage limit strike","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"post-swap recovery turn","events":[{"type":"text","delayMs":15,"text":"The single usage-limit strike benched the slot and the pool rotated in-process; continuing the task on the healthy slot.","chunks":["The single usage-limit strike ","benched the slot and the pool rotated in-process."]},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"markDelivered":true,"limit":20}},{"type":"toolcall","delayMs":10,"name":"swarm_ack_message","id":"ack-1","arguments":{"messageId":"assignment-msg-usage-limit","status":"seen"}}]}
+{"name":"post-swap settle","stopReason":"stop","events":[{"type":"toolcall","delayMs":10,"name":"swarm_send_message","id":"msg-1","arguments":{"to":"root","body":"Recovered after the single-strike usage-limit rotation; task complete.","replyTo":"assignment-msg-usage-limit","conversationId":"task:task-20261011-pool-single-strike:usage-limit","requiresAck":true}},{"type":"toolcall","delayMs":10,"name":"swarm_ack_message","id":"ack-2","arguments":{"messageId":"assignment-msg-usage-limit","status":"done","resultMessageId":"msg-1"}},{"type":"stop","delayMs":5,"reason":"stop"}]}

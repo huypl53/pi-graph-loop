@@ -1651,7 +1651,11 @@ console.log("\n[R23] goal backoff/epoch starvation — fresh-epoch re-arm");
 	process.env.PI_SWARM_AGENT_ID = "root";
 	process.env.PI_SWARM_IS_ROOT = "1";
 	registerSwarmHooks(mockPi);
-	if (turnStartHandlers.length !== 1) throw new Error(`expected exactly 1 turn_start handler, got ${turnStartHandlers.length}`);
+	// Incident 2026-10-11 B: registerSwarmHooks now installs TWO turn_start handlers (the
+	// turns.ts root-epoch handler + the pool liveness stamp from pool-swap.ts, registered
+	// after). The R23C orbit drives the ROOT-EPOCH handler specifically; the liveness stamp
+	// is exercised by pool-slow-attempt-window.test.mjs.
+	if (turnStartHandlers.length !== 2) throw new Error(`expected exactly 2 turn_start handlers, got ${turnStartHandlers.length}`);
 	const realTurnStart = turnStartHandlers[0];
 	async function turnStartOrbit(nowMs) {
 		// Real hooks.ts handler requires a ctx-shaped argument. Mirrors the inline state the

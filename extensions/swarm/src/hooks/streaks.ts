@@ -92,6 +92,38 @@ export function peekSwapChain(agentId: string): { count: number; at: number } | 
 // agent_settled, and any successful turn_end (the engine recovered on a later retry attempt).
 const engineRetryIncidents = new Map<string, EngineRetryIncident>();
 
+// Incident 2026-10-11 (slow-attempt liveness): timestamp of the agent's most recent turn_start.
+// pi's engine retry re-enters through agent.continue() → runAgentLoopContinue, which emits a
+// fresh agent_start + turn_start BEFORE each retry attempt (verified in pi-agent-core
+// agent-loop.js). So a turn_start observed AFTER an error strike proves a NEW attempt on the
+// SAME incident started — the incident is live no matter how long that attempt takes. This
+// repairs the 14s window for slow errors ("Codex SSE response headers timed out after
+// 300000ms": strikes ~302s apart previously aged out into count:1 forever — live session
+// 01a12883 needed a MANUAL model change). Stamped by hooks/pool-swap.ts's turn_start handler
+// (registered first, so it runs before turns.ts's heavier handler). In-process only.
+const lastTurnStartAt = new Map<string, number>();
+
+/** Record that a new attempt (turn) started for this agent. Called from the turn_start hook. */
+export function noteTurnStart(agentId: string, nowMs = Date.now()): void {
+	lastTurnStartAt.set(agentId, nowMs);
+}
+
+/**
+ * True when a turn_start was observed strictly AFTER the incident's last error strike — i.e.
+ * the engine started another attempt on the same incident. Such an incident is "live" and
+ * must keep accumulating even beyond ENGINE_RETRY_WINDOW_MS (a 300s-timeout attempt cannot
+ * fit a window calibrated for backoff delays alone).
+ */
+export function hasAttemptSinceIncident(agentId: string, incidentLastSeenAt: number): boolean {
+	const at = lastTurnStartAt.get(agentId);
+	return typeof at === "number" && at > incidentLastSeenAt;
+}
+
+/** Test-only: clear turn-start stamps so fixtures start with clean liveness state. */
+export function _resetTurnStartForTests(): void {
+	lastTurnStartAt.clear();
+}
+
 // Exposed for tests + the `/swarm pool rotate` manual-override path so a caller can verify the
 // engine-retry gate owns its own incident lifecycle (manual override does NOT clear it). Returns
 // a plain copy so callers cannot mutate the module-local Map.

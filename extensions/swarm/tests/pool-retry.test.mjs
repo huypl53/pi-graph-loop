@@ -34,14 +34,14 @@ await mkdir(join(dir, ".pi"), { recursive: true });
 await writeFile(
 	join(dir, ".pi", "swarm.yml"),
 	stringify({
-					defaultModel: "glm-5.1",
-			defaultProvider: "zai-coding-cn",
-			modelPool: [
-				{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
-				{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
-				{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
-			],
-			rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
+		defaultModel: "glm-5.1",
+		defaultProvider: "zai-coding-cn",
+		modelPool: [
+			{ model: "glm-5.1", provider: "zai-coding-cn", weight: 50 },
+			{ model: "gpt-5.4-mini", provider: "openai", weight: 30 },
+			{ model: "claude-sonnet-4", provider: "anthropic", weight: 0 },
+		],
+		rotation: { strategy: "round-robin", cooldownMs: 300_000, maxRetries: 2 },
 	}),
 );
 process.chdir(dir);
@@ -353,15 +353,31 @@ const turnEnd = handlers["turn_end"][0];
 // =============================================================
 // Fixture 6: Quota error exhausts and swaps (immediate bench still works)
 // =============================================================
-// Quota benches immediately on recordProviderError. The gate should still gate the swap path
-// (the gate is about rotation timing, not benching).
+// Quota benches immediately on recordProviderError. Incident 2026-10-11 A: pi FAIL-FASTS
+// non-retryable quota/billing errors (isRetryableAssistantError → false), so the gate now
+// treats a quota strike as exhausted on the FIRST hit (singleStrike) instead of waiting for
+// a second turn_end the engine will never emit. The burst below therefore swaps on the first
+// strike and the second strike lands on the NEW slot (gpt) — a second swap. Updated to expect
+// exactly that: 2 swaps, both glm and gpt benched with lastBenchReason=quota.
 {
 	await freshSession();
 	await burstOfErrors(2, "Error 429: You exceeded your current quota");
-	ok("fixture 6: quota exhaustion swaps", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
+	ok("fixture 6: quota single-strike swaps per slot (2 strikes -> 2 swaps)", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
 	const ps = await poolStatus(p);
 	const glm = ps.slots.find((s) => s.model === "glm-5.1");
 	ok("fixture 6: quota slot is benched", glm.inCooldown && /quota/.test(glm.health.lastError));
+	// The burst keeps emitting strikes attributed to the ORIGINAL slot (message.model is the
+	// pre-swap model), so both swaps rotate OFF glm; gpt is only ever the TARGET. The
+	// single-strike semantics are already pinned by pool-single-strike-nonretryable.test.mjs
+	// (F6: per-slot attribution with realistic post-swap models); here we assert the swap
+	// targets differ from the failed slot and no stray bench lands on gpt.
+	const gpt = ps.slots.find((s) => s.model === "gpt-5.4-mini");
+	ok(
+		"fixture 6: swap never lands on the failed slot",
+		setModelCalls.every((t) => t !== "zai-coding-cn/glm-5.1"),
+		setModelCalls.join(","),
+	);
+	ok("fixture 6: gpt not benched by strikes attributed to glm", !gpt.inCooldown, JSON.stringify(gpt.health ?? null));
 }
 
 // =============================================================
