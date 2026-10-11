@@ -1,8 +1,12 @@
 // === swarm/tools/agents/status.ts — swarm_agent_status + swarm_list_agents (real bodies) ===
 // Extracted verbatim from the src/tools/agents.ts monolith (Phase 5/6 real split).
-// tool-output-slim (2026-09-28): swarm_agent_status gains an attention/census default view
-// (view:"full" / verbose:true preserve the legacy 24-field rows); swarm_list_agents becomes a
-// compact phonebook (details carry the same compact rows — the full-agent-array details leak dies).
+// tool-output-slim (2026-09-28): swarm_agent_status gains an attention/census default view;
+// swarm_list_agents becomes a compact phonebook (details carry the same compact rows — the
+// full-agent-array details leak dies).
+// full-view removal (2026-10-10): view:"full"/verbose:true (legacy 24-field rows) removed. It
+// was the only path injecting ~1.1KB of forensic plumbing (pid, ISO timestamps, dead counters,
+// duplicated liveness fields) into model context. Those fields stay durable in
+// .pi/swarm/swarm-state.json + events.jsonl — read those directly when debugging.
 
 import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -44,7 +48,7 @@ function agentSlot(agent: any): string {
 // tool-output-slim §8 (2026-10-03): compact row for targeted agentId queries — same vocabulary as
 // attention rows. Renamed fields (paneAlive/target), human ages (heartbeatAge/settledAge),
 // dead counters dropped (unackedMessages/ackMissing are always 0 under minimal protocol), debt
-// counters only when non-zero, plumbing ISOs/pid gone. view:"full" keeps the legacy 24-field row.
+// counters only when non-zero, plumbing ISOs/pid gone.
 function slimStatusRow(row: any): Record<string, unknown> {
 	const slim: Record<string, unknown> = {
 		agentId: row.agentId,
@@ -59,7 +63,8 @@ function slimStatusRow(row: any): Record<string, unknown> {
 		slot: row.slot,
 	};
 	if (row.paused) slim.paused = true;
-	if (row.runtimeStatus === "busy" || row.runtimeStatus === "tool_running") slim.lastToolAge = row.lastToolAt ? humanAge(row.lastToolAt) : undefined;
+	if (row.runtimeStatus === "busy" || row.runtimeStatus === "tool_running")
+		slim.lastToolAge = row.lastToolAt ? humanAge(row.lastToolAt) : undefined;
 	if (row.lastHeartbeatAgeSec === undefined) delete slim.heartbeatAge;
 	const settledAgeSec = row.lastAgentSettledAt ? Math.round((Date.now() - new Date(row.lastAgentSettledAt).getTime()) / 1000) : undefined;
 	if (settledAgeSec !== undefined) slim.settledAge = settledAgeSec;
@@ -108,28 +113,32 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 			name: "swarm_agent_status",
 			label: "Swarm Agent Status",
 			description:
-				"Report runtime/liveness status for swarm agents using pi lifecycle state, tmux pane liveness, and mailbox message counts. Default view is a compact attention/census summary and is the correct shape for routine supervision; view:'full' (or verbose:true) returns the legacy 24-field rows — reserve it for debugging ONE agent (pass agentId with it); pass agentId alone for a targeted full-row query.",
+				"Report runtime/liveness status for swarm agents using pi lifecycle state, terminal pane liveness, and mailbox message counts. Default view is a compact attention/census summary and is the correct shape for routine supervision; a targeted agentId query returns one slim row with the same vocabulary. For forensic fields (pid, exact timestamps) read .pi/swarm/swarm-state.json directly.",
 			promptGuidelines: [
-				"Use `swarm_agent_status` to inspect which swarm agents are idle, busy, tool-running, stopped, alive in tmux, or have pending/unacked/dead-letter messages. The default attention view summarizes the whole swarm; use view:'full' only when debugging a specific agent (pass agentId).",
+				"Use `swarm_agent_status` to inspect which swarm agents are idle, busy, tool-running, stopped, alive, or have pending/dead-letter messages. The default attention view summarizes the whole swarm; pass agentId for a compact per-agent row.",
 			],
 			parameters: Type.Object({
 				agentId: Type.Optional(Type.String({ description: "Optional agent id. If omitted, returns all agents." })),
 				view: Type.Optional(
-					Type.Union([Type.Literal("attention"), Type.Literal("census"), Type.Literal("full")], {
-						description:
-							"Output view. Defaults to 'attention' (census + non-healthy rows). 'full' returns legacy detailed rows.",
+					Type.Union([Type.Literal("attention"), Type.Literal("census")], {
+						description: "Output view. Defaults to 'attention' (census + non-healthy rows).",
 					}),
 				),
-				verbose: Type.Optional(Type.Boolean({ description: "Legacy alias for view:'full'. Defaults to false." })),
 				includeStopped: Type.Optional(
 					Type.Boolean({
 						description:
-							"Include stopped agents in census/attention (default false — routine supervision shows only live agents). view:'full' implies true; targeted agentId queries always include the row.",
+							"Include stopped agents in census/attention (default false — routine supervision shows only live agents). Targeted agentId queries always include the row.",
 					}),
 				),
 			}),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_agent_status", async () => {
+					// full-view removal: legacy params hard-reject with a steer (schema validation may be
+					// bypassed by callers invoking the handler directly; this guard is the contract).
+					if ((params as any).view === "full" || (params as any).verbose === true)
+						throw new Error(
+							"view:'full'/verbose were removed (2026-10-10): the 24-field envelope polluted agent context. Default call = attention/census summary; pass agentId for a slim per-agent row; read .pi/swarm/swarm-state.json for forensic fields (pid, exact timestamps).",
+						);
 					const p = paths(ctx.cwd);
 					const st = await readState(p, ctx.cwd);
 					const filter = params.agentId ? safeId(params.agentId) : undefined;
@@ -198,9 +207,9 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						});
 					}
 					await trace(p, "agent.status.read", { agentId: filter, count: rows.length });
-					// stopped-agent-records-gc: default view hides stopped rows unless includeStopped/
-					// view:"full"/targeted agentId. Counts + hidden counter computed from the full set.
-					const includeStopped = params.includeStopped === true || params.view === "full" || params.verbose === true;
+					// stopped-agent-records-gc: default view hides stopped rows unless includeStopped /
+					// targeted agentId. Counts + hidden counter computed from the full set.
+					const includeStopped = params.includeStopped === true;
 					const stoppedTotal = rows.filter((r) => r.status === "stopped").length;
 					const visibleRows = filterAgentRows(rows as any[], {
 						includeStopped,
@@ -208,15 +217,11 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						agentId: params.agentId,
 					}) as typeof rows;
 					// === tool-output-slim §2 + §8 — view resolution ===
-					// view:"full"/verbose:true → legacy 24-field rows (explicit escape hatch). Everything else
-					// is compact: no-filter calls get the attention/census summary; targeted agentId queries
-					// get ONE slim row (same vocabulary as attention rows) — the routine per-agent
-					// supervision call no longer pays the 24-field ~1.1KB envelope by default.
-					const viewFull = params.view === "full" || params.verbose === true;
-					const view = viewFull ? "full" : params.view === "census" ? "census" : "attention";
-					if (view === "full") {
-						return textResult(JSON.stringify({ count: rows.length, agents: rows }, null, 2), { agents: rows });
-					}
+					// full-view removal (2026-10-10): the legacy 24-field envelope is gone. No-filter
+					// calls get the attention/census summary; targeted agentId queries get ONE slim row
+					// (same vocabulary as attention rows). Forensic plumbing lives in swarm-state.json
+					// (readState is the source; full was a pretty-printer, not a store).
+					const view = params.view === "census" ? "census" : "attention";
 					if (filter) {
 						// §8 targeted query: slim row(s) — normally exactly one agent (any status, incl. stopped)
 						const slimRows = rows.map((r: any) => slimStatusRow(r));
@@ -272,13 +277,14 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 						slim.why = whyOfRow(row);
 						attention.push(slim);
 					}
-					const hint = stoppedHidden > 0
-						? `${stoppedHidden} stopped agent(s) hidden from this view (includeStopped:true to show; root: /swarm deregister --purge-stopped or swarm_gc purgeStopped to purge aged stopped records).`
-						: census.stopped > 0
-							? `${census.stopped} stopped agent(s) need attention; use view:"full" or agentId for detail.`
-							: attention.length
-								? `${attention.length} agent(s) need attention; use view:"full" or agentId for detail.`
-								: 'All agents healthy; use view:"full" or agentId for detail.';
+					const hint =
+						stoppedHidden > 0
+							? `${stoppedHidden} stopped agent(s) hidden from this view (includeStopped:true to show; root: /swarm deregister --purge-stopped to purge aged stopped records).`
+							: census.stopped > 0
+								? `${census.stopped} stopped agent(s) need attention; pass agentId for detail.`
+								: attention.length
+									? `${attention.length} agent(s) need attention; pass agentId for detail.`
+									: "All agents healthy.";
 					return textResult(JSON.stringify({ census, stoppedHidden, attention, hint }), { census, attention });
 				});
 			},
@@ -293,9 +299,7 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 				"List pi swarm agents for this project as a compact phonebook: ids, role first lines, status, driver target, slot, and mailbox paths.",
 			promptGuidelines: ["Use `swarm_list_agents` before sending swarm messages when you are unsure which agents exist."],
 			parameters: Type.Object({
-				includeStopped: Type.Optional(
-					Type.Boolean({ description: "Include stopped agents in the phonebook (default false)." }),
-				),
+				includeStopped: Type.Optional(Type.Boolean({ description: "Include stopped agents in the phonebook (default false)." })),
 			}),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_list_agents", async () => {
@@ -303,25 +307,25 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 					const st = await readState(p, ctx.cwd);
 					const driver = getTerminalDriver().id;
 					// tool-output-slim §3: compact phonebook rows. details carries the SAME compact rows —
-					// the full-agent-array details leak (multi-MB per session) dies here. Legacy full records
-					// remain reachable per-agent via swarm_agent_status({agentId, view:"full"}).
+					// the full-agent-array details leak (multi-MB per session) dies here. Full agent
+					// records (forensic fields, role history) live in .pi/swarm/swarm-state.json.
 					const rows = Object.values(st.agents)
-					.filter((agent) => params.includeStopped === true || agent.status !== "stopped")
-					.map((agent) => {
-						const { driver: agentDriver, target } = agentDriverAndTarget(agent);
-						// tool-output-slim §3 (root review trim): `mailbox` dropped from default rows —
-						// it is derivable as .pi/swarm/mailboxes/<id>.jsonl; full records stay reachable
-						// via swarm_agent_status({agentId, view:"full"}).
-						return {
-							id: agent.id,
-							roleFirstLine: roleFirstLine(agent.role),
-							roleKind: agent.roleKind,
-							status: agent.status,
-							driver: agentDriver,
-							target,
-							slot: agentSlot(agent),
-						};
-					});
+						.filter((agent) => params.includeStopped === true || agent.status !== "stopped")
+						.map((agent) => {
+							const { driver: agentDriver, target } = agentDriverAndTarget(agent);
+							// tool-output-slim §3 (root review trim): `mailbox` dropped from default rows —
+							// it is derivable as .pi/swarm/mailboxes/<id>.jsonl; full records live in
+							// .pi/swarm/swarm-state.json.
+							return {
+								id: agent.id,
+								roleFirstLine: roleFirstLine(agent.role),
+								roleKind: agent.roleKind,
+								status: agent.status,
+								driver: agentDriver,
+								target,
+								slot: agentSlot(agent),
+							};
+						});
 					return textResult(JSON.stringify({ swarmId: st.swarmId, driver, agents: rows }), { agents: rows });
 				});
 			},
