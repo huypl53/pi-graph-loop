@@ -26,7 +26,7 @@ export const ERR_ROOT_LEADER_DENIED = "ROOT_LEADER_DENIED";
 
 // Stable error code for root-authority-required tools that today have no authority check.
 // Thrown by tools that this issue elevates to root-only (swarm_create_task,
-// swarm_stop_agent, swarm_release_agent_task, swarm_reconcile(mark=true)). NOT a new tool.
+// swarm_stop_agent, swarm_reconcile(mark=true)). NOT a new tool.
 export const ERR_ROOT_AUTHORITY_REQUIRED = "ROOT_AUTHORITY_REQUIRED";
 
 // Stable error code for the root-pane reject guard in swarm_send_keys (issue 12 C6 micro-fix).
@@ -249,18 +249,6 @@ export const ALLOWED_NODE_TRANSITIONS: Record<string, Set<string>> = {
 };
 
 export const TERMINAL_NODE_STATUSES = new Set<TaskNodeStatus>(["done", "failed", "skipped", "cancelled"]);
-
-export const METRIC_ID_RE = /^[a-z0-9_-]+$/;
-
-export const RUN_STATUSES = new Set(["running", "done", "blocked", "failed"]);
-
-export const RUN_VERDICTS = new Set(["pass", "fail", "approved", "rejected", "blocked"]);
-
-// Shared path to the project memory policy (a committed doc; agents read it relative to repo root).
-// Declared in the memory-surface region; the identity region references this constant when appending
-// the `## Memory protocol` link to generated agent identity. The dedicated policy file defines the
-// read/propose/accept triggers, claim-quality rules, evidence requirements, and role permissions.
-export const MEMORY_POLICY_DOC = "docs/swarm-memory.md";
 
 export const MAX_ATTEMPTS = 5;
 
@@ -795,7 +783,8 @@ export function formatNotifyKey(template: string, params: Record<string, string>
 // Worker wrote an artifact (fs.stat mtime > node.lastProgressAt) but the node is still open.
 // The pump-tick deliver-and-trace function evaluateArtifactProgressNudgeLocked fires an
 // action-oriented nudge to the agent itself (not the root) before it settles, naming
-// the exact close-action triple: swarm_update_task + swarm_send_message replyTo + swarm_ack_message.
+// the close action pair: swarm_update_task + swarm_send_message replyTo (the former
+// swarm_ack_message step was removed with the ack surface in the 2026-10 retired-surface cleanup).
 // Tunables:
 //   - ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS: dedupe gate between consecutive nudges on the same node.
 //   - ARTIFACT_PROGRESS_NUDGE_CAP:        per-node counter; once exceeded we emit cap_exceeded + one-line root escalation instead.

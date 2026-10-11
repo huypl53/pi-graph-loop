@@ -165,41 +165,21 @@ Inside pi:
 /swarm pool clear <provider/model>                          # clear a bench
 ````
 
-Useful tools:
+Useful tools (live registrations — the retired agent/message wrappers `swarm_register_agent`, `swarm_restart_agent`, `swarm_set_role`, `swarm_set_agent_paused`, `swarm_send_keys`, `swarm_attach_agent`, `swarm_release_agent_task`, `swarm_ack_message`, `swarm_message_status`, `swarm_prune`, `swarm_dead_letters`, `swarm_trace`, `swarm_capture_agent_pane`, `swarm_agent_identity` were removed in the 2026-10 retired-surface cleanup; role-change/recovery flows now run through `/swarm` subcommands — see `docs/swarm/tools.md`):
 
 - `swarm_spawn_agent`
-- `swarm_register_agent` (adopt an existing tmux pane into a role; upsert/retarget)
 - `swarm_stop_agent` (refuses active tasks unless `force`; `killPane=false` to keep the pane)
-- `swarm_restart_agent` (stop + respawn at the same id; mailbox/identity persist)
-- `swarm_set_role` (repurpose role/roleKind/capabilities + identity reload, no respawn)
-- `swarm_set_agent_paused` (drain from reuse without killing the pane)
-- `swarm_send_keys` (raw tmux keys to a pane — interrupt/dismiss/type)
-- `swarm_attach_agent` (tmux attach/select commands for a pane)
 - `/swarm mailbox reset <id|here> --yes` — emergency mailbox reset; archives live mailbox + clears delivered ledger (preserves message records in `swarm-state.json`).
-- `swarm_release_agent_task` (clear a stale active-task pointer)
 - `swarm_list_agents`
 - `swarm_agent_status`
-- `swarm_send_message`
+- `swarm_send_message` (reply lifecycle is engine-derived — reply + task close; no ack tool)
 - `swarm_check_mailbox`
-- `swarm_ack_message`
-- `swarm_message_status`
 - `swarm_reconcile` (mail + task sweep; `mark=true` repairs task status drift; `offset` skips already-seen result actions and returns `nextOffset`)
-- `swarm_prune` (root-only after Issue 10; dry-run by default)
-- `swarm_dead_letters`
-- `swarm_trace`
-- `swarm_capture_agent_pane`
-- `swarm_agent_identity`
-
-> Tools marked **root-only** in `docs/swarm/tools.md` (e.g. `swarm_prune`,
-> `swarm_gc`) reject non-root callers with a server-side error before any state
-> mutation.
-
 Task-graph tools:
 
-- `swarm_create_task`, `swarm_confirm_qualification`, `swarm_assign_task`, `swarm_update_task`, `swarm_task_message`
+- `swarm_create_task`, `swarm_assign_task`, `swarm_update_task` (the retired wrappers `swarm_confirm_qualification` / `swarm_task_message` / `swarm_validate_graph` / `swarm_print_graph` / `swarm_next_nodes` were removed in the 2026-10 retired-surface cleanup; graph inspection runs through `swarm_task_status(detail:"graph")`)
 - Package skill: `qualification-skills/qualification-gate/SKILL.md` ships inside `extensions/swarm/` and is surfaced only in generated root/reviewer/auditor identities. It guides the short task-creation qualification gate (`auto` or `human-discuss`).
 - Package skill: `role-skills/task-role-staffing/SKILL.md` ships inside `extensions/swarm/` as a root-only reference doc (not surfaced to other roles). It explains how to staff a task with role-specific agents using the existing `swarm_spawn_agent` + `swarm_assign_task` tools; the `swarm_create_task` result text ends with a concise hint naming it.
-- `swarm_task_status`, `swarm_validate_graph`, `swarm_print_graph`, `swarm_next_nodes`
 - Rework edges are first-class: a declared `rework: true` edge can re-open a failed/skipped node as `ready` so follow-up validation is a normal graph transition, not an root force-reset.
 - `/swarm flow <#|task-id> [--events N]` — read-only observatory snapshot (task graph, agent lanes, recent events)
 
@@ -208,7 +188,8 @@ Runtime state is written under `.pi/swarm/` and ignored by git.
 ## Supported now vs deferred
 
 **Supported now:** spawning tmux-backed agents; mailbox messaging with
-ACK/idempotency/dead-letter; engine-enforced task closure (`computeTaskStatus`
+engine-derived lifecycle/idempotency/dead-letter handling (no manual ack tool);
+engine-enforced task closure (`computeTaskStatus`
 — `done`/`failed`/`in_progress`/`ready` derived from node states on every
 create/assign/update, `cancelled` sticky); `swarm_reconcile` sweeping both mail
 and tasks (mark-only; `mark=true` repairs drift; stamps advisory `node.staleAt`);
@@ -236,16 +217,13 @@ leases release with audit `releasedAt`/`releaseReason` on terminal/reassign/rewo
 nudge** that surfaces a fresh
 task whose start node stays ready+unassigned past a short grace period to the
 root (bounded, idempotent, never auto-assigns); a repeatable
-**task-graph UAT** entrypoint at `scripts/swarm_task_uat.sh`; and a full **agent
-lifecycle** surface —
-`swarm_register_agent` (adopt/retarget an existing tmux pane),
-`swarm_stop_agent` (refuses active tasks unless `force`), `swarm_restart_agent`
-(respawn at the same id, preserving mailbox/identity), `swarm_set_role`
-(repurpose + identity reload), `swarm_set_agent_paused` (drain from reuse
-without killing), `swarm_send_keys`/`swarm_attach_agent`, and
-`swarm_release_agent_task` (clear stale active-task pointers) — each mirrored as
-a `/swarm` subcommand (`register | stop | restart | role | pause | resume |
-sendkey | attach | release`).
+**task-graph UAT** entrypoint at `scripts/swarm_task_uat.sh`; and a live **agent
+lifecycle** surface — `swarm_stop_agent`
+(refuses active tasks unless `force`) plus the `/swarm` subcommands
+(`register | stop | restart | role | pause | resume | sendkey | attach | release`)
+for pane adoption, respawn, role change, drain, raw keys, attach, and stale
+active-task release. The dedicated tool wrappers for those flows were retired in
+the 2026-10 retired-surface cleanup; the subcommands remain the supported path.
 
 **Deferred (not first-class V1 tools):** destructive auto-cleanup (auto-kill tmux
 windows, auto-remove agents); reminder-message re-injection from reconcile

@@ -8,24 +8,13 @@ import {
 	formatSize,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir, realpath } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, rm, stat, rename, readdir } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, relative, sep, basename } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
-import type {
-	EvidenceDigest,
-	IterationSession,
-	LoopState,
-	MemoryRecord,
-	MetricContract,
-	Paths,
-	RunRecord,
-	SwarmState,
-	TaskPaths,
-	TaskState,
-} from "./types/index.ts";
+import { randomUUID } from "node:crypto";
+import type { Paths, SwarmState, TaskPaths, TaskState } from "./types/index.ts";
 import { EXT, LOCK_STALE_MS, STATE_VERSION } from "./constants.ts";
-import { ensureAgentDefaults, isSafeRelativePath, normalizeTaskNode, now, projectSlug, safeId, sleep } from "./utils.ts";
+import { ensureAgentDefaults, normalizeTaskNode, now, projectSlug, safeId, sleep } from "./utils.ts";
 import { expected, logSwarmError } from "./errorlog.ts";
 // Local import to avoid a circular module dependency: mailbox.ts imports this module.
 import { isOversizedLine } from "./mailbox.ts";
@@ -44,12 +33,6 @@ export function paths(cwd: string): Paths {
 		traces: join(root, "traces"),
 		tmuxTraces: join(root, "traces", "tmux"),
 		events: join(root, "traces", "events.jsonl"),
-		metricsDir: join(root, "metrics"),
-		runsDir: join(root, "runs"),
-		runArtifactsDir: join(root, "runs"),
-		memoryDir: join(root, "memory"),
-		iterationsDir: join(root, "iterations"),
-		loopsDir: join(root, "loops"),
 		// issues-sequencer-restart-dedup: append-only completion ledger for restart dedup.
 		completionsLedger: join(root, "issues", "completions.jsonl"),
 	};
@@ -71,11 +54,9 @@ export async function ensureDirs(p: Paths) {
 	await mkdir(p.agentsDir, { recursive: true });
 	await mkdir(p.tasksDir, { recursive: true });
 	await mkdir(p.tmuxTraces, { recursive: true });
-	await mkdir(p.metricsDir, { recursive: true });
-	await mkdir(p.runsDir, { recursive: true });
-	await mkdir(p.memoryDir, { recursive: true });
-	await mkdir(p.iterationsDir, { recursive: true });
-	await mkdir(p.loopsDir, { recursive: true });
+	// Retired experimentation subsystem (task-202610110323-audit-and-retire-dormant): startup no
+	// longer creates metrics/, runs/, memory/, iterations/, loops/. Existing directories and any
+	// legacy user data on disk are intentionally left untouched — no deletion, no migration.
 }
 
 export async function withLock<T>(p: Paths, fn: () => Promise<T>): Promise<T> {
@@ -375,27 +356,6 @@ export async function captureGitCommit(pi: ExtensionAPI): Promise<{ available: b
 	}
 }
 
-export async function resolveEvidencePath(cwd: string, ref: string): Promise<string> {
-	const [base, target] = await Promise.all([realpath(cwd), realpath(join(cwd, ref))]);
-	if (target !== base && !target.startsWith(`${base}${sep}`)) throw new Error(`evidence ref resolves outside project cwd: ${ref}`);
-	return target;
-}
-
-export async function captureEvidenceDigests(cwd: string, refs: string[]): Promise<EvidenceDigest[]> {
-	const out: EvidenceDigest[] = [];
-	for (const ref of refs) {
-		if (!isSafeRelativePath(ref)) continue;
-		try {
-			const data = await readFile(await resolveEvidencePath(cwd, ref));
-			out.push({ ref, sha256: createHash("sha256").update(data).digest("hex"), size: data.byteLength });
-		} catch {
-			// Expected: existence/boundary is enforced by the promotion gate, not run recording.
-			expected("evidence_digest_absent_at_record_time");
-		}
-	}
-	return out;
-}
-
 export async function readJsonlRecords<T = any>(file: string): Promise<T[]> {
 	let raw: string;
 	try {
@@ -426,151 +386,6 @@ export async function readJsonlRecords<T = any>(file: string): Promise<T[]> {
 	return out;
 }
 
-// Append-only JSONL with status transitions: readers keep only the latest line per id field.
-export async function readJsonlLatestById<T extends Record<string, any>>(file: string, idField: string): Promise<T[]> {
-	const all = await readJsonlRecords<T>(file);
-	const latest = new Map<string, T>();
-	for (const rec of all) {
-		const id = rec?.[idField];
-		if (typeof id === "string") latest.set(id, rec);
-	}
-	return Array.from(latest.values());
-}
-
-export async function checkEvidenceRefs(
-	cwd: string,
-	refs: string[],
-): Promise<{ ok: boolean; reasons: string[]; checked: { ref: string; exists: boolean; readable: boolean }[] }> {
-	const reasons: string[] = [];
-	const checked: { ref: string; exists: boolean; readable: boolean }[] = [];
-	for (const ref of refs) {
-		if (!isSafeRelativePath(ref)) {
-			reasons.push(`evidence ref is unsafe (must be relative, no ..): ${ref}`);
-			checked.push({ ref, exists: false, readable: false });
-			continue;
-		}
-		const lexical = join(cwd, ref);
-		let exists = false;
-		let readable = false;
-		try {
-			const abs = await resolveEvidencePath(cwd, ref);
-			await readFile(abs, "utf8");
-			exists = true;
-			readable = true;
-		} catch (err) {
-			exists = existsSync(lexical);
-			if (exists && String((err as Error)?.message || err).includes("outside project cwd"))
-				reasons.push(`evidence ref resolves outside project cwd: ${ref}`);
-		}
-		checked.push({ ref, exists, readable });
-		if (!exists) reasons.push(`evidence ref does not exist: ${ref}`);
-		else if (!readable && !reasons.some((r) => r === `evidence ref resolves outside project cwd: ${ref}`))
-			reasons.push(`evidence ref exists but is not readable: ${ref}`);
-	}
-	return { ok: reasons.length === 0, reasons, checked };
-}
-
-export async function verifyEvidenceDigests(cwd: string, refs: string[], digests: EvidenceDigest[] | undefined): Promise<string[]> {
-	const reasons: string[] = [];
-	const byRef = new Map((digests || []).map((d) => [d.ref, d] as const));
-	for (const ref of refs) {
-		const recorded = byRef.get(ref);
-		if (!recorded) {
-			reasons.push(`evidence ref has no recorded digest: ${ref}`);
-			continue;
-		}
-		try {
-			const data = await readFile(await resolveEvidencePath(cwd, ref));
-			const current = createHash("sha256").update(data).digest("hex");
-			if (current !== recorded.sha256 || data.byteLength !== recorded.size)
-				reasons.push(`evidence ref changed after run recording: ${ref}`);
-		} catch {
-			// Expected: checkEvidenceRefs reports missing/unreadable itself.
-			expected("evidence_ref_recheck_delegates_to_checker");
-		}
-	}
-	return reasons;
-}
-
-export function iterationFile(p: Paths, iterationId: string) {
-	return join(p.iterationsDir, `${safeId(iterationId)}.json`);
-}
-
-export async function readIteration(p: Paths, iterationId: string): Promise<IterationSession | undefined> {
-	const file = iterationFile(p, iterationId);
-	if (!existsSync(file)) return undefined;
-	try {
-		return JSON.parse(await readFile(file, "utf8")) as IterationSession;
-	} catch (err) {
-		await backupCorruptFile(file);
-		throw corruptParseError(file, err);
-	}
-}
-
-export async function writeIteration(p: Paths, session: IterationSession) {
-	session.updatedAt = now();
-	await atomicWriteFile(iterationFile(p, session.iterationId), `${JSON.stringify(session, null, 2)}\n`);
-}
-
-export async function readMetricContract(p: Paths, id: string): Promise<MetricContract | undefined> {
-	const file = join(p.metricsDir, `${safeId(id)}.json`);
-	if (!existsSync(file)) return undefined;
-	try {
-		return JSON.parse(await readFile(file, "utf8")) as MetricContract;
-	} catch (err) {
-		await backupCorruptFile(file);
-		throw corruptParseError(file, err);
-	}
-}
-
-export async function latestRuns(p: Paths): Promise<RunRecord[]> {
-	return readJsonlLatestById<RunRecord>(join(p.runsDir, "runs.jsonl"), "runId");
-}
-
-export async function latestMemories(p: Paths): Promise<MemoryRecord[]> {
-	return readJsonlLatestById<MemoryRecord>(join(p.memoryDir, "memory.jsonl"), "memoryId");
-}
-
-export function loopStateFile(p: Paths, taskId: string) {
-	return join(p.loopsDir, `${safeId(taskId)}.json`);
-}
-
-export function loopDir(p: Paths, taskId: string) {
-	return join(p.loopsDir, safeId(taskId));
-}
-
-export function loopHistoryFile(p: Paths, taskId: string) {
-	return join(loopDir(p, taskId), "history.jsonl");
-}
-
-export function loopRoundFile(p: Paths, taskId: string, round: number) {
-	return join(loopDir(p, taskId), `round-${round}.json`);
-}
-
-export async function readLoopState(p: Paths, taskId: string): Promise<LoopState | undefined> {
-	const file = loopStateFile(p, taskId);
-	if (!existsSync(file)) return undefined;
-	try {
-		return JSON.parse(await readFile(file, "utf8")) as LoopState;
-	} catch (err) {
-		// Corrupt loop-state.json: back it up and surface a clear error. After the backup,
-		// existsSync(file) is false so the next read returns undefined and the loop self-heals
-		// (round restarts from 1) instead of silently masking the corruption.
-		await backupCorruptFile(file);
-		throw corruptParseError(file, err);
-	}
-}
-
-export async function writeLoopState(p: Paths, state: LoopState) {
-	state.updatedAt = now();
-	await atomicWriteFile(loopStateFile(p, state.taskId), `${JSON.stringify(state, null, 2)}\n`);
-}
-
-export async function appendLoopHistory(p: Paths, taskId: string, entry: Record<string, unknown>) {
-	await mkdir(loopDir(p, taskId), { recursive: true });
-	await appendJsonl(loopHistoryFile(p, taskId), { at: now(), ...entry });
-}
-
 export function mailboxPath(p: Paths, agentId: string) {
 	return join(p.mailboxes, `${safeId(agentId)}.jsonl`);
 }
@@ -578,3 +393,6 @@ export function mailboxPath(p: Paths, agentId: string) {
 export function identityPath(p: Paths, agentId: string) {
 	return join(p.agentsDir, `${safeId(agentId)}.md`);
 }
+
+// Re-export for callers that import Paths from this module (pre-existing surface contract).
+export type { Paths } from "./types/index.ts";

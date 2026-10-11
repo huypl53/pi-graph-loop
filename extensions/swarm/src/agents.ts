@@ -658,7 +658,7 @@ export async function stopAgent(
 					await deliverMessageLocked(pi, cwd, p, state, {
 						to: "root",
 						subject: `agent ${agentId} stopped owing ${ackDebt.length} unacked ack(s)`,
-						body: `Agent ${agentId} stopped (swarm_stop_agent) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
+						body: `Agent ${agentId} stopped (swarm_stop_agent) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Reply via swarm_send_message + close via swarm_update_task, or ask root to reconcile/waive the record.`,
 						requiresAck: false,
 						idempotencyKey,
 					});

@@ -680,11 +680,11 @@ prints the action directly so the operator never has to guess the fix.
 
 ### Inspect or change agent roles
 
-- `swarm_agent_identity`
-- `swarm_reload_identity`
-- `swarm_set_role`
-- `swarm_set_agent_paused`
-- `swarm_restart_agent`
+(Retired-surface cleanup 2026-10: the former `swarm_agent_identity`, `swarm_reload_identity`,
+`swarm_set_role`, `swarm_set_agent_paused`, and `swarm_restart_agent` tools are gone from the
+registered surface. Equivalents: `/swarm set-role <id> ...`, `/swarm pause|resume <id>`,
+`/swarm restart <id>` root commands; identity cards regenerate on spawn/role change and are
+readable at `.pi/swarm/agents/<id>.md`.)
 
 ## Sequential issue auto-run operations
 
@@ -1158,8 +1158,7 @@ PI_SWARM_ORPHAN_TIMEOUT_MS=50 PI_SWARM_PREFLIGHT_GRACE_MS=10 node extensions/swa
 
 The watchdog arms only on the **fresh-record** branch of `spawnAgent`. The reuse path is excluded:
 
-- `swarm_restart_agent` calls `spawnAgent` with `isNewRecord: false` (refresh, not new).
-- `swarm_register_agent` adopts an existing pane and never calls `spawnAgent`.
+- (retired tool paths, historical) `swarm_restart_agent` called `spawnAgent` with `isNewRecord: false` (refresh, not new); `swarm_register_agent` adopted an existing pane and never called `spawnAgent`.
 - `swarm_assign_task` reuse lookup (`findReusableAgent`) does not call `spawnAgent` either.
 - Direct `swarm_spawn_agent` for an id whose record already exists (e.g. previously stopped) is treated
   as refresh and skips the watchdog.
@@ -1257,11 +1256,13 @@ Gate 1 still runs, so an expired-park agent whose pane actually died gets flippe
 `agent.heartbeat_gc.expired_park_flipped {reason:"tmux_dead_after_lease_expiry"}` distinguishes
 this case from the normal gate-1 dead-pane flip.
 
-**`swarm_prune` remains the root escape hatch** for already-stopped records that
+**Stopped-record cleanup** (retired-surface cleanup 2026-10: the former `swarm_prune`
+escape hatch tool is gone; `/swarm deregister --purge-stopped` and the shared
+stopped-GC predicates are the supported paths) for already-stopped records that
 the heartbeat GC does not touch. The GC is bounded by `probesFired + direct flips`; the
-size of the `state.agents` stopped set only grows until prune runs. The R9 a3 graveyard
+size of the `state.agents` stopped set only grows until purge runs. The R9 a3 graveyard
 (177 stopped agents) becomes bounded: the GC flips dead-pane running records automatically,
-and prune removes the resulting stopped records on operator demand.
+and purge removes the resulting stopped records on operator demand.
 
 ## Operator: Stale-open surfacing (Issue 83 sub-task a, P1)
 
@@ -1564,11 +1565,11 @@ Rules governing which messages mint response debt and how debt clears (source:
   no-outgoing-edge nodes fall back to a `see task.md edges` pointer hint. The old generic list
   (`planned|implemented|tested|reviewed|approved|rejected|failed`) caused workers to close with
   `outcome=tested` when the edge required `passed`.
-- **Protocol-gated ack line (Fix B)** — the `swarm_ack_message(...)` body line renders only under
-  the legacy lane (`PI_SWARM_MINIMAL_PROTOCOL=0`); under minimal protocol the ack step is
-  engine-derived and the body omits it (mirror of `delivery.ts showAckHint`). Gate=0 bodies keep
-  the baseline line ORDER — the ack triple is inserted by marker (before the incomplete-work
-  note), not a position-coupled splice index (review F-1/F-3 follow-up, 2026-10-03).
+- **Protocol-gated ack line (Fix B, superseded 2026-10-11)** — the `swarm_ack_message(...)`
+  body line originally rendered only under the legacy lane (`PI_SWARM_MINIMAL_PROTOCOL=0`).
+  The retired-surface cleanup removed the ack line under BOTH gates (the ack tool is no longer
+  registered; lifecycle is engine-derived everywhere). The marker-insertion history
+  (review F-1/F-3, 2026-10-03) is retained in git history.
 - **Closure-aware delivery (Fix C)** — immediately before nudge (and cap-escalation, review F-2
   follow-up) delivery the
   sweep re-reads `task.json` from disk (lock-held) and skips when the node went terminal between
@@ -1821,7 +1822,7 @@ the PM except by polling.
 creating a new ack-debt loop):
 
 - Subject: `agent <id> settled owing N unacked ack(s)` (or `stopped owing …` for `swarm_stop_agent`).
-- Body lists the message ids, subjects, and the close-action `swarm_ack_message`.
+- Body lists the message ids, subjects, and the close action (reply via `swarm_send_message` + close via `swarm_update_task`, or root reconcile/waive; wording updated 2026-10-11 when the retired-surface cleanup removed the ack tool).
 - `from` derives from `currentAgentId()` — the worker in settle path; the root in the stop
   path (since stop is invoked by the root). Both are correct per the deliver path.
 
@@ -2087,7 +2088,7 @@ R16 fixes two regressions that survived R14:
   additional write that closes the persistence gap.
 - **reconcile.ts** — escalation body builder classifies `poolDiag` into
   dead-panes / stopped-agents / stale-heartbeats / fallback hint buckets
-  and joins them with `swarm_spawn_agent` / `swarm_restart_agent` /
+  and joins them with `swarm_spawn_agent` / `/swarm restart <id>` /
   `swarm_create_task` / `swarm_mark_goal_done` references. The body is
   now action-oriented per the root's note.
 - **state.ts** — `idleNudgeState` back-fill: narrow to a plain object so
@@ -2226,7 +2227,7 @@ All six MUST be green in the post-fix shape. R19-S1 (orphan on `failed` task) is
 
 ### When this matters
 
-A worker writes real artifacts to disk (tests pass, files edited, `artifacts/<x>.md` produced), then `agent_settled` fires WITHOUT a call to `swarm_update_task` (close) + `swarm_send_message replyTo` (link the verified result) + `swarm_ack_message` (clear the assignment). Pre-R20 the root's recovery ladder was: probe pane → send directive → restart → force-close. Step 1 was unreliable — the worker had already settled and missed the directive.
+A worker writes real artifacts to disk (tests pass, files edited, `artifacts/<x>.md` produced), then `agent_settled` fires WITHOUT a call to `swarm_update_task` (close) + `swarm_send_message replyTo` (link the verified result) (the ack leg was removed with the ack surface, 2026-10). Pre-R20 the root's recovery ladder was: probe pane → send directive → restart → force-close. Step 1 was unreliable — the worker had already settled and missed the directive.
 
 R20 adds a self-nudge that fires BEFORE the agent settles: every pump tick, the swarm scans `node.allowedFiles ?? task.allowedFiles` for fresh mtime, and when an artifact write has landed since the last `lastProgressAt`, delivers an action-oriented nudge to the agent itself (not the root) naming the exact close-action triple.
 
@@ -2258,7 +2259,7 @@ A second, related improvement: `swarm_agent_status` now returns a single top-lev
 
 - **Nudge fires repeatedly on a node with no real progress:** likely a worker that just touches files between nudges (e.g., autosave). Check `node.artifactProgressNudgeCount` — after cap (default 3), only `worker.artifact_progress_cap_exceeded` fires. Inspect `node.artifactProgressNudgeAt` vs the file mtime to confirm the worker is genuinely writing.
 - **`completed_unverified` agent state with no nudge firing:** check `agent.lastToolAt` — if it's < 60s ago, the active-agent skip suppresses the nudge. Look at `agent.lastToolAt` vs `node.lastProgressAt`: a worker actively stamping progress (via `ensureNodeActivityStamp`) is NOT a candidate.
-- **Cap-exceeded fires but the worker is still active:** the worker is ignoring nudges. Restart the agent (`swarm_restart_agent`) or force-close the node (`swarm_update_task force=true`).
+- **Cap-exceeded fires but the worker is still active:** the worker is ignoring nudges. Respawn the agent (`swarm_spawn_agent` or root `/swarm restart <id>`) or force-close the node (`swarm_update_task force=true`).
 - **No nudge fires on a clearly-stuck node:** verify `node.allowedFiles` is non-empty. The predicate skips nodes with empty allowed-files (too noisy to track whole-project mtime).
 - **`taskProgressState` shows `awaiting_input` but the worker is clearly working:** stale `agent.lastToolAt`. The heartbeat hook (`tool_execution_end`) should keep it fresh; a worker stuck between tool calls may have a stale stamp. Cross-check with `swarm_audit({mode:"events", event:"tool_execution_end"})`.
 - **`taskProgressState` `dead` verdicts and long tool calls (task-202610040001):** heartbeats stamp only at tool-call boundaries — ONE tool running >60s (gates, test suites) leaves `lastHeartbeatAt` stale mid-tool. Since the fix, `runtimeStatus busy|tool_running` defers the heartbeat-dead verdict (the agent classifies `active`/`stalled` honestly; the pane probe still catches real death, and `why` for a mid-tool dead-row now says `tool running (heartbeat deferred)` / `pane died mid-tool` instead of the misleading `no pane / stale heartbeat`). Before declaring an agent dead, cross-check `runtimeStatus` — a `tool_running` agent with a stale heartbeat is mid-tool, not dead.
@@ -2293,7 +2294,7 @@ task.artifact_progress_nudge_count_reset    # forward-transition reset
 - `swarm_agent_status({agentId:"..."})` — observe the new top-level `taskProgressState`. `completed_unverified` is the R20 nudge target.
 - `swarm_update_task({status:"done|failed|blocked"})` — closes the node and resets the R20 nudge cycle for future re-opens.
 - `swarm_send_message({to:"root", replyTo:"<assignment msg id>", ...})` — links the verified result to the assignment.
-- `swarm_ack_message({messageId:"<assignment msg id>", status:"done", resultMessageId:"..."})` — the third leg of the close-action triple.
+(Historical third leg: `swarm_ack_message(...)` — removed with the ack surface, 2026-10-11.)
 - `swarm_audit({mode:"events", event:"worker.artifact_progress_no_status_update"})` — inspect nudge history.
 - `swarm_audit({mode:"events", event:"worker.artifact_progress_cap_exceeded"})` — inspect cap escalations.
 - `/swarm trace` — view the live trace census.
@@ -2643,8 +2644,12 @@ tools re-fed stale, already-read state into context every cycle — the "agent f
   `headers`) moved to `details`. 20-message scan: 18,905B → ~2,023B.
 - `swarm_agent_status` — default `view:"attention"`: `census` + `attention` rows for non-healthy-idle
   agents only, each with a `why` sentence. Nonzero-only counters. `unackedMessages`/`ackMissing`
-  removed from the default view (dead under minimal protocol). `view:"full"` (or `verbose:true`,
-  or a targeted `agentId` query) restores the legacy 24-field rows. 11-agent view: 7,311B → 393B.
+  removed from the default view (dead under minimal protocol). 11-agent view: 7,311B → 393B.
+  (Full-view removal, 2026-10-10: `view:"full"` / `verbose:true` — the legacy 24-field rows —
+  were removed entirely; they were the one path that re-injected ~1.1KB of forensic plumbing
+  (pid, ISO timestamps, dead counters) into model context. Forensic fields remain durable in
+  `swarm-state.json` (`agents[<id>]`) and `events.jsonl`; read those files directly when
+  debugging. Legacy calls now hard-reject with a steer to the slim shapes.)
 - `swarm_list_agents` — compact phonebook rows (`roleFirstLine` ≤60B, `roleKind`, `status`,
   `driver`, `target`, `slot`). The full-agent-array `details` dump (measured 5.9MB across one
   session) is gone; `details` now carries the same compact rows.
@@ -2676,7 +2681,8 @@ rows by default. Routine supervision shows only live agents. The hidden count su
 truthfully as top-level `stoppedHidden` in the status tool (no flood rows); the hint names
 the purge path when hidden records exist.
 
-- Resurface stopped records: `includeStopped:true` — `view:"full"` / `verbose:true` imply it.
+- Resurface stopped records: `includeStopped:true` (explicit; the `view:"full"` imply was
+  removed with the full view on 2026-10-10).
 - Targeted `swarm_agent_status({agentId})` slim rows keep working for ANY id/status — a
   stopped agent's row is always returned when asked for directly.
 
@@ -2684,8 +2690,10 @@ the purge path when hidden records exist.
 
 Two surfaces, one predicate (`stoppedGcCandidates`):
 
-- Tool: `swarm_gc({ purgeStopped: true, stoppedOlderThanMs?, dryRun? })` — dry-run default.
 - CLI: `/swarm deregister --purge-stopped [--older-than-hours N] [--apply]` — dry-run default.
+  (Retired-surface cleanup 2026-10: the former `swarm_gc` tool surface is gone; the same
+  predicate/dry-run semantics live in the shared `src/agent-gc.ts` + `src/gc.ts` modules,
+  exercised by the direct-import lane `extensions/mock-llm/tests/agent-stopped-gc.test.mjs`.)
 
 A stopped record is purge-eligible ONLY when ALL gates pass:
 
@@ -2846,7 +2854,7 @@ it requires swarm-state write access, which already owns the swarm (attack-guard
 NEVER classified dead.
 
 **Operator guidance:** do not wait out the blind window when you suspect a dead pane — check the
-pane directly (`swarm_agent_status`, tmux/herdr inspect) and `swarm_restart_agent`. Probe health
+pane directly (`swarm_agent_status`, tmux/herdr inspect) and respawn via `swarm_spawn_agent` or `/swarm restart <id>`. Probe health
 is visible via errors.jsonl (`op=goal_diag.probe_failed`). The interval/cap envs exist, but
 shrinking the interval trades pump-lock probe cost (see the Cost bound bullets above).
 

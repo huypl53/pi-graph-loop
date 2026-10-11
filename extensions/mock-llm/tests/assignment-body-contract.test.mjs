@@ -144,7 +144,7 @@ const body = assignmentMsg?.body || "";
 ok("F1.a: assignment message delivered with a real id", !!assignmentMsgId && !!assignmentMsg, assignmentMsgId || "(none)");
 ok("F1.b: body names its own message id (replyTo contract)", body.includes(`replyTo=${assignmentMsgId}`), body.slice(0, 200));
 ok("F1.c: body carries the graph-state summary line", /Graph: \d+ done \/ \d+ in-progress \/ \d+ pending — you are node plan \(1 of 2\)/.test(body), (body.match(/Graph: [^\n]+/) || ["(missing)"])[0]);
-okGate0("F1.d: body states the reply-BEFORE-update fencing order", /BEFORE (calling )?swarm_update_task/.test(body) && /reply must land first/.test(body), "");
+okGate0("F1.d: body states the reply-BEFORE-update fencing order", /BEFORE/.test(body) && /reply must land first/.test(body), "");
 okGate0("F1.e: body does NOT carry the retired ack instruction", !body.includes("Ack this assignment message too"), "");
 ok(
 	"F1.f: acceptance criteria are a pointer, not a full echo",

@@ -20,7 +20,6 @@ import { deliverMessageLocked, findIdempotentMessage } from "../mailbox.ts";
 import { logSwarmError } from "../errorlog.ts";
 import { readTaskState, taskPaths, trace, withLock, writeState, writeTaskState } from "../state.ts";
 import { outgoingOutcomes } from "../taskgraph/graph.ts";
-import { PI_SWARM_MINIMAL_PROTOCOL } from "../constants.ts";
 
 export async function evaluateArtifactProgressNudgeLocked(
 	pi: ExtensionAPI,
@@ -222,22 +221,9 @@ export async function evaluateArtifactProgressNudgeLocked(
 				`If the work is genuinely incomplete, call swarm_update_task(status=blocked, note=<reason>) instead.`,
 				`(Auto-backoff: ${Math.round(ARTIFACT_PROGRESS_NUDGE_BACKOFF_MS / 60000)} min between nudges; cap ${ARTIFACT_PROGRESS_NUDGE_CAP} then escalate to root.)`,
 			];
-			// Fix B (task-202610031339): swarm_ack_message is retired under minimal protocol — the ack
-			// step is engine-derived (mirror delivery.ts showAckHint). Only the legacy lane
-			// (PI_SWARM_MINIMAL_PROTOCOL=0) keeps the ack triple. F-1/F-3 follow-up: insert by MARKER
-			// (before the incomplete-work note), not by position-coupled splice index — the baseline
-			// bd71726 order was ack line -> blank -> note, which a numeric index silently drifted from.
-			if (PI_SWARM_MINIMAL_PROTOCOL === 0) {
-				const noteIdx = bodyLines.findIndex((l) => l.startsWith("If the work is genuinely incomplete"));
-				if (noteIdx !== -1) {
-					bodyLines.splice(
-						noteIdx,
-						0,
-						`  swarm_ack_message(messageId="${assignmentMsgId}", status=done, resultMessageId="<result msg id>")`,
-						``,
-					);
-				}
-			}
+			// Fix B (task-202610031339) superseded by the 2026-10 retired-surface cleanup: the legacy
+			// gate=0 ack line (swarm_ack_message triple) is removed entirely — ack is engine-derived
+			// under BOTH gates now (the minimal-protocol default); no conditional rendering remains.
 			const body = bodyLines.join("\n");
 			// Fix C (task-202610031339): closure-aware re-check. The sweep snapshot may predate the
 			// worker's closure — three live "nudge raced the closure" replies in task-202610031216.

@@ -1,93 +1,15 @@
-# Swarm dashboard (static HTML)
+# Swarm task dashboard
 
-`scripts/swarm_dashboard.sh` / `scripts/swarm_dashboard.py` generate a **single, self-contained, dependency-free HTML dashboard** from `.pi/swarm` state. Inline CSS + minimal markup only — no CDN, no JavaScript framework, no build step, works offline from `file://`.
+The dashboard is a static, offline visual review surface for current task graphs, agent conversations, inspector details, and recent trace events. It is read-only with respect to swarm state. Its executable owner is [`scripts/swarm_dashboard.py`](../scripts/swarm_dashboard.py); use [`scripts/swarm_dashboard.sh --help`](../scripts/swarm_dashboard.sh) for the current options and defaults.
 
-Dashboard V2 keeps the same static/offline contract but makes the operator view easier to scan: task graphs can render as **role lanes** or **branch lanes**, compact cards collapse into chips, conversations are grouped by **conversationId → node pair**, and the inspector can focus a **node** or **artifact** as well as runs/messages/memories.
-
-The generated page also includes a **floating outline** on wide screens and every major section is **collapsible**. Use the outline or top navigation to jump to a section, and use **Expand all / Collapse all** to focus on the part you are reading. Collapse state is remembered in browser `localStorage` for that local file.
-
-It prioritizes four sections: **per-iteration metric improvement**, **task-graph node flow**, **agent conversation**, and **inspector/raw details**, while still showing memory/evidence, runs, and trace events.
-
-The dashboard reads the same `.pi/swarm` state files directly as the terminal reviewers and task UAT flows, so the visual and textual views stay aligned without a separate iteration watcher.
-
-## Quick start
+Quick start:
 
 ```bash
-# one-shot dashboard from the repo root (live swarm state) -> file:
 scripts/swarm_dashboard.sh --out dashboard.html
-open dashboard.html        # macOS; or xdg-open on Linux
-
-# role lanes are the default; branch lanes are handy for fan-out/rework:
-scripts/swarm_dashboard.sh --lanes branch --compact --task <task-id> --out dashboard.html
-
-# to stdout instead of a file (pipe anywhere):
-scripts/swarm_dashboard.sh | head
-
-# live: regenerate the file in a loop and auto-refresh the browser tab:
-scripts/swarm_dashboard.sh --live --interval 3 --out dashboard.html
-# (the HTML includes a <meta refresh> so a viewing browser reloads itself)
-
-# against the isolated iteration demo cwd:
-DEMO_CWD="$(ls -td .pi/swarm-uat/runs/iter-demo-*/cwd | head -1)"
-scripts/swarm_dashboard.sh --cwd "$DEMO_CWD" --out demo-dashboard.html
 ```
 
-## Flags
+Use `--cwd` to select the workspace whose `.pi/swarm` state is reviewed. The selected cwd is the read boundary: task/state inputs and inline artifact content must remain inside it. Relative `--artifact` paths are resolved from `.pi/swarm`; absolute paths use their given location. Artifacts inside `.pi/swarm` may be shown inline; artifacts elsewhere inside the selected cwd are link-only, and paths escaping the cwd (including symlink escapes) are rejected. Rendering does not mutate swarm state; HTML output is the only write and goes to the selected `--out` path (or the live-mode default documented by `--help`).
 
-| Flag | Default | Purpose |
-|---|---|---|
-| `--cwd DIR` | `.` (env `WATCH_CWD`) | swarm cwd to read state from |
-| `--out FILE` | stdout (`--once`) / `swarm-dashboard.html` (`--live`) | write HTML to FILE |
-| `--once` | (default behavior) | generate once and exit |
-| `--live` | off | regenerate the dashboard in a loop every `--interval` |
-| `--interval SEC` | 3 | live regeneration interval |
-| `--lanes role|branch|none` | `role` | task-graph lane mode |
-| `--compact` | off | collapse node cards to compact chips |
-| `--iteration ID` | – | focus one iteration session (metric section + inspector) |
-| `--task ID` | – | focus one task graph (flow + conversation + inspector) |
-| `--node ID` | – | focus one node inside the selected task |
-| `--run ID` | – | focus one run (inspector raw JSON) |
-| `--message ID` / `--memory ID` | – | focus one message / memory (inspector raw JSON) |
-| `--artifact PATH` | – | focus one artifact path (inline text for `.pi/swarm`) |
-| `--messages N` | 20 | messages per task in the conversation view |
-| `--tasks-limit N` | 6 | task graphs shown in flow/conversation |
-| `--runs N` / `--events N` | 10 / 15 | recent runs / trace events shown |
+The dashboard intentionally focuses on the active task workflow. Metric, run, memory, and iteration views belong to the retired experimentation subsystem; retained historical docs or runtime records do not imply those features are supported.
 
-## Sections
-
-1. **Overview** — counts (tasks/iterations/runs/memories) + a task-graphs table linking into the flow section.
-2. **Per-iteration metric improvement** *(primary)* — per session: contract/direction, baseline, **recomputed** best (improvement/meaningful, `DRIFT` flag vs stored `bestRunId`), an inline **SVG bar chart** of per-iteration values with Δ labels and a dashed target line, and a visible **text summary** of the trend. `compute_best` mirrors the extension's `computeIterationBest` (maximize/minimize/target/passfail).
-3. **Task graph node flow** *(primary)* — V2 supports `--lanes role|branch|none`. Role lanes group nodes by owner type, branch lanes group by topological layer, and `--compact` collapses cards to chips for dense graphs. Status is conveyed by color **and** text/icon (not color alone). Parallel branches render side-by-side instead of a single brittle spine.
-4. **Agent conversation** *(primary)* — per task: messages are grouped by conversation/thread and node pair, with `from → to`, subject, ack badge, response/result status, expandable body, and dashed reply links for `resultMessageId`. When a task is focused, the section shows node jump chips for the task's nodes.
-
-All major sections are rendered as native `<details>` panels, so they work without a framework and remain accessible from keyboard/screen readers.
-5. **Memory & evidence** — status cards (active/proposed/rejected/expired) + a table with per-ref evidence ✓/✗ present/missing and rejection reasons.
-6. **Inspector / raw details** — when a focus flag is passed (`--run`/`--task`/`--node`/`--iteration`/`--message`/`--memory`/`--artifact`), shows the selected raw JSON or artifact text in a `<pre>`; otherwise a collapsible raw-state summary with counts and ids.
-7. **Recent runs** / **Recent trace events** — tables.
-
-A sticky header shows a **mode/refresh banner** (`role=status`, `aria-live=polite`) with `ONE-SHOT` vs `● LIVE`, the interval, and the generation timestamp.
-
-## Accessibility & responsiveness
-
-- Semantic landmarks (`header`/`nav`/`main`/`section`/`footer`), a "Skip to content" link, logical heading order, `<table>` with `<caption>` and `scope=col`, and charts carry `role="img"` + `aria-label` plus a visible text summary.
-- Status uses text + icon + color (never color alone); focus styles and `prefers-reduced-motion` are respected.
-- Responsive CSS: multi-column cards on desktop, lane grids for branch/role grouping, collapsing to single column + horizontally-scrollable tables on tablet (≤900px) and mobile (≤600px); the node pipeline and lane grids stack vertically on mobile.
-
-## Relationship to the other tools
-
-- Use terminal/task UAT flows for text-based review of the same swarm state; use the dashboard for a visual/browser review.
-- For isolated review data, point `--cwd` at a demo or test workspace such as `.pi/swarm-uat/runs/.../cwd`.
-
-## Validation gates
-
-```bash
-python3 -m py_compile scripts/swarm_dashboard.py
-bash -n scripts/swarm_dashboard.sh
-scripts/swarm_dashboard.sh --cwd . --out dashboard.html
-```
-
-Validation should include at least one generated dashboard artifact and a browser/tmux review when available. The dashboard is **read-only** — the only thing it writes is the `--out` HTML file you choose.
-
-## Cleanup
-
-The dashboard writes only the `--out` file (default `swarm-dashboard.html` in the cwd for `--live`). Remove it when done: `rm -f swarm-dashboard.html`. Demo state it can point at lives under `.pi/swarm-uat/runs/iter-demo-<stamp>/` (gitignored; safe to `rm -rf`).
+For the command-line UAT entrypoint, see [`scripts/swarm_task_uat.sh`](../scripts/swarm_task_uat.sh). The canonical swarm documentation map is [`docs/swarm/index.md`](swarm/index.md).

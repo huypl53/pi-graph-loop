@@ -2,7 +2,8 @@
 //
 // This module performs NO filesystem I/O and acquires NO locks. It operates ONLY on the passed
 // state object: it mutates st.messages and st.delivered in place and returns { removed, kept }.
-// The companion tool (src/tools/gc.ts) is responsible for readState/withLock/writeState.
+// The deletion boundary is the TOOL wrapper only: lock + state I/O live with each caller
+// (the /swarm deregister --purge-stopped command, the stopped-gc mock-llm lane).
 //
 // Retention rule (see task swarm-robustness-v1 / node retention):
 //   - Always keep the most-recent `keepMessages` messages by updatedAt (ties broken by id).

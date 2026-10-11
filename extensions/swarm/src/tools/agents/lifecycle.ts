@@ -102,7 +102,7 @@ export function registerAgentLifecycleTools(pi: ExtensionAPI): void {
 			description:
 				"Stop a swarm agent: kill its terminal pane/window and mark it stopped. Refuses if the agent has active tasks unless force=true. Mailbox, identity, and history persist via the stable id.",
 			promptGuidelines: [
-				"Use `swarm_stop_agent` to retire an agent. For a non-destructive park that keeps the pane alive, use `swarm_set_agent_paused` instead.",
+				"Use `swarm_stop_agent` to retire an agent. For a non-destructive park that keeps the pane alive, use the root command `/swarm pause <agentId>` instead.",
 			],
 			parameters: Type.Object({
 				agentId: Type.String({ description: "Agent id to stop." }),

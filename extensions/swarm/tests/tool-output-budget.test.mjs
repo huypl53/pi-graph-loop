@@ -316,7 +316,11 @@ const textOf = (r) => r?.content?.[0]?.text ?? "";
 	ok("§2 stoppedHidden counter present", typeof parsed.stoppedHidden === "number");
 	// stopped-agent-records-gc: default view hides stopped — worker-sick is hidden (stoppedHidden=1),
 	// and resurfaces with includeStopped:true.
-	ok("§2 default view hides stopped (stoppedHidden=1, no flood rows)", parsed.census?.stopped === 0 && parsed.stoppedHidden === 1, `census=${JSON.stringify(parsed.census)} hidden=${parsed.stoppedHidden}`);
+	ok(
+		"§2 default view hides stopped (stoppedHidden=1, no flood rows)",
+		parsed.census?.stopped === 0 && parsed.stoppedHidden === 1,
+		`census=${JSON.stringify(parsed.census)} hidden=${parsed.stoppedHidden}`,
+	);
 	const rInc = await call("swarm_agent_status", { includeStopped: true });
 	const pInc = JSON.parse(textOf(rInc));
 	ok(
@@ -340,17 +344,27 @@ const textOf = (r) => r?.content?.[0]?.text ?? "";
 	const rt = await call("swarm_agent_status", { agentId: "worker-03" });
 	const row = JSON.parse(textOf(rt));
 	const slimRow = row.agents?.[0] || row;
-	ok("§2 targeted query returns slim row (details keep full)", slimRow.agentId === "worker-03" && !("pid" in slimRow) && Array.isArray(rt.details?.agents));
+	ok(
+		"§2 targeted query returns slim row (details keep full)",
+		slimRow.agentId === "worker-03" && !("pid" in slimRow) && Array.isArray(rt.details?.agents),
+	);
 
-	// view:"full" legacy reachability
-	const rv = await call("swarm_agent_status", { view: "full" });
-	const pv = JSON.parse(textOf(rv));
-	const vfull = pv.agents?.find((a) => a.agentId === "worker-03") || pv.attention?.[0];
-	ok("§2 view:full keeps legacy fields", vfull && ("pid" in vfull || "lastHeartbeatAt" in vfull || Array.isArray(pv.agents)));
-
-	// verbose:true ≡ view:"full"
-	const rvb = await call("swarm_agent_status", { verbose: true });
-	ok("§2 verbose:true ≡ view full", textOf(rvb).includes("lastHeartbeatAt") || textOf(rvb).length > 1_500);
+	// full-view removal (2026-10-10): view:"full" + verbose:true hard-reject with a steer;
+	// the slim vocabulary (attention rows + targeted rows) is the only surface left.
+	let fullRejected = false;
+	try {
+		await call("swarm_agent_status", { view: "full" });
+	} catch (e) {
+		fullRejected = /removed/.test(String(e?.message || e));
+	}
+	ok("§2 view:'full' rejected with steer", fullRejected);
+	let verboseRejected = false;
+	try {
+		await call("swarm_agent_status", { verbose: true });
+	} catch (e) {
+		verboseRejected = /removed/.test(String(e?.message || e));
+	}
+	ok("§2 verbose:true rejected with steer", verboseRejected);
 }
 
 // ============================================================
@@ -568,10 +582,7 @@ const textOf = (r) => r?.content?.[0]?.text ?? "";
 	// human ages, not ISO timestamps
 	ok("§8 row uses heartbeatAge (no ISO lastHeartbeatAt)", "heartbeatAge" in row && !("lastHeartbeatAt" in row));
 	// dead counters under minimal protocol are gone
-	ok(
-		"§8 dead counters dropped (unackedMessages/ackMissing)",
-		!("unackedMessages" in row) && !("ackMissing" in row),
-	);
+	ok("§8 dead counters dropped (unackedMessages/ackMissing)", !("unackedMessages" in row) && !("ackMissing" in row));
 	// debt counters only when non-zero
 	ok(
 		"§8 debt counters present only when non-zero",
@@ -589,20 +600,103 @@ const textOf = (r) => r?.content?.[0]?.text ?? "";
 		Object.keys(row).join(","),
 	);
 
-	// view:"full" stays the legacy escape hatch for targeted queries too
-	const rf = await call("swarm_agent_status", { agentId: "worker-03", view: "full" });
-	const rowF = JSON.parse(textOf(rf)).agents?.[0] || {};
+	// full-view removal: targeted + view:"full" rejects too (no legacy escape hatch anymore)
+	let targetedFullRejected = false;
+	try {
+		await call("swarm_agent_status", { agentId: "worker-03", view: "full" });
+	} catch (e) {
+		targetedFullRejected = /removed/.test(String(e?.message || e));
+	}
+	ok("§8 targeted + view:full rejected with steer", targetedFullRejected);
 	ok(
-		"§8 targeted + view:full keeps legacy 24-field row",
-		rowF.agentId === "worker-03" && "pendingMessages" in rowF && "lastHeartbeatAt" in rowF,
-		Object.keys(rowF).join(","),
+		"§8 schema no longer advertises a full escape hatch",
+		!/full/.test(tools.swarm_agent_status.description || "") &&
+			!/full/.test(JSON.stringify(tools.swarm_agent_status.parameters?.properties?.view || {})),
 	);
-	// verbose:true ≡ view:"full" for targeted queries
+}
+
+// ============================================================
+// §9 full-view removal (2026-10-10) — the legacy 24-field envelope dies.
+// Rationale: view:"full" was the only path injecting the ~1.1KB 24-field row
+// into model context; the tool description itself steered debugging models
+// into it. Forensic fields stay durable in swarm-state.json + events.jsonl
+// (readState is the authoritative source; full was a pretty-printer, not a
+// store). After removal:
+//   - view union = attention | census only; view:"full" → schema-level rejection
+//   - verbose param gone from the registered schema
+//   - hint strings no longer advertise view:"full"
+//   - includeStopped stays the resurface path for stopped rows
+//   - targeted {agentId} query keeps the slim row (§8 shape, unchanged)
+// ============================================================
+{
+	console.log("\n--- §9 full-view removed ---");
+	// §7 mutates pi.exec into the herdr lane without restoring; restore the tmux
+	// probe lane first so liveness census in this block matches §2 baseline.
+	pi.exec = async (cmd, args) => {
+		if (cmd === "tmux" && args?.[0] === "list-panes") return { code: 0, stdout: "%1 0 1 1\n", stderr: "" };
+		if (cmd === "tmux" && args?.[0] === "display-message") return { code: 0, stdout: "%1\n", stderr: "" };
+		return { code: 1, stdout: "", stderr: "" };
+	};
+	const props = tools.swarm_agent_status.parameters?.properties || {};
+	ok("§9 verbose param gone from schema", !("verbose" in props), Object.keys(props).join(","));
 	ok(
-		"§8 schema description steers: full is the escape hatch",
-		/view:"full"/.test(tools.swarm_agent_status.parameters?.properties?.view?.description || "") ||
-			/full/.test(tools.swarm_agent_status.description || ""),
+		"§9 view union no longer offers full",
+		!JSON.stringify(props.view || {}).includes('"full"') && (props.view?.anyOf || []).length === 2,
+		JSON.stringify(props.view || {}).slice(0, 120),
 	);
+	ok(
+		"§9 description no longer steers to view:'full'",
+		!tools.swarm_agent_status.description.includes("view:'full'") && !tools.swarm_agent_status.description.includes('view:"full"'),
+	);
+
+	// view:"full" must be rejected (typebox union rejects non-members; wrapper routes
+	// the throw as a tool error the model can self-correct from).
+	let rejected = false;
+	try {
+		await call("swarm_agent_status", { view: "full" });
+	} catch {
+		rejected = true;
+	}
+	ok("§9 view:'full' call rejected", rejected);
+
+	// verbose:true must be rejected too (param removed from schema)
+	let rejectedV = false;
+	try {
+		await call("swarm_agent_status", { verbose: true });
+	} catch {
+		rejectedV = true;
+	}
+	ok("§9 verbose:true call rejected", rejectedV);
+
+	// includeStopped stays the resurface path; stopped rows hidden by default
+	const rBase = JSON.parse(textOf(await call("swarm_agent_status", {})));
+	ok(
+		"§9 default hides stopped (census.stopped=0, stoppedHidden=1)",
+		rBase.census?.stopped === 0 && rBase.stoppedHidden === 1,
+		JSON.stringify(rBase),
+	);
+	const rInc2 = JSON.parse(textOf(await call("swarm_agent_status", { includeStopped: true })));
+	ok(
+		"§9 includeStopped:true still resurfaces stopped attention row",
+		rInc2.census?.stopped === 1 && (rInc2.attention || []).some((a) => a.agentId === "worker-sick"),
+	);
+	ok(
+		"§9 hint strings no longer advertise view:'full'",
+		![rBase.hint, rInc2.hint].some((h) => /view:.?full/.test(String(h))),
+		JSON.stringify(rInc2.hint),
+	);
+
+	// targeted slim row unchanged by the removal (§8 contract preserved)
+	const rt2 = JSON.parse(textOf(await call("swarm_agent_status", { agentId: "worker-03" })));
+	const slim2 = rt2.agents?.[0] || {};
+	ok(
+		"§9 targeted slim row intact (no pid/ISO plumbing)",
+		slim2.agentId === "worker-03" && !("pid" in slim2) && !("lastHeartbeatAt" in slim2),
+	);
+
+	// census view stays reachable and slim
+	const rc2 = JSON.parse(textOf(await call("swarm_agent_status", { view: "census" })));
+	ok("§9 census view still works", typeof rc2.census?.idle === "number");
 }
 
 // cleanup

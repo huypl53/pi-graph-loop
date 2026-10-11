@@ -114,7 +114,7 @@ export async function createTaskCore(p: Paths, deps: TaskCoreDeps, params: any) 
 			qualification,
 		};
 		// Reject structurally-invalid graphs at creation (hard errors only; soft warnings are still allowed)
-		// so a broken task can't be written and linger. Run swarm_validate_graph for the full report.
+		// so a broken task can't be written and linger. validateTaskGraph runs inline below.
 		const createValidation = validateTaskGraph(task);
 		if (createValidation.errors.length) {
 			throw new Error(
@@ -144,7 +144,7 @@ export async function createTaskCore(p: Paths, deps: TaskCoreDeps, params: any) 
 		if (createTaskStatusChange.terminal) await sweepTaskWorkersLocked(pi, ctx.cwd, st, taskId, task);
 		// Actionable = newly-ready nodes PLUS already-ready unassigned nodes (e.g. a fresh task's start node,
 		// which is born status:"ready" and lands in `current`, not the raw `ready` set). Keeps the "Ready:"
-		// report consistent with swarm_next_nodes so roots see what is assignable right now.
+		// report consistent with the actionable-ready set, so roots see what is assignable right now.
 		const actionable = Array.from(
 			new Set([
 				...ready,
@@ -159,7 +159,7 @@ export async function createTaskCore(p: Paths, deps: TaskCoreDeps, params: any) 
 			: "- [ ] Add and run deterministic evidence appropriate to this change.";
 		const discussion =
 			qualification.mode === "human-discuss"
-				? "\n## Human discussion required\n\nBefore implementation, confirm the intended outcome, scope trade-offs, and any visible behavior that only the user can decide. Root records that confirmation with `swarm_confirm_qualification`.\n"
+				? "\n## Human discussion required\n\nBefore implementation, confirm the intended outcome, scope trade-offs, and any visible behavior that only the user can decide. Root stamps the confirmation on the qualification gate (see the gate artifact's instructions).\n"
 				: "\n## Auto-mode challenge\n\nRoot must draft this gate using `extensions/swarm/qualification-skills/qualification-gate/SKILL.md`, ask one reviewer/auditor to challenge missing negative cases, regressions, and evidence, then revise this artifact once before implementation.\n";
 		await writeFile(
 			join(tp.root, qualification.artifact),
@@ -197,7 +197,7 @@ export async function updateTaskCore(p: Paths, deps: TaskCoreDeps, params: any, 
 				nodeId: params.nodeId,
 				expected: { validNodes: Object.keys(task.nodes) },
 				received: { nodeId: params.nodeId },
-				actionableHint: "Valid node ids are listed in task.json. Run swarm_task_status or swarm_graph to inspect.",
+				actionableHint: "Valid node ids are listed in task.json. Run swarm_task_status to inspect.",
 			});
 		// Cancellation fence (issue 3, fix-1): once a task is cancelled, NO caller — not even the
 		// root — can mutate task or node state via this handler. The fence is the most
@@ -509,7 +509,7 @@ export async function updateTaskCore(p: Paths, deps: TaskCoreDeps, params: any, 
 			received: { attemptId: params.attemptId, attemptStatus: providedStatus },
 			blocked: true,
 			actionableHint:
-				"Your attempt has been superseded by a new assignment. Read the latest message in your mailbox (or call swarm_next_nodes to see the current assignment) before retrying.",
+				"Your attempt has been superseded by a new assignment. Read the latest message in your mailbox (or call swarm_task_status to see the current assignment) before retrying.",
 		},
 	);
 				}
@@ -810,7 +810,7 @@ export async function updateTaskCore(p: Paths, deps: TaskCoreDeps, params: any, 
 				}
 			}
 			// Supersede every assignment-class message in the task so late ACK/result attempts are
-			// rejected at the swarm_ack_message / swarm_send_message handler boundary.
+			// rejected at the swarm_send_message handler boundary.
 			const sup = await supersedeTaskAssignmentMessages(p, st, task, CANCELLATION_REASON, me);
 			await traceTask(tp, "task.cancel.revoke_all", {
 				taskId,

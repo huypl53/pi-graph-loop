@@ -141,7 +141,7 @@ export async function handleRegisterCommand(rest: string[], ctx: any, p: Paths, 
 export async function handleDeregisterCommand(rest: string[], ctx: any, p: Paths, pi: ExtensionAPI): Promise<void> {
 	const flags = parseFlags(rest);
 	// stopped-agent-records-gc: --purge-stopped = batch purge of gated stopped records (root-only).
-	// Dry-run by default; --apply commits. Reuses the same pure predicate as swarm_gc purgeStopped.
+	// Dry-run by default; --apply commits. Reuses the same pure predicate as the stopped-record purge.
 	if (flags["purge-stopped"]) {
 		const me = currentAgentId();
 		if (me !== "root") {

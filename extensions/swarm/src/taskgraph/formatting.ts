@@ -206,21 +206,23 @@ export function buildAssignmentBody(
 		const rewritten = rewriteTaskArtifactRefs(task.taskId, note);
 		lines.push(rewritten === note ? `Note: ${rewritten}` : `Note (rewritten to task-absolute artifact paths): ${rewritten}`);
 	}
-	// Ergonomics Fix 2 + Fix 4: under minimal protocol the ack is retired (swarm_ack_message is
-	// unregistered; identity.ts already tells workers NOT to call it) — the closing line instead
-	// states the fencing contract: reply to this assignment BEFORE the terminal update. Under
-	// gate=0 the legacy ack line is preserved (Phase-1 byte-identical contract, mirroring the
-	// delivery.ts showAckHint gating).
+	// Ergonomics Fix 2 + Fix 4: under minimal protocol the closing line states the fencing
+	// contract in workflow terms (reply to this assignment BEFORE the terminal node close) —
+	// no tool catalog, and no instruction about the unregistered ack tool. Under gate=0 the
+	// legacy line is preserved (Phase-1 byte-identical contract, mirroring delivery.ts showAckHint).
 	if (PI_SWARM_MINIMAL_PROTOCOL === 1) {
 		const replyClause = assignmentMessageId
 			? `Reply to this assignment message (replyTo=${assignmentMessageId}) BEFORE`
 			: `Reply to ${replyTarget} BEFORE`;
 		lines.push(
-			`When finished: send your result (${replyClause} calling swarm_update_task with status=done/failed/blocked and an outcome — the reply must land first so the assignment response is verified). Do NOT call swarm_ack_message (retired under minimal protocol).`,
+			`When finished: ${replyClause} closing the node — send your result first, then close with done/failed/blocked and an outcome (the reply must land first so the assignment response is verified).`,
 		);
 	} else {
+		const replyClause = assignmentMessageId
+			? `Reply to this assignment message (replyTo=${assignmentMessageId}) BEFORE`
+			: `Reply to ${replyTarget} BEFORE`;
 		lines.push(
-			`When finished, call swarm_update_task with taskId=${task.taskId}, nodeId=${nodeId}, status=done (or failed/blocked) and an outcome. Ack this assignment message too.`,
+			`When finished: ${replyClause} closing the node — send your result first, then close with done/failed/blocked and an outcome (the reply must land first so the assignment response is verified).`,
 		);
 	}
 	return lines.join("\n");

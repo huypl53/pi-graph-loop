@@ -118,7 +118,8 @@ const throws = async (n, p) => {
 };
 
 // [1][2] swarm_register_agent is retired from the live tool surface (R31-era 21-tool trim,
-// CHANGELOG-documented; bodies preserved in src/tools/agents/retired.ts). Pane adoption now
+// CHANGELOG-documented; former comment-preserved bodies removed in the 2026-10 retired-surface
+// cleanup). Pane adoption now
 // flows through swarm_spawn_agent / the /swarm register command (covered by
 // register-here.test.mjs, green in the gate) and direct state seeding (rework-reopen pattern).
 // Seed a record and assert the live surface can read it instead.

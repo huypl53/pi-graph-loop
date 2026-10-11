@@ -5,7 +5,9 @@
  * PI_SWARM_MINIMAL_PROTOCOL is an import-time constant, so this test spawns a CHILD process
  * for each gate lane:
  *   gate=1 (default/minimal): nudge body must NOT instruct swarm_ack_message (retired).
- *   gate=0 (legacy):          nudge body MUST carry the ack triple, byte-preserved.
+ *   gate=0 (legacy):          the legacy ack line was REMOVED in the 2026-10 retired-surface
+ *                             cleanup — ack is engine-derived under BOTH gates now (the former
+ *                             Fix-B byte-preservation applied only while the ack surface lived).
  *
  * Run this file directly; it re-execs itself as `--child <gate>`.
  */
@@ -49,8 +51,8 @@ if (process.argv[2] === "--child") {
 	ok("gate=1: body still carries update+send steps", gate1.bodyIncludesUpdate && gate1.bodyIncludesSend, "close steps missing");
 
 	ok("gate=0: nudge was delivered", gate0.delivered, JSON.stringify(gate0));
-	ok("gate=0: body carries the ack triple (legacy byte-preserved)", gate0.bodyIncludesAck, "ack line missing at gate=0");
-	ok("gate=0: ack line precedes the incomplete-work note (F-1 ordering)", gate0.ackBeforeNote, "ack line placed after the note — splice order drift");
+	ok("gate=0: body has NO swarm_ack_message instruction (ack surface removed 2026-10, both gates)", !gate0.bodyIncludesAck, "ack line present at gate=0");
+	ok("gate=0: body still carries update+send steps", gate0.bodyIncludesUpdate && gate0.bodyIncludesSend, "close steps missing");
 
 	console.log(`\n---\nnudge-minimal-protocol results: ${passed} passed, ${failed} failed`);
 	process.exit(failed > 0 ? 1 : 0);
@@ -129,10 +131,10 @@ async function runChild(gate) {
 				bodyIncludesAck: body.includes("swarm_ack_message("),
 				bodyIncludesUpdate: body.includes("swarm_update_task("),
 				bodyIncludesSend: body.includes("swarm_send_message("),
-				// F-1 (task review 2026-10-03): at gate=0 the ack line must sit BEFORE the
-				// "If the work is genuinely incomplete" note — byte-order parity with baseline
-				// bd71726, not just presence.
-				ackBeforeNote: gate === "0" ? body.indexOf("swarm_ack_message(") < body.indexOf("If the work is genuinely incomplete") : true,
+				// F-1 (task review 2026-10-03): retained for RESULT-shape compat; the ack surface was
+				// removed under BOTH gates (2026-10 retired-surface cleanup), so the byte-order check
+				// below is now unconditional (no gate-conditional vacuous-true).
+				ackBeforeNote: body.indexOf("swarm_ack_message(") < body.indexOf("If the work is genuinely incomplete"),
 			}),
 	);
 	process.exit(0);

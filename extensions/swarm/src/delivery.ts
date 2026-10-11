@@ -2,7 +2,11 @@
 import { join, dirname, relative, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { SwarmMessage } from "./types/index.ts";
-import { PI_SWARM_MINIMAL_PROTOCOL, SYSTEM_END, SYSTEM_START } from "./constants.ts";
+import { SYSTEM_END, SYSTEM_START } from "./constants.ts";
+// Runtime-contract citation (retired-surface cleanup, 2026-10): the [PI-SWARM ACK REQUIRED]
+// suffix below was L4 LLM-consumption content (docs/swarm/pi-runtime-contract.md §1). Its removal
+// changes consumed text but adds ZERO new Pi boundary crossings (no pi.sendMessage/
+// ctx.abort/ctx.reload/registerTool call sites) — no new R10-1 counter or §10 row.
 import { currentAgentId } from "./session.ts";
 import { logSwarmError } from "./errorlog.ts";
 import { now } from "./utils.ts";
@@ -33,16 +37,12 @@ export function formatSwarmMessageContent(msg: SwarmMessage) {
 	// the TUI.
 	const ts = new Date(msg.createdAt || Date.now());
 	const stamp = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}-${String(ts.getDate()).padStart(2, "0")} ${String(ts.getHours()).padStart(2, "0")}:${String(ts.getMinutes()).padStart(2, "0")}:${String(ts.getSeconds()).padStart(2, "0")}`;
-	// === Issue 25 Phase 2: gate-aware [PI-SWARM ACK REQUIRED] rendering (proposal §K.3) ===
-	// Under PI_SWARM_MINIMAL_PROTOCOL=1 the engine derives lifecycle state from recipient actions;
-	// recipients no longer need to be told to call swarm_ack_message explicitly. Under gate=0 the
-	// hint stays so a Phase-2 ship never alters what legacy recipients see (Phase-1 contract
-	// preserved — the rendered body is byte-identical to Phase 1).
-	const showAckHint = PI_SWARM_MINIMAL_PROTOCOL === 0;
-	const ackLine =
-		showAckHint && msg.requiresAck
-			? `\n\n[PI-SWARM ACK REQUIRED] This message requires acknowledgement. Call \`swarm_ack_message\` with messageId="${msg.id}" and status=\`seen\`|\`processing\`|\`done\`|\`failed\` (ack \`seen\`/\`processing\` now, then \`done\`/\`failed\` when complete). Unacked delivered messages are surfaced as ack_missing.`
-			: "";
+	// === gate-aware [PI-SWARM ACK REQUIRED] rendering — retired-surface cleanup (2026-10) ===
+	// The manual-ack hint is removed under BOTH gates: the tool it names (swarm_ack_message) is
+	// not registered, and message lifecycle is engine-derived from replies + swarm_update_task.
+	// (Historical legacy: under PI_SWARM_MINIMAL_PROTOCOL=0 this used to render the full ack
+	// instructions; the Phase-2/Phase-1 gating history lives in git history + minimal-protocol tests.)
+	const ackLine = "";
 	return `[${stamp}] Inter-agent swarm message from ${msg.from} to ${msg.to}${msg.subject ? ` (${msg.subject})` : ""}:\n\n${msg.body}${ackLine}`;
 }
 
@@ -53,12 +53,11 @@ export function formatSwarmBatchMessageContent(msgs: SwarmMessage[]) {
 	const ts = new Date(msgs[msgs.length - 1].createdAt || Date.now());
 	const stamp = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}-${String(ts.getDate()).padStart(2, "0")} ${String(ts.getHours()).padStart(2, "0")}:${String(ts.getMinutes()).padStart(2, "0")}:${String(ts.getSeconds()).padStart(2, "0")}`;
 
-	const showAckHint = PI_SWARM_MINIMAL_PROTOCOL === 0;
+	// [PI-SWARM ACK REQUIRED] line retired (2026-10 cleanup) — engine-derived lifecycle.
 	const items = msgs.map((m, idx) => {
 		const prio = m.priority && m.priority !== "normal" ? ` | Priority: ${m.priority}` : "";
 		const subj = m.subject ? ` (${m.subject})` : "";
-		const ackLine = showAckHint && m.requiresAck ? `\n[PI-SWARM ACK REQUIRED] messageId="${m.id}"` : "";
-		return `--- [${idx + 1}/${msgs.length}] From ${m.from} to ${m.to}${subj}${prio} [${m.id}] ---\n${m.body.trim()}${ackLine}`;
+		return `--- [${idx + 1}/${msgs.length}] From ${m.from} to ${m.to}${subj}${prio} [${m.id}] ---\n${m.body.trim()}`;
 	});
 
 	return `[${stamp}] Inter-agent swarm batch delivery for ${msgs[0].to} (${msgs.length} incoming messages):\n\n${items.join("\n\n")}`;

@@ -1,0 +1,18 @@
+# agent-status-full-removed: legacy full-view calls are hard-rejected with a steer (2026-10-10).
+# Covers the changed code path end-to-end against the REAL registered swarm_agent_status:
+#   turn 1: a habit-trained model asks for the legacy envelope (view:"full" then verbose:true),
+#           both calls reject with the removal steer (error surfaces land in the transcript);
+#           the model self-corrects to the attention default + a targeted {agentId} slim row,
+#           and confirms includeStopped:true still resurfaces stopped rows.
+# Lane: scratch cwd seeded with 3 agents (1 stopped + dead letter), root identity.
+#   pi --provider mock-llm --model agent-status-full-removed -e ./extensions/mock-llm -e ./extensions/swarm
+# (from the seeded scratch cwd, with PI_SWARM_AGENT_ID=root PI_SWARM_IS_ROOT=1; do NOT stack
+# -e ./extensions/swarm on the repo's global package entry — double registration aborts.)
+# Transcript assertions (.pi/mock-llm/transcripts/):
+#   - slim-st-full: tool error text matches /removed/ naming the slim replacement
+#   - slim-st-v: same steer for verbose:true
+#   - slim-st-default + slim-st-target + slim-st-stopped: slim vocabulary, no pid/ISO fields,
+#     stopped row only present under includeStopped:true
+{"name":"legacy full call rejected","events":[{"type":"text","delayMs":15,"text":"Checking one agent in full detail as I always do.","chunks":["Checking one agent in full detail ","as I always do."]},{"type":"toolcall","delayMs":15,"name":"swarm_agent_status","id":"slim-st-full","arguments":{"view":"full"}},{"type":"toolcall","delayMs":10,"name":"swarm_agent_status","id":"slim-st-v","arguments":{"verbose":true}}]}
+{"name":"self-correct to slim shapes","events":[{"type":"text","delayMs":15,"text":"Full is gone — using the attention census, a targeted slim row, and includeStopped for the stopped agent.","chunks":["Full is gone — using the attention census, ","a targeted slim row, and includeStopped for the stopped agent."]},{"type":"toolcall","delayMs":15,"name":"swarm_agent_status","id":"slim-st-default","arguments":{}},{"type":"toolcall","delayMs":10,"name":"swarm_agent_status","id":"slim-st-target","arguments":{"agentId":"worker-a"}},{"type":"toolcall","delayMs":10,"name":"swarm_agent_status","id":"slim-st-stopped","arguments":{"includeStopped":true}}]}
+{"name":"settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Confirmed: legacy envelope rejected with a steer; slim views carry the supervision load.","chunks":["Confirmed: legacy envelope rejected with a steer; ","slim views carry the supervision load."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

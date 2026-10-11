@@ -21,6 +21,7 @@ Use it when you need to understand, extend, or debug swarm without reading one l
     content (treat repo write access as swarm instruction access); probe-ledger blind window +
     traces-sink degradation dispositions
 - [Tooling reference](./tools.md) — grouped tools and `/swarm` commands
+- [Task dashboard](../swarm-dashboard.md) — offline visual review of task graphs, conversations, and inspector details; executable options remain owned by `scripts/swarm_dashboard.sh --help`
 
 ### I want to change swarm
 - [Contributor guide](./contributor-guide.md) — where code lives, how to add features, change checklists
@@ -36,10 +37,10 @@ Use it when you need to understand, extend, or debug swarm without reading one l
 ### I need detailed legacy/reference material
 - [`../swarm.md`](../swarm.md) — consolidated reference doc kept for compatibility
 - [`../swarm-task-graph.md`](../swarm-task-graph.md) — detailed task graph design and semantics
-- [`../swarm-memory.md`](../swarm-memory.md) — legacy memory / iteration / loop reference
-- [`../swarm-new-project-setup.md`](../swarm-new-project-setup.md) — setup recipe for a new project
+- [`../swarm-memory.md`](../swarm-memory.md) — HISTORICAL (removed experimentation subsystem): memory / iteration / loop reference
+- [`../swarm-new-project-setup.md`](../swarm-new-project-setup.md) — HISTORICAL (removed experimentation subsystem): setup recipe
 - [`../swarm-graph-uat-scenario.md`](../swarm-graph-uat-scenario.md) — UAT scenario and review flow
-- [`../swarm-iteration-demo.md`](../swarm-iteration-demo.md) — legacy iteration demo scenario
+- [`../swarm-iteration-demo.md`](../swarm-iteration-demo.md) — HISTORICAL (removed experimentation subsystem): iteration demo scenario
 - [`./pi-runtime-evidence.md`](./pi-runtime-evidence.md) — raw citations and reproduction probes backing the [Pi runtime contract](./pi-runtime-contract.md)
 
 ## Recommended reading order for contributors

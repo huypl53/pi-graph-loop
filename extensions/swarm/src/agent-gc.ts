@@ -4,7 +4,8 @@
 // swarm_agent_status forever; the only removal path was one-by-one /swarm deregister --purge.
 // This module is the pure core (no I/O, no locks) for:
 //   1. Default-view hiding: filterAgentRows hides status==="stopped" rows from census/attention
-//      unless includeStopped (view:"full" implies it). Targeted agentId queries always pass.
+//      unless includeStopped (explicit) — the view:"full" imply died with the full view
+//      (2026-10-10). Targeted agentId queries always pass.
 //   2. Batch purge gating (stoppedGcCandidates + applyStoppedGc): an agent record is purge-
 //      eligible ONLY when ALL of:
 //        - status === "stopped" and id !== "root"
@@ -12,8 +13,10 @@
 //        - no NON-terminal task node in any supplied task graph references it as assignee
 //        - no response debt (responseMissingRecords-shaped requiresResponse messages, or
 //          actionable pending/unacked messages addressed to it)
-//   The companion surfaces (src/tools/gc.ts swarm_gc purgeStopped, /swarm deregister
-//   --purge-stopped) own readState/withLock/writeState + requireRootAuthority.
+//   The companion surfaces (/swarm deregister --purge-stopped command; the stopped-gc
+//   mock-llm lane driving these helpers directly) own readState/withLock/writeState +
+//   requireRootAuthority. The former swarm_gc tool wrapper was removed in the 2026-10
+//   retired-surface cleanup.
 //
 // Loss boundary (docs/swarm/operations.md): purging deletes the state record + delivered
 // ledger only. Mailbox/identity files on disk, traces (events.jsonl), and task artifacts
@@ -77,9 +80,10 @@ export function hasResponseDebt(st: SwarmState, agentId: string): boolean {
 }
 
 export function stoppedGcCandidates(st: SwarmState, opts: StoppedGcOptions = {}): StoppedGcCandidate[] {
-	const minAge = typeof opts.stoppedOlderThanMs === "number" && Number.isFinite(opts.stoppedOlderThanMs) && opts.stoppedOlderThanMs >= 0
-		? opts.stoppedOlderThanMs
-		: DEFAULT_STOPPED_OLDER_THAN_MS;
+	const minAge =
+		typeof opts.stoppedOlderThanMs === "number" && Number.isFinite(opts.stoppedOlderThanMs) && opts.stoppedOlderThanMs >= 0
+			? opts.stoppedOlderThanMs
+			: DEFAULT_STOPPED_OLDER_THAN_MS;
 	const nowMs = typeof opts.nowMs === "number" ? opts.nowMs : Date.now();
 	const out: StoppedGcCandidate[] = [];
 	for (const [agentId, agentAny] of Object.entries(st.agents || {})) {
@@ -126,17 +130,18 @@ export function applyStoppedGc(
 export interface FilterAgentRowsOptions {
 	/** Show stopped rows too (legacy behavior). */
 	includeStopped?: boolean;
-	/** view:"full" implies includeStopped. */
+	/** View name, kept for call-site compatibility. The legacy view:"full" → includeStopped
+	 *  imply was removed with the full view itself (2026-10-10); includeStopped is explicit-only. */
 	view?: string;
 	/** Targeted agentId query — targeted rows ALWAYS pass, any status. */
 	agentId?: string;
 }
 
 /** Default-view hiding for census/attention rows: stopped rows are hidden unless
- *  includeStopped (or view:"full"); targeted agentId queries always keep their rows. */
+ *  includeStopped is explicit; targeted agentId queries always keep their rows. */
 export function filterAgentRows(rows: Array<Record<string, unknown>>, opts: FilterAgentRowsOptions = {}): Array<Record<string, unknown>> {
 	const targeted = Boolean(opts.agentId);
-	const includeStopped = opts.includeStopped === true || opts.view === "full" || targeted;
+	const includeStopped = opts.includeStopped === true || targeted;
 	if (includeStopped) return rows;
 	return rows.filter((r) => r.status !== "stopped");
 }

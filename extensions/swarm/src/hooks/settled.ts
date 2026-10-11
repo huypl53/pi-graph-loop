@@ -195,7 +195,7 @@ export function registerSettledHook(pi: ExtensionAPI) {
 							await deliverMessageLocked(pi, ctx.cwd, p, st, {
 								to: "root",
 								subject: `agent ${agentId} settled owing ${ackDebt.length} unacked ack(s)`,
-								body: `Agent ${agentId} settled (agent_settled) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Ack via swarm_ack_message.`,
+								body: `Agent ${agentId} settled (agent_settled) while still holding ${ackDebt.length} unacked requiresAck message(s): ${idList}. Subjects: ${subjectList}. Reply via swarm_send_message + close via swarm_update_task, or ask root to reconcile/waive the record.`,
 								requiresAck: false,
 								idempotencyKey,
 							});
@@ -281,7 +281,7 @@ export function registerSettledHook(pi: ExtensionAPI) {
 							await deliverMessageLocked(pi, ctx.cwd, p, st, {
 								to: "root",
 								subject: `agent ${agentId} settled idle with open assignment(s)`,
-								body: `Agent ${agentId} settled (agent_settled) while still holding ${openCount2} open assignment(s): ${list2}. It may be idle or stalled; advance via swarm_next_nodes/swarm_update_task, reassign, or reconcile as needed.`,
+								body: `Agent ${agentId} settled (agent_settled) while still holding ${openCount2} open assignment(s): ${list2}. It may be idle or stalled; advance via swarm_task_status/swarm_update_task, reassign, or reconcile as needed.`,
 								requiresAck: false,
 							});
 							await trace(p, "task.stale.settled.notify", { agentId, open: openCount2 });

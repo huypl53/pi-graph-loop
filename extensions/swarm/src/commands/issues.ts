@@ -10,7 +10,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { currentAgentId } from "../session.ts";
-import { readState, withLock, writeState, trace } from "../state.ts";
+import { readState, withLock, writeState, trace, type Paths } from "../state.ts";
 import { validateIssuesSource, classifyDocPath } from "../issues/source.ts";
 import { captureIssueSnapshot, sourceHashOf } from "../issues/snapshot.ts";
 import { setIssueFooter } from "../issues/footer.ts";

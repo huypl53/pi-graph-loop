@@ -8,15 +8,14 @@
 // NOW: swarm_send_keys was retired from the live surface in the R31 21-tool retirement
 // (CHANGELOG-documented; manual pane injection is no longer a worker-facing primitive — the
 // reinject path uses the terminal driver internally). The guard logic retired WITH the tool
-// (its body is preserved verbatim in src/tools/agents/retired.ts). This file now asserts the
-// retirement contract itself: the tool must be ABSENT from the registered live surface, and
-// the retired body must remain in the preserved file for archaeological reference.
+// (its former comment-preserved body was removed in the 2026-10 retired-surface cleanup).
+// This file asserts the retirement contract itself: the tool must be ABSENT from the
+// registered live surface.
 
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync, existsSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const mod = await import(join(here, "..", "index.ts"));
@@ -44,16 +43,10 @@ factory({
 ok("R31 retirement: swarm_send_keys is NOT registered on the live surface", tools.swarm_send_keys === undefined);
 ok("R31 retirement: no live tool routes send-keys through pi.exec", sentKeys.length === 0);
 
-// The retired body (with the ROOT_PANE_REJECTED guard) is preserved in retired.ts for reference.
-const retiredPath = join(here, "..", "src", "tools", "agents", "retired.ts");
-ok("retired.ts preserved", existsSync(retiredPath));
-if (existsSync(retiredPath)) {
-	const retired = readFileSync(retiredPath, "utf8");
-	ok("retired.ts still documents the ROOT_PANE_REJECTED guard", retired.includes("ROOT_PANE_REJECTED"));
-	ok("retired.ts still carries the send_keys body", retired.includes("send_keys"));
-}
+// The retired body (with the ROOT_PANE_REJECTED guard) is gone — git history (R31 retirement
+// commits) is the archaeological record.
 
-// Live-surface negative checks: the remaining surface never exposes a raw keys-injection tool.
+// Live-surface negative checks: the surface never exposes a raw keys-injection tool.
 const keyish = Object.keys(tools).filter((n) => /send_keys|send-keys|keys/i.test(n));
 ok("no keys-injection tool under any name on the live surface", keyish.length === 0);
 

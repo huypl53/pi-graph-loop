@@ -5,7 +5,6 @@ import { registerSwarmCommand } from "./src/command.ts";
 import { registerAgentsTools } from "./src/tools/agents.ts";
 import { registerMessagesTools } from "./src/tools/messages.ts";
 import { registerTasksTools } from "./src/tools/tasks.ts";
-import { registerGcTools } from "./src/tools/gc.ts";
 import { registerAuditTools } from "./src/tools/audit.ts";
 export { isDeliveryFailureRetryable } from "./src/delivery.ts";
 export { providerForModel, currentProvider } from "./src/session.ts";
@@ -35,7 +34,12 @@ export default function (pi: ExtensionAPI) {
 	registerAgentsTools(pi);
 	registerMessagesTools(pi);
 	registerTasksTools(pi);
-	// registerGcTools(pi); // retired from default surface — stopped-gc lane drives it via direct module import
+	// swarm_gc tool surface retired from the default registration (2026-10 retired-surface
+	// cleanup): the deleted file was ONLY the tool wrapper (registerGcTools) — no imports
+	// remained (the stopped-gc lane was its sole external caller and now drives the shared
+	// helpers directly). The shared GC/retention behavior is untouched and live:
+	// src/gc.ts (pure pruneState), src/agent-gc.ts (stopped-purge predicates),
+	// src/agent-gc-io.ts, the auto-GC config gate, and /swarm deregister --purge-stopped.
 	registerAuditTools(pi);
 	registerSwarmCommand(pi);
 }

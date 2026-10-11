@@ -271,7 +271,7 @@ was treated as unknown syntax and blocked ALL parallel assignment of dir-scoped 
 - Do not move source-of-truth task state out of task files.
 - Do not make tmux liveness the only truth for delivery or ownership.
 - Do not bypass reconcile semantics with ad hoc repair logic in unrelated modules.
-- Do not handwave evidence rules for run/memory promotion.
+- Do not handwave evidence rules for run/memory promotion (the run/memory subsystem itself is RETIRED — see `docs/swarm/architecture.md`; historical rules are evidence context only).
 - Do not let `/swarm` command help become the only documentation of a feature.
 
 ## Root-authoritative mutations
@@ -293,8 +293,11 @@ Required examples in this issue family:
 - `swarm_stop_agent`
 - `swarm_release_agent_task`
 - `swarm_reconcile(mark=true)`
-- `swarm_prune` (Issue 10: added to the root-only set; previously description-only)
-- `swarm_gc` (Issue 10: added to the root-only set; previously description-only)
+- `swarm_prune` (retired from the surface; Issue 10 root-only gate is the historical
+  precedent — its stopped-record cleanup lives in `/swarm deregister --purge-stopped`)
+- `swarm_gc` (retired from the surface; Issue 10 root-only gate is the historical
+  precedent — retention behavior lives in the shared gc/agent-gc modules + the
+  purge-stopped command)
 - `/swarm stop`
 - `/swarm release`
 
@@ -374,7 +377,7 @@ When you change behavior, update docs in this order:
 1. `docs/swarm/index.md` if the doc map changes
 2. `docs/swarm/architecture.md` if a boundary or invariant changes
 3. `docs/swarm/tools.md` for new public tool/command behavior
-4. topic-specific detailed docs (`docs/swarm-task-graph.md`, `docs/swarm-memory.md`, etc.)
+4. topic-specific detailed docs (`docs/swarm-task-graph.md`; `docs/swarm-memory.md` and the other experimentation pages are HISTORICAL — retired subsystem)
 5. `README.md` only for package install/start/doc navigation changes
 6. `AGENTS.md` only when future agents need new standing guidance
 

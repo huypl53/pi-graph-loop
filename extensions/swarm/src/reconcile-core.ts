@@ -535,7 +535,7 @@ export async function reconcile(
 						// Surface as ack_missing: keep the injected/intercepted status intact so this is NOT
 						// confused with a delivery failure (failed messages get re-injected by the retry branch
 						// above). Record a clear marker + trace so it shows up in swarm_agent_status /
-						// swarm_message_status instead of silently lingering. Do not bump attempts here, so an
+						// swarm_check_mailbox instead of silently lingering. Do not bump attempts here, so an
 						// unacked-but-delivered message is not accidentally escalated to dead_letter by the
 						// maxAttempts check; TTL still applies for eventual cleanup.
 						upsertMessageRecord(

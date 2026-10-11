@@ -1,5 +1,3 @@
-import type { LoopConfig } from "./loops.ts";
-
 export type TaskStatus = "draft" | "ready" | "in_progress" | "blocked" | "reviewing" | "validating" | "done" | "failed" | "cancelled";
 
 // Durable attention classification for a task node (roadmap issue 5). Derived PURELY from
@@ -209,8 +207,9 @@ export type TaskState = {
 	// Present on newly-created tasks. Absent on legacy tasks so historical work remains assignable.
 	qualification?: QualificationGate;
 	reworkConsumption?: ReworkConsumptionRecord[];
-	// V1.5 opt-in post-iteration loop config. Absent or enabled !== true => no behavior change.
-	loop?: LoopConfig;
+	// RETIRED (task-202610110323-audit-and-retire-dormant): the V1.5 `loop` field is no longer
+	// declared. Legacy task.json files may still carry a `loop` key — reads/writes round-trip
+	// unknown JSON keys untouched, so historical data is preserved verbatim. Do not re-add.
 };
 
 export type GraphValidation = { errors: string[]; warnings: string[] };

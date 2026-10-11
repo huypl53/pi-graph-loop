@@ -540,19 +540,19 @@ async function emitPoolEmptyEscalationLocked(
 		// LOOKED busy but its pane is gone (herdr workspace closed / tmux session killed).
 		const ids = busyDeadAgents.map((a) => a.id).join(", ");
 		hints.push(
-			`Busy but dead panes (${busyDeadAgents.length}): ${ids}. Pane probe returned dead while heartbeat was fresh — the worker cannot make progress. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace, or \`swarm_restart_agent(agentId=...)\` if panes are recoverable.`,
+			`Busy but dead panes (${busyDeadAgents.length}): ${ids}. Pane probe returned dead while heartbeat was fresh — the worker cannot make progress. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace, or \`/swarm restart <agentId>\` (root command) if panes are recoverable.`,
 		);
 	}
 	if (deadAgents.length > 0) {
 		const ids = deadAgents.map((a) => a.id).join(", ");
 		hints.push(
-			`Dead panes (${deadAgents.length}): ${ids}. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace, or \`swarm_restart_agent(agentId=...)\` if panes are recoverable.`,
+			`Dead panes (${deadAgents.length}): ${ids}. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace, or \`/swarm restart <agentId>\` (root command) if panes are recoverable.`,
 		);
 	}
 	if (stoppedAgents.length > 0 && deadAgents.length === 0 && busyDeadAgents.length === 0) {
 		const ids = stoppedAgents.map((a) => a.id).join(", ");
 		hints.push(
-			`Stopped agents (${stoppedAgents.length}): ${ids}. Run \`swarm_restart_agent(agentId=...)\` for each, or spawn fresh.`,
+			`Stopped agents (${stoppedAgents.length}): ${ids}. Run \`/swarm restart <agentId>\` (root command) for each, or spawn fresh.`,
 		);
 	}
 	if (staleAgents.length > 0 && deadAgents.length === 0 && stoppedAgents.length === 0 && busyDeadAgents.length === 0) {
@@ -567,7 +567,7 @@ async function emitPoolEmptyEscalationLocked(
 	) {
 		const ids = bootFailedAgents.map((a) => a.id).join(", ");
 		hints.push(
-			`Boot failed / no heartbeat (${bootFailedAgents.length}): ${ids}. Workers exceeded boot grace without registering a heartbeat. Run \`swarm_restart_agent(agentId=...)\` or spawn fresh.`,
+			`Boot failed / no heartbeat (${bootFailedAgents.length}): ${ids}. Workers exceeded boot grace without registering a heartbeat. Run \`/swarm restart <agentId>\` (root command) or spawn fresh.`,
 		);
 	}
 	if (hints.length === 0) {
@@ -757,7 +757,7 @@ export async function evaluateIdleGoalNudgeLocked(
 					goalId: goal.id,
 					agents: deadIds,
 					classification: "busy_dead_pane",
-					hint: `Pane probe returned dead for busy worker(s) ${deadIds.join(", ")} while heartbeat was fresh. Run \`swarm_restart_agent(agentId=...)\` if panes are recoverable, or \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace.`,
+					hint: `Pane probe returned dead for busy worker(s) ${deadIds.join(", ")} while heartbeat was fresh. Run \`/swarm restart <agentId>\` (root command) if panes are recoverable, or \`swarm_spawn_agent(role=..., roleKind=worker)\` to replace.`,
 				});
 				// Fall through: a dead mid-tool agent consumed by this route must NOT get the
 				// "capture the pane" health-check nudge below (it is dead, not long-running).
@@ -798,7 +798,7 @@ export async function evaluateIdleGoalNudgeLocked(
 					`Suggested Action for Root:\n` +
 					`- Check pane progress: capture the agent's pane via the terminal driver (tmux: \`tmux capture-pane -t ${targetText} -p | tail -25\`; herdr: \`herdr pane read ${targetText}\`)\n` +
 					`- If progress is normal: continue waiting (e.g. run a synchronous wait like \`bash sleep 30\` or \`sleep 60\` to stay in sync).\n` +
-					`- If stuck/frozen: terminate the agent's pane via the terminal manager or restart the worker (\`swarm_restart_agent(agentId="${staleBusyWorker.id}")\`).`;
+					`- If stuck/frozen: terminate the agent's pane via the terminal manager or restart the worker (\`/swarm restart ${staleBusyWorker.id}\`, root command).`;
 
 				const key = formatNotifyKey("goal:worker:long_running_tool", {
 					agentId: staleBusyWorker.id,

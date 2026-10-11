@@ -17,7 +17,7 @@ const { readState, readTaskState, paths, ensureDirs, mailboxPath, withLock, writ
 );
 const { readMailbox } = await import(join(here, "..", "src", "mailbox.ts"));
 const { LOCK_STALE_MS } = await import(join(here, "..", "src", "constants.ts"));
-const { mkdir, writeFile, rename, readdir } = await import("node:fs/promises");
+const { mkdir, writeFile, readFile, rename, readdir, mkdtemp, rm } = await import("node:fs/promises");
 const { reconcileTasks } = await import(join(here, "..", "src", "reconcile.ts"));
 
 // Minimal ExtensionAPI stub for reconcileTasks
@@ -483,28 +483,42 @@ console.log("\n[11] cross-file consistency: missing agent detected by reconcile"
 	rmSync(tp.root, { recursive: true, force: true });
 }
 
-// --- [12] Regression: backupBeforeWrite coverage for writeIteration/writeLoopState ---
-console.log("\n[12] regression: backupBeforeWrite coverage check");
+// --- [12] REPLACED (task-202610110323-audit-and-retire-dormant): the old block pinned the
+// existence of writeIteration/writeLoopState — helpers that were REMOVED with the dormant
+// experimentation subsystem. Replaced by the data-preservation + no-legacy-mkdir contract below.
+
+// --- [13] Retired experimentation subsystem: legacy data preserved, no legacy dirs created ---
+console.log("\n[13] retired experimentation dirs: preserve legacy data, stop creating legacy dirs");
 {
-	// Check if writeIteration and writeLoopState have backup coverage
-	// This documents the current state - they use atomicWriteFile but NOT backupBeforeWrite
-	const stateCode = readFileSync(join(here, "..", "src", "state.ts"), "utf8");
-
-	// Check if writeIteration exists and uses atomicWriteFile
-	const hasWriteIteration = /export async function writeIteration/.test(stateCode);
-	ok("writeIteration function exists", hasWriteIteration);
-
-	const hasWriteLoopState = /export async function writeLoopState/.test(stateCode);
-	ok("writeLoopState function exists", hasWriteLoopState);
-
-	// Document: iteration/loop state use atomicWriteFile without backupBeforeWrite
-	// This is documented in plan review as a known deviation - these are ephemeral
-	// session-state files, not persistent state like swarm-state.json/task.json
-	// Backup is not needed because these are recreatable from running process state
-
-	console.log(
-		"    (note: writeIteration/writeLoopState use atomicWriteFile without backupBeforeWrite - accepted as documented in plan review)",
-	);
+	const scratch = await mkdtemp(join(tmpdir(), "legacy-dirs-"));
+	const p = paths(scratch);
+	// Seed SENTINEL legacy files exactly as a pre-cleanup project would have on disk.
+	const legacy = {
+		"metrics/contract-a.json": JSON.stringify({ id: "contract-a", legacy: true }),
+		"runs/runs.jsonl": JSON.stringify({ runId: "r1" }) + "\n",
+		"memory/memory.jsonl": JSON.stringify({ memoryId: "m1" }) + "\n",
+		"iterations/it-1.json": JSON.stringify({ iterationId: "it-1" }),
+		"loops/task-x.json": JSON.stringify({ taskId: "task-x", enabled: true }),
+		"loops/task-x/history.jsonl": JSON.stringify({ at: "legacy" }) + "\n",
+	};
+	for (const [rel, content] of Object.entries(legacy)) {
+		await mkdir(join(scratch, dirname(rel)), { recursive: true });
+		await writeFile(join(scratch, rel), content);
+	}
+	// The normal startup path (ensureDirs) must NOT delete/rename/alter any legacy file...
+	await ensureDirs(p);
+	for (const [rel, content] of Object.entries(legacy)) {
+		ok(`legacy data preserved byte-for-byte: ${rel}`, (await readFile(join(scratch, rel), "utf8")) === content);
+	}
+	// ...and must NOT create the retired directories in a fresh project.
+	const fresh = await mkdtemp(join(tmpdir(), "fresh-dirs-"));
+	await ensureDirs(paths(fresh));
+	const retiredDirs = ["metrics", "runs", "memory", "iterations", "loops"];
+	const created = retiredDirs.filter((d) => existsSync(join(fresh, d)));
+	ok("fresh project: ensureDirs creates NO retired experimentation dirs", created.length === 0, `created=${JSON.stringify(created)}`);
+	ok("fresh project: live dirs still created", existsSync(join(fresh, ".pi/swarm/mailboxes")) && existsSync(join(fresh, ".pi/swarm/tasks")));
+	await rm(scratch, { recursive: true, force: true });
+	await rm(fresh, { recursive: true, force: true });
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

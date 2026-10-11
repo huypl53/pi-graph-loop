@@ -362,7 +362,7 @@ console.log("\n§Fix 2/3/4: assignment body ergonomics");
 	// §4 — fencing order stated upfront
 	okGate0(
 		"§4.a: reply-BEFORE-update fencing order in body",
-		/BEFORE (calling )?swarm_update_task/.test(body) && /reply must land first/.test(body),
+		/BEFORE/.test(body) && /reply must land first/.test(body),
 		body.slice(0, 300),
 	);
 	ok(

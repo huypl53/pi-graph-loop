@@ -41,7 +41,7 @@ export async function runPumpMaintenancePhasesLocked(
 	// O(N) over agents for the cheap heartbeat gate; tmux probe fires only when an agent's
 	// heartbeat is older than 2× the stale window. Auto-flips `status` from "running" to
 	// "stopped" for agents whose tmux pane is known-dead or freshly probed dead, so the next
-	// sweepTaskWorkersLocked / swarm_prune picks them up. Lease-valid (reuse) and paused
+	// sweepTaskWorkersLocked pass picks them up. Lease-valid (reuse) and paused
 	// agents are exempt. Idempotent across ticks.
 	try {
 		await agentHeartbeatGCLocked(pi, ctx.cwd, p, st, nowMs);

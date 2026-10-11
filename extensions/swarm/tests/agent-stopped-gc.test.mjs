@@ -12,7 +12,7 @@
  *   Gates: status==="stopped" AND id!=="root" AND age >= stoppedOlderThanMs (default 24h)
  *          AND no non-terminal task node references it as assignee AND no response debt.
  *   Visibility: default view hides stopped rows; targeted agentId slim rows keep working;
- *               view:"full" implies includeStopped.
+ *               (legacy view:"full" imply removed 2026-10-10 — includeStopped is explicit-only).
  */
 
 import { dirname, join } from "node:path";
@@ -75,11 +75,7 @@ if (!agentGc || typeof agentGc.stoppedGcCandidates !== "function") {
 } else {
 	ok("module src/agent-gc.ts exports stoppedGcCandidates", true);
 
-	const {
-		stoppedGcCandidates,
-		applyStoppedGc,
-		DEFAULT_STOPPED_OLDER_THAN_MS,
-	} = agentGc;
+	const { stoppedGcCandidates, applyStoppedGc, DEFAULT_STOPPED_OLDER_THAN_MS } = agentGc;
 
 	ok("DEFAULT_STOPPED_OLDER_THAN_MS is 24h", DEFAULT_STOPPED_OLDER_THAN_MS === 24 * HOUR, String(DEFAULT_STOPPED_OLDER_THAN_MS));
 
@@ -141,7 +137,7 @@ if (!agentGc || typeof agentGc.stoppedGcCandidates !== "function") {
 		},
 		{
 			messages: st.messages,
-		delivered: { aged: ["m-9"], referenced: ["m-8"], "in-debt": ["m-7"], root: ["m-0"] },
+			delivered: { aged: ["m-9"], referenced: ["m-8"], "in-debt": ["m-7"], root: ["m-0"] },
 		},
 	);
 	const cands2 = stoppedGcCandidates(st2, { nowMs: NOW, taskGraphs });
@@ -151,12 +147,16 @@ if (!agentGc || typeof agentGc.stoppedGcCandidates !== "function") {
 	ok("purged delivered ledger removed", !st2.delivered.aged, "delivered.aged still present");
 	ok("task-referenced record kept", Boolean(st2.agents.referenced), "referenced removed!");
 	ok("response-debt record kept", Boolean(st2.agents["in-debt"]), "in-debt removed!");
-	ok("dryRun leaves state untouched", (() => {
-		const st3 = makeState({ aged: makeStoppedAgent("aged", NOW - 30 * HOUR) }, { delivered: { aged: ["m-9"] } });
-		const c = stoppedGcCandidates(st3, { nowMs: NOW });
-		applyStoppedGc(st3, c, { dryRun: true });
-		return Boolean(st3.agents.aged) && Boolean(st3.delivered.aged);
-	})(), "dryRun mutated state");
+	ok(
+		"dryRun leaves state untouched",
+		(() => {
+			const st3 = makeState({ aged: makeStoppedAgent("aged", NOW - 30 * HOUR) }, { delivered: { aged: ["m-9"] } });
+			const c = stoppedGcCandidates(st3, { nowMs: NOW });
+			applyStoppedGc(st3, c, { dryRun: true });
+			return Boolean(st3.agents.aged) && Boolean(st3.delivered.aged);
+		})(),
+		"dryRun mutated state",
+	);
 }
 
 // filterAgentRows — default hiding + includeStopped + full view
@@ -164,14 +164,30 @@ if (!agentGc || typeof agentGc.filterAgentRows !== "function") {
 	ok("module src/agent-gc.ts exports filterAgentRows (RED: missing pre-fix)", false, "import failed or export missing");
 } else {
 	const { filterAgentRows } = agentGc;
-	const rows = [statusRow({ id: "root", status: "running" }), statusRow({ id: "live", status: "running" }), statusRow({ id: "dead", status: "stopped" })];
+	const rows = [
+		statusRow({ id: "root", status: "running" }),
+		statusRow({ id: "live", status: "running" }),
+		statusRow({ id: "dead", status: "stopped" }),
+	];
 
-	ok("default view hides stopped rows", filterAgentRows(rows, {}).length === 2 && !filterAgentRows(rows, {}).some((r) => r.status === "stopped"), JSON.stringify(filterAgentRows(rows, {})));
+	ok(
+		"default view hides stopped rows",
+		filterAgentRows(rows, {}).length === 2 && !filterAgentRows(rows, {}).some((r) => r.status === "stopped"),
+		JSON.stringify(filterAgentRows(rows, {})),
+	);
 	ok("includeStopped:true shows all rows", filterAgentRows(rows, { includeStopped: true }).length === 3);
-	ok("view:full implies includeStopped", filterAgentRows(rows, { view: "full" }).length === 3);
-	ok("targeted stopped row still returned (regression guard)", filterAgentRows([rows[2]], { agentId: "dead" }).length === 1, "stopped targeted row was hidden");
+	ok('view:"full" no longer implies includeStopped (removed 2026-10-10)', filterAgentRows(rows, { view: "full" }).length === 2);
+	ok("unknown view values do not leak stopped rows", filterAgentRows(rows, { view: "census" }).length === 2);
+	ok(
+		"targeted stopped row still returned (regression guard)",
+		filterAgentRows([rows[2]], { agentId: "dead" }).length === 1,
+		"stopped targeted row was hidden",
+	);
 	ok("targeted live row unaffected", filterAgentRows([rows[1]], { agentId: "live" }).length === 1);
-	ok("live rows never hidden by default", filterAgentRows(rows, {}).some((r) => r.agentId === "live"));
+	ok(
+		"live rows never hidden by default",
+		filterAgentRows(rows, {}).some((r) => r.agentId === "live"),
+	);
 }
 
 console.log(`\n---\nagent-stopped-gc results: ${passed} passed, ${failed} failed`);

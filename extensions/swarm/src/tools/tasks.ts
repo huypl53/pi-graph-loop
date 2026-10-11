@@ -5,8 +5,6 @@
 //   tasks/assign.ts   — swarm_assign_task (registerAssignTaskTool)
 //   tasks/update.ts   — swarm_update_task (registerUpdateTaskTool)
 //   tasks/fencing.ts  — Issue 83b pure helpers + lateResultRejectionCount stamping (canonical)
-//   tasks/retired.ts  — retired tools preserved as comments (confirm_qualification, validate_graph,
-//                       print_graph, next_nodes, task_message)
 //
 // C8 traceability anchor — supersession-fencing.test.mjs reads THIS file's text and asserts the
 // fence-stamp literals (lateResultRejectionCount increment + attemptHistory[].assignmentMessageId).

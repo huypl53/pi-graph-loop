@@ -170,7 +170,7 @@ export async function staleOpenNudgeLocked(
 
 Act NOW in this turn:
   1. Check the assignee pane (swarm_agent_status) — if idle with the node open, send a high-priority directive naming the exact close action (swarm_update_task to done/failed/blocked + result message).
-  2. If the pane is dead, restart the agent with the brief (swarm_restart_agent) — the assignment record persists.
+  2. If the pane is dead, respawn the agent with the brief via swarm_spawn_agent (root command: /swarm restart <agentId>) — the assignment record persists.
   3. If the node is genuinely long-running (evidence of progress in artifacts), ack this nudge done with a note; it will not re-fire within the window.
 
 (Auto-clears when the node records progress or closes. Capped at ${NOTIFY_DEFAULT_MAX_NUDGES} nudges per node; ${Math.round(NOTIFY_DEFAULT_COOLDOWN_MS / 60000)}min cooldown.)`,

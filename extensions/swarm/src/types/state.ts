@@ -192,12 +192,6 @@ export type Paths = {
 	traces: string;
 	tmuxTraces: string;
 	events: string;
-	metricsDir: string;
-	runsDir: string;
-	runArtifactsDir: string;
-	memoryDir: string;
-	iterationsDir: string;
-	loopsDir: string;
 	/** Append-only completion ledger for issue-run restart dedup (issues-sequencer-restart-dedup). */
 	completionsLedger: string;
 };

@@ -513,7 +513,7 @@ console.log("\n[R10-1] F24 boundary counters");
 {
 	// --- C-F24-1: zero pi.sendMessage calls from the new path ---
 	freshScratch("cf241");
-	const now = Date.now();
+	let now = Date.now();
 	const worker = makeWorker("worker-send", { runtimeStatus: "busy", heartbeatAgeMs: 60_000, tmuxAlive: true });
 	const p = await seed([worker]);
 	const { pi, sendMessages } = makePi({ tmuxAlive: new Map([["goal-deadpane-probe:worker-send.0", false]]) });
@@ -525,8 +525,19 @@ console.log("\n[R10-1] F24 boundary counters");
 	);
 
 	// --- C-F24-3: escalation append exactly 1 per hour-bucket (idempotency dedupe proof) ---
-	// Cooldown expired (lastPoolEmptyEscalationAt 10min ago) but SAME hour-bucket →
-	// the idempotency key `goal:<id>:escalation:pool-empty:<YYYY-MM-DDTHH>` dedupes the append.
+	// Cooldown expired (lastPoolEmptyEscalationAt 10min ago) and the re-fire lands in the SAME
+	// hour-bucket → the idempotency key `goal:<id>:escalation:pool-empty:<YYYY-MM-DDTHH>` dedupes
+	// the append. The re-fire time is DERIVED from `now` (not Date.now()) so the suite is
+	// hour-boundary-immune: if `now + 11min` would cross the hour top, both ticks are pulled back
+	// into `now`'s hour (the dedupe key family is wall-clock-hour based by design — that product
+	// behavior is pinned by root-goal-pool-empty-escalation's cooldown assertions, not here).
+	{
+		const minuteOf = (t) => new Date(t).getUTCMinutes();
+		if (minuteOf(now + 11 * 60_000) < minuteOf(now)) {
+			// crossing the hour top: rewind BOTH ticks into the current hour
+			now -= 15 * 60_000;
+		}
+	}
 	await withLock(p, async () => {
 		const st = await readState(p, scratch);
 		st.idleNudgeState.lastPoolEmptyEscalationAt = new Date(now - 10 * 60_000).toISOString();

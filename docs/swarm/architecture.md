@@ -48,15 +48,20 @@ root pi session
   tasks/<task-id>/              task graph state, events, artifacts
   traces/events.jsonl           structured trace stream
   traces/tmux/*.txt             pane captures and snapshots
-  metrics/                      legacy metric contracts (preserved, unsupported)
-  runs/                         legacy run records (preserved, unsupported)
-  memory/                       legacy memory records (preserved, unsupported) — actively `mkdir`-kept by `src/state.ts` paths init so legacy `swarm-state.json` reads stay consistent
-  iterations/                   legacy iteration sessions (preserved, unsupported)
-  loops/                        legacy loop state (preserved, unsupported)
+  metrics/                      legacy metric contracts (only if already on disk; not created at startup — retired, unsupported)
+  runs/                         legacy run records (only if already on disk; not created at startup — retired, unsupported)
+  memory/                       legacy memory records (only if already on disk; not created at startup — retired, unsupported)
+  iterations/                   legacy iteration sessions (only if already on disk; not created at startup — retired, unsupported)
+  loops/                        legacy loop state (only if already on disk; not created at startup — retired, unsupported)
 ```
 
-The legacy directories remain on disk for historical review, but the core swarm
-extension no longer registers tools or commands for them.
+The legacy experimentation subsystem (metrics/runs/memory/iterations/loops) is fully retired
+(task-202610110323-audit-and-retire-dormant): startup no longer creates these directories, no
+tools/commands are registered for them, and the corresponding state helpers and types were
+deleted after a full call-graph audit. Existing directories and legacy user data on disk are
+intentionally left untouched — no deletion, no migration. Legacy task.json files may still
+carry a `loop` key; reads/writes round-trip unknown JSON keys, so historical data survives
+verbatim.
 
 ## Subsystems
 
@@ -208,7 +213,7 @@ These rules should stay stable unless there is an intentional design change.
 - durable task transitions and ownership checks
 - **file-scope ownership preflight: `swarm_assign_task` rejects overlapping active write scopes with `ACTIVE_SCOPE_CONFLICT` before any mutation**
 - **root-only authority for `force=true` and `cancelTask`** (server-side identity check; a non-root caller is rejected before any mutation)
-- **destructive tools are server-side gated to `PI_SWARM_AGENT_ID=root`** — `swarm_prune`, `swarm_gc`, `swarm_assign_task`, `swarm_update_task(force=…)`, `swarm_stop_agent`, `swarm_release_agent_task` all reject non-root callers with `ROOT_AUTHORITY_REQUIRED` (or `FORCE_FORBIDDEN`/`CANCEL_FORBIDDEN` for the `force`/`cancelTask` paths) before any state mutation
+- **destructive tools are server-side gated to `PI_SWARM_AGENT_ID=root`** — `swarm_assign_task`, `swarm_update_task(force=…)`, `swarm_stop_agent` (and historically the now-retired `swarm_prune`, `swarm_gc`, `swarm_release_agent_task`) reject non-root callers with `ROOT_AUTHORITY_REQUIRED` (or `FORCE_FORBIDDEN`/`CANCEL_FORBIDDEN` for the `force`/`cancelTask` paths) before any state mutation
 - **strict single-root leadership: `ROOT_LEADER_DENIED` rejects a second live pid on gated tool and command paths**
 - **reuse predicate (`matchReusableAgents`) tightens role-kind matching** by re-deriving roleKind from id+role text (Issue 10, Issue 7 misroute fix), honors a same-task active-lease guard (`excludeTaskId`) with an idle carve-out so reclaim stays the right gate, and respects explicit `agentId` / `capabilities` escape-hatches; every substring-collapsed or fallback match emits a `reuse.match_kind` trace for auditability
 - assignment state in task files

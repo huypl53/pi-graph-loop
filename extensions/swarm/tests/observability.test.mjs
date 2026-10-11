@@ -57,7 +57,6 @@ const created = await call("swarm_create_task", {
 		"docs/swarm/tools.md",
 		"extensions/swarm/README.md",
 	],
-	loop: { enabled: true, proposalAgents: [] },
 	cwd: scratch,
 });
 const taskId = created.content[0].text.match(/task-[A-Za-z0-9-]+/)[0];
@@ -187,7 +186,6 @@ const snapshot = renderFlowSnapshot(task, ["implement"], ["plan", "implement"], 
 	index: 1,
 	open: 2,
 	stale: 1,
-	loopLine: "not_started",
 	eventLimit: 3,
 });
 ok("renderFlowSnapshot header", snapshot.includes(`Flow #1 ${taskId} — Implement Swarm Observatory flow UI [in_progress] open=2 stale=1`));

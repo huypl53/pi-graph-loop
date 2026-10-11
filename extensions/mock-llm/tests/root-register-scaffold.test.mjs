@@ -16,7 +16,13 @@ const transcriptRoot = join(scratch, ".pi/mock-llm/transcripts");
 // spawns REAL herdr workspaces in the user's live daemon. Env var is precedence #1 in
 // getTerminalDriver, so this pin makes the lane hermetic regardless of host config.
 // Same pattern as swarm-yml-pool.test.mjs.
-const env = { ...process.env, PI_SWARM_AGENT_ID: "root", PI_SWARM_IS_ROOT: "1", PI_MOCK_LLM_TRANSCRIPTS_DIR: transcriptRoot, PI_SWARM_TERMINAL_MANAGER: "tmux" };
+// PI_SWARM_TERMINAL_MANAGER=tmux + hermetic HOME (test-hermeticity 2026-10-11): the USER's
+// GLOBAL ~/.pi/agent/swarm.yml now declares modelPool (host config drift), which makes
+// ensurePoolScaffold skip the project scaffold ("global covers it") — without the HOME pin
+// this lane asserts host-specific global state. Mirror of pool-scaffold.test.mjs's hermeticHome
+// pin and the terminalManager pin above. PI_SWARM_AGENT_ID/IS_ROOT still required for root lane.
+const hermeticHome = mkdtempSync(join(tmpdir(), "root-register-scaffold-home-"));
+const env = { ...process.env, HOME: hermeticHome, PI_SWARM_AGENT_ID: "root", PI_SWARM_IS_ROOT: "1", PI_MOCK_LLM_TRANSCRIPTS_DIR: transcriptRoot, PI_SWARM_TERMINAL_MANAGER: "tmux" };
 const run = spawnSync(
 	"pi",
 	[

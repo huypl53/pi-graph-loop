@@ -65,7 +65,7 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 			description:
 				"Assign a task graph node to an agent: reuse an idle role-matching agent by default, optionally spawn, update node assignment state + activeTaskIds, and send a structured assignment message carrying taskId/nodeId/replyTarget. task.json is the source of truth. Root-level tool.",
 			promptGuidelines: [
-				"Use `swarm_assign_task` to assign a ready node; it reuses an idle role-matching agent unless autoSpawn/spawnIsolated is set. If it returns NODE_NOT_READY, call swarm_next_nodes first. If NO_AVAILABLE_AGENT, enable autoSpawn or pass an explicit agentId.",
+				"Use `swarm_assign_task` to assign a ready node; it reuses an idle role-matching agent unless autoSpawn/spawnIsolated is set. If it returns NODE_NOT_READY, check the graph first with swarm_task_status (detail:\"graph\") to see which nodes are still blocking. If NO_AVAILABLE_AGENT, enable autoSpawn or pass an explicit agentId.",
 			],
 			parameters: Type.Object({
 				taskId: Type.String({ description: "Task id." }),
@@ -134,7 +134,7 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 								nodeId: params.nodeId,
 								expected: { validNodes: Object.keys(task.nodes) },
 								received: { nodeId: params.nodeId },
-								actionableHint: "Valid node ids are listed in task.json. Run swarm_task_status or swarm_graph to inspect.",
+								actionableHint: "Valid node ids are listed in task.json. Run swarm_task_status to inspect.",
 							});
 						if (TERMINAL_NODE_STATUSES.has(node.status))
 							await failTaskTool(
@@ -171,7 +171,7 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 									nodeId: params.nodeId,
 									expected: { ready: cr.ready, current: cr.current },
 									received: { nodeStatus: node.status },
-									suggestedNextCall: { tool: "swarm_next_nodes", params: { taskId } },
+									suggestedNextCall: { tool: "swarm_task_status", params: { taskId, detail: "graph" } },
 									actionableHint:
 										"The node's dependencies have not all reached a terminal state. Run swarm_task_status to inspect the blocking nodes, or wait for the root to advance the graph.",
 								},

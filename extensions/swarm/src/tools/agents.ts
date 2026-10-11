@@ -3,9 +3,6 @@
 //   agents/status.ts    — swarm_agent_status + swarm_list_agents (registerAgentStatusTools)
 //   agents/lifecycle.ts — swarm_spawn_agent + swarm_stop_agent (registerAgentLifecycleTools)
 //   goals.ts            — swarm_set_goal + swarm_mark_goal_done (registerGoalTools)
-//   agents/retired.ts   — retired tools preserved as comments (prune, identity, reload, trace,
-//                         capture, dead_letters, register, restart, set_role, set_agent_paused,
-//                         send_keys, attach, release)
 //
 // This module is a pure barrel: no behavior, no imports of its own.
 

@@ -166,42 +166,13 @@ console.log("\n[7] ROLE-GATED destructive tools (Issue 10) reject non-root calle
 		fs.writeFile(join(gateScratch, ".pi/swarm/swarm-state.json"), JSON.stringify(seedState, null, 2)),
 	);
 
-	const pruneTool = toolDefs.get("swarm_prune");
-	const gcTool = toolDefs.get("swarm_gc");
-
-	if (pruneTool && gcTool) {
-		// --- (a) non-root caller is rejected BEFORE any state mutation ---
-		process.env.PI_SWARM_AGENT_ID = "worker";
-		delete process.env.PI_SWARM_IS_ROOT;
-		const denyPrune = await pruneTool
-			.execute("call", { dryRun: false, removeStopped: false, markDead: false }, undefined, undefined, mkGateCtx())
-			.then(
-				() => "ALLOWED",
-				(err) => String(err?.message || err),
-			);
-		ok("non-root: swarm_prune rejected with ROOT_AUTHORITY_REQUIRED", denyPrune.includes("ROOT_AUTHORITY_REQUIRED"), denyPrune);
-		const denyGc = await gcTool.execute("call", { dryRun: false }, undefined, undefined, mkGateCtx()).then(
-			() => "ALLOWED",
-			(err) => String(err?.message || err),
-		);
-		ok("non-root: swarm_gc rejected with ROOT_AUTHORITY_REQUIRED", denyGc.includes("ROOT_AUTHORITY_REQUIRED"), denyGc);
-
-		// --- (b) root caller is allowed (dry-run default) ---
-		delete process.env.PI_SWARM_AGENT_ID;
-		process.env.PI_SWARM_IS_ROOT = "1";
-		const allowPrune = await pruneTool.execute("call", {}, undefined, undefined, mkGateCtx()).then(
-			(r) => r?.content?.[0]?.text || "ALLOWED",
-			(err) => `DENIED:${String(err?.message || err)}`,
-		);
-		ok("root: swarm_prune dry-run default succeeds", /Swarm Prune|dryRun/.test(allowPrune), allowPrune.slice(0, 80));
-		const allowGc = await gcTool.execute("call", {}, undefined, undefined, mkGateCtx()).then(
-			(r) => r?.content?.[0]?.text || "ALLOWED",
-			(err) => `DENIED:${String(err?.message || err)}`,
-		);
-		ok("root: swarm_gc dry-run default succeeds", /dry run|applied/.test(allowGc), allowGc.slice(0, 80));
-	} else {
-		ok("destructive tools swarm_prune & swarm_gc are retired/commented out", true);
-	}
+	// --- (a) destructive-tool retirement is UNCONDITIONAL: neither tool may appear in the
+	// registry (2026-10 retired-surface cleanup; former conditional "pass if absent" branch
+	// replaced with hard assertions at the real factory boundary).
+	ok("swarm_prune is absent from the live registry", !toolDefs.has("swarm_prune"));
+	ok("swarm_gc is absent from the live registry (registrar retired from default surface)", !toolDefs.has("swarm_gc"));
+	ok("swarm_ack_message is absent from the live registry", !toolDefs.has("swarm_ack_message"));
+	ok("swarm_message_status is absent from the live registry", !toolDefs.has("swarm_message_status"));
 
 	// Restore
 	if (savedId === undefined) delete process.env.PI_SWARM_AGENT_ID;

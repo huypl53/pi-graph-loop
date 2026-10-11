@@ -116,21 +116,35 @@ const r3 = await tools["swarm_agent_status"].execute("t", { agentId: "aged" }, u
 const v3 = JSON.parse(r3?.content?.[0]?.text ?? "{}");
 ok("targeted stopped agentId returns exactly one slim row", v3.count === 1 && v3.agents?.[0]?.agentId === "aged" && v3.agents?.[0]?.status === "stopped", JSON.stringify(v3));
 
-// --- Lane 4: swarm_gc purgeStopped — tool is retired from the default surface, so the lane
-// drives the REAL registered execute body via direct module registration (same handler the
-// surface used; assertions cover the tool-level text/details contract).
-const gcMod = await import(join(root, "extensions/swarm/src/tools/gc.ts"));
-gcMod.registerGcTools(pi);
-const r4 = await tools["swarm_gc"].execute("t", { purgeStopped: true }, undefined, undefined, { cwd: scratch });
-const t4 = r4?.content?.[0]?.text ?? "";
-ok("gc purgeStopped dry-run: aged eligible", /aged/.test(t4) && !/State unchanged/.test(t4) === false, t4.slice(0, 200));
-ok("gc purgeStopped dry-run: referenced blocked (task-referenced)", /referenced: task-referenced/.test(t4), t4.slice(0, 300));
-ok("gc purgeStopped dry-run: fresh blocked (too-recent)", /fresh: too-recent/.test(t4), t4.slice(0, 300));
+// --- Lane 4: swarm_gc purgeStopped — tool is retired from the default surface (and its
+// registrar module was removed in the 2026-10 retired-surface cleanup), so the lane drives the
+// shared GC/retention helpers DIRECTLY (src/gc.ts pruneState + agent-gc.ts stopped purge)
+// under the same lock/dryRun semantics the former tool body implemented; assertions cover the
+// same eligibility contract.
+const { pruneState } = await import(join(root, "extensions/swarm/src/gc.ts"));
+const { paths, readState, withLock, writeState } = await import(join(root, "extensions/swarm/src/state.ts"));
+const { stoppedGcCandidates, applyStoppedGc } = await import(join(root, "extensions/swarm/src/agent-gc.ts"));
+const { loadTaskGraphsForGc } = await import(join(root, "extensions/swarm/src/agent-gc-io.ts"));
+const gcPreview = await withLock(paths(scratch), async () => {
+	const st = await readState(paths(scratch), scratch);
+	const candidates = stoppedGcCandidates(st, { nowMs: Date.now(), taskGraphs: await loadTaskGraphsForGc(paths(scratch)) });
+	const applied = applyStoppedGc(st, candidates, { dryRun: true });
+	return { purged: applied.purged, blocked: candidates.filter((c) => !c.eligible).map((c) => ({ agentId: c.agentId, blocked: c.blocked })) };
+});
+const t4 = JSON.stringify(gcPreview);
+ok("gc purgeStopped dry-run: aged eligible", gcPreview.purged.includes("aged"), t4.slice(0, 200));
+ok("gc purgeStopped dry-run: referenced blocked (task-referenced)", gcPreview.blocked.some((b) => b.agentId === "referenced" && b.blocked.includes("task-referenced")), t4.slice(0, 300));
+ok("gc purgeStopped dry-run: fresh blocked (too-recent)", gcPreview.blocked.some((b) => b.agentId === "fresh" && b.blocked.includes("too-recent")), t4.slice(0, 300));
 const stateAfterDry = JSON.parse(await readFile(join(scratch, ".pi/swarm/swarm-state.json"), "utf8"));
 ok("gc purgeStopped dry-run: state untouched", Boolean(stateAfterDry.agents.aged), "aged removed in dry run!");
 
 // --- Lane 5: purgeStopped apply removes only the eligible record ---
-const r5 = await tools["swarm_gc"].execute("t", { purgeStopped: true, dryRun: false }, undefined, undefined, { cwd: scratch });
+await withLock(paths(scratch), async () => {
+	const st = await readState(paths(scratch), scratch);
+	const candidates = stoppedGcCandidates(st, { nowMs: Date.now(), taskGraphs: await loadTaskGraphsForGc(paths(scratch)) });
+	applyStoppedGc(st, candidates, { dryRun: false });
+	await writeState(paths(scratch), st);
+});
 const stateAfterApply = JSON.parse(await readFile(join(scratch, ".pi/swarm/swarm-state.json"), "utf8"));
 ok("gc purgeStopped apply: aged record purged", !stateAfterApply.agents.aged, "aged still present");
 ok("gc purgeStopped apply: aged delivered ledger purged", !stateAfterApply.delivered?.aged, "delivered.aged still present");

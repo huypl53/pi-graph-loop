@@ -21,22 +21,20 @@ import { logSwarmError } from "../errorlog.ts";
 // === R16 (2026-09-02): turn-end resolve-action detector (module-scope export) ===
 // A turn_end{stop, role=assistant} is a RESOLVE only if the root ADVANCED the goal
 // in that turn — i.e., the message contains a swarm tool call (swarm_spawn_agent /
-// swarm_assign_task / swarm_mark_goal_done / swarm_set_goal / swarm_restart_agent /
+// swarm_assign_task / swarm_mark_goal_done / swarm_set_goal /
 // swarm_send_message / swarm_reconcile / swarm_update_task / swarm_create_task /
-// swarm_stop_agent / swarm_release_agent_task) OR an explicit user-direction message
+// swarm_stop_agent) OR an explicit user-direction message
 // was sent via a tool call in the same turn.
 export const SWARM_RESOLVE_TOOLS: ReadonlySet<string> = new Set([
 	"swarm_spawn_agent",
 	"swarm_assign_task",
 	"swarm_mark_goal_done",
 	"swarm_set_goal",
-	"swarm_restart_agent",
 	"swarm_send_message",
 	"swarm_reconcile",
 	"swarm_update_task",
 	"swarm_create_task",
 	"swarm_stop_agent",
-	"swarm_release_agent_task",
 ]);
 export function turnEndIsResolveAction(event: any): { resolve: boolean; reason: string; toolNames?: string[] } {
 	const msg: any = event?.message;
@@ -124,8 +122,8 @@ export function registerTurnHooks(pi: ExtensionAPI) {
 	// R16 fix: a turn_end{stop, role=assistant} is a RESOLVE only if the root actually
 	// ADVANCED the goal in that turn — i.e., the message contains a swarm tool call
 	// (swarm_spawn_agent / swarm_assign_task / swarm_mark_goal_done / swarm_set_goal /
-	// swarm_restart_agent / swarm_send_message / swarm_reconcile / swarm_update_task /
-	// swarm_create_task / swarm_stop_agent / swarm_release_agent_task) OR an explicit user-
+	// swarm_send_message / swarm_reconcile / swarm_update_task /
+	// swarm_create_task / swarm_stop_agent) OR an explicit user-
 	// direction message was sent via a tool call in the same turn.
 	//
 	// Pure ack text ("Got it, will continue", "Acknowledged", "Will keep going") does NOT count:
