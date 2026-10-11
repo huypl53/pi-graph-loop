@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Static, dependency-free HTML dashboard generator for .pi/swarm state.
 
-Reads the file-backed swarm state (metrics / runs / memory / iterations /
-traces / tasks / mailboxes / swarm-state) and emits a single self-contained
-HTML file (inline CSS + minimal JS, no external runtime dependencies) that
-prioritizes three sections: per-iteration metric improvement, task-graph node
-flow, and agent conversation. Supports completed/historical review (one-shot)
-and live regeneration (--live loop + optional auto-refresh meta tag).
+Task-focused: reads the file-backed swarm state (tasks / swarm-state / mailboxes /
+traces) and emits a single self-contained HTML file (inline CSS + minimal JS, no
+external runtime dependencies) that prioritizes three sections: task-graph node
+flow, agent conversation, and a task/node/artifact inspector. Supports
+completed/historical review (one-shot) and live regeneration (--live loop +
+optional auto-refresh meta tag).
 
-Data loaders are imported from the sibling swarm_iteration_watch module so the
-two tools share one source of truth for the data model.
+All loaders are local and read-only. Paths are contained to the selected cwd.
+No writes outside the explicit --out path.
 
 See docs/swarm-dashboard.md for usage.
 """
@@ -21,10 +21,6 @@ import signal
 import sys
 import time
 
-# reuse the shared data model from the sibling watcher (same scripts/ dir)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import swarm_iteration_watch as W  # noqa: E402
-
 
 # --------------------------------------------------------------- html helpers
 def esc(s):
@@ -32,7 +28,12 @@ def esc(s):
 
 
 def trunc_esc(s, n):
-    return esc(W.trunc(s, n))
+    if s is None:
+        return ""
+    s = str(s)
+    if len(s) <= n:
+        return esc(s)
+    return esc(s[: max(0, n - 1)] + "\u2026")
 
 
 def badge(text, kind=""):
@@ -57,7 +58,13 @@ def status_badge(status):
 
 
 def vis_num(v):
-    return W.num(v)
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if v is None:
+        return "-"
+    return esc(v)
 
 
 def table(headers, rows, caption=None, cls=""):
@@ -69,18 +76,292 @@ def table(headers, rows, caption=None, cls=""):
     return f'<div class="tablewrap"><table class="{cls}">{cap}<thead>{head}</thead><tbody>{body}</tbody></table></div>'
 
 
+# --------------------------------------------------------------- local loaders
+def state_root(cwd):
+    """Resolve the .pi/swarm root under cwd. Returns the absolute path or None.
+
+    The trust boundary is the realpath of cwd. If .pi or .pi/swarm is a
+    symlink, it is rejected (returns None) to prevent the trust root from
+    being redirected outside the selected cwd.
+    """
+    if not cwd:
+        return None
+    abs_cwd = os.path.abspath(cwd)
+    real_cwd = os.path.realpath(abs_cwd)
+    # Reject if .pi is a symlink (would redirect trust root outside cwd).
+    pi_path = os.path.join(real_cwd, ".pi")
+    if os.path.islink(pi_path):
+        print(f"[swarm_dashboard] WARN: .pi is a symlink; rejecting trust root", file=sys.stderr)
+        return None
+    # Reject if .pi/swarm is a symlink.
+    swarm_path = os.path.join(pi_path, "swarm")
+    if os.path.islink(swarm_path):
+        print(f"[swarm_dashboard] WARN: .pi/swarm is a symlink; rejecting trust root", file=sys.stderr)
+        return None
+    return swarm_path
+
+
+def _resolve_within(root, rel):
+    """Resolve rel under root and ensure the realpath stays under root.
+
+    Uses os.path.realpath to follow symlinks, then checks containment via
+    commonpath against the realpath of root. Returns the realpath on
+    success, None on escape or error.
+    """
+    if not root or rel is None:
+        return None
+    rel = str(rel)
+    abs_root = os.path.realpath(root)
+    if os.path.isabs(rel):
+        candidate = rel
+    else:
+        candidate = os.path.join(abs_root, rel)
+    try:
+        real = os.path.realpath(candidate)
+    except (OSError, ValueError):
+        return None
+    try:
+        common = os.path.commonpath([real, abs_root])
+    except ValueError:
+        return None
+    if common != abs_root:
+        return None
+    return real
+
+
+def _read_json(path, default, label="json"):
+    """Read a JSON file. Missing optional files return default silently;
+    malformed JSON and unexpected I/O errors are surfaced to stderr."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except json.JSONDecodeError as e:
+        print(f"[swarm_dashboard] WARN: malformed {label} at {path}: {e}", file=sys.stderr)
+        return default
+    except (PermissionError, IsADirectoryError) as e:
+        print(f"[swarm_dashboard] WARN: cannot read {label} at {path}: {e}", file=sys.stderr)
+        return default
+    except OSError as e:
+        print(f"[swarm_dashboard] WARN: I/O error reading {label} at {path}: {e}", file=sys.stderr)
+        return default
+
+
+def _read_jsonl(path, label="jsonl"):
+    """Read a JSONL file. Missing optional files return [] silently;
+    malformed lines and unexpected I/O errors are surfaced to stderr."""
+    out = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    print(f"[swarm_dashboard] WARN: malformed {label} line {lineno} at {path}: {e}", file=sys.stderr)
+    except FileNotFoundError:
+        pass
+    except (PermissionError, IsADirectoryError) as e:
+        print(f"[swarm_dashboard] WARN: cannot read {label} at {path}: {e}", file=sys.stderr)
+    except OSError as e:
+        print(f"[swarm_dashboard] WARN: I/O error reading {label} at {path}: {e}", file=sys.stderr)
+    return out
+
+
+def load_swarm_id(root):
+    if not root:
+        return None
+    state_path = _resolve_within(root, "swarm-state.json")
+    if state_path is None:
+        # Distinguish missing file (expected) from escaped path (warn).
+        candidate = os.path.join(root, "swarm-state.json")
+        if os.path.lexists(candidate):
+            print(f"[swarm_dashboard] WARN: swarm-state.json path escapes root; treating as empty", file=sys.stderr)
+        return None
+    state = _read_json(state_path, {}, label="swarm-state.json")
+    return state.get("swarmId") if isinstance(state, dict) else None
+
+
+def load_swarm_state(root):
+    if not root:
+        return {}
+    state_path = _resolve_within(root, "swarm-state.json")
+    if state_path is None:
+        # Distinguish missing file (expected) from escaped path (warn).
+        candidate = os.path.join(root, "swarm-state.json")
+        if os.path.lexists(candidate):
+            print(f"[swarm_dashboard] WARN: swarm-state.json path escapes root; treating as empty", file=sys.stderr)
+        return {}
+    state = _read_json(state_path, {}, label="swarm-state.json")
+    return state if isinstance(state, dict) else {}
+
+
+def load_messages_by_id(root):
+    """Index every mailbox JSONL record by id. Returns {id: record}."""
+    out = {}
+    if not root:
+        return out
+    mb_dir = os.path.join(root, "mailboxes")
+    if not os.path.isdir(mb_dir):
+        return out
+    try:
+        names = os.listdir(mb_dir)
+    except (PermissionError, OSError) as e:
+        print(f"[swarm_dashboard] WARN: cannot list mailboxes at {mb_dir}: {e}", file=sys.stderr)
+        return out
+    for name in names:
+        if not name.endswith(".jsonl"):
+            continue
+        # Containment: resolve the mailbox file's realpath and ensure it stays under root.
+        mb_path = _resolve_within(root, os.path.join("mailboxes", name))
+        if mb_path is None:
+            print(f"[swarm_dashboard] WARN: skipping mailbox {name} (path escapes root)", file=sys.stderr)
+            continue
+        for rec in _read_jsonl(mb_path, label=f"mailbox {name}"):
+            mid = rec.get("id")
+            if isinstance(mid, str):
+                out[mid] = rec
+    return out
+
+
+def load_trace_tail(root, n):
+    """Return the last n events from the global trace JSONL (events.jsonl)."""
+    if not root or n is None or n <= 0:
+        return []
+    trace_path = _resolve_within(root, os.path.join("traces", "events.jsonl"))
+    if trace_path is None:
+        print(f"[swarm_dashboard] WARN: traces path escapes root; trace events unavailable", file=sys.stderr)
+        return []
+    events = _read_jsonl(trace_path, label="traces/events.jsonl")
+    return events[-n:]
+
+
+def discover_tasks(root):
+    """Return a list of {id, task, status, title, nodeCount, doneCount} for every task.json."""
+    out = []
+    if not root:
+        return out
+    tasks_dir = os.path.join(root, "tasks")
+    if not os.path.isdir(tasks_dir):
+        return out
+    try:
+        names = os.listdir(tasks_dir)
+    except (PermissionError, OSError) as e:
+        print(f"[swarm_dashboard] WARN: cannot list tasks at {tasks_dir}: {e}", file=sys.stderr)
+        return out
+    for name in names:
+        # Reject any task dir name that contains path separators or traversal.
+        if not name or name in (".", "..") or os.sep in name or "/" in name:
+            print(f"[swarm_dashboard] WARN: skipping task dir with unsafe name: {name!r}", file=sys.stderr)
+            continue
+        # Resolve task.json through _resolve_within to catch symlinked task.json files.
+        tpath = _resolve_within(root, os.path.join("tasks", name, "task.json"))
+        if tpath is None:
+            print(f"[swarm_dashboard] WARN: skipping task dir {name} (path escapes root)", file=sys.stderr)
+            continue
+        if not os.path.isfile(tpath):
+            continue
+        t = _read_json(tpath, {}, label=f"task {name}/task.json")
+        if not isinstance(t, dict):
+            continue
+        nodes = t.get("nodes") or {}
+        done = sum(1 for n in nodes.values() if isinstance(n, dict) and n.get("status") == "done")
+        out.append({
+            "id": t.get("taskId") or name,
+            "task": t,
+            "status": t.get("status"),
+            "title": t.get("title") or "",
+            "nodeCount": len(nodes),
+            "doneCount": done,
+        })
+    out.sort(key=lambda x: x.get("id") or "")
+    return out
+
+
+def load_task(root, task_id):
+    if not root or not task_id:
+        return None
+    # Reject task_id that contains path separators or traversal segments.
+    tid = str(task_id)
+    if not tid or tid in (".", "..") or os.sep in tid or "/" in tid or "\\" in tid:
+        print(f"[swarm_dashboard] WARN: rejecting unsafe task id: {task_id!r}", file=sys.stderr)
+        return None
+    # Resolve task.json through _resolve_within to catch symlinked task.json files.
+    tpath = _resolve_within(root, os.path.join("tasks", tid, "task.json"))
+    if tpath is None:
+        print(f"[swarm_dashboard] WARN: task id {task_id!r} resolves outside root", file=sys.stderr)
+        return None
+    t = _read_json(tpath, None, label=f"task {tid}/task.json")
+    return t if isinstance(t, dict) else None
+
+
+def collect_task_msg_ids(task):
+    """Collect every message id referenced by a task (nodes + handoffs)."""
+    if not isinstance(task, dict):
+        return []
+    mids = set()
+    nodes = task.get("nodes") or {}
+    for n in nodes.values():
+        if not isinstance(n, dict):
+            continue
+        for k in ("messageIds", "assignmentMessageId"):
+            v = n.get(k)
+            if isinstance(v, str):
+                mids.add(v)
+            elif isinstance(v, list):
+                for x in v:
+                    if isinstance(x, str):
+                        mids.add(x)
+    for h in task.get("handoffs") or []:
+        if isinstance(h, dict):
+            mid = h.get("messageId")
+            if isinstance(mid, str):
+                mids.add(mid)
+    return sorted(mids)
+
+
+def mailbox_bodies_for(root, mids):
+    """Return {id: body_record} for the given message ids, scanning mailbox JSONLs."""
+    out = {}
+    if not root or not mids:
+        return out
+    mb_dir = os.path.join(root, "mailboxes")
+    if not os.path.isdir(mb_dir):
+        return out
+    wanted = set(mids)
+    try:
+        names = os.listdir(mb_dir)
+    except (PermissionError, OSError) as e:
+        print(f"[swarm_dashboard] WARN: cannot list mailboxes at {mb_dir}: {e}", file=sys.stderr)
+        return out
+    for name in names:
+        if not name.endswith(".jsonl"):
+            continue
+        mb_path = _resolve_within(root, os.path.join("mailboxes", name))
+        if mb_path is None:
+            print(f"[swarm_dashboard] WARN: skipping mailbox {name} (path escapes root)", file=sys.stderr)
+            continue
+        for rec in _read_jsonl(mb_path, label=f"mailbox {name}"):
+            if rec.get("id") in wanted:
+                out[rec["id"]] = rec
+    return out
+
+
 # --------------------------------------------------------------- sections
 def render_overview(ctx, args):
-    tasks, sessions = ctx["tasks"], ctx["sessions"]
-    runs, memories = ctx["runs"], ctx["memories"]
+    tasks = ctx["tasks"]
+    state = ctx["state"]
+    agents = state.get("agents") or {}
     done_tasks = sum(1 for t in tasks if t.get("status") == "done")
-    active_mem = sum(1 for m in memories.values() if m.get("status") == "active")
-    rej_mem = sum(1 for m in memories.values() if m.get("status") == "rejected")
+    failed_tasks = sum(1 for t in tasks if t.get("status") == "failed")
+    inprog_tasks = sum(1 for t in tasks if t.get("status") == "in_progress")
     cards = (
-        ("Tasks", f"{len(tasks)}", f"{done_tasks} done"),
-        ("Iterations", f"{len(sessions)}", ""),
-        ("Runs", f"{len(runs)}", ""),
-        ("Memories", f"{len(memories)}", f"{active_mem} active / {rej_mem} rejected"),
+        ("Tasks", f"{len(tasks)}", f"{done_tasks} done / {failed_tasks} failed / {inprog_tasks} in progress"),
+        ("Agents", f"{len(agents)}", ""),
+        ("Messages", f"{len(ctx['messages'])}", ""),
     )
     out = ['<div class="cards">']
     for label, big, sub in cards:
@@ -92,89 +373,6 @@ def render_overview(ctx, args):
                  trunc_esc(t.get("title"), 48), f'{t["doneCount"]}/{t["nodeCount"]}']
                 for t in tasks]
         out.append(table(["Task", "Status", "Title", "Nodes done"], rows, "Task graphs"))
-    return "\n".join(out)
-
-
-def _iter_chart_svg(deltas, best):
-    rows = deltas.get("rows") or []
-    nums = [r["value"] for r in rows if W._is_num(r["value"])]
-    if not nums:
-        return '<p class="muted">(no numeric metric values to chart)</p>'
-    target = best.get("target")
-    lo = min(min(nums), target if W._is_num(target) else 0, 0)
-    hi = max(max(nums), target if W._is_num(target) else 0, lo + 1)
-    span = (hi - lo) or 1
-    n = len(rows)
-    bw, gap, left, pad = 46, 14, 34, 18
-    W_ = left + n * (bw + gap) + gap
-    H = 150
-    base_y = H - 22
-    top_y = 16
-    plot_h = base_y - top_y
-    best_id = best.get("bestRunId")
-    parts = [f'<svg class="chart" role="img" aria-label="Metric {esc(deltas.get("metricId"))} across {n} iterations: {" ".join(vis_num(r["value"]) for r in rows)}" viewBox="0 0 {W_} {H}" preserveAspectRatio="xMidYMid meet">']
-    # baseline axis line
-    zero_y = base_y - ((0 - lo) / span) * plot_h
-    parts.append(f'<line x1={left} y1={zero_y:.1f} x2={W_-gap:.1f} y2={zero_y:.1f} class=axis />')
-    if W._is_num(target):
-        ty = base_y - ((target - lo) / span) * plot_h
-        parts.append(f'<line x1={left} y1={ty:.1f} x2={W_-gap:.1f} y2={ty:.1f} class=target /><text x={W_-gap:.1f} y={ty-4:.1f} class=axislbl text-anchor=end>target {vis_num(target)}</text>')
-    for i, r in enumerate(rows):
-        x = left + i * (bw + gap) + gap
-        v = r["value"]
-        if W._is_num(v):
-            h = max(2, (v - lo) / span * plot_h) if v >= 0 else max(2, (lo - 0) / span * plot_h * 0 + 2)
-            y = base_y - ((v - lo) / span) * plot_h
-            h = base_y - y
-            cls = "bar best" if (best_id and r.get("runId") == best_id) else "bar"
-            parts.append(f'<rect x={x:.1f} width={bw} y={y:.1f} height={max(2,h):.1f} rx=3 class="{cls}" />')
-            parts.append(f'<text x={x+bw/2:.1f} y={y-4:.1f} class=val text-anchor=middle>{vis_num(v)}</text>')
-        else:
-            parts.append(f'<text x={x+bw/2:.1f} y={base_y-4:.1f} class=val gap text-anchor=middle>n/a</text>')
-        idx = "base" if i == 0 else f"#{r.get('index')}"
-        parts.append(f'<text x={x+bw/2:.1f} y={base_y+14:.1f} class=axislbl text-anchor=middle>{esc(idx)}</text>')
-        dp = r.get("deltaPrev")
-        if i > 0 and dp is not None:
-            parts.append(f'<text x={x+bw/2:.1f} y={base_y+27:.1f} class=delta text-anchor=middle>{"+" if dp>=0 else ""}{vis_num(dp)}</text>')
-    parts.append("</svg>")
-    return "".join(parts)
-
-
-def render_iterations(ctx, args):
-    sessions = ctx["sessions"]
-    contracts = ctx["contracts"]
-    runs = ctx["runs"]
-    out = []
-    sel = sessions
-    if args.iteration:
-        sel = {args.iteration: sessions[args.iteration]} if args.iteration in sessions else {}
-        if not sel:
-            out.append(f'<p class="muted">Iteration <code>{esc(args.iteration)}</code> not found.</p>')
-    if not sel:
-        out.append('<p class="muted">No iteration sessions under this cwd. Run <code>bash scripts/swarm_iteration_demo.sh</code> first.</p>')
-        return "\n".join(out)
-    for sid, s in sel.items():
-        cid = s.get("metricContractId")
-        contract = contracts.get(cid) if cid else None
-        best = W.compute_best(s, runs, contract)
-        deltas = W.per_entry_deltas(s, runs, contract)
-        pm = (contract or {}).get("primaryMetric", {}) if contract else {}
-        drift = (s.get("bestRunId") and best.get("bestRunId") and s.get("bestRunId") != best.get("bestRunId"))
-        imp = vis_num(best.get("improvement")) if best.get("improvement") is not None else (f"passing={best.get('passingCount')}" if best.get("passingCount") is not None else "-")
-        out.append(f'<div class="card session" id="iter-{esc(sid)}">')
-        out.append(f'<h3>{esc(sid)} <span class="muted">/ {esc(cid)}</span> {status_badge(s.get("status"))}</h3>')
-        out.append(f'<p class="goal">{trunc_esc(s.get("goal"), 120)}</p>')
-        out.append('<dl class="kv">')
-        out.append(f'<dt>Metric</dt><dd><code>{esc(pm.get("id"))}</code> dir={esc(pm.get("direction"))} type={esc(pm.get("valueType"))} mmc={esc(pm.get("minimumMeaningfulChange"))} target={esc(pm.get("target"))}</dd>')
-        out.append(f'<dt>Baseline</dt><dd>run <code>{trunc_esc(best.get("baselineRunId"),22)}</code> = {vis_num(best.get("baselineValue"))}</dd>')
-        out.append(f'<dt>Best</dt><dd>run <code>{trunc_esc(best.get("bestRunId"),22)}</code> = {vis_num(best.get("bestValue"))} &mdash; improvement {imp}, meaningful={best.get("meaningful")}' + (' <strong class=warn>DRIFT vs stored</strong>' if drift else '') + '</dd>')
-        out.append(f'<dt>Missing metric values</dt><dd>{best.get("missingCount")}</dd>')
-        out.append('</dl>')
-        out.append(_iter_chart_svg(deltas, best))
-        # visible text summary of the chart (accessibility + at-a-glance)
-        trend = "; ".join(f"#{r.get('index') if i else 'base'}={vis_num(r.get('value'))}" + (f" (\u0394{vis_num(r.get('deltaPrev'))})" if i and r.get("deltaPrev") is not None else "") for i, r in enumerate(deltas.get("rows") or []))
-        out.append(f'<p class="chart-summary"><strong>Trend:</strong> {esc(trend or "n/a")}. Direction {esc(deltas.get("direction"))}; best is <code>{trunc_esc(best.get("bestRunId"),22)}</code>.</p>')
-        out.append("</div>")
     return "\n".join(out)
 
 
@@ -370,8 +568,8 @@ def render_graphs(ctx, args):
 
 
 def _gather_task_messages(task, ctx, cap):
-    mids = W.collect_task_msg_ids(task)
-    bodies = W.mailbox_bodies_for(ctx["root"], mids)
+    mids = collect_task_msg_ids(task)
+    bodies = mailbox_bodies_for(ctx["root"], mids)
     rows = []
     seen = set()
     for mid in mids:
@@ -447,13 +645,13 @@ def render_conversation(ctx, args):
                     resp = (rec.get("response") or {}).get("status")
                     rid = lastack.get("resultMessageId")
                     btxt = (body.get("body") if isinstance(body, dict) else None) or ""
-                    body_html = f'<details><summary>body</summary><pre class="msgbody">{esc(W.trunc(btxt, 600))}</pre></details>' if btxt else ""
+                    body_html = f'<details><summary>body</summary><pre class="msgbody">{esc(trunc_esc(btxt, 600))}</pre></details>' if btxt else ""
                     resp_html = f' <span class="badge mini">{esc(resp)}</span>' if resp else ""
                     convo_tag = f'<div class="msgmeta"><span class="chip">task {esc(t["id"])}</span><span class="chip">{esc(convo_id)}</span><span class="chip">{esc(pair)}</span></div>'
                     result_html = ""
                     if rid and rid in ctx["messages"]:
                         rrec = ctx["messages"].get(rid) or {}
-                        rbody = W.mailbox_bodies_for(ctx["root"], [rid]).get(rid, {})
+                        rbody = mailbox_bodies_for(ctx["root"], [rid]).get(rid, {})
                         rsubj = (rbody.get("subject") if isinstance(rbody, dict) else None) or rrec.get("subject") or "RESULT"
                         result_html = f'<div class="reply">&rarr; reply <code>{trunc_esc(rid,20)}</code>: {trunc_esc(rsubj, 70)}</div>'
                     out.append(f'<li class="msg {ackcls}"><div class="msghead">'
@@ -469,66 +667,38 @@ def render_conversation(ctx, args):
     return "\n".join(out)
 
 
-def render_memories(ctx, args):
-    memories = ctx["memories"]
-    out = ["<div class='cards small'>"]
-    by = {}
-    for m in memories.values():
-        by.setdefault(m.get("status", "?"), []).append(m)
-    for st in ("active", "proposed", "rejected", "expired"):
-        out.append(f'<div class="card"><div class=big>{len(by.get(st, []))}</div><div class=label>{esc(st)}</div></div>')
-    out.append("</div>")
-    if not memories:
-        out.append('<p class="muted">No memories under this cwd.</p>')
-        return "\n".join(out)
-    rows = []
-    for m in memories.values():
-        ev_refs = m.get("evidenceRefs") or []
-        ev = []
-        for r in ev_refs:
-            ok = os.path.exists(os.path.join(ctx["root"], "..", r)) if not os.path.isabs(r) else os.path.exists(r)
-            ev.append(f'<span class="ev {"ok" if ok else "miss"}">{"\u2713" if ok else "\u2717"} {esc(r)}</span>')
-        ev_html = " ".join(ev) or '<span class="muted">none</span>'
-        reason = f'<div class=muted>reason: {trunc_esc(m.get("rejectionReason"), 80)}</div>' if m.get("rejectionReason") else ""
-        rows.append([f'<a href="#mem-{esc(m.get("memoryId"))}">{trunc_esc(m.get("memoryId"), 22)}</a>',
-                     status_badge(m.get("status")), trunc_esc(m.get("claim"), 50),
-                     trunc_esc(m.get("sourceRunId"), 16), ev_html + reason])
-    out.append(table(["Memory", "Status", "Claim", "Source run", "Evidence"], rows, "Memories and evidence"))
-    return "\n".join(out)
-
-
-def _load_task_node(ctx, task_id, node_id):
-    task = W.load_task(ctx["root"], task_id)
-    if not task:
-        return None, None
-    node = (task.get("nodes") or {}).get(node_id)
-    return task, node
-
-
 def _read_artifact_text(root, artifact_path, limit=20000):
+    """Read an artifact file with strict containment.
+
+    Returns (realpath, text) on success, (None, None) if the path is missing
+    or escapes root. The realpath is symlink-resolved; only files whose
+    realpath stays under root are readable. Unexpected I/O errors are
+    surfaced to stderr.
+    """
     if not artifact_path:
         return None, None
-    path = artifact_path
-    if not os.path.isabs(path):
-        path = os.path.normpath(os.path.join(root, path))
-    if not os.path.exists(path):
-        return path, None
+    real = _resolve_within(root, artifact_path)
+    if real is None:
+        print(f"[swarm_dashboard] WARN: artifact path escapes root: {artifact_path!r}", file=sys.stderr)
+        return None, None
+    if not os.path.isfile(real):
+        return real, None
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return path, f.read(limit)
-    except Exception:
-        return path, None
+        with open(real, "r", encoding="utf-8") as f:
+            return real, f.read(limit)
+    except (PermissionError, IsADirectoryError) as e:
+        print(f"[swarm_dashboard] WARN: cannot read artifact {real}: {e}", file=sys.stderr)
+        return real, None
+    except OSError as e:
+        print(f"[swarm_dashboard] WARN: I/O error reading artifact {real}: {e}", file=sys.stderr)
+        return real, None
 
 
 def render_inspector(ctx, args):
     out = ['<div class="inspector">']
     shown = False
-    if args.run and args.run in ctx["runs"]:
-        out.append(f'<section class="inspectblock"><h3>Run inspector &mdash; <code>{esc(args.run)}</code></h3>')
-        out.append(f'<pre class="raw">{esc(json.dumps(ctx["runs"][args.run], indent=2, default=str))}</pre></section>')
-        shown = True
     if args.task:
-        t = W.load_task(ctx["root"], args.task)
+        t = load_task(ctx["root"], args.task)
         if t:
             out.append(f'<section class="inspectblock"><h3>Task inspector &mdash; <code>{esc(args.task)}</code></h3>')
             out.append(f'<pre class="raw">{esc(json.dumps(t, indent=2, default=str))}</pre></section>')
@@ -557,72 +727,73 @@ def render_inspector(ctx, args):
                 else:
                     out.append(f'<section class="inspectblock"><h3>Node inspector &mdash; <code>{esc(args.node)}</code></h3><p class="muted">Node not found in task <code>{esc(args.task)}</code>.</p></section>')
                     shown = True
-    if args.iteration and args.iteration in ctx["sessions"]:
-        out.append(f'<section class="inspectblock"><h3>Iteration inspector &mdash; <code>{esc(args.iteration)}</code></h3>')
-        out.append(f'<pre class="raw">{esc(json.dumps(ctx["sessions"][args.iteration], indent=2, default=str))}</pre></section>')
-        shown = True
     if args.message and args.message in ctx["messages"]:
         out.append(f'<section class="inspectblock"><h3>Message inspector &mdash; <code>{esc(args.message)}</code></h3>')
-        body = W.mailbox_bodies_for(ctx["root"], [args.message]).get(args.message, {})
+        body = mailbox_bodies_for(ctx["root"], [args.message]).get(args.message, {})
         rec = dict(ctx["messages"][args.message])
         if isinstance(body, dict):
             rec["_body"] = body.get("body")
         out.append(f'<pre class="raw">{esc(json.dumps(rec, indent=2, default=str))}</pre></section>')
         shown = True
-    if getattr(args, "memory", None) and args.memory in ctx["memories"]:
-        out.append(f'<section class="inspectblock" id="mem-{esc(args.memory)}"><h3>Memory inspector &mdash; <code>{esc(args.memory)}</code></h3>')
-        out.append(f'<pre class="raw">{esc(json.dumps(ctx["memories"][args.memory], indent=2, default=str))}</pre></section>')
-        shown = True
     if getattr(args, "artifact", None):
-        path, text = _read_artifact_text(ctx["root"], args.artifact)
         out.append(f'<section class="inspectblock"><h3>Artifact inspector &mdash; <code>{esc(args.artifact)}</code></h3>')
-        if path and text is not None:
+        # First try to resolve as inside .pi/swarm (inline content).
+        path, text = _read_artifact_text(ctx["root"], args.artifact)
+        if path is not None and text is not None:
             rel = os.path.relpath(path, ctx["root"]) if os.path.isabs(path) else path
-            if os.path.abspath(path).startswith(os.path.abspath(os.path.join(ctx["root"], ".pi", "swarm"))):
-                out.append(f'<p class="muted">Rendered from <code>{esc(rel)}</code></p>')
-                out.append(f'<pre class="raw artifacttext">{esc(text)}</pre>')
-            else:
-                out.append(f'<p class="muted">Artifact exists outside <code>.pi/swarm</code>: <code>{esc(rel)}</code></p>')
-                out.append(f'<p><a href="file://{esc(path)}">Open artifact</a></p>')
+            out.append(f'<p class="muted">Rendered from <code>{esc(rel)}</code></p>')
+            out.append(f'<pre class="raw artifacttext">{esc(text)}</pre>')
         else:
-            out.append(f'<p class="muted">Artifact not found: <code>{esc(path or args.artifact)}</code></p>')
+            # Not inside .pi/swarm. Resolve relative paths against .pi/swarm (same as inline reads),
+            # then check if the resolved path is inside cwd but outside .pi/swarm (link-only).
+            cwd_real = os.path.realpath(os.path.abspath(args.cwd or "."))
+            swarm_real = os.path.realpath(ctx["root"]) if ctx["root"] else None
+            art_real = None
+            try:
+                if os.path.isabs(args.artifact):
+                    art_real = os.path.realpath(args.artifact)
+                elif swarm_real:
+                    # Resolve relative paths against .pi/swarm (same anchor as inline reads).
+                    art_real = os.path.realpath(os.path.join(swarm_real, args.artifact))
+                else:
+                    art_real = os.path.realpath(os.path.join(cwd_real, args.artifact))
+            except (OSError, ValueError):
+                art_real = None
+            inside_cwd = False
+            if art_real:
+                try:
+                    inside_cwd = os.path.commonpath([art_real, cwd_real]) == cwd_real
+                except ValueError:
+                    inside_cwd = False
+            if inside_cwd and os.path.isfile(art_real):
+                rel = os.path.relpath(art_real, cwd_real)
+                out.append(f'<p class="muted">Artifact exists inside cwd but outside <code>.pi/swarm</code>: <code>{esc(rel)}</code></p>')
+                out.append(f'<p><a href="file://{esc(art_real)}">Open artifact</a></p>')
+            elif inside_cwd:
+                out.append(f'<p class="muted">Artifact not found: <code>{esc(args.artifact)}</code></p>')
+            else:
+                print(f"[swarm_dashboard] WARN: artifact path escapes cwd: {args.artifact!r}", file=sys.stderr)
+                out.append(f'<p class="muted">Artifact path rejected (escapes cwd): <code>{esc(args.artifact)}</code></p>')
         out.append('</section>')
         shown = True
     if not shown:
-        out.append('<p class="muted">No focus selected. Pass <code>--run</code>, <code>--task</code>, <code>--node</code>, <code>--iteration</code>, <code>--message</code>, <code>--memory</code>, or <code>--artifact</code> to inspect raw details here.</p>')
+        out.append('<p class="muted">No focus selected. Pass <code>--task</code>, <code>--node</code>, <code>--message</code>, or <code>--artifact</code> to inspect raw details here.</p>')
         summary = {"swarmId": ctx["swarm_id"], "cwd": args.cwd,
-                   "counts": {"tasks": len(ctx["tasks"]), "iterations": len(ctx["sessions"]),
-                              "runs": len(ctx["runs"]), "memories": len(ctx["memories"])},
-                   "contracts": list(ctx["contracts"].keys()), "sessions": list(ctx["sessions"].keys())}
+                   "counts": {"tasks": len(ctx["tasks"]), "agents": len(ctx["state"].get("agents") or {}),
+                              "messages": len(ctx["messages"])}}
         out.append('<details><summary>Raw state summary</summary><pre class="raw">' + esc(json.dumps(summary, indent=2)) + '</pre></details>')
     out.append("</div>")
     return "\n".join(out)
 
 
-def render_runs(ctx, args):
-    items = sorted(ctx["runs"].values(), key=lambda r: r.get("recordedAt") or "", reverse=True)[: args.runs]
-    if not items:
-        return '<p class="muted">No runs under this cwd.</p>'
-    rows = []
-    for r in items:
-        cid = r.get("metricContractId")
-        pm_id = ((ctx["contracts"].get(cid) or {}).get("primaryMetric") or {}).get("id")
-        pval = (r.get("metrics") or {}).get(pm_id) if pm_id else None
-        rows.append([f'<a href="#run-{esc(r.get("runId"))}">{trunc_esc(r.get("runId"), 20)}</a>',
-                     status_badge(r.get("status")), badge(r.get("verdict") or "-", ""),
-                     vis_num(pval), trunc_esc(cid, 18), trunc_esc(((r.get("git") or {}).get("headCommit")) or "no-git", 9),
-                     trunc_esc(r.get("recordedAt"), 19)])
-    return table(["Run", "Status", "Verdict", "Primary", "Contract", "Git", "Recorded"], rows, "Recent runs")
-
-
 def render_events(ctx, args):
     events = ctx["events"]
     if not events:
-        return '<p class="muted">No recent metric/run/memory/iteration trace events.</p>'
+        return '<p class="muted">No recent trace events.</p>'
     rows = []
     for ev in reversed(events):
-        keys = " ".join(f"{k}={ev[k]}" for k in ("runId", "memoryId", "iterationId", "bestRunId", "accepted", "status", "verdict", "metricContractId") if k in ev)
-        rows.append([trunc_esc(ev.get("ts"), 19), trunc_esc(ev.get("event"), 22), trunc_esc(keys, 60)])
+        keys = " ".join(f"{k}={ev[k]}" for k in ("taskId", "nodeId", "sourceNodeId", "targetNodeId", "status", "outcome", "reason") if k in ev)
+        rows.append([trunc_esc(ev.get("ts"), 19), trunc_esc(ev.get("event"), 28), trunc_esc(keys, 60)])
     return table(["Timestamp", "Event", "Key fields"], rows, "Recent trace events")
 
 
@@ -689,15 +860,6 @@ caption{caption-side:top;text-align:left;color:var(--muted);padding:.2rem 0 .5re
 th,td{text-align:left;padding:.4rem .55rem;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:600;white-space:nowrap}
 tr:hover td{background:rgba(110,168,254,.05)}
-.chart{width:100%;height:auto;max-height:230px;display:block;background:var(--panel2);border-radius:6px;margin:.4rem 0}
-.chart .axis{stroke:var(--line);stroke-width:1}
-.chart .target{stroke:var(--warn);stroke-width:1;stroke-dasharray:4 3}
-.chart .bar{fill:var(--accent)}
-.chart .bar.best{fill:var(--warn)}
-.chart .val{fill:var(--ink);font-size:9px}
-.chart .val.gap{fill:var(--idle)}
-.chart .axislbl{fill:var(--muted);font-size:8.5px}
-.chart .delta{fill:var(--ok);font-size:8px}
 .chart-summary{font-size:.82rem;color:var(--ink);background:var(--panel2);border-radius:6px;padding:.4rem .6rem;margin:.3rem 0}
 .lanegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.75rem;margin:.5rem 0}
 .lane{background:rgba(255,255,255,.02);border:1px solid var(--line);border-radius:8px;overflow:hidden}
@@ -738,9 +900,6 @@ tr:hover td{background:rgba(110,168,254,.05)}
 .msgbody{white-space:pre-wrap;font-size:.74rem;max-height:160px;overflow:auto;margin:.3rem 0 0}
 .reply{font-size:.76rem;color:var(--ok);margin-top:.2rem}
 .msgid{font-size:.68rem;margin-top:.2rem}
-.ev{font-size:.72rem;margin-right:.4rem}
-.ev.ok{color:var(--ok)}
-.ev.miss{color:var(--fail)}
 .inspector{display:flex;flex-direction:column;gap:.6rem}
 .inspectblock{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:.7rem}
 .inspector pre.raw,pre.msgbody,.artifacttext{background:#0b1018;border:1px solid var(--line);border-radius:6px;padding:.6rem;overflow:auto;font-size:.72rem;color:#cfe;white-space:pre-wrap}
@@ -792,35 +951,28 @@ DASHBOARD_JS = """
 def build_html(args, root, generated_at):
     ctx = {
         "root": root,
-        "runs": W.load_runs(root),
-        "memories": W.load_memories(root),
-        "sessions": W.load_sessions(root),
-        "contracts": W.load_all_contracts(root),
-        "messages": W.load_messages_by_id(root),
-        "swarm_id": W.load_swarm_id(root),
-        "tasks": W.discover_tasks(root),
-        "events": W.load_trace_tail(root, args.events),
+        "state": load_swarm_state(root),
+        "messages": load_messages_by_id(root),
+        "swarm_id": load_swarm_id(root),
+        "tasks": discover_tasks(root),
+        "events": load_trace_tail(root, args.events),
     }
     mode = "live" if args.live else "once"
     mode_html = f'<span class="live">\u25cf LIVE</span> regenerating every {args.interval}s' if args.live else '<span class="once">ONE-SHOT</span> historical/completed review'
     meta_refresh = f'<meta http-equiv="refresh" content="{int(max(1,args.interval))}">' if args.live else ""
     focus = []
-    if args.iteration: focus.append(f"iteration={args.iteration}")
     if args.task: focus.append(f"task={args.task}")
     if args.node: focus.append(f"node={args.node}")
-    if args.run: focus.append(f"run={args.run}")
     if args.message: focus.append(f"message={args.message}")
-    if args.memory: focus.append(f"memory={args.memory}")
     if args.artifact: focus.append(f"artifact={args.artifact}")
     focus_s = (" &middot; focus: " + ", ".join(focus)) if focus else ""
     lane_s = f" &middot; lanes={args.lanes}"
     compact_s = " &middot; compact" if args.compact else ""
 
     toc = [
-        ("#overview", "Overview"), ("#iterations", "Metric improvement"),
-        ("#graphs", "Node flow"), ("#conversation", "Conversation"),
-        ("#memories", "Memories"), ("#inspector", "Inspector"),
-        ("#runs", "Runs"), ("#events", "Events"),
+        ("#overview", "Overview"), ("#graphs", "Task graph node flow"),
+        ("#conversation", "Conversation"), ("#inspector", "Inspector"),
+        ("#events", "Events"),
     ]
     toc_html = " ".join(f'<a href="{h}">{esc(t)}</a>' for h, t in toc)
     outline_html = "".join(f'<a href="{h}">{esc(t)}</a>' for h, t in toc)
@@ -841,12 +993,9 @@ def build_html(args, root, generated_at):
     parts.append('<main id="main">')
     parts.append('<div class="section-actions"><button type="button" onclick="swarmDashboardSetAll(true)">Expand all</button><button type="button" onclick="swarmDashboardSetAll(false)">Collapse all</button></div>')
     parts.append(render_dashboard_section('overview', 'Overview', render_overview(ctx, args), True))
-    parts.append(render_dashboard_section('iterations', 'Per-iteration metric improvement', render_iterations(ctx, args), True))
     parts.append(render_dashboard_section('graphs', 'Task graph node flow', render_graphs(ctx, args), True))
     parts.append(render_dashboard_section('conversation', 'Agent conversation', render_conversation(ctx, args), True))
-    parts.append(render_dashboard_section('memories', 'Memory & evidence', render_memories(ctx, args), True))
     parts.append(render_dashboard_section('inspector', 'Inspector / raw details', render_inspector(ctx, args), True))
-    parts.append(render_dashboard_section('runs', 'Recent runs', render_runs(ctx, args), True))
     parts.append(render_dashboard_section('events', 'Recent trace events', render_events(ctx, args), True))
     parts.append('</main>')
     parts.append('<footer>Generated by <code>scripts/swarm_dashboard.sh</code> \u2014 static, dependency-free, read-only.</footer>')
@@ -858,7 +1007,7 @@ def build_html(args, root, generated_at):
 
 # --------------------------------------------------------------- main
 def parse_args(argv):
-    p = argparse.ArgumentParser(prog="swarm_dashboard", description="Static HTML dashboard for .pi/swarm state (dependency-free).")
+    p = argparse.ArgumentParser(prog="swarm_dashboard", description="Static HTML dashboard for .pi/swarm state (dependency-free, task-focused).")
     cwd_default = os.environ.get("WATCH_CWD", ".")
     p.add_argument("--cwd", default=cwd_default, help=f"swarm cwd (default {cwd_default!r}; env WATCH_CWD)")
     p.add_argument("--out", default=None, help="write HTML to FILE (default: stdout for --once; swarm-dashboard.html for --live)")
@@ -867,16 +1016,12 @@ def parse_args(argv):
     p.add_argument("--interval", type=float, default=3.0, help="live regeneration interval seconds (default 3)")
     p.add_argument("--lanes", choices=("role", "branch", "none"), default="role", help="task graph lane mode (default role)")
     p.add_argument("--compact", action="store_true", help="collapse node cards to compact chips")
-    p.add_argument("--iteration", default=None, help="focus one iteration session id")
     p.add_argument("--task", default=None, help="focus one task graph id")
     p.add_argument("--node", default=None, help="focus one task node id (requires --task)")
-    p.add_argument("--run", default=None, help="focus one run id (inspector)")
     p.add_argument("--message", default=None, help="focus one message id (inspector)")
-    p.add_argument("--memory", default=None, help="focus one memory id (inspector)")
     p.add_argument("--artifact", default=None, help="focus one artifact path (inspector)")
     p.add_argument("--messages", default="20", help="messages per task in the conversation view: N (default 20)")
     p.add_argument("--tasks-limit", type=int, default=6, help="task graphs to show in flow/conversation (default 6)")
-    p.add_argument("--runs", type=int, default=10, help="recent runs to show (default 10)")
     p.add_argument("--events", type=int, default=15, help="recent trace events to show (default 15)")
     return p.parse_args(argv)
 
@@ -894,9 +1039,10 @@ def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
         args.messages_limit = int(args.messages)
-    except Exception:
+    except (TypeError, ValueError) as e:
+        print(f"[swarm_dashboard] WARN: invalid --messages value {args.messages!r}: {e}; using default 20", file=sys.stderr)
         args.messages_limit = 20
-    root = W.state_root(args.cwd)
+    root = state_root(args.cwd)
     generated_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
     if args.live:
@@ -911,8 +1057,11 @@ def main(argv=None):
 
         try:
             signal.signal(signal.SIGTERM, _on_term)
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as e:
+            # expected(reason): signal.signal raises ValueError outside main thread
+            # (e.g. when imported under a test harness) and OSError on platforms
+            # without SIGTERM support. Falling back to default handler is safe.
+            print(f"[swarm_dashboard] WARN: SIGTERM handler not installed ({e}); using default", file=sys.stderr)
         try:
             while True:
                 msg = _generate_once(args, root, out_path, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
