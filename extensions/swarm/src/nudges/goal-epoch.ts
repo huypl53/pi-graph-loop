@@ -39,7 +39,7 @@ import { ensureAgentDefaults, now } from "../utils.ts";
 import { isTmuxRunning } from "../tmux.ts";
 import { computeReadyNodes, computeTaskStatus, checkStallNotificationStale } from "../taskgraph.ts";
 import { deliverMessageLocked, findIdempotentMessage, readMailbox } from "../mailbox.ts";
-import { mailboxPath, readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "../state.ts";
+import { readState, readTaskState, taskPaths, trace, traceTask, withLock, writeState } from "../state.ts";
 import { logSwarmError } from "../errorlog.ts";
 
 // Goal-epoch is tick code: trace() failures were swallowed by `.catch(() => {})`. Route the
@@ -786,12 +786,11 @@ export async function evaluateIdleGoalNudgeLocked(
 				const hbAgeSec = hbMs ? Math.round((nowMs - hbMs) / 1000) : null;
 				const hbAgeText = hbAgeSec !== null ? `${hbAgeSec}s (${Math.round(hbAgeSec / 60)}m)` : ">10m";
 				const targetText = staleBusyWorker.tmuxTarget || "unknown";
-				const mbPath = mailboxPath(p, staleBusyWorker.id);
 				const subject = `[Health Check] Worker ${staleBusyWorker.id} running tool >10m without heartbeat`;
 				const body =
 					`Worker \`${staleBusyWorker.id}\` is in \`${staleBusyWorker.runtimeStatus}\` for ${hbAgeText} without a heartbeat update (>10m).\n` +
 					`Tmux Target: \`${targetText}\`\n` +
-					`Mailbox: ${mbPath}\n\n` +
+					`(Read the worker's mailbox via swarm_check_mailbox agentId if you need its message history; do not read mailbox files directly.)\n\n` +
 					`Possible causes:\n` +
 					`1. Long-running synchronous command (e.g. extensive test suite, heavy migration, full sync, build).\n` +
 					`2. Tool execution is stuck, frozen, or deadlocked.\n\n` +

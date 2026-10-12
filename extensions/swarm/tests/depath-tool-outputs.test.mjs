@@ -176,6 +176,17 @@ const lifecycleSrc = (await import("node:fs")).readFileSync(join(here, "..", "sr
 ok("Finding J NC: spawn warning 69 byte-identical", lifecycleSrc.includes('[Swarm] Warning: .pi/swarm.yaml is not configured. Spawning with fallback defaults. Please configure .pi/swarm.yaml.'));
 ok("Finding J NC: spawn warning 87 byte-identical", lifecycleSrc.includes("[WARNING: .pi/swarm.yaml is not configured. Worker spawned with fallback defaults. Configure .pi/swarm.yaml to set model & provider.]"));
 
+// === Follow-up Finding L (goal-epoch health-check body) — RED before fix ===
+{
+	const { readFileSync: rsf } = await import("node:fs");
+	const src = rsf(join(here, "..", "src", "nudges", "goal-epoch.ts"), "utf8");
+	ok(
+		"Finding L: goal-epoch health-check body has no Mailbox: <path> line",
+		!/`Mailbox: \$\{/.test(src),
+		"goal-epoch.ts still embeds `Mailbox: ${mbPath}` in the model-visible health-check body",
+	);
+}
+
 rmSync(scratch, { recursive: true, force: true });
 console.log(`\nDEPATH-TOOL-OUTPUTS ${fail ? "FAIL" : "PASS"} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);
