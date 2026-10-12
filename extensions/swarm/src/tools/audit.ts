@@ -257,7 +257,8 @@ export async function readAuditEvents(p: Paths, opts: AuditEventFilter & { gener
 	}
 	const events = filters.limit ? rows.slice(0, filters.limit) : rows;
 	const source = {
-		file: p.events,
+		// file path is kept in details.source.file for programmatic/harness use; the model-visible
+		// text drops it to prevent workers from reading the trace file directly (incident p9-dossier-runtime-debug2).
 		bytesScanned: files.map((f) => (existsSync(f) ? statSync(f).size : 0)).reduce((a, b) => a + b, 0),
 		generationsIncluded: generations,
 	};
@@ -323,7 +324,7 @@ export async function auditTimeline(p: Paths, messageId: string, opts: AuditEven
 		generatedAt: new Date().toISOString(),
 		mode: "timeline",
 		filters: { ...opts, messageId },
-		source: { file: p.events, bytesScanned: 0, generationsIncluded: opts.generations !== false },
+		source: { bytesScanned: 0, generationsIncluded: opts.generations !== false },
 		durationMs: Date.now() - started,
 		counts: { stages: timeline.stages.length, gaps: timeline.gaps.length },
 		timeline,
@@ -571,7 +572,11 @@ export function registerAuditTools(pi: ExtensionAPI) {
 							...filters,
 							generations: params.generations !== false,
 						});
-						return textResult(params.json ? JSON.stringify(res, null, 2) : JSON.stringify(res.timeline, null, 2), res);
+						return textResult(params.json ? JSON.stringify(res, null, 2) : JSON.stringify(res.timeline, null, 2), {
+							...res,
+							// programmatic/harness escape hatch: keep the trace file path in details only
+							source: { ...res.source, file: p.events },
+						});
 					}
 					if (mode === "probes") {
 						const eventsRes = await readAuditEvents(p, {
@@ -611,14 +616,21 @@ export function registerAuditTools(pi: ExtensionAPI) {
 							},
 							invariants: await checkInvariants(p, st),
 						};
-						return textResult(JSON.stringify(payload, null, 2), payload);
+						return textResult(JSON.stringify(payload, null, 2), {
+							...payload,
+							source: { ...payload.source, file: p.events },
+						});
 					}
 					const res = await readAuditEvents(p, {
 						...filters,
 						generations: params.generations !== false,
 						rollupWindowMs: params.rollupWindowMs,
 					});
-					return textResult(JSON.stringify(res, null, 2), res);
+					return textResult(JSON.stringify(res, null, 2), {
+						...res,
+						// programmatic/harness escape hatch: keep the trace file path in details only
+						source: { ...res.source, file: p.events },
+					});
 				});
 			},
 		}),

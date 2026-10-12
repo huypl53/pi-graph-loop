@@ -67,8 +67,8 @@ try {
 	);
 	ok("model description does NOT contain 'glm-5.1'", !modelDesc.includes("glm-5.1"), `actual modelDesc: ${modelDesc}`);
 	ok(
-		"promptGuidelines advises against passing model/provider and steers to swarm.yaml",
-		guidelines.includes("swarm.yaml") || guidelines.includes("swarm.yml"),
+		"promptGuidelines advises against passing model/provider and steers to the swarm config",
+		guidelines.includes("swarm.yaml") || guidelines.includes("swarm.yml") || guidelines.includes("swarm config file"),
 		`actual guidelines: ${guidelines}`,
 	);
 

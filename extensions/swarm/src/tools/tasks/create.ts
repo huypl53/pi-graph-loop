@@ -33,7 +33,7 @@ export function registerCreateTaskTool(pi: ExtensionAPI): void {
 			name: "swarm_create_task",
 			label: "Swarm Create Task",
 			description:
-				"Create a task graph under .pi/swarm/tasks/<task-id>/ with task.md, task.json, events.jsonl, and artifacts/. Synthesizes the built-in feature-dev graph unless a custom nodes/edges graph is supplied.",
+				"Create a durable task graph with task markdown, task state, event stream, and artifact directory. Synthesizes the built-in feature-dev graph unless a custom nodes/edges graph is supplied.",
 			promptGuidelines: ["Use `swarm_create_task` to define a new durable task graph before assigning work."],
 			parameters: Type.Object({
 				title: Type.String({ description: "Human-readable task title." }),
@@ -101,7 +101,7 @@ export function registerCreateTaskTool(pi: ExtensionAPI): void {
 						}, params);
 					});
 					return textResult(
-						`Created task ${result.taskId} at ${relative(ctx.cwd, result.tp.root)}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}${result.autoClosed?.length ? `\nAuto-closed root terminal nodes: ${result.autoClosed.join(", ")}` : ""}\nHint: use task-role-staffing.`,
+						`Created task ${result.taskId}\nStart: ${result.task.start}\nReady: ${result.actionable.join(", ") || "(none)"}${result.autoClosed?.length ? `\nAuto-closed root terminal nodes: ${result.autoClosed.join(", ")}` : ""}\nHint: use task-role-staffing. Inspect with swarm_task_status (detail:"graph" for the full node/edge map).`,
 						{
 							taskId: result.taskId,
 							task: result.task,

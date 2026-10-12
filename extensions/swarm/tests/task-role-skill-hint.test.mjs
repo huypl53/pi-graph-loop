@@ -61,22 +61,29 @@ const result = await call("swarm_create_task", {
 const text = result.content[0].text;
 const details = result.details;
 
-// 1. Regression guard: existing lines still present.
+// 1. Regression guard: existing lines still present. (2026-10-12 depath: the path segment
+// `at .pi/swarm/tasks/...` was removed from the create-text per task depath-swarm-tool-outputs.)
 ok(
-	"textResult contains 'Created task … at …' line",
-	text.includes(`Created task task-role-skill-hint at .pi/swarm/tasks/task-role-skill-hint`),
+	"textResult contains 'Created task …' line (no path)",
+	text.startsWith(`Created task task-role-skill-hint\n`),
 	text,
 );
 ok("textResult contains 'Start: …' line", /^Start: \w+/m.test(text), text);
 ok("textResult contains 'Ready: …' line", /^Ready: .*$/m.test(text), text);
 
-// 2. Hint is exactly the concise form, appended as the last line.
-const lines = text.split("\n");
-const lastLine = lines[lines.length - 1];
-ok("textResult ends with the exact concise hint", lastLine === "Hint: use task-role-staffing.", `last line: ${JSON.stringify(lastLine)}`);
+const lastLine = text.split("\n")[text.split("\n").length - 1];
+// 2. Hint starts with the concise form. (2026-10-12 depath: appended bounded-tool steer
+// `Inspect with swarm_task_status …` per task depath-swarm-tool-outputs, Site 7.)
+ok(
+	"textResult ends with concise hint + bounded-tool steer",
+	lastLine === 'Hint: use task-role-staffing. Inspect with swarm_task_status (detail:"graph" for the full node/edge map).',
+	`last line: ${JSON.stringify(lastLine)}`,
+);
 
 // 3. Hint does NOT contain paths, tool names, or workflow directions.
-ok("hint does not contain a path", !/Hint:[^]*\//.test(text), text);
+// (2026-10-12 depath: the steer names detail:"graph" — a tool arg, not a filesystem path.
+// Assertion is now: no filesystem-shaped segments — no `.pi/swarm`, no leading-slash paths.)
+ok("hint does not contain a path", !/Hint:[^]*(\.pi\/swarm|\s\/[a-z])/.test(text), text);
 ok("hint does not contain a tool name", !/Hint:[^]*swarm_(spawn|assign|staff|role)/.test(text), text);
 ok("hint does not contain workflow verbs", !/Hint:[^]*(then|write|call|use existing)/i.test(text), text);
 

@@ -113,7 +113,7 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 			name: "swarm_agent_status",
 			label: "Swarm Agent Status",
 			description:
-				"Report runtime/liveness status for swarm agents using pi lifecycle state, terminal pane liveness, and mailbox message counts. Default view is a compact attention/census summary and is the correct shape for routine supervision; a targeted agentId query returns one slim row with the same vocabulary. For forensic fields (pid, exact timestamps) read .pi/swarm/swarm-state.json directly.",
+				"Report runtime/liveness status for swarm agents using pi lifecycle state, terminal pane liveness, and mailbox message counts. Default view is a compact attention/census summary and is the correct shape for routine supervision; a targeted agentId query returns one slim row with the same vocabulary. For forensic fields (pid, exact timestamps) use the bounded audit surface (swarm_audit mode:timeline messageId:<id> for message forensics; swarm_reconcile dryRun:true for task-graph drift).",
 			promptGuidelines: [
 				"Use `swarm_agent_status` to inspect which swarm agents are idle, busy, tool-running, stopped, alive, or have pending/dead-letter messages. The default attention view summarizes the whole swarm; pass agentId for a compact per-agent row.",
 			],
@@ -137,7 +137,7 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 					// bypassed by callers invoking the handler directly; this guard is the contract).
 					if ((params as any).view === "full" || (params as any).verbose === true)
 						throw new Error(
-							"view:'full'/verbose were removed (2026-10-10): the 24-field envelope polluted agent context. Default call = attention/census summary; pass agentId for a slim per-agent row; read .pi/swarm/swarm-state.json for forensic fields (pid, exact timestamps).",
+							"view:'full'/verbose were removed (2026-10-10): the 24-field envelope polluted agent context. Default call = attention/census summary; pass agentId for a slim per-agent row; for forensic fields (pid, exact timestamps) use swarm_audit mode:timeline messageId:<id> or swarm_reconcile dryRun:true.",
 						);
 					const p = paths(ctx.cwd);
 					const st = await readState(p, ctx.cwd);
@@ -296,7 +296,7 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 			name: "swarm_list_agents",
 			label: "Swarm List",
 			description:
-				"List pi swarm agents for this project as a compact phonebook: ids, role first lines, status, driver target, slot, and mailbox paths.",
+				"List pi swarm agents for this project as a compact phonebook: ids, role first lines, status, driver target, and slot.",
 			promptGuidelines: ["Use `swarm_list_agents` before sending swarm messages when you are unsure which agents exist."],
 			parameters: Type.Object({
 				includeStopped: Type.Optional(Type.Boolean({ description: "Include stopped agents in the phonebook (default false)." })),

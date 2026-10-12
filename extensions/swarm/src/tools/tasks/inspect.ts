@@ -48,7 +48,7 @@ export function registerTaskStatusTool(pi: ExtensionAPI): void {
 			name: "swarm_task_status",
 			label: "Swarm Task Status",
 			description:
-				"Read task.json and summarize task/node/gate state. Optionally include artifact listing and runtime liveness/message warnings.",
+				"Read the task-graph state file and summarize task/node/gate state. Optionally include artifact listing and runtime liveness/message warnings.",
 			promptGuidelines: ["Use `swarm_task_status` to inspect assigned task state and current/ready nodes."],
 			parameters: Type.Object({
 				taskId: Type.String({ description: "Task id." }),

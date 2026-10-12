@@ -115,7 +115,7 @@ function fullMailboxRow(m: any, mailboxFile: string): any {
 	const rawBody = typeof body === "string" ? body : "";
 	if (rawBody.length > FULL_BODY_MAX_CHARS) {
 		const truncated = rawBody.length - FULL_BODY_MAX_CHARS;
-		rest.body = `${rawBody.slice(0, FULL_BODY_MAX_CHARS)}\n…[+${truncated} chars truncated — full body durable in mailbox JSONL: ${mailboxFile}]`;
+		rest.body = `${rawBody.slice(0, FULL_BODY_MAX_CHARS)}\n…[+${truncated} chars truncated — re-read with fullBody:true and a smaller limit to page through the rest]`;
 	} else {
 		rest.body = rawBody;
 	}
@@ -150,7 +150,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			name: "swarm_send_message",
 			label: "Swarm Send",
 			description:
-				"Send an inter-agent swarm message. The message is appended to the recipient mailbox JSONL and injected into the recipient tmux pane with PI-SWARM system headers when possible.",
+				"Send an inter-agent swarm message. The message is durably queued for the recipient and injected into the recipient tmux pane with PI-SWARM system headers when possible.",
 			promptGuidelines: ["Use `swarm_send_message` for agent-to-agent coordination instead of asking the human to relay messages."],
 			parameters: Type.Object({
 				to: Type.String({ description: "Recipient agent id." }),
@@ -221,11 +221,11 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 								// surface fires when the root's own agent_settled fires or its next idle watchdog
 								// tick processes the mailbox (R10-1 counter at the real pi.sendMessage boundary).
 								// Full narrative lives in docs/swarm/operations.md (root mailbox-only note).
-								" (root: mailbox-only — durable in mailbox, no time-bound surface guarantee; normal)"
+								" (root: mailbox-only — replies arrive in root's mailbox via the pump; root uses swarm_check_mailbox to read; do not read root's mailbox file directly)"
 							: " (mailbox-only delivery; recipient has no live tmux pane — will surface via reconcile/pump once it restarts)"
 						: "";
 					return textResult(
-						`Sent ${msg.id} to ${msg.to}. Delivery status: ${deliveryStatus}. Mailbox: ${mailboxPath}.${mailboxOnlyNote}`,
+						`Sent ${msg.id} to ${msg.to}. Delivery status: ${deliveryStatus}.${mailboxOnlyNote}`,
 						{ message: msg, delivery, receipt },
 					);
 				});
@@ -243,7 +243,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			name: "swarm_check_mailbox",
 			label: "Swarm Mailbox",
 			description:
-			"Read pending or recent messages from a swarm agent mailbox JSONL. Defaults to the current PI_SWARM_AGENT_ID. The default compact scan (id/from/subject/age/unread) is the correct poll shape; unread drains durably once messages are surfaced or marked delivered, so a repeated poll returning unread:0 needs no re-reading. Use bodyPreview to triage bodies; use fullBody only to read specific message(s) you have already selected from a scan (pass a small limit).",
+			"Read pending or recent messages from a swarm agent's mailbox. Defaults to the current PI_SWARM_AGENT_ID. The default compact scan (id/from/subject/age/unread) is the correct poll shape; unread drains durably once messages are surfaced or marked delivered, so a repeated poll returning unread:0 needs no re-reading. Use bodyPreview to triage bodies; use fullBody only to read specific message(s) you have already selected from a scan (pass a small limit).",
 			promptGuidelines: [
 				"Use `swarm_check_mailbox` when you are a swarm agent and need to read messages sent by other agents. Poll with the default compact scan; do not re-read with fullBody when unread is 0.",
 			],
@@ -413,7 +413,7 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 			name: "swarm_reconcile",
 			label: "Swarm Reconcile",
 			description:
-				"Reconcile swarm mailbox state AND task graph state. Mailbox: inspects queued/failed/injected messages requiring ack, retries failed/queued injections when recipient tmux is running, marks expired or max-attempt messages dead_letter. Task sweep: re-reads every task.json, reports stored-vs-derived status drift and stale/nudge signals (dead assignee, dead-lettered assignment, in_progress too long, ack_missing), and stamps advisory node.staleAt. Use offset to skip reconciliation actions already returned by an earlier call. Mark-only by default; pass mark=true to also persist the recomputed task.status. Never auto-fails a node.",
+				"Reconcile swarm mailbox state AND task graph state. Mailbox: inspects queued/failed/injected messages requiring ack, retries failed/queued injections when recipient tmux is running, marks expired or max-attempt messages dead_letter. Task sweep: re-reads every task graph, reports stored-vs-derived status drift and stale/nudge signals (dead assignee, dead-lettered assignment, in_progress too long, ack_missing), and stamps advisory node.staleAt. Use offset to skip reconciliation actions already returned by an earlier call. Mark-only by default; pass mark=true to also persist the recomputed task.status. Never auto-fails a node.",
 			promptGuidelines: [
 				"Use `swarm_reconcile` to recover stuck messages, retry failed deliveries, move expired/unrecoverable messages to dead_letter, and surface stale/stalled task nodes. Run with dryRun=true first to preview; reuse the returned nextOffset as offset to skip already-seen actions; use mark=true to repair task status drift.",
 			],

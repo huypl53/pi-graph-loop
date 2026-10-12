@@ -3,7 +3,6 @@
 
 import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { relative } from "node:path";
 import { currentAgentId } from "../../session.ts";
 import { ensureDirs, paths, readState, trace, withLock, writeState } from "../../state.ts";
 import { logSwarmError } from "../../errorlog.ts";
@@ -23,7 +22,7 @@ export function registerAgentLifecycleTools(pi: ExtensionAPI): void {
 				"Spawn a new pi agent in a terminal window (tmux or herdr, per the configured terminal manager) in the same working directory. The new agent shares project extensions and skills. Requires a supported terminal manager.",
 			promptGuidelines: [
 				"Use `swarm_spawn_agent` when the user asks to create a pi agent/swarm worker for parallel planning, review, or coding.",
-				"Do NOT specify provider or model when spawning agents. Model and provider are configured by the user in .pi/swarm.yaml. Only specify id, role, roleKind, and initialPrompt unless the user explicitly requested a specific model/provider.",
+				"Do NOT specify provider or model when spawning agents. Model and provider are configured by the user in the swarm config file. Only specify id, role, roleKind, and initialPrompt unless the user explicitly requested a specific model/provider.",
 			],
 			parameters: Type.Object({
 				id: Type.Optional(
@@ -42,13 +41,13 @@ export function registerAgentLifecycleTools(pi: ExtensionAPI): void {
 				model: Type.Optional(
 					Type.String({
 						description:
-							"Optional model override. Omit this parameter; swarm agents automatically inherit model from .pi/swarm.yaml.",
+							"Optional model override. Omit this parameter; swarm agents automatically inherit model from the swarm config.",
 					}),
 				),
 				provider: Type.Optional(
 					Type.String({
 						description:
-							"Optional provider override. Omit this parameter; swarm agents automatically inherit provider from .pi/swarm.yaml.",
+							"Optional provider override. Omit this parameter; swarm agents automatically inherit provider from the swarm config.",
 					}),
 				),
 				initialPrompt: Type.Optional(
@@ -87,7 +86,7 @@ export function registerAgentLifecycleTools(pi: ExtensionAPI): void {
 						? "[WARNING: .pi/swarm.yaml is not configured. Worker spawned with fallback defaults. Configure .pi/swarm.yaml to set model & provider.]\n\n"
 						: "";
 					return textResult(
-						`${warnHeader}Spawned ${result.agent.id} at ${result.agent.tmuxTarget}\nIdentity: ${relative(ctx.cwd, result.identity)}\nSnapshot: ${relative(ctx.cwd, result.snapshot)}`,
+						`${warnHeader}Spawned ${result.agent.id} at ${result.agent.tmuxTarget}\nIdentity + snapshot persisted (use swarm_agent_status agentId:"${result.agent.id}" to inspect).`,
 						result,
 					);
 				});
