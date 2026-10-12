@@ -308,6 +308,22 @@ export const ROOT_BUSY_ACTIVE_EXECUTION_MS = Number(process.env.PI_SWARM_ROOT_BU
 
 export const PUMP_RETRIGGER_MAX = 3;
 
+// === Read-streak guard v1.1 (task loop-read-streak-guard) ===
+// Detects an agent burning consecutive native-READ tool calls (read/grep/find/ls ONLY —
+// every other tool, bash included, is OTHER and resets the whole streak, fail-closed) and
+// self-nudges the looping agent mid-run. Milestone k (k=1..3) fires only when BOTH gates
+// hold: readCallCount >= 6k AND accumulatedActiveMs >= 5·60_000·k. Env overrides are read
+// at EVENT TIME (never cached at import) so lanes and tests always apply fresh (M3).
+export function readStreakCalls(): number {
+	const n = Number(process.env.PI_SWARM_READ_STREAK_CALLS);
+	return Number.isFinite(n) && n > 0 ? Math.floor(n) : 6;
+}
+export function readStreakMs(): number {
+	const n = Number(process.env.PI_SWARM_READ_STREAK_MS);
+	return Number.isFinite(n) && n >= 0 ? n : 300_000;
+}
+export const READ_STREAK_MAX_NUDGES = 3;
+
 export const MAX_STATUS_TASKS = 100;
 
 // Orphan-spawn watchdog timeout (Issue 14). When swarm_spawn_agent returns and no follow-up delivery

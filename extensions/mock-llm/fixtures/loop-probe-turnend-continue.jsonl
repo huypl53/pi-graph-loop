@@ -1,0 +1,25 @@
+# loop-probe-turnend-continue: R10-1 busy-nudge PROBE fixture (task loop-read-streak-guard Phase 1).
+#
+# Claim under probe (pi-runtime-contract.md §10 F-BUSY-NUDGE, status UNPROVEN):
+#   a turn_end boundary handler returning { entries: [{ type: "custom_message", ... }],
+#   continue: true } makes pi (a) append the custom_message to the session, (b) run ONE
+#   more model request IN THE SAME RUN with the custom message in LLM context (role=user),
+#   WITHOUT an intervening agent_settled. This is the §7 B1 delivery path for the
+#   read-streak self-nudge to a BUSY agent.
+#
+# Shape (6 turns; the probe hook in r10-1-busy-nudge-probe.test.mjs injects):
+#   t1: text + native read toolcall, stopReason toolUse (run keeps looping naturally)
+#   t2: text + native read toolcall, stopReason toolUse -> MID marker injected at this turn_end;
+#       the marker request follows a read toolResult within the same run (P1 evidence)
+#   t3: text + native read toolcall, stopReason toolUse — consumed by the MID continuation
+#   t4: text only, stopReason stop -> run would normally END here; STOP marker injected at
+#       this turn_end proves continue:true creates a request that would NOT otherwise exist (P2)
+#   t5: text only, stopReason stop — consumed by the STOP continuation request
+#   t6: text only, stopReason stop — terminal settle of the probe lane
+# Control lane (same fixture, hook injects nothing) consumes exactly t1..t4.
+{"name":"probe turn 1 — read toolcall (toolUse)","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Scanning the target module.","chunks":["Scanning ","the target module."]},{"type":"toolcall","delayMs":10,"name":"read","id":"probe-read-1","arguments":{"path":"src/example.ts"}}]}
+{"name":"probe turn 2 — read toolcall (MID injection follows this turn)","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Reading more context.","chunks":["Reading ","more context."]},{"type":"toolcall","delayMs":10,"name":"read","id":"probe-read-2","arguments":{"path":"src/example2.ts"}}]}
+{"name":"probe turn 3 — read toolcall, consumed by the MID continuation","stopReason":"toolUse","events":[{"type":"text","delayMs":10,"text":"Still scanning.","chunks":["Still ","scanning."]},{"type":"toolcall","delayMs":10,"name":"read","id":"probe-read-3","arguments":{"path":"src/example3.ts"}}]}
+{"name":"probe turn 4 — terminal stop (STOP injection follows this turn)","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Probe lane would settle here without the continuation.","chunks":["Probe lane would settle here ","without the continuation."]}]}
+{"name":"probe turn 5 — consumed by the STOP continuation","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Continuation request consumed turn five.","chunks":["Continuation request ","consumed turn five."]}]}
+{"name":"probe turn 6 — terminal settle","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Probe lane terminal after continuation.","chunks":["Probe lane terminal ","after continuation."]}]}

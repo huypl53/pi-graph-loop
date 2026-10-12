@@ -23,11 +23,27 @@ import { pumpRootMailbox } from "../surface.ts";
 import { scanAgentOpenAssignments, checkStallNotificationStale } from "../taskgraph.ts";
 import { maybeAutoFocusBusyAgent } from "../focus.ts";
 import { engineRetryIncidentsMap, isAgentInPoolSwapHandoff } from "./streaks.ts";
+import { pauseAtSettled } from "../nudges/loop-detect.ts";
 import { armRootPumpWatchdog, getRootMailboxTimer, isRootPumpCtxFresh, surfaceAgentPending } from "./pump-manager.ts";
 
 export function registerSettledHook(pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_event, ctx) => {
 		const agentId = currentAgentId();
+		// === Read-streak guard v1.1 (task loop-read-streak-guard) ===
+		// D2: agent_settled freezes the OPEN active segment into the accumulator (idle gap
+		// excluded). Toggle-off → no-op inside pauseAtSettled. Root never streaks.
+		if (agentId !== "root") {
+			try {
+				const pSettle = paths(ctx?.cwd);
+				const taskId = await withLock(pSettle, async () => {
+					const stS = await readState(pSettle, ctx?.cwd);
+					return stS.agents[agentId]?.activeTaskIds?.[0] ?? null;
+				});
+				await pauseAtSettled(ctx?.cwd, taskId);
+			} catch (err) {
+				await logSwarmError(ctx?.cwd, "loop-detect", "settle_pause_failed", err, { agentId });
+			}
+		}
 		if (agentId === "root") {
 			const p = paths(ctx.cwd);
 			await pumpRootMailbox(pi, ctx, p, "agent_settled");

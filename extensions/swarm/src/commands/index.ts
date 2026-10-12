@@ -10,6 +10,7 @@ import { handleObservabilityCommand } from "./observability.ts";
 import { normalizeScopedSwarmArgs, scopedSwarmUsage, SWARM_COMMAND_DESCRIPTION } from "./parser.ts";
 import type { ScopedSwarmCommandName } from "./parser.ts";
 import { handleIssuesCommand } from "./issues.ts";
+import { handleLoopCommand } from "./loop.ts";
 import { handlePoolCommand } from "./pool.ts";
 import { handleProtocolCommand } from "./protocol.ts";
 import { handleRolesCommand } from "./roles.ts";
@@ -27,6 +28,7 @@ export * from "./messaging.ts";
 export * from "./observability.ts";
 export * from "./protocol.ts";
 export * from "./issues.ts";
+export * from "./loop.ts";
 
 const AGENT_COMMANDS = new Set([
 	"",
@@ -101,6 +103,10 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 			}
 			if (cmd === "issues") {
 				await handleIssuesCommand(cmd, rest, ctx, p, pi);
+				return;
+			}
+			if (cmd === "loop") {
+				await handleLoopCommand(cmd, rest, ctx, p, pi);
 				return;
 			}
 			if (cmd === "protocol") {

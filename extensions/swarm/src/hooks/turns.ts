@@ -16,7 +16,20 @@ import { currentAgentId } from "../session.ts";
 import { paths, readState, trace, withLock, writeState } from "../state.ts";
 import { resetIdleEpochState } from "../reconcile.ts";
 import { applySwarmToolGating } from "../tools/gating.ts";
+import { consumeTurnEndNudge, maybeEscalateToRoot } from "../nudges/loop-detect.ts";
 import { logSwarmError } from "../errorlog.ts";
+
+// === R10-1 (loop-read-streak): send-count instrumentation at the REAL injection boundary ===
+// Exported so tests can assert the count at the exact `turn_end` return site — not inside any
+// internal helper. Reset per test via resetReadStreakSendCount().
+export let readStreakSendCount = 0;
+export function resetReadStreakSendCount(): void {
+	readStreakSendCount = 0;
+}
+export let readStreakEscalationCount = 0;
+export function resetReadStreakEscalationCount(): void {
+	readStreakEscalationCount = 0;
+}
 
 // === R16 (2026-09-02): turn-end resolve-action detector (module-scope export) ===
 // A turn_end{stop, role=assistant} is a RESOLVE only if the root ADVANCED the goal
@@ -63,6 +76,59 @@ export function turnEndIsResolveAction(event: any): { resolve: boolean; reason: 
 }
 
 export function registerTurnHooks(pi: ExtensionAPI) {
+	// === Read-streak guard v1.1 (task loop-read-streak-guard) — R10-1 INJECTION SITE ===
+	// When a milestone just fired (observeToolCall set milestoneJustFired on the streak), the
+	// NEXT turn_end returns { entries: [custom_message(nudge)], continue: true } so the BUSY
+	// agent's own model receives the nudge in the very next request of the SAME run (delivery
+	// contract §10 F-BUSY-NUDGE, VERIFIED by r10-1-busy-nudge-probe.test.mjs).
+	// - Continuation guard: consumeTurnEndNudge clears the transient flag under the lock —
+	//   exactly ONE continuation per milestone, hard cap 3 per streak (nudges counter).
+	// - Escalation: after nudge 3, the milestone-4 boundary reconciles to root ONCE per streak
+	//   through the locked deliverMessage path (existing sink — no new message surface).
+	// - R10-1 send counting happens HERE at the real boundary (readStreakSendCount), not in a
+	//   helper. Audit trace (loop_streak.nudge) is written inside consumeTurnEndNudge.
+	// Handler is cast because repo-local @earendil-works/pi-coding-agent@0.83 types turn_end as
+	// void-returning; the LIVE runtime (pi 1.1.0, verified by the r10-1 probe) accepts the
+	// BoundaryResult { entries, continue } — mismatch tracked in §10 F-BUSY-NUDGE evidence.
+	pi.on("turn_end", (async (event: unknown, ctx: any) => {
+		void event;
+		const agentId = currentAgentId();
+		if (agentId === "root") return undefined; // root never streaks
+		try {
+			const pTurn = paths(ctx?.cwd);
+			const taskId = await withLock(pTurn, async () => {
+				const stT = await readState(pTurn, ctx?.cwd);
+				return stT.agents[agentId]?.activeTaskIds?.[0] ?? null;
+			});
+			if (!taskId) return undefined;
+			const nudge = await consumeTurnEndNudge(ctx?.cwd, taskId);
+			// Escalation check runs on EVERY turn_end (not only nudge turns): the milestone-4
+			// boundary sets `escalated` on a READ that fires NO milestone (cap reached), so the
+			// escalate-once delivery must not depend on a nudge being pending. Idempotent through
+			// the persisted escalatedNotified latch. A regression here (escalation gated behind a
+			// pending nudge) never delivers the root reconcile — caught by T7 driving turn_end
+			// after each milestone.
+			const escalatedNow = await maybeEscalateToRoot(pi, ctx?.cwd, taskId);
+			void escalatedNow;
+			if (nudge) {
+				readStreakSendCount += 1; // counted at the REAL boundary (R10-1 C-R10-1-1)
+				return {
+					entries: [
+						{
+							type: "custom_message" as const,
+							customType: "swarm.read-streak-nudge",
+							content: nudge.text,
+							display: false,
+						},
+					],
+					continue: true,
+				};
+			}
+		} catch (err) {
+			await logSwarmError(ctx?.cwd, "loop-detect", "turn_end_nudge_failed", err, { agentId });
+		}
+		return undefined;
+	}) as any);
 	// === Root-busy resets the shared idle epoch (Row 68 semantics fix, 2026-08-31) ===
 	// The idle-streak nudge measures "all agents + ROOT idle for a full interval". Workers
 	// are covered by updateIdleEpochLocked (runtimeStatus busy/idle edges), but the ROOT's

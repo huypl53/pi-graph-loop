@@ -413,6 +413,36 @@ headers. `[VERIFIED]`
 > "Handlers can return `{ message }` to replace the finalized message.
 > The replacement must keep the same `role`." `[VERIFIED]`
 
+### 9.6 `turn_end` / `agent_before_settle` boundary drafts (actionable continuation)
+
+`docs/extensions.md` ~line 117:
+
+> "`turn_end` and `agent_before_settle` are actionable boundaries. Their handlers can
+> chain proposed `custom`, `custom_message`, `context_edit`, or `compaction` entries and
+> return `continue: true` for one next model request. Guard continuation conditions because
+> an unconditional continuation can loop." `[VERIFIED]`
+
+Handler signature: `(event: TurnEndEvent, ctx) => BoundaryResult | void` where
+`BoundaryResult = { entries?: SessionBoundaryDraft[]; continue?: boolean }`. The event
+carries the accumulated `{ entries, continue, context, outcome }` boundary state; a handler
+that wants to inject returns NEW drafts plus `continue: true`.
+
+- `custom_message` draft shape: `{ type: "custom_message", customType, content (string or
+  TextContent[]), display, details? }` `[VERIFIED types.d.ts ~L735]`
+- The draft is committed to the session via `appendCustomMessageEntry` (`agent-session.js
+  _commitBoundaryDrafts` → `_applyBoundaryDrafts`); `convertToLlm` renders it as a
+  **`role:"user"` message in the LLM context** (`dist/core/messages.js convertToLlm`).
+- `continue: true` → `finishTurn` returns `{ action: "continue" }` → the agent loop runs
+  exactly ONE more model request in the same run (even past a `stopReason: "stop"` turn —
+  verified live: the stop-continuation request consumed the next scripted turn). If the
+  boundary context cannot continue (no runnable model context), pi reports
+  `"turn_end requested continuation without runnable model context"` and does NOT continue.
+- The next request fires **before `agent_end`/`agent_settled`** — mid-run continuation stays
+  inside the run. `[VERIFIED live lane 2026-10-12]` (probe r10-1-busy-nudge-probe.test.mjs,
+  §10 F-BUSY-NUDGE row)
+- Handlers run in registration order; the LAST handler returning `continue` wins (each
+  handler's `continue` overwrites the accumulated flag). `[VERIFIED runner.js emitBoundary]`
+
 ---
 
 ## 10. Mapping to swarm R12-R15 incident themes

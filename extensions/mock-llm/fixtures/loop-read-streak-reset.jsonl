@@ -1,0 +1,15 @@
+# loop-read-streak-reset: zero-send control lane for the read-streak guard (task loop-read-streak-guard).
+#
+# Scenario: 3 READ calls, then ONE `edit` (OTHER — fail-closed per D3), then more READs, then stop.
+# OTHER = any tool that is not a native read/grep/find/ls — it resets the WHOLE streak.
+#
+# Expected (GREEN and RED): ZERO nudge text in transcripts, ZERO mid-run continuations —
+# the edit resets the streak before any milestone (6·k READs AND time) can fire. This lane is
+# the R10-1 zero-send control (C-R10-1-2) for the reset semantics.
+{"name":"read 1 — pre-edit streak","stopReason":"toolUse","events":[{"type":"text","delayMs":20,"text":"Reading the module before editing.","chunks":["Reading the module ","before editing."]},{"type":"toolcall","delayMs":20,"name":"read","id":"rs-1","arguments":{"path":"src/a.ts"}}]}
+{"name":"read 2 — pre-edit streak","stopReason":"toolUse","events":[{"type":"text","delayMs":20,"text":"Reading the test file.","chunks":["Reading the ","test file."]},{"type":"toolcall","delayMs":20,"name":"read","id":"rs-2","arguments":{"path":"tests/a.test.ts"}}]}
+{"name":"read 3 — pre-edit streak","stopReason":"toolUse","events":[{"type":"text","delayMs":20,"text":"Checking the config.","chunks":["Checking the ","config."]},{"type":"toolcall","delayMs":20,"name":"read","id":"rs-3","arguments":{"path":"config.json"}}]}
+{"name":"edit — OTHER resets the whole streak","stopReason":"toolUse","events":[{"type":"text","delayMs":20,"text":"Patching the module now.","chunks":["Patching the ","module now."]},{"type":"toolcall","delayMs":20,"name":"edit","id":"rs-edit-1","arguments":{"path":"src/a.ts","oldText":"export const A = 1;","newText":"export const A = 2;"}}]}
+{"name":"read 1 — post-edit fresh streak","stopReason":"toolUse","events":[{"type":"text","delayMs":20,"text":"Verifying the patch context.","chunks":["Verifying the ","patch context."]},{"type":"toolcall","delayMs":20,"name":"read","id":"rs-4","arguments":{"path":"src/a.ts"}}]}
+{"name":"read 2 — post-edit fresh streak","stopReason":"toolUse","events":[{"type":"text","delayMs":20,"text":"Re-reading the caller.","chunks":["Re-reading the ","caller."]},{"type":"toolcall","delayMs":20,"name":"read","id":"rs-5","arguments":{"path":"src/b.ts"}}]}
+{"name":"terminal stop","stopReason":"stop","events":[{"type":"text","delayMs":20,"text":"Lane terminal: reset scenario complete.","chunks":["Lane terminal: ","reset scenario complete."]}]}

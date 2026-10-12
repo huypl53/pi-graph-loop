@@ -8,6 +8,7 @@
 // tool_result (root): root-delegation guard — consecutive direct-edit streak advisory +
 // swarm-tool reset.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { READ_TOOLS, observeToolCall } from "../nudges/loop-detect.ts";
 import { existsSync } from "node:fs";
 import { PI_SWARM_MINIMAL_PROTOCOL, SWARM_GUEST_ID, TRACE_LIFECYCLE_DERIVED } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
@@ -130,7 +131,27 @@ export function registerToolHooks(pi: ExtensionAPI) {
 
 	pi.on("tool_result", async (event, ctx) => {
 		const agentId = currentAgentId();
-		if (agentId !== "root") return;
+		if (agentId !== "root") {
+			// === Read-streak guard v1.1 (task loop-read-streak-guard) — WORKER lane ===
+			// Classify every completed tool call — READ counts toward the streak, OTHER
+			// (bash/edit/write/…, fail-closed) deletes it. Toggle re-read fresh inside
+			// observeToolCall (M3); errors are recorded durably, never thrown into the tool loop.
+			// observeToolCall takes the state lock internally — do NOT wrap it in withLock here.
+			try {
+				const toolName = (event as any)?.toolName;
+				if (typeof toolName === "string" && toolName.length > 0) {
+					const pStreak = paths(ctx?.cwd);
+					const taskId = await withLock(pStreak, async () => {
+						const stS = await readState(pStreak, ctx?.cwd);
+						return stS.agents[agentId]?.activeTaskIds?.[0] ?? null;
+					});
+					await observeToolCall(pi, ctx?.cwd, toolName, { taskId });
+				}
+			} catch (err) {
+				await logSwarmError(ctx?.cwd, "loop-detect", "tool_result_observe_failed", err, { agentId, toolName: (event as any)?.toolName });
+			}
+			return;
+		}
 		try {
 			const toolName = (event as any)?.toolName;
 			if (toolName === "edit" || toolName === "write") {

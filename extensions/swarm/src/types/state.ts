@@ -161,6 +161,34 @@ export type SwarmIdleNudgeState = {
 	goalDiagProbeLedger?: Record<string, string>;
 };
 
+// Read-streak guard v1.1 (task loop-read-streak-guard): per-(agentId, activeTaskId) streak
+// state. Persisted in the swarm state file so it survives agent restarts; deleted on OTHER
+// tool / task change. `milestoneJustFired` is transient (cleared by the turn_end consumer).
+export type ReadStreakMilestone = {
+	k: number; // milestone index 1-based
+	atMs: number; // wall clock when fired
+	readCallCount: number; // READ calls at fire time
+	accumulatedActiveMs: number; // active ms at fire time
+};
+
+export type ReadStreakState = {
+	streakId: string; // stable per streak — regenerated on any reset
+	agentId: string;
+	taskId: string;
+	readCallCount: number;
+	accumulatedActiveMs: number;
+	segmentStartedAt: number | null; // ms epoch of the OPEN segment (null = paused at settle)
+	nudges: number; // continuations fired this streak (cap 3)
+	milestones: ReadStreakMilestone[]; // fired milestones (k asc)
+	escalated: boolean; // milestone-4 boundary crossed (streak unbroken past nudge cap)
+	escalatedAt?: string;
+	// Notify latch: root reconcile message enqueued (once per streak). Cleared on delivery
+	// failure so a transient mailbox error can retry; the `escalated` boundary flag stays.
+	escalatedNotified?: boolean;
+	lastReadAtMs: number; // last observed READ tool_result
+	milestoneJustFired?: ReadStreakMilestone; // transient: turn_end consumes + clears
+};
+
 // Checkpoint marker created via /swarm mark / /swarm-mark for timeline debugging.
 export type SwarmMarker = {
 	id: string;
@@ -314,6 +342,13 @@ export type SwarmState = {
 	// Back-filled by backfillIssueRun (src/issues/state.ts) from readState; absent on
 	// pre-policy swarms means { status: "inactive", queue: [] } after backfill.
 	issueRun?: IssueRun;
+	// Read-streak guard v1.1 (task loop-read-streak-guard). Root toggle persisted here so
+	// EVERY event re-reads it fresh from the state file — never cached (M3). Absent === ON
+	// (default enabled).
+	readStreakGuard?: { enabled: boolean; updatedAt: string };
+	// Read-streak state keyed `${agentId}\u0000${activeTaskId}`. Deleted on OTHER tool /
+	// task change; survives restarts so a re-spawned agent resumes its streak.
+	readStreaks?: Record<string, ReadStreakState>;
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;

@@ -356,6 +356,11 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 						// ---- end ownership preflight ----
 
 						const prevStatus = node.status;
+						// The assignee's previous first-active-task (before this assignment mutates the
+						// list) — used by the read-streak guard's D5 task-change reset. Optional chain:
+						// assignee was just ensured non-null above, but tsc cannot carry that narrowing
+						// across the intervening awaits (same pattern as every other use in this file).
+						const oldActiveTaskId = assignee?.activeTaskIds[0] ?? null;
 						// Reassignment bookkeeping: free the previous assignee's active-task pointer.
 						if (node.assignee && node.assignee !== assignee.id) {
 							const old = st.agents[node.assignee];
@@ -474,6 +479,19 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 							});
 						}
 						if (!assignee.activeTaskIds.includes(task.taskId)) assignee.activeTaskIds.push(task.taskId);
+						// === Read-streak guard v1.1 (task loop-read-streak-guard) — D5: task/attempt change ===
+						// A NEW assignment changes the assignee's first active task → its previous streak
+						// no longer applies. Reset INLINE (we already hold the state lock in this withLock
+						// body — a nested resetForTaskChange would self-deadlock the mkdir lock) and ONLY
+						// on the success path AFTER all rejection gates (the rejected-assign byte-identity
+						// contract: a preflight failure must persist NOTHING, including streak deletes).
+						if (assignee && oldActiveTaskId && oldActiveTaskId !== task.taskId) {
+							const streakKey = `${assignee.id}\u0000${oldActiveTaskId}`;
+							if (st.readStreaks?.[streakKey]) {
+								delete st.readStreaks[streakKey];
+								void trace(p, "loop_streak.reset", { reason: "task_change", agentId: assignee.id, taskId: task.taskId, prevTaskId: oldActiveTaskId }).catch(() => {});
+							}
+						}
 						// === Issue 82: stamp lease on the assignee at assignment time (optional) ===
 						// When the caller passes a `lease` parameter, stamp the assignee's record with the
 						// lease fields so the task-close sweep honors it (reuse = skip, park = pause).
