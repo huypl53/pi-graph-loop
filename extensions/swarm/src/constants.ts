@@ -324,6 +324,28 @@ export function readStreakMs(): number {
 }
 export const READ_STREAK_MAX_NUDGES = 3;
 
+// === Loop-repeat guard v1.2 (task loop-repeat-guard) ===
+// Detects an agent burning identical bash (or any tool) calls with the same args — the
+// 2026-10-12 incident (`p9-dossier-runtime-debug2` polled `sleep 165; tail -1 root.jsonl`
+// every ~2m45s for hours). Milestone k (k=1..3) fires only when BOTH gates hold:
+// count >= PI_SWARM_LOOP_REPEAT_CALLS * k AND span >= PI_SWARM_LOOP_REPEAT_SPAN_MS * k.
+// Env overrides are read at EVENT TIME (never cached at import) so lanes and tests always
+// apply fresh (M3). PI_SWARM_LOOP_REPEAT_WINDOW_MS=0 disables the time-span gate
+// deterministically (lane command only — never in fixtures).
+export function loopRepeatCalls(): number {
+	const n = Number(process.env.PI_SWARM_LOOP_REPEAT_CALLS);
+	return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
+}
+export function loopRepeatSpanMs(): number {
+	const n = Number(process.env.PI_SWARM_LOOP_REPEAT_SPAN_MS);
+	return Number.isFinite(n) && n >= 0 ? n : 600_000; // 10 minutes per milestone
+}
+export function loopRepeatWindowMs(): number {
+	const n = Number(process.env.PI_SWARM_LOOP_REPEAT_WINDOW_MS);
+	return Number.isFinite(n) && n >= 0 ? n : 3_600_000; // 60 minutes occurrence cap
+}
+export const LOOP_REPEAT_MAX_NUDGES = 3;
+
 export const MAX_STATUS_TASKS = 100;
 
 // Orphan-spawn watchdog timeout (Issue 14). When swarm_spawn_agent returns and no follow-up delivery

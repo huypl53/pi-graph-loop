@@ -16,7 +16,7 @@ import { currentAgentId } from "../session.ts";
 import { paths, readState, trace, withLock, writeState } from "../state.ts";
 import { resetIdleEpochState } from "../reconcile.ts";
 import { applySwarmToolGating } from "../tools/gating.ts";
-import { consumeTurnEndNudge, maybeEscalateToRoot } from "../nudges/loop-detect.ts";
+import { consumeRepeatTurnEndNudge, consumeTurnEndNudge, maybeEscalateRepeatToRoot, maybeEscalateToRoot } from "../nudges/loop-detect.ts";
 import { logSwarmError } from "../errorlog.ts";
 
 // === R10-1 (loop-read-streak): send-count instrumentation at the REAL injection boundary ===
@@ -101,22 +101,31 @@ export function registerTurnHooks(pi: ExtensionAPI) {
 				return stT.agents[agentId]?.activeTaskIds?.[0] ?? null;
 			});
 			if (!taskId) return undefined;
-			const nudge = await consumeTurnEndNudge(ctx?.cwd, taskId);
-			// Escalation check runs on EVERY turn_end (not only nudge turns): the milestone-4
-			// boundary sets `escalated` on a READ that fires NO milestone (cap reached), so the
+			// === Loop-repeat guard v1.2 (task loop-repeat-guard) — ARBITRATION ===
+			// Both detectors (read-streak v1.1 + loop-repeat v1.2) may have a pending milestone
+			// on the same turn_end. Arbitration: consume BOTH, emit exactly ONE continuation.
+			// Priority: loop-repeat wins (it's the newer, more specific detector for the
+			// motivating incident). If only one has a pending milestone, that one wins.
+			const repeatNudge = await consumeRepeatTurnEndNudge(ctx?.cwd, taskId);
+			const readNudge = await consumeTurnEndNudge(ctx?.cwd, taskId);
+			// Escalation checks run on EVERY turn_end (not only nudge turns): the milestone-4
+			// boundary sets `escalated` on a call that fires NO milestone (cap reached), so the
 			// escalate-once delivery must not depend on a nudge being pending. Idempotent through
-			// the persisted escalatedNotified latch. A regression here (escalation gated behind a
-			// pending nudge) never delivers the root reconcile — caught by T7 driving turn_end
-			// after each milestone.
-			const escalatedNow = await maybeEscalateToRoot(pi, ctx?.cwd, taskId);
-			void escalatedNow;
+			// the persisted escalatedNotified latch.
+			const escalatedRead = await maybeEscalateToRoot(pi, ctx?.cwd, taskId);
+			const escalatedRepeat = await maybeEscalateRepeatToRoot(pi, ctx?.cwd, taskId);
+			void escalatedRead;
+			void escalatedRepeat;
+			// Pick the nudge to inject (loop-repeat wins on tie).
+			const nudge = repeatNudge ?? readNudge;
 			if (nudge) {
 				readStreakSendCount += 1; // counted at the REAL boundary (R10-1 C-R10-1-1)
+				const customType = repeatNudge ? "swarm.loop-repeat-nudge" : "swarm.read-streak-nudge";
 				return {
 					entries: [
 						{
 							type: "custom_message" as const,
-							customType: "swarm.read-streak-nudge",
+							customType,
 							content: nudge.text,
 							display: false,
 						},

@@ -28,7 +28,7 @@ src/mailbox.ts       mailbox read/deliver helpers
 src/agents.ts        spawn/reuse/reload
 src/nudges/goal-epoch.ts       swarm-level idle epoch + goal-floor emission
 src/nudges/graph-advance.ts    graph-advance / stall / artifact / heartbeat GC nudges
-src/nudges/loop-detect.ts      read-streak guard v1.1 — classify/count READ streaks, milestone gates, mid-run self-nudge + one-per-streak root escalation (task loop-read-streak-guard)
+src/nudges/loop-detect.ts      read-streak guard v1.1 + loop-repeat guard v1.2 — classify/count READ streaks, identical-fingerprint repeat rings, milestone gates, mid-run self-nudge + one-per-streak root escalation (tasks loop-read-streak-guard, loop-repeat-guard)
 src/nudges/status-predicates.ts pure predicates over TaskState["status"]
 src/surface.ts                 facade — root-facing message surface machinery (canonical logic in src/surface/)
 src/issues/controller.ts       sequential issue auto-run: activate/observe/fence/safe-idle + live queue append/auto-continue + context hints

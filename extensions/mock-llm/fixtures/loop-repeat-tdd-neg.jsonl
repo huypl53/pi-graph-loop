@@ -1,0 +1,30 @@
+# loop-repeat-tdd-neg: negative control fixture for the loop-repeat guard v1.2
+# (task loop-repeat-guard, IDEAS §8).
+#
+# Scenario: TDD-shape runs that MUST NOT trigger the loop-repeat guard.
+#
+# Variant: 2 identical bash calls, then an `edit` (OTHER), then 2 more identical bash calls.
+# Total ring count = 4 < 5 (PI_SWARM_LOOP_REPEAT_CALLS). The count gate fails → 0 nudges.
+# This proves the AND-gate (count AND span) works: even with the span gate disabled
+# (PI_SWARM_LOOP_REPEAT_WINDOW_MS=0 for lane determinism), the count gate alone prevents
+# false positives on short TDD runs.
+#
+# IMPORTANT: the interleaved `edit` does NOT reset the ring count (anti-evasion property —
+# ring count accumulates across all tools). The `consecutiveCount` resets on OTHER tools
+# but is only used for evidence text, NOT for milestone gates. So the only way to get
+# 0 nudges in this lane is to stay under the count threshold.
+#
+# Expected (GREEN and RED): ZERO nudge text in transcripts, ZERO mid-run continuations.
+# This lane is the R10-1 zero-send control (C-R10-1-2) for the loop-repeat guard.
+#
+# Shape (6 turns):
+#   t1..t2:   2 identical bash calls
+#   t3:       edit (OTHER) — breaks consecutive streak
+#   t4..t5:   2 more identical bash calls (total count = 4 < 5)
+#   t6:       terminal stop
+{"name": "bash 1/2 — count below threshold", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 5, "text": "Running test 1.", "chunks": ["Running test 1."]}, {"type": "toolcall", "delayMs": 5, "name": "bash", "id": "n-1", "arguments": {"command": "npm test -- --testNamePattern='case A'", "timeout": 30000}}]}
+{"name": "bash 2/2 — count below threshold", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 5, "text": "Running test 2.", "chunks": ["Running test 2."]}, {"type": "toolcall", "delayMs": 5, "name": "bash", "id": "n-2", "arguments": {"command": "npm test -- --testNamePattern='case A'", "timeout": 30000}}]}
+{"name": "edit — breaks consecutive streak", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 5, "text": "Patching the test.", "chunks": ["Patching the test."]}, {"type": "toolcall", "delayMs": 5, "name": "edit", "id": "n-edit-1", "arguments": {"path": "tests/case-a.test.ts", "oldText": "expect(1).toBe(1);", "newText": "expect(2).toBe(2);"}}]}
+{"name": "bash 1/2 — post-edit", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 5, "text": "Running test 1.", "chunks": ["Running test 1."]}, {"type": "toolcall", "delayMs": 5, "name": "bash", "id": "n-3", "arguments": {"command": "npm test -- --testNamePattern='case A'", "timeout": 30000}}]}
+{"name": "bash 2/2 — post-edit (total count = 4 < 5, no milestone)", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 5, "text": "Running test 2.", "chunks": ["Running test 2."]}, {"type": "toolcall", "delayMs": 5, "name": "bash", "id": "n-4", "arguments": {"command": "npm test -- --testNamePattern='case A'", "timeout": 30000}}]}
+{"name": "terminal stop", "stopReason": "stop", "events": [{"type": "text", "delayMs": 5, "text": "Lane terminal: negative scenario complete.", "chunks": ["Lane terminal: ", "negative scenario complete."]}]}

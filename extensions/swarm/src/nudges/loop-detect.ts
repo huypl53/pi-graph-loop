@@ -20,11 +20,11 @@
 // pre-existing sink).
 
 import { createHash, randomUUID } from "node:crypto";
-import { READ_STREAK_MAX_NUDGES, readStreakCalls, readStreakMs } from "../constants.ts";
+import { LOOP_REPEAT_MAX_NUDGES, READ_STREAK_MAX_NUDGES, loopRepeatCalls, loopRepeatSpanMs, loopRepeatWindowMs, readStreakCalls, readStreakMs } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
 import { paths, readState, trace, withLock, writeState } from "../state.ts";
 import { logSwarmError } from "../errorlog.ts";
-import type { Paths, ReadStreakMilestone, ReadStreakState, SwarmState } from "../types.ts";
+import type { LoopRepeatMilestone, LoopRepeatRing, LoopRepeatState, Paths, ReadStreakMilestone, ReadStreakState, SwarmState } from "../types.ts";
 import { now } from "../utils.ts";
 
 // Native read-class tools (exact lowercase names). ALL other tools are OTHER (fail-closed).
@@ -320,4 +320,360 @@ export async function readStreakFor(cwd: string, agentId: string, taskId: string
 	const p: Paths = paths(cwd);
 	const st = await readState(p, cwd);
 	return st.readStreaks?.[streakKey(agentId, taskId)] ?? null;
+}
+
+// ============================================================================
+// === Loop-repeat guard v1.2 (task loop-repeat-guard) ===
+// ============================================================================
+// Detects an agent burning identical bash (or any tool) calls with the same args — the
+// 2026-10-12 incident (`p9-dossier-runtime-debug2` polled `sleep 165; tail -1 root.jsonl`
+// every ~2m45s for hours). v1.1 read-streak guard is fail-closed on bash (bash = OTHER
+// resets the streak), so it cannot catch this. v1.2 adds a parallel detector.
+//
+// Design (IDEAS §8, v1.2 revision commit 4a2cc39):
+// - fp = hash(toolName + normalizedArgs) — NO result-hash. The motivating incident's poll
+//   prints a fresh timestamp every iteration, so result-hash would make every fingerprint
+//   unique and defeat the detector. Args-identical is the stable signal.
+// - Ring per (agent, task, fp): {fp, toolName, normalizedArgs, firstSeenAt, lastSeenAt,
+//   count, consecutiveCount}. Other tools do NOT reset the ring (anti-evasion poll→ls→poll)
+//   but they DO break consecutiveCount (TDD interleaves edit between test runs).
+// - Milestone k (k=1..3) fires only when BOTH gates hold: count >= PI_SWARM_LOOP_REPEAT_CALLS*k
+//   AND span(firstSeen→last) >= PI_SWARM_LOOP_REPEAT_SPAN_MS*k. PI_SWARM_LOOP_REPEAT_WINDOW_MS=0
+//   disables the time-span gate (lane command only — never in fixtures).
+// - After nudge 3, milestone-4 boundary with streak unbroken → reconcile to root ONCE per
+//   streak (persisted `escalated` flag). No abort, no auto-reassign.
+// - State persisted in swarm state file keyed `agentId\u0000activeTaskId`; deleted on task
+//   change. Every event re-reads the toggle fresh from the state file (M3).
+// - Toggle shared with v1.1: `readStreakGuard.enabled` (both detectors share the same toggle).
+//
+// R10-1 (loop-repeat): the ONLY send is the custom_message/continue object returned from
+// the turn_end hook in hooks/turns.ts (the injection site) — this module NEVER imports
+// pi.sendMessage / ctx.abort. Escalation goes through deliverMessageLocked (the locked,
+// pre-existing sink).
+
+/** Normalize tool args to a canonical string for fingerprint hashing. */
+function normalizeArgs(args: unknown): string {
+	if (args === undefined || args === null) return "";
+	if (typeof args === "string") return args;
+	try {
+		// Sort keys for deterministic hashing regardless of property order.
+		const sorted = sortKeysDeep(args);
+		return JSON.stringify(sorted);
+	} catch {
+		return String(args);
+	}
+}
+
+function sortKeysDeep(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(sortKeysDeep);
+	if (value && typeof value === "object") {
+		const obj = value as Record<string, unknown>;
+		const sorted: Record<string, unknown> = {};
+		for (const k of Object.keys(obj).sort()) sorted[k] = sortKeysDeep(obj[k]);
+		return sorted;
+	}
+	return value;
+}
+
+/** Compute the fingerprint hash for a tool call. */
+export function computeFingerprint(toolName: string, args: unknown): string {
+	const normalized = normalizeArgs(args);
+	return createHash("sha256").update(`${toolName}\u0000${normalized}`).digest("hex").slice(0, 16);
+}
+
+function freshRepeatStreak(agentId: string, taskId: string): LoopRepeatState {
+	return {
+		streakId: randomUUID(),
+		agentId,
+		taskId,
+		rings: {},
+		nudges: 0,
+		milestones: [],
+		escalated: false,
+	};
+}
+
+export type ObserveRepeatResult = {
+	action: "ignored" | "counted" | "reset";
+	milestone?: LoopRepeatMilestone;
+	escalated?: boolean;
+	streak: LoopRepeatState | null;
+};
+
+export type ObserveRepeatDeps = {
+	taskId?: string | null;
+	nowMs?: number;
+	args?: unknown;
+};
+
+/**
+ * Observe one completed tool call for the loop-repeat guard. Every tool call updates the
+ * ring for its fingerprint; other tools do NOT reset the ring (anti-evasion) but they DO
+ * break consecutiveCount (TDD interleaves edit between test runs). Runs under the swarm
+ * state lock; toggle re-read fresh (M3). Errors are caught by the hook callers and routed
+ * to logSwarmError.
+ */
+export async function observeRepeat(pi: any, cwd: string, toolName: unknown, deps: ObserveRepeatDeps = {}): Promise<ObserveRepeatResult> {
+	const agentId = currentAgentId();
+	const name = typeof toolName === "string" ? toolName : "unknown";
+	const p: Paths = paths(cwd);
+	const atMs = deps.nowMs ?? Date.now();
+	return withLock(p, async () => {
+		const st = await readState(p, cwd);
+		if (!guardEnabled(st)) return { action: "ignored", streak: null } as ObserveRepeatResult;
+		const taskId = deps.taskId ?? null;
+		if (!agentId || agentId === "guest" || !taskId) return { action: "ignored", streak: null } as ObserveRepeatResult;
+		const key = streakKey(agentId, taskId);
+		// D5: a task/attempt change resets the agent's previous repeat state (drop stale keys).
+		if (st.loopRepeats) {
+			for (const other of Object.keys(st.loopRepeats)) {
+				if (other !== key && other.startsWith(`${agentId}\u0000`)) {
+					delete st.loopRepeats[other];
+					await trace(p, "loop_repeat.reset", {
+						reason: "task_change",
+						agentId,
+						taskId,
+						prevKey: other,
+					}).catch(() => {});
+				}
+			}
+		}
+		st.loopRepeats ||= {};
+		let s = st.loopRepeats[key];
+		if (!s || s.streakId === undefined) {
+			s = freshRepeatStreak(agentId, taskId);
+			st.loopRepeats[key] = s;
+		}
+		const fp = computeFingerprint(name, deps.args);
+		const normalized = normalizeArgs(deps.args);
+		const windowMs = loopRepeatWindowMs();
+		// Prune occurrences older than the window cap (60 min default).
+		// PI_SWARM_LOOP_REPEAT_WINDOW_MS=0 means "disable window cap" (lane command only).
+		const cutoff = windowMs > 0 ? atMs - windowMs : Number.POSITIVE_INFINITY;
+		// Update or create the ring for this fingerprint.
+		let ring = s.rings[fp];
+		if (!ring) {
+			ring = {
+				fp,
+				toolName: name,
+				normalizedArgs: normalized,
+				firstSeenAt: atMs,
+				lastSeenAt: atMs,
+				count: 0,
+				consecutiveCount: 0,
+			};
+			s.rings[fp] = ring;
+		}
+		// If the ring's firstSeenAt is older than the window, reset it (occurrence cap).
+		// Skip reset when windowMs is 0 (lane command: disable window cap).
+		if (windowMs > 0 && ring.firstSeenAt < cutoff) {
+			ring.firstSeenAt = atMs;
+			ring.count = 0;
+			ring.consecutiveCount = 0;
+		}
+		ring.count += 1;
+		ring.lastSeenAt = atMs;
+		ring.consecutiveCount += 1;
+		// Break consecutiveCount for all OTHER rings (interleaved tool breaks TDD streak).
+		for (const otherFp of Object.keys(s.rings)) {
+			if (otherFp !== fp) {
+				s.rings[otherFp].consecutiveCount = 0;
+			}
+		}
+		// Evaluate milestone gates.
+		const perCall = loopRepeatCalls();
+		const perMs = loopRepeatSpanMs();
+		const spanMs = ring.lastSeenAt - ring.firstSeenAt;
+		const firedK = s.milestones.length;
+		let milestone: LoopRepeatMilestone | undefined;
+		if (firedK < LOOP_REPEAT_MAX_NUDGES) {
+			const k = firedK + 1;
+			// AND-gate: count >= perCall*k AND span >= perMs*k.
+			// PI_SWARM_LOOP_REPEAT_WINDOW_MS=0 disables the span gate (lane command only).
+			const spanOk = windowMs === 0 || spanMs >= perMs * k;
+			if (ring.count >= perCall * k && spanOk) {
+				milestone = { k, atMs, count: ring.count, spanMs };
+				s.milestones.push(milestone);
+				s.nudges += 1;
+				s.milestoneJustFired = milestone;
+			}
+		} else if (!s.escalated) {
+			// Milestone-4 boundary: streak unbroken past nudge cap → reconcile to root ONCE.
+			s.escalated = true;
+			s.escalatedAt = now();
+		}
+		await writeState(p, st);
+		return { action: "counted", milestone, escalated: s.escalated && !milestone, streak: s } as ObserveRepeatResult;
+	});
+}
+
+/** Pure: build the mid-run self-nudge text for the loop-repeat guard. */
+export function buildRepeatNudgeText(s: LoopRepeatState, m: LoopRepeatMilestone, ring: LoopRepeatRing, opts: { perCalls: number; perMs: number }): string {
+	const spanMinutes = Math.round(m.spanMs / 60_000);
+	const minsPerMilestone = Math.round(opts.perMs / 60_000);
+	const argsPreview = ring.normalizedArgs.length > 120 ? ring.normalizedArgs.slice(0, 117) + "..." : ring.normalizedArgs;
+	return [
+		`[LOOP-REPEAT nudge ${s.nudges}/${LOOP_REPEAT_MAX_NUDGES} — milestone ${m.k}]`,
+		`You have called \`${ring.toolName}\` with identical args ${m.count} times across ${spanMinutes} min of active time.`,
+		`Args: ${argsPreview}`,
+		`Threshold: ${opts.perCalls} identical calls per ${minsPerMilestone} active minutes. This is nudge ${s.nudges} of ${LOOP_REPEAT_MAX_NUDGES} for streak ${s.streakId}.`,
+		`Before the next identical call: re-read your task.json + plan, check whether you are stuck in a polling loop, and either act on what you already have (edit/write/messages) or report a blocker to root via swarm_send_message.`,
+		`After ${LOOP_REPEAT_MAX_NUDGES} nudges without a reset, root will be reconciled with your streak evidence.`,
+	].join("\n");
+}
+
+/** Pure: build the one-per-streak root escalation body for the loop-repeat guard. */
+export function buildRepeatEscalationText(s: LoopRepeatState, ring: LoopRepeatRing): string {
+	const ms = s.milestones.map((m) => `k=${m.k}@${m.count}calls/${Math.round(m.spanMs / 60_000)}min`).join(", ");
+	const argsPreview = ring.normalizedArgs.length > 120 ? ring.normalizedArgs.slice(0, 117) + "..." : ring.normalizedArgs;
+	return [
+		`[LOOP-REPEAT escalation — agent ${s.agentId}, task ${s.taskId}]`,
+		`Streak ${s.streakId} crossed the milestone-4 boundary with ${ring.count} identical \`${ring.toolName}\` calls / ${Math.round((ring.lastSeenAt - ring.firstSeenAt) / 60_000)} active minutes and no reset.`,
+		`Args: ${argsPreview}`,
+		`Milestones: ${ms || "(none recorded)"}; nudges delivered: ${s.nudges}.`,
+		`The agent may be loop-locked in an identical-call polling loop. Consider a direct pane nudge, task re-scope, or /swarm attention.`,
+	].join(" ");
+}
+
+/**
+ * turn_end consumption for the loop-repeat guard: returns the nudge text to inject when a
+ * milestone just fired and clears the transient flag. Returns null when nothing to inject.
+ * Runs under the state lock. Arbitration: if BOTH read-streak and loop-repeat have a
+ * pending milestone on the same turn_end, the caller (turns.ts) emits exactly ONE
+ * continuation and consumes both pending flags.
+ */
+export async function consumeRepeatTurnEndNudge(cwd: string, taskId: string | null): Promise<{ text: string; milestone: LoopRepeatMilestone; streak: LoopRepeatState; ring: LoopRepeatRing } | null> {
+	const agentId = currentAgentId();
+	if (!agentId || agentId === "guest" || !taskId) return null;
+	const p: Paths = paths(cwd);
+	return withLock(p, async () => {
+		const st = await readState(p, cwd);
+		if (!guardEnabled(st)) return null;
+		const s = st.loopRepeats?.[streakKey(agentId, taskId)];
+		if (!s?.milestoneJustFired) return null;
+		const m = s.milestoneJustFired;
+		delete s.milestoneJustFired;
+		// Find the ring that triggered this milestone (the one with the highest count at fire time).
+		let ring: LoopRepeatRing | undefined;
+		let maxCount = -1;
+		for (const r of Object.values(s.rings)) {
+			if (r.count >= m.count && r.count > maxCount) {
+				ring = r;
+				maxCount = r.count;
+			}
+		}
+		if (!ring) {
+			// Fallback: pick any ring.
+			ring = Object.values(s.rings)[0];
+		}
+		if (!ring) {
+			await writeState(p, st);
+			return null;
+		}
+		const text = buildRepeatNudgeText(s, m, ring, { perCalls: loopRepeatCalls(), perMs: loopRepeatSpanMs() });
+		await trace(p, "loop_repeat.nudge", {
+			agentId,
+			taskId,
+			streakId: s.streakId,
+			k: m.k,
+			nudge: s.nudges,
+			count: m.count,
+			spanMs: m.spanMs,
+			fp: ring.fp,
+			toolName: ring.toolName,
+		});
+		await writeState(p, st);
+		return { text, milestone: m, streak: s, ring };
+	});
+}
+
+/**
+ * Milestone-4 escalation check for the loop-repeat guard: when the cap is reached and the
+ * boundary condition holds, reconcile to root ONCE per streak via the locked deliverMessage
+ * path. Idempotent through the persisted `escalatedNotified` flag.
+ */
+export async function maybeEscalateRepeatToRoot(pi: any, cwd: string, taskId: string | null): Promise<boolean> {
+	const agentId = currentAgentId();
+	if (!agentId || agentId === "guest" || !taskId) return false;
+	const p: Paths = paths(cwd);
+	let escalated = false;
+	try {
+		await withLock(p, async () => {
+			const st = await readState(p, cwd);
+			if (!guardEnabled(st)) return;
+			const s = st.loopRepeats?.[streakKey(agentId, taskId)];
+			if (!s || !s.escalated || s.escalatedNotified) return;
+			s.escalatedNotified = true;
+			await writeState(p, st);
+			escalated = true;
+		});
+		if (!escalated) return false;
+		const st = await readState(p, cwd);
+		const s = st.loopRepeats?.[streakKey(agentId, taskId)];
+		if (!s) return false;
+		// Find the ring with the highest count for the escalation body.
+		let ring: LoopRepeatRing | undefined;
+		let maxCount = -1;
+		for (const r of Object.values(s.rings)) {
+			if (r.count > maxCount) {
+				ring = r;
+				maxCount = r.count;
+			}
+		}
+		if (!ring) return false;
+		const { deliverMessageLocked } = await import("../mailbox.ts");
+		const fresh = await readState(p, cwd);
+		await deliverMessageLocked(pi, cwd, p, fresh, {
+			to: "root",
+			body: buildRepeatEscalationText(s, ring),
+			subject: `[swarm] loop-repeat escalation: ${agentId} on ${taskId}`,
+			priority: "low",
+			idempotencyKey: `loop-repeat-escalation:${s.streakId}`,
+		});
+		await trace(p, "loop_repeat.escalated", { agentId, taskId, streakId: s.streakId, count: ring.count, fp: ring.fp });
+		return true;
+	} catch (err) {
+		if (escalated) {
+			try {
+				await withLock(p, async () => {
+					const st = await readState(p, cwd);
+					const s = st.loopRepeats?.[streakKey(agentId, taskId)];
+					if (s) delete s.escalatedNotified;
+					await writeState(p, st);
+				});
+			} catch (rollbackErr) {
+				await logSwarmError(cwd, "loop-detect", "repeat_escalation_rollback_failed", rollbackErr, { agentId, taskId });
+			}
+		}
+		await logSwarmError(cwd, "loop-detect", "repeat_escalation_failed", err, { agentId, taskId });
+		return false;
+	}
+}
+
+/** Task change resets the loop-repeat state (T3). */
+export async function resetRepeatForTaskChange(cwd: string, oldTaskId: string | null, newTaskId: string | null): Promise<void> {
+	const agentId = currentAgentId();
+	if (!agentId || agentId === "guest") return;
+	const p: Paths = paths(cwd);
+	try {
+		await withLock(p, async () => {
+			const st = await readState(p, cwd);
+			if (oldTaskId) {
+				const key = streakKey(agentId, oldTaskId);
+				if (st.loopRepeats?.[key]) {
+					delete st.loopRepeats[key];
+				}
+			}
+			await writeState(p, st);
+		});
+	} catch (err) {
+		await logSwarmError(cwd, "loop-detect", "repeat_task_change_reset_failed", err, { agentId, oldTaskId, newTaskId });
+	}
+}
+
+/** Test hook: read the persisted loop-repeat state (no lock mutation). */
+export async function readRepeatFor(cwd: string, agentId: string, taskId: string): Promise<LoopRepeatState | null> {
+	const p: Paths = paths(cwd);
+	const st = await readState(p, cwd);
+	return st.loopRepeats?.[streakKey(agentId, taskId)] ?? null;
 }

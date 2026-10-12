@@ -8,7 +8,7 @@
 // tool_result (root): root-delegation guard — consecutive direct-edit streak advisory +
 // swarm-tool reset.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { READ_TOOLS, observeToolCall } from "../nudges/loop-detect.ts";
+import { READ_TOOLS, observeRepeat, observeToolCall } from "../nudges/loop-detect.ts";
 import { existsSync } from "node:fs";
 import { PI_SWARM_MINIMAL_PROTOCOL, SWARM_GUEST_ID, TRACE_LIFECYCLE_DERIVED } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
@@ -149,6 +149,25 @@ export function registerToolHooks(pi: ExtensionAPI) {
 				}
 			} catch (err) {
 				await logSwarmError(ctx?.cwd, "loop-detect", "tool_result_observe_failed", err, { agentId, toolName: (event as any)?.toolName });
+			}
+			// === Loop-repeat guard v1.2 (task loop-repeat-guard) — WORKER lane ===
+			// Observe every completed tool call for identical-fingerprint repeat. Unlike the
+			// read-streak guard, this detector does NOT reset on OTHER tools — rings are
+			// independent per fingerprint and accumulate across interleaved tools (anti-evasion).
+			// The detector takes the state lock internally — do NOT wrap it in withLock here.
+			try {
+				const toolName = (event as any)?.toolName;
+				if (typeof toolName === "string" && toolName.length > 0) {
+					const pRepeat = paths(ctx?.cwd);
+					const taskId = await withLock(pRepeat, async () => {
+						const stR = await readState(pRepeat, ctx?.cwd);
+						return stR.agents[agentId]?.activeTaskIds?.[0] ?? null;
+					});
+					const args = (event as any)?.input ?? (event as any)?.arguments ?? (event as any)?.args;
+					await observeRepeat(pi, ctx?.cwd, toolName, { taskId, args });
+				}
+			} catch (err) {
+				await logSwarmError(ctx?.cwd, "loop-detect", "tool_result_repeat_observe_failed", err, { agentId, toolName: (event as any)?.toolName });
 			}
 			return;
 		}

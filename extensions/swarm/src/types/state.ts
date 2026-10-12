@@ -189,6 +189,42 @@ export type ReadStreakState = {
 	milestoneJustFired?: ReadStreakMilestone; // transient: turn_end consumes + clears
 };
 
+// Loop-repeat guard v1.2 (task loop-repeat-guard): per-(agentId, activeTaskId, fingerprint)
+// ring state. Persisted in the swarm state file so it survives agent restarts; deleted on
+// task change. `milestoneJustFired` is transient (cleared by the turn_end consumer).
+// fp = hash(toolName + normalizedArgs) — NO result-hash (v1.2 revision commit 4a2cc39:
+// the motivating incident's poll prints a fresh timestamp every iteration, so result-hash
+// would make every fingerprint unique and defeat the detector).
+export type LoopRepeatMilestone = {
+	k: number; // milestone index 1-based
+	atMs: number; // wall clock when fired
+	count: number; // ring count at fire time
+	spanMs: number; // firstSeen→last span at fire time
+};
+
+export type LoopRepeatRing = {
+	fp: string; // fingerprint hash
+	toolName: string;
+	normalizedArgs: string; // canonical args string used for hashing
+	firstSeenAt: number; // ms epoch of first occurrence
+	lastSeenAt: number; // ms epoch of most recent occurrence
+	count: number; // total occurrences in window (accumulates across interleaved tools)
+	consecutiveCount: number; // occurrences since last non-matching tool (TDD breaks this)
+};
+
+export type LoopRepeatState = {
+	streakId: string; // stable per streak — regenerated on any reset
+	agentId: string;
+	taskId: string;
+	rings: Record<string, LoopRepeatRing>; // keyed by fp
+	nudges: number; // continuations fired this streak (cap 3)
+	milestones: LoopRepeatMilestone[]; // fired milestones (k asc)
+	escalated: boolean; // milestone-4 boundary crossed (streak unbroken past nudge cap)
+	escalatedAt?: string;
+	escalatedNotified?: boolean; // notify latch (cleared on delivery failure)
+	milestoneJustFired?: LoopRepeatMilestone; // transient: turn_end consumes + clears
+};
+
 // Checkpoint marker created via /swarm mark / /swarm-mark for timeline debugging.
 export type SwarmMarker = {
 	id: string;
@@ -349,6 +385,9 @@ export type SwarmState = {
 	// Read-streak state keyed `${agentId}\u0000${activeTaskId}`. Deleted on OTHER tool /
 	// task change; survives restarts so a re-spawned agent resumes its streak.
 	readStreaks?: Record<string, ReadStreakState>;
+	// Loop-repeat guard v1.2 (task loop-repeat-guard). State keyed `${agentId}\u0000${activeTaskId}`.
+	// Deleted on task change; survives restarts so a re-spawned agent resumes its rings.
+	loopRepeats?: Record<string, LoopRepeatState>;
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;

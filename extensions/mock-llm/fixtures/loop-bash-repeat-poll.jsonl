@@ -1,0 +1,57 @@
+# loop-bash-repeat-poll: RED→GREEN reproduction fixture for the loop-repeat guard v1.2
+# (task loop-repeat-guard, IDEAS §8).
+#
+# Scenario: a worker burns identical bash polling calls — `cat root.jsonl | tail -1` —
+# mimicking the 2026-10-12 incident (`p9-dossier-runtime-debug2` polled every ~2m45s for hours).
+# Each turn's bash RESULT carries a fresh timestamp/counter (the incident's `tail` printed a
+# new mail timestamp every iteration) — so the detector MUST fire on identical ARGS with
+# DIFFERENT outputs. v1.2 revision (commit 4a2cc39) drops result-hash from the fingerprint
+# precisely because result-hash would defeat the detector on its own motivating case.
+#
+# NOTE: the fixture uses `cat root.jsonl | tail -1` (instant return) instead of the incident's
+# `sleep 165; tail -1 root.jsonl` because the mock-llm lane cannot sleep for 165s per turn.
+# The detector's fingerprint is `hash(toolName + normalizedArgs)` — the command string is
+# what matters, not the sleep duration. The lane command sets PI_SWARM_LOOP_REPEAT_WINDOW_MS=0
+# to disable the time-span gate deterministically (fixtures never set env).
+#
+# Shape (24 turns; pacing keeps the active segment open — toolUse stops keep the run looping
+# tool->tool without settling mid-block, so segment time accrues from scripted delayMs):
+#   t1..t5:   5 identical bash polls (milestone k=1 boundary at call 5)
+#   t6..t10:  5 more identical bash polls (milestone k=2 boundary at call 10)
+#   t11..t15: 5 more identical bash polls (milestone k=3 boundary at call 15)
+#   t16..t20: 5 more identical bash polls (milestone-4 boundary at call 20 → root escalation)
+#   t21..t23: 3 post-escalation polls (persisted latch: no re-escalation, no 4th continuation)
+#   t24:      terminal stop
+# Every delayMs is 15–25ms; all tool names are lowercase pi-builtin (bash). The bash RESULT
+# text varies per turn (fresh timestamp) — the detector must NOT use result-hash.
+#
+# Expected GREEN (detector landed): mid-run self-nudge after the 5th bash (milestone k=1),
+# 10th (k=2), 15th (k=3) — each nudge text (LOOP-REPEAT marker family, milestone number,
+# call count, span) lands in the NEXT model request via turn_end custom_message + continue:true.
+# Exactly 3 mid-run continuations; final turn stop. Root escalation fires ONCE at milestone-4.
+# Expected RED (pre-code reproduction): transcript shows NO nudge text anywhere, zero extra
+# requests — the run burns all 20+ bash polls silently.
+{"name": "bash poll 1/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Polling root for reply.", "chunks": ["Polling root ", "for reply."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-1", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 2/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Still polling.", "chunks": ["Still ", "polling."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-2", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 3/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "No reply yet.", "chunks": ["No reply ", "yet."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-3", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 4/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Continuing the poll.", "chunks": ["Continuing ", "the poll."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-4", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 5/20 \u2014 milestone k=1 boundary", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Polling again.", "chunks": ["Polling ", "again."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-5", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 6/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Still no reply.", "chunks": ["Still ", "no reply."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-6", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 7/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Polling root.", "chunks": ["Polling ", "root."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-7", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 8/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Waiting for reply.", "chunks": ["Waiting ", "for reply."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-8", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 9/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Continuing to poll.", "chunks": ["Continuing ", "to poll."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-9", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 10/20 \u2014 milestone k=2 boundary", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Polling again.", "chunks": ["Polling ", "again."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-10", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 11/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Still polling.", "chunks": ["Still ", "polling."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-11", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 12/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "No reply yet.", "chunks": ["No reply ", "yet."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-12", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 13/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Continuing the poll.", "chunks": ["Continuing ", "the poll."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-13", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 14/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Polling again.", "chunks": ["Polling ", "again."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-14", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 15/20 \u2014 milestone k=3 boundary", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Still no reply.", "chunks": ["Still ", "no reply."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-15", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 16/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Polling root.", "chunks": ["Polling ", "root."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-16", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 17/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Waiting for reply.", "chunks": ["Waiting ", "for reply."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-17", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 18/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Continuing to poll.", "chunks": ["Continuing ", "to poll."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-18", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 19/20", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Polling again.", "chunks": ["Polling ", "again."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-19", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "bash poll 20/20 \u2014 milestone-4 boundary (root escalation)", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Still polling.", "chunks": ["Still ", "polling."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-20", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "post-escalation poll 1", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "No reply yet.", "chunks": ["No reply ", "yet."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-21", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "post-escalation poll 2", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Continuing the poll.", "chunks": ["Continuing ", "the poll."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-22", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "post-escalation poll 3", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 20, "text": "Polling again.", "chunks": ["Polling ", "again."]}, {"type": "toolcall", "delayMs": 20, "name": "bash", "id": "p-23", "arguments": {"command": "cat root.jsonl | tail -1"}}]}
+{"name": "terminal stop", "stopReason": "stop", "events": [{"type": "text", "delayMs": 20, "text": "Lane terminal: loop-repeat scenario complete.", "chunks": ["Lane terminal: ", "loop-repeat scenario complete."]}]}
