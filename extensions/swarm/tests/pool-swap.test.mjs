@@ -154,27 +154,26 @@ async function errBurst(turnIndexBase, { model = fakeModelGlm, provider = "zai-c
 	}
 }
 
-// Simulate a QUOTA error turn from glm/zai. Incident 2026-10-11 A: pi fail-fasts
-// non-retryable quota errors (isRetryableAssistantError → false), so the gate opens on the
-// FIRST strike (singleStrike). A 3-strike burst therefore attempts one swap per strike,
-// bounded by MAX_SWAP_CHAIN=2: exactly 2 swaps, then the 3rd strike is swap_chain_capped.
-await errBurst(1, {
+// Simulate a QUOTA error turn from glm/zai.
+// Error passes through the engine-retry gate (strike 1 gated to allow engine retry and preserve cache;
+// strike 2 exhausts retries -> swap in-process).
+await errBurst(2, {
 	model: fakeModelGlm,
 	provider: "zai-coding-cn",
 	errorMessage: "Error 429: You exceeded your current quota, please check your plan and billing details",
+	count: 2,
 });
 
-ok("quota error swapped model in-process", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
+ok("quota error swapped model in-process after retries exhaust", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
 ok("swapped to a DIFFERENT slot", setModelCalls[0] !== "zai-coding-cn/glm-5.1");
 let ps = await poolStatus(p);
 const glm = ps.slots.find((s) => s.model === "glm-5.1");
-ok("quota benched glm immediately", glm.inCooldown && /quota/.test(glm.health.lastError));
+ok("quota benched glm", glm.inCooldown && /quota/.test(glm.health.lastError));
 ok(
 	"swap note sent to the agent",
 	sentMessages.some((s) => /Pool:/.test(s.m.content) && /quota/.test(s.m.content)),
 );
-// Issue 17 (binding C3): positive assertion that pool.swap_gated_by_engine_retry fired for the
-// first two gated strikes. The 3rd strike opens the gate; gated count for this burst is exactly 2.
+// Issue 17: positive assertion that pool.swap_gated_by_engine_retry fired for the gated strike.
 {
 	const { readFile } = await import("node:fs/promises");
 	const raw = await readFile(p.events, "utf8");
@@ -188,11 +187,7 @@ ok(
 				return false;
 			}
 		}).length;
-	// Incident 2026-10-11 A: quota is single-strike now (pi never retries it) — a quota burst
-	// emits NO gated events. Burst-gated kinds (transient/rate_limit) are pinned by
-	// pool-retry.test.mjs fixtures 1/2 and pool-slow-attempt-window.test.mjs.
-	ok("issue 17 + incident A: quota strikes are never gated (single-strike)", gated === 0, `gated=${gated}`);
-	ok("issue 17 + incident A: 3rd quota strike hit the swap-chain cap", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
+	ok("first strike was gated to allow engine retry (preserves cache)", gated === 1, `gated=${gated}`);
 }
 
 // Non-provider errors must NOT swap (e.g. context overflow). Issue 17: kind === "unknown"

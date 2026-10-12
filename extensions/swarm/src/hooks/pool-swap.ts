@@ -139,7 +139,6 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 		// cap still bounds cascades. rate_limit/transient/unknown keep the full burst-count gate
 		// (pi genuinely retries those: RETRYABLE_PROVIDER_ERROR_PATTERN matches 429/5xx/network/
 		// timeout text).
-		const singleStrike = kind === "quota" || kind === "auth" || kind === "request_limit";
 		const providerKey = slotKey(currentSlot);
 		const scrubErr = scrubErrorIdentity(errorText);
 		const prevIncident = engineRetryIncidentsMap().get(agentId);
@@ -149,24 +148,12 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 			prevIncident &&
 			prevIncident.providerKey === providerKey &&
 			prevIncident.kind === kind &&
-			prevIncident.errorMessage === scrubErr &&
-			(nowMs - prevIncident.lastSeenAt <= ENGINE_RETRY_WINDOW_MS ||
-				// Incident 2026-10-11 B (slow-attempt liveness): the window is calibrated for pi's
-				// backoff budget (2s+4s+8s), not the request duration. A "Codex SSE response headers
-				// timed out after 300000ms" retry attempt takes ~5 minutes, so consecutive strikes
-				// land ~302s apart and each one aged the previous incident out into count:1 forever
-				// (live: three identical timeout strikes at 01:36/01:41/01:46, all gated count:1,
-				// rescued only by a MANUAL model change). But every engine retry re-enters via
-				// agent.continue() → runAgentLoopContinue, which emits a fresh turn_start BEFORE the
-				// next attempt (pi-agent-core agent-loop.js). So "turn_start observed after the last
-				// error strike" proves a new attempt on the SAME incident is in flight — keep
-				// accumulating past the wall-clock window. No turn_start since the strike means the
-				// agent settled idle (e.g. the user read the error and much later retried): fresh
-				// incident, exactly as before.
-				hasAttemptSinceIncident(agentId, prevIncident.lastSeenAt))
+			(nowMs - prevIncident.lastSeenAt <= ENGINE_RETRY_WINDOW_MS || hasAttemptSinceIncident(agentId, prevIncident.lastSeenAt))
 		) {
 			prevIncident.count++;
 			prevIncident.lastSeenAt = nowMs;
+			prevIncident.kind = kind;
+			prevIncident.errorMessage = scrubErr;
 			incidentCount = prevIncident.count;
 			if (prevIncident.count >= ENGINE_MAX_RETRIES) engineExhausted = true;
 		} else {
@@ -179,17 +166,9 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 				count: 1,
 			});
 		}
-		if (singleStrike) {
-			// Non-retryable kind: pi already gave up on the first strike. Treat the incident as
-			// exhausted NOW (count 1); the shared exhaustion site below clears it and traces with
-			// singleStrike:true so the next failure (on the post-swap slot) starts fresh.
-			engineExhausted = true;
-			incidentCount = Math.max(incidentCount, 1);
-		}
 		if (!engineExhausted) {
 			// Transient within the engine's retry budget — DO NOT swap, DO NOT bench, DO NOT pollute
-			// the streak. Trace for visibility and return. The engine may still recover on a later
-			// retry; if it does, the successful turn_end clears the incident (see `stop` branch).
+			// the streak. Trace for visibility.
 			await trace(p, "pool.swap_gated_by_engine_retry", {
 				agentId,
 				providerKey,
@@ -199,6 +178,29 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 				threshold: ENGINE_MAX_RETRIES,
 				error: errorText.slice(0, 120),
 			}).catch(() => {});
+
+			// Active Swarm Retry: Trigger a retry turn on the CURRENT slot using exponential backoff.
+			// This preserves the prompt cache and handles cases where the engine didn't auto-continue.
+			const delayMs = 2000 * 2 ** (incidentCount - 1); // 2s -> 4s
+			if (delayMs > 0) {
+				await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, 5000)));
+			}
+			pi.sendMessage(
+				{
+					customType: "swarm-pool-retry",
+					content: `⚠ Pool: ${kind} error on ${providerKey} — retrying attempt ${incidentCount}/${ENGINE_MAX_RETRIES} on current slot to preserve cache.`,
+					display: true,
+				},
+				{ deliverAs: "followUp" },
+			);
+			pi.sendMessage(
+				{
+					customType: "swarm-message",
+					content: "Continue your current task (retrying).",
+					display: false,
+				},
+				ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp", triggerTurn: true },
+			);
 			return;
 		}
 		// Engine exhausted: this is the terminal strike. Clear the incident so the next failure
@@ -210,7 +212,6 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 			providerKey,
 			kind,
 			count: incidentCount,
-			singleStrike: singleStrike || undefined,
 		}).catch(() => {});
 		await recordProviderError(p, currentSlot, kind, errorText).catch((err) =>
 			logSwarmError(p, "hooks", "recordProviderError.failed", err),

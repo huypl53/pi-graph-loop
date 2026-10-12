@@ -80,11 +80,7 @@ function missingProviderCredential(provider: string): string | undefined {
 			const entry = auth?.[provider];
 			if (entry && typeof entry === "object") {
 				if (entry.type === "api_key" && String(entry.key || entry.apiKey || "").trim()) return undefined;
-				if (
-					entry.type === "oauth" &&
-					(String(entry.access || "").trim() || String(entry.refresh || "").trim())
-				)
-					return undefined;
+				if (entry.type === "oauth" && (String(entry.access || "").trim() || String(entry.refresh || "").trim())) return undefined;
 			}
 		}
 	} catch (err: any) {
@@ -412,7 +408,15 @@ export function validateSwarmSettings(
 	// readSwarmYml(cwd) only) and are documented in the project scaffold (constants.ts) —
 	// recognizing them only at the project layer keeps the global warning truthful (a global
 	// `issues:` block really is ignored).
-	const RECOGNIZED_BOTH = new Set(["modelPool", "rotation", "defaultModel", "defaultProvider", "terminalManager", "inheritGlobal", "roles"]);
+	const RECOGNIZED_BOTH = new Set([
+		"modelPool",
+		"rotation",
+		"defaultModel",
+		"defaultProvider",
+		"terminalManager",
+		"inheritGlobal",
+		"roles",
+	]);
 	const RECOGNIZED_PROJECT = new Set([...RECOGNIZED_BOTH, "issues", "issue-sequencer"]);
 	const projFile = findSwarmYamlFile(cwd);
 	if (projFile) {
@@ -816,9 +820,7 @@ export async function recordProviderError(p: Paths, slot: ModelSlot, kind: Provi
 			// cooldown doubles its bench time (capped at 24h), so a long outage (monthly quota reset)
 			// costs at most one probe attempt per doubling instead of one per cooldownMs.
 			const benchStreak = (prev.benchStreak || 0) + 1;
-			// B-1: effectiveBenchMs already floors on rotation.cooldownMs — drop the redundant Math.max.
-			// auth is unaffected by quotaResetMs (auth benches do not self-heal on a known reset window).
-			const base = kind === "auth" ? Math.max(rotation.cooldownMs, 6 * 60 * 60_000) : effectiveBenchMs(slot, rotation);
+			const base = effectiveBenchMs(slot, rotation);
 			const ms = Math.min(base * Math.pow(2, benchStreak - 1), 24 * 60 * 60_000);
 			next.cooldownUntil = new Date(Date.now() + ms).toISOString();
 			next.failures = 0; // fresh chance after cooldown

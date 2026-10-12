@@ -351,18 +351,14 @@ const turnEnd = handlers["turn_end"][0];
 }
 
 // =============================================================
-// Fixture 6: Quota error exhausts and swaps (immediate bench still works)
+// Fixture 6: Quota error exhausts and swaps
 // =============================================================
-// Quota benches immediately on recordProviderError. Incident 2026-10-11 A: pi FAIL-FASTS
-// non-retryable quota/billing errors (isRetryableAssistantError → false), so the gate now
-// treats a quota strike as exhausted on the FIRST hit (singleStrike) instead of waiting for
-// a second turn_end the engine will never emit. The burst below therefore swaps on the first
-// strike and the second strike lands on the NEW slot (gpt) — a second swap. Updated to expect
-// exactly that: 2 swaps, both glm and gpt benched with lastBenchReason=quota.
+// Quota error passes through the engine-retry gate (strike 1 is gated to allow engine retry
+// and preserve prompt cache; strike 2 exhausts retries -> bench + swap).
 {
 	await freshSession();
 	await burstOfErrors(2, "Error 429: You exceeded your current quota");
-	ok("fixture 6: quota single-strike swaps per slot (2 strikes -> 2 swaps)", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
+	ok("fixture 6: quota exhausts retries on strike 2 and swaps", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
 	const ps = await poolStatus(p);
 	const glm = ps.slots.find((s) => s.model === "glm-5.1");
 	ok("fixture 6: quota slot is benched", glm.inCooldown && /quota/.test(glm.health.lastError));

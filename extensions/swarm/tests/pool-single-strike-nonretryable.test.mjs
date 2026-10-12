@@ -186,24 +186,27 @@ ok("chatgpt usage-limit body classifies as quota", classifyProviderError(CHATGPT
 ok("proxy auth_unavailable wrapper classifies as auth", classifyProviderError("auth_unavailable: no auth available") === "auth");
 
 // =============================================================
-// F1: single quota strike opens the gate immediately (the live incident)
+// F1: quota strike gates first to allow engine retry (preserves cache), swaps on retry exhausted
 // =============================================================
 {
 	await freshSession("worker-quota");
 	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
 	ok(
-		"F1: single quota strike swaps in-process",
-		setModelCalls.length === 1,
-		`calls=${setModelCalls.length} (live session died here: gated count:1, no swap)`,
+		"F1: first quota strike does NOT swap (gated to preserve cache for retry)",
+		setModelCalls.length === 0,
+		`calls=${setModelCalls.length}`,
 	);
+	// 2nd strike (engine retries exhausted)
+	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
+	ok("F1: quota strike swaps after engine retries exhausted", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
 	if (setModelCalls.length > 0)
 		ok("F1: swapped to a DIFFERENT slot", setModelCalls[0] !== "zai-coding-cn/glm-5.1", `to=${setModelCalls[0]}`);
 	const ps = await poolStatus(p);
 	const glm = ps.slots.find((s) => s.model === "glm-5.1");
-	ok("F1: quota slot benched immediately", Boolean(glm?.inCooldown), JSON.stringify(glm?.health ?? null));
+	ok("F1: quota slot benched after retries exhausted", Boolean(glm?.inCooldown), JSON.stringify(glm?.health ?? null));
 	ok("F1: benched with lastBenchReason=quota", glm?.health?.lastBenchReason === "quota", `reason=${glm?.health?.lastBenchReason}`);
 	const exhausted = await countTraceEvents("pool.engine_retry_exhausted");
-	ok("F1: engine_retry_exhausted fired once (single-strike)", exhausted === 1, `exhausted=${exhausted}`);
+	ok("F1: engine_retry_exhausted fired once", exhausted === 1, `exhausted=${exhausted}`);
 	const swaps = await countTraceEvents("pool.swap");
 	ok("F1: pool.swap trace fired", swaps === 1, `swaps=${swaps}`);
 	ok(
@@ -214,43 +217,50 @@ ok("proxy auth_unavailable wrapper classifies as auth", classifyProviderError("a
 }
 
 // =============================================================
-// F2: single auth strike behaves the same (fail-fast + immediate bench)
+// F2: auth strike gates first, then swaps and benches without 6h floor
 // =============================================================
 {
 	await freshSession("worker-auth");
 	await errOnce(fakeModelGlm, "401 Invalid API key provided");
-	ok("F2: single auth strike swaps", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
+	ok("F2: first auth strike does NOT swap (gated)", setModelCalls.length === 0, `calls=${setModelCalls.length}`);
+	await errOnce(fakeModelGlm, "401 Invalid API key provided");
+	ok("F2: auth strike swaps after retries exhausted", setModelCalls.length === 1, `calls=${setModelCalls.length}`);
 	const ps = await poolStatus(p);
 	const glm = ps.slots.find((s) => s.model === "glm-5.1");
-	ok("F2: auth slot benched immediately", Boolean(glm?.inCooldown), JSON.stringify(glm?.health ?? null));
+	ok("F2: auth slot benched after retries exhausted", Boolean(glm?.inCooldown), JSON.stringify(glm?.health ?? null));
 	ok("F2: benched with lastBenchReason=auth", glm?.health?.lastBenchReason === "auth", `reason=${glm?.health?.lastBenchReason}`);
+	ok(
+		"F2: bench duration honors cooldownMs (300,000ms), NOT 6-hour floor",
+		glm?.health?.lastBenchMs === 300_000,
+		`actual lastBenchMs=${glm?.health?.lastBenchMs}`,
+	);
 }
 
 // =============================================================
-// F8: exact live upstream buffer-limit failure must not strand the worker on its slot.
-// Live session 01a12a34: WebSocket failed before stream start (requestBytes=1,655,768),
-// SSE fallback then surfaced this exact error; subsequent auth_unavailable wrappers were
-// also unrecognized. The pool currently treats the first error as unknown and returns.
+// F8: exact live upstream buffer-limit failure rotates after retries exhaust
+// =============================================================
 {
 	await freshSession("worker-buffer-limit");
 	await errOnce(fakeModelGlm, "exceeded request buffer limit while retrying upstream");
+	await errOnce(fakeModelGlm, "exceeded request buffer limit while retrying upstream");
 	ok(
-		"F8: exact proxy buffer-limit failure rotates to a different pool slot",
+		"F8: exact proxy buffer-limit failure rotates after retries exhaust",
 		setModelCalls.length === 1 && setModelCalls[0] !== "zai-coding-cn/glm-5.1",
 		`calls=${JSON.stringify(setModelCalls)}`,
 	);
 }
 
 // =============================================================
-// F9: the proxy's wrapped no-auth error is an immediate pool failover signal too.
+// F9: the proxy's wrapped no-auth error rotates after retries exhaust
+// =============================================================
 {
 	await freshSession("worker-auth-unavailable");
-	await errOnce(
-		fakeModelGlm,
-		"auth_unavailable: no auth available (providers=codex, model=gpt-6-luna; last upstream error: exceeded request buffer limit while retrying upstream)",
-	);
+	const msg =
+		"auth_unavailable: no auth available (providers=codex, model=gpt-6-luna; last upstream error: exceeded request buffer limit while retrying upstream)";
+	await errOnce(fakeModelGlm, msg);
+	await errOnce(fakeModelGlm, msg);
 	ok(
-		"F9: proxy auth_unavailable wrapper rotates to a different pool slot",
+		"F9: proxy auth_unavailable wrapper rotates after retries exhaust",
 		setModelCalls.length === 1 && setModelCalls[0] !== "zai-coding-cn/glm-5.1",
 		`calls=${JSON.stringify(setModelCalls)}`,
 	);
@@ -286,6 +296,7 @@ ok("proxy auth_unavailable wrapper classifies as auth", classifyProviderError("a
 // =============================================================
 {
 	await freshSession("worker-reset");
+	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
 	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT); // swap glm -> gpt
 	if (setModelCalls.length !== 1) {
 		ok("F5: precondition — first strike swapped", false, `calls=${setModelCalls.length}`);
@@ -312,9 +323,11 @@ ok("proxy auth_unavailable wrapper classifies as auth", classifyProviderError("a
 	await freshSession("worker-chain");
 	// glm quota -> swap #1; gpt quota -> swap #2; claude quota -> capped (MAX_SWAP_CHAIN=2)
 	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
+	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
+	await errOnce(fakeModelGpt, CHATGPT_USAGE_LIMIT);
 	await errOnce(fakeModelGpt, CHATGPT_USAGE_LIMIT);
 	const two = setModelCalls.length;
-	ok("F6: chain allows first 2 single-strike swaps", two === 2, `calls=${two}`);
+	ok("F6: chain allows first 2 swaps", two === 2, `calls=${two}`);
 	await errOnce(fakeModelClaude, CHATGPT_USAGE_LIMIT);
 	ok("F6: chain caps the 3rd swap", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
 	const capped = await countTraceEvents("pool.swap_chain_capped");
