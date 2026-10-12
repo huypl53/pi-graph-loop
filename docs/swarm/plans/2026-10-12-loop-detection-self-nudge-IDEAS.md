@@ -170,3 +170,46 @@ Red-team 2026-10-12: design lens (D1–D6) + runtime lens (B1, M1–M3, m1–m2)
 - Read-loop thuần bash không bị bắt (fail-closed theo D3).
 - Xen OTHER vô hại định kỳ = evasion (D4) — đây là read-streak guard, không phải full loop detection.
 - Single never-ending turn out of scope v1 — đã giải quyết: nudge bám vào `turn_end` sau mỗi vòng tool, không cần settle.
+
+## 8. PLAN v1.2 — loop-repeat guard (bash-identical-repeat)
+
+> Incident 2026-10-12 tối: `p9-dossier-runtime-debug2` (workflow-agents) lặp
+> `sleep 165; tail -1 root.jsonl` mỗi ~2m45s suốt nhiều giờ — tự bịa polling loop chờ
+> reply root. Mỗi vòng là 1 bash tool call → `tool_running` + heartbeat healthy → mọi
+> detector tưởng nó đang làm. Đây là known limit v1.1 (bash = OTHER, fail-closed).
+> v1.2 thêm detector song song: **identical fingerprint repeat** (C2 gốc từ §1).
+
+### Tiêu chí
+
+- `fp = hash(toolName + normalizedArgs + hash(normalizedResult))` — result-hash bắt buộc
+  (TDD rerun cho output khác → không đếm).
+- Ring per (agent, task, fp): `{fp, firstSeenAt, count, lastSeenAt}`; lệnh khác xen vào
+  KHÔNG reset ring (chống evasion poll→ls→poll); fingerprint khác = ring riêng.
+- **Milestone k (k=1..3): count ≥ 5·k VÀ span(firstSeen→last) ≥ 10·60_000·k** (AND cả hai —
+  TDD loop 5 lần trong 3 phút không trúng). Env: `PI_SWARM_LOOP_REPEAT_CALLS` (5),
+  `PI_SWARM_LOOP_REPEAT_WINDOW_MS` (60 phút cap — occurrence cũ hơn bị drop).
+- Quan hệ với read-streak guard: detector nào trúng mốc trước thì nudge; không double-nudge
+  cùng 1 turn_end (milestoneJustFired đơn).
+- Delivery + ladder y nguyên v1.1: turn_end custom_message continuation (F-BUSY-NUDGE đã
+  VERIFIED — không probe lại), max 3 nudges, milestone-4 → reconcile root 1 lần (latch).
+- Persist trong swarm state (`st.loopRepeats`) keyed `agentId+activeTaskId` — sống qua restart.
+- Toggle dùng chung `/swarm loop on|off`; status hiển thị cả 2 detector.
+
+### Files
+
+| File | Thay đổi |
+|---|---|
+| `src/nudges/loop-detect.ts` | thêm `observeRepeat()` + ring + milestone; reuse consumeTurnEndNudge |
+| `src/hooks/tools.ts` | gọi observeRepeat cho MỌI tool_result (kể cả bash) |
+| `src/constants.ts` | 2-3 hằng số env trên |
+| `src/types/state.ts` | `loopRepeats` map |
+| fixtures | `loop-bash-repeat-poll.jsonl` (mô phỏng incident: identical sleep+tail, RED trước code), `loop-repeat-tdd-neg.jsonl` (identical args nhưng output khác / span ngắn → 0 nudge) |
+| tests | unit (milestone AND-gates, ring không reset khi xen lệnh khác, persistence, no-double-nudge) + lane + R10-1 counter đã có tại turns.ts (phải đếm nudge của detector mới) |
+| docs | tools.md `/swarm loop` cập nhật, CHANGELOG |
+
+### Thứ tự implement (bắt buộc)
+
+1. RED fixture `loop-bash-repeat-poll.jsonl` chạy lane thấy 0 nudge (chưa có detector).
+2. Code detector + hooks + persist → fixture XANH; unit tests; R10-1 counter giữ đúng.
+3. Negative fixture xanh (TDD-shape không nudge).
+4. tmux validation lane riêng, transcripts làm evidence; CHANGELOG + docs.
