@@ -1,0 +1,4 @@
+# Reproduces the proxy's terminal fallback error after a large request's WebSocket attempt
+# fails pre-stream and the upstream retry buffer is exceeded. The worker must bench this slot,
+# rotate in-process, and continue on the alternate pool model.
+{"name":"upstream request buffer exhausted after transport fallback","events":[{"type":"error","kind":"torn_json","message":"exceeded request buffer limit while retrying upstream"}]}

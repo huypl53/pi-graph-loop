@@ -19,9 +19,9 @@ export type ModelSlot = {
 
 export type RotationStrategy = "weighted" | "round-robin" | "sticky";
 
-// Classify a provider/turn error message. Quota/auth failures are the rotation triggers;
-// transient errors are tolerated a few times before benching.
-export type ProviderErrorKind = "quota" | "auth" | "rate_limit" | "transient" | "unknown";
+// Classify a provider/turn error message. Quota/auth and deterministic request-limit failures
+// trigger immediate rotation; retryable transient errors are tolerated through engine retries.
+export type ProviderErrorKind = "quota" | "auth" | "request_limit" | "rate_limit" | "transient" | "unknown";
 
 export type RotationConfig = {
 	strategy?: RotationStrategy; // default weighted

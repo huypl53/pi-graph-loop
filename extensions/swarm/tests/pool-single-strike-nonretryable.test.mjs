@@ -24,6 +24,8 @@
 //       the next slot's error).
 //   F6: swap-chain cap still applies to single-strike swaps (2 swaps max in 5 minutes).
 //   F7: guest sessions never rotate even on single-strike quota errors.
+//   F8: the exact proxy buffer-limit failure is not silently classified unknown; rotate away.
+//   F9: the auth_unavailable wrapper emitted by the same proxy incident also rotates away.
 //
 // Run: node extensions/swarm/tests/pool-single-strike-nonretryable.test.mjs
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
@@ -181,6 +183,7 @@ async function freshSession(agentId = `worker-${Math.random().toString(36).slice
 
 // Classification sanity for the exact live body.
 ok("chatgpt usage-limit body classifies as quota", classifyProviderError(CHATGPT_USAGE_LIMIT) === "quota");
+ok("proxy auth_unavailable wrapper classifies as auth", classifyProviderError("auth_unavailable: no auth available") === "auth");
 
 // =============================================================
 // F1: single quota strike opens the gate immediately (the live incident)
@@ -221,6 +224,36 @@ ok("chatgpt usage-limit body classifies as quota", classifyProviderError(CHATGPT
 	const glm = ps.slots.find((s) => s.model === "glm-5.1");
 	ok("F2: auth slot benched immediately", Boolean(glm?.inCooldown), JSON.stringify(glm?.health ?? null));
 	ok("F2: benched with lastBenchReason=auth", glm?.health?.lastBenchReason === "auth", `reason=${glm?.health?.lastBenchReason}`);
+}
+
+// =============================================================
+// F8: exact live upstream buffer-limit failure must not strand the worker on its slot.
+// Live session 01a12a34: WebSocket failed before stream start (requestBytes=1,655,768),
+// SSE fallback then surfaced this exact error; subsequent auth_unavailable wrappers were
+// also unrecognized. The pool currently treats the first error as unknown and returns.
+{
+	await freshSession("worker-buffer-limit");
+	await errOnce(fakeModelGlm, "exceeded request buffer limit while retrying upstream");
+	ok(
+		"F8: exact proxy buffer-limit failure rotates to a different pool slot",
+		setModelCalls.length === 1 && setModelCalls[0] !== "zai-coding-cn/glm-5.1",
+		`calls=${JSON.stringify(setModelCalls)}`,
+	);
+}
+
+// =============================================================
+// F9: the proxy's wrapped no-auth error is an immediate pool failover signal too.
+{
+	await freshSession("worker-auth-unavailable");
+	await errOnce(
+		fakeModelGlm,
+		"auth_unavailable: no auth available (providers=codex, model=gpt-6-luna; last upstream error: exceeded request buffer limit while retrying upstream)",
+	);
+	ok(
+		"F9: proxy auth_unavailable wrapper rotates to a different pool slot",
+		setModelCalls.length === 1 && setModelCalls[0] !== "zai-coding-cn/glm-5.1",
+		`calls=${JSON.stringify(setModelCalls)}`,
+	);
 }
 
 // =============================================================

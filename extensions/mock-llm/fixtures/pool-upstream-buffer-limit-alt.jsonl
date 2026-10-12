@@ -1,0 +1,3 @@
+{"name":"post-rotation completion 1","events":[{"type":"text","delayMs":5,"text":"Recovered on the alternate pool model after the upstream request buffer limit."},{"type":"stop","delayMs":1,"reason":"stop"}]}
+{"name":"post-rotation follow-up completion 2","events":[{"type":"text","delayMs":5,"text":"Still running on the alternate pool model after rotation."},{"type":"stop","delayMs":1,"reason":"stop"}]}
+{"name":"post-rotation follow-up completion 3","events":[{"type":"text","delayMs":5,"text":"Alternate model remains available after recovery."},{"type":"stop","delayMs":1,"reason":"stop"}]}

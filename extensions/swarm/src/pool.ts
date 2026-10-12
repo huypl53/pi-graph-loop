@@ -44,8 +44,9 @@ export function classifyProviderError(message: string): ProviderErrorKind {
 	// classify quota — they route into the pool's immediate-bench policy (lastBenchReason=quota).
 	// This branch runs BEFORE the 429/rate_limit branch so plain "429 rate limit" stays rate_limit.
 	if (/quota|insufficient|billing|balance|exceeded your current quota|prepaid|usage_limit|usage limit/.test(m)) return "quota";
+	if (/request buffer limit|request body too large|payload too large/.test(m)) return "request_limit";
 	if (/rate.?limit|too many requests|429|overloaded/.test(m)) return "rate_limit";
-	if (/invalid api key|unauthorized|forbidden|401|403|authentication|api key/.test(m)) return "auth";
+	if (/auth_unavailable|no auth available|invalid api key|unauthorized|forbidden|401|403|authentication|api key/.test(m)) return "auth";
 	if (/timeout|timed out|econnrefused|econnreset|enotfound|5\d\d|network|connection/.test(m)) return "transient";
 	return "unknown";
 }
@@ -809,7 +810,7 @@ export async function recordProviderError(p: Paths, slot: ModelSlot, kind: Provi
 			lastErrorAt: new Date().toISOString(),
 			deduped: sameIncident || undefined,
 		};
-		const immediate = kind === "quota" || kind === "auth";
+		const immediate = kind === "quota" || kind === "auth" || kind === "request_limit";
 		if (failures >= rotation.maxRetries || immediate) {
 			// Exponential backoff for repeated benching: a slot that keeps failing right after each
 			// cooldown doubles its bench time (capped at 24h), so a long outage (monthly quota reset)

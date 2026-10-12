@@ -122,6 +122,9 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 		// identity + kind keeps distinct transient messages distinct while collapsing mutating
 		// quota bodies into one incident.
 		//
+		// Single-strike terminal failures: quota/auth fail fast in pi; request_limit is also
+		// non-recoverable for the same request against that upstream, so do not wait for another
+		// identical turn before benching and rotating.
 		// Incident 2026-10-11 A (single-strike non-retryable kinds — live session 01a12883):
 		// pi's engine FAIL-FASTS on quota/billing/subscription-limit errors —
 		// isRetryableAssistantError (pi-ai utils/retry.js) matches them against
@@ -136,7 +139,7 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 		// cap still bounds cascades. rate_limit/transient/unknown keep the full burst-count gate
 		// (pi genuinely retries those: RETRYABLE_PROVIDER_ERROR_PATTERN matches 429/5xx/network/
 		// timeout text).
-		const singleStrike = kind === "quota" || kind === "auth";
+		const singleStrike = kind === "quota" || kind === "auth" || kind === "request_limit";
 		const providerKey = slotKey(currentSlot);
 		const scrubErr = scrubErrorIdentity(errorText);
 		const prevIncident = engineRetryIncidentsMap().get(agentId);
