@@ -181,10 +181,18 @@ Red-team 2026-10-12: design lens (D1–D6) + runtime lens (B1, M1–M3, m1–m2)
 
 ### Tiêu chí
 
-- `fp = hash(toolName + normalizedArgs + hash(normalizedResult))` — result-hash bắt buộc
-  (TDD rerun cho output khác → không đếm).
+- `fp = hash(toolName + normalizedArgs)` — **KHÔNG hash result** (v1.2 revision 2026-10-12):
+  chính incident motivator in timestamp mới mỗi vòng (`tail` mail + clock) → result-hash làm
+  fp luôn khác → detector vô hiệu. Result chứa timestamp/counter/usage luôn khác nhau, strip
+  bằng normalize chỉ giảm bớt không chắc chắn. Args-identical là tín hiệu ổn định.
+- Anti-TDD KHÔNG靠 result-hash mà靠: (a) chuỗi **liên tiếp** — TDD thật xen `edit` giữa 2 lần
+  test nên không tích chuỗi; (b) milestone cần span ≥ 10 phút; (c) nudge 5+ lần chạy y hệt
+  không đổi gì là đúng hành vi đáng nhắc, kể cả TDD. Output khác nhau KHÔNG reset chuỗi —
+  poll cho output mới chính là loop cần bắt.
 - Ring per (agent, task, fp): `{fp, firstSeenAt, count, lastSeenAt}`; lệnh khác xen vào
-  KHÔNG reset ring (chống evasion poll→ls→poll); fingerprint khác = ring riêng.
+  KHÔNG reset ring nhưng PHẢI đứt tính "liên tiếp" — vd fp A lặp 4 lần, xen 1 lệnh khác, lại
+  A 4 lần: count ring A = 8 (không reset) nhưng consecutive-check đếm từ đoạn cuối. Milestone
+  dựa trên count tích lũy trong window (chống evasion poll→ls→poll VÀ không phạt TDD xen edit).
 - **Milestone k (k=1..3): count ≥ 5·k VÀ span(firstSeen→last) ≥ 10·60_000·k** (AND cả hai —
   TDD loop 5 lần trong 3 phút không trúng). Env: `PI_SWARM_LOOP_REPEAT_CALLS` (5),
   `PI_SWARM_LOOP_REPEAT_WINDOW_MS` (60 phút cap — occurrence cũ hơn bị drop).
