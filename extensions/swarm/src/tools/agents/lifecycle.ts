@@ -85,8 +85,9 @@ export function registerAgentLifecycleTools(pi: ExtensionAPI): void {
 					const warnHeader = !hasUserConfig
 						? "[WARNING: .pi/swarm.yaml is not configured. Worker spawned with fallback defaults. Configure .pi/swarm.yaml to set model & provider.]\n\n"
 						: "";
+					const assignHint = `\n\nNOTE: this agent is NOT tracked by any task graph yet. To attach its work to the task graph (and get progress/closure nudges), assign a node:\n  swarm_assign_task(taskId="<taskId>", nodeId="<nodeId>", agentId="${result.agent.id}")\nIf this is a message-only helper (no task graph), it will report back via swarm messages.`;
 					return textResult(
-						`${warnHeader}Spawned ${result.agent.id} at ${result.agent.tmuxTarget}\nIdentity + snapshot persisted (use swarm_agent_status agentId:"${result.agent.id}" to inspect).`,
+						`${warnHeader}Spawned ${result.agent.id} at ${result.agent.tmuxTarget}\nIdentity + snapshot persisted (use swarm_agent_status agentId:"${result.agent.id}" to inspect).${assignHint}`,
 						result,
 					);
 				});
