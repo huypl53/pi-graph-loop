@@ -51,6 +51,8 @@ const SERIALIZATION_GROUPS = {
 		"extensions/swarm/tests/ct-phase2-probes.test.mjs",
 		"extensions/mock-llm/tests/agent-lifecycle-uat.test.mjs",
 		"extensions/mock-llm/tests/messaging-uat.test.mjs",
+		"extensions/mock-llm/tests/assignment-clarify-footer.test.mjs",
+		"extensions/mock-llm/tests/selftest.test.mjs",
 		"extensions/swarm/tests/uat-goal-nudge.test.mjs",
 	],
 	// Lanes that can drive the live terminal daemons (real tmux window creation through

@@ -114,7 +114,7 @@ within their group (defined in `SERIALIZATION_GROUPS` inside the runner):
 
 | group | protects | members |
 |---|---|---|
-| `repo-pi-state` | fixed paths under the repo's own `.pi/` (`.pi/swarm/tasks/task-202609020643-r18-…/artifacts`, `.pi/mock-llm/transcripts/ct*`, `.pi/swarm-uat/runs/<second-granularity STAMP>`) + repo-cwd child pi sessions + repo `tmux-snapshots/` writes | `r18-scratch-startup`, `ct-phase2-probes`, `agent-lifecycle-uat`, `messaging-uat`, `uat-goal-nudge` |
+| `repo-pi-state` | fixed paths under the repo's own `.pi/` (`.pi/swarm/tasks/task-202609020643-r18-…/artifacts`, `.pi/mock-llm/transcripts/ct*`, `.pi/mock-llm/transcripts/assignment-clarify-footer*`, `.pi/swarm-uat/runs/<second-granularity STAMP>`) + repo-cwd child pi sessions + repo `tmux-snapshots/` writes | `r18-scratch-startup`, `ct-phase2-probes`, `agent-lifecycle-uat`, `messaging-uat`, `uat-goal-nudge`, `assignment-clarify-footer` |
 | `live-terminal` | lanes that can reach the live herdr daemon / create real tmux windows (`PI_SWARM_TMUX_OK` + `$TMUX` inheritance) | `swarm-yml-pool`, `terminal-manager-pin-demo` |
 
 Everything else (~193/200 suites) is verified parallel-safe: each uses its own `mkdtemp`

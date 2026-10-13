@@ -206,6 +206,20 @@ export function buildAssignmentBody(
 		const rewritten = rewriteTaskArtifactRefs(task.taskId, note);
 		lines.push(rewritten === note ? `Note: ${rewritten}` : `Note (rewritten to task-absolute artifact paths): ${rewritten}`);
 	}
+	// Task intent coaching (task-202610131005): lightweight self-review + conditional
+	// clarification footer, placed BEFORE the closing When finished fencing line so the
+	// reply-BEFORE-update contract stays the LAST instruction. Prompt-only coaching: the
+	// clarification reply rides the EXISTING replyTo verification path (which pre-satisfies
+	// the RESPONSE_REQUIRED fence) — waiting is NOT an engine-enforced pause and no
+	// response timing is promised (contract §1/§2.2 honesty; see docs/swarm/tools.md).
+	// Tool-name-free by design: the fencing line's replyTo contract names the id;
+	// enumerating tool names here would resurrect retired-surface D-style grep triggers.
+	lines.push(
+		"Before you start: in one line, restate the intended outcome, the deliverable, and the validation you will run.",
+	);
+	lines.push(
+		"Materially unclear? Reply to this assignment with your specific question before proceeding; otherwise proceed and surface your assumptions in the result message. The engine does not pause for answers — root responds on its own cadence.",
+	);
 	// Ergonomics Fix 2 + Fix 4: under minimal protocol the closing line states the fencing
 	// contract in workflow terms (reply to this assignment BEFORE the terminal node close) —
 	// no tool catalog, and no instruction about the unregistered ack tool. Under gate=0 the

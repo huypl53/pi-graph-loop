@@ -18,6 +18,7 @@ src/utils.ts         pure helpers (now, safeId, inferRoleKind, ...)
 src/state.ts         paths + state/lock/trace/JSON/JSONL file IO
 src/errorlog.ts      durable internal-error log (.pi/swarm/traces/errors.jsonl); logSwarmError/traceLogged — no silent catches
 src/taskgraph.ts     graph algorithms, status/closure/transitions, rendering
+src/taskgraph/formatting.ts  task markdown + assignment-body composition (incl. the 2-line worker self-review/clarification footer before the reply-BEFORE-close fencing line)
 src/observability.ts read-only text flow snapshot renderer for `/swarm flow`
 src/flow-dialog.ts   interactive TUI picker/dialog for `/swarm flow`
 src/delivery.ts      message parsing + retry predicate

@@ -33,8 +33,11 @@ export function registerCreateTaskTool(pi: ExtensionAPI): void {
 			name: "swarm_create_task",
 			label: "Swarm Create Task",
 			description:
-				"Create a durable task graph with task markdown, task state, event stream, and artifact directory. Synthesizes the built-in feature-dev graph unless a custom nodes/edges graph is supplied.",
-			promptGuidelines: ["Use `swarm_create_task` to define a new durable task graph before assigning work."],
+				"Create a durable task graph with task markdown, task state, event stream, and artifact directory. Synthesizes the built-in feature-dev graph unless a custom nodes/edges graph is supplied. Map the ask to existing fields — outcome → goal; touch set → allowedFiles; observable done-conditions → acceptanceCriteria + validationCommands; per-node outputs → nodes[].writeArtifacts. There is no rules field: encode constraints as acceptanceCriteria or in goal. Material human decisions: qualificationMode:\"human-discuss\". Ask the human rather than inventing structure.",
+			promptGuidelines: [
+				"Use `swarm_create_task` to define a new durable task graph before assigning work.",
+				"swarm_create_task has no rules field — encode hard constraints as acceptanceCriteria or in goal, prior context as node readArtifacts, and use qualificationMode:\"human-discuss\" for material human decisions; if the ask is materially ambiguous, ask the human first.",
+			],
 			parameters: Type.Object({
 				title: Type.String({ description: "Human-readable task title." }),
 				goal: Type.String({ description: "One-paragraph goal/outcome for the task." }),
