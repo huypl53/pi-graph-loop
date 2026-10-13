@@ -15,6 +15,7 @@ import { ensureDirs, paths, readState, trace, withLock, writeState, writeTaskSta
 import { scanAgentOpenAssignments, checkStallNotificationStale } from "../taskgraph.ts";
 import { engineRetryIncidentsMap, setRootEditStreak } from "./streaks.ts";
 import { stopRootPump } from "./pump-manager.ts";
+import { logSwarmError, expected } from "../errorlog.ts";
 
 export function registerShutdownInputHooks(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (_event, ctx) => {
@@ -155,6 +156,7 @@ export function registerShutdownInputHooks(pi: ExtensionAPI) {
 
 		const isHigh = msg.priority === "high";
 		const midTurn = !ctx.isIdle();
+		const isSelfNudge = msg.from === msg.to;
 
 		// === Issue 86: priority-high interrupt-on-delivery ===
 		// When a high-priority swarm message is intercepted mid-turn, call ctx.abort() (TUI-level
@@ -163,7 +165,11 @@ export function registerShutdownInputHooks(pi: ExtensionAPI) {
 		// 23 min). Rate-limited per agent (~1/30s default) so a chatty root cannot livelock
 		// a worker. Graceful degrade on ctx.abort() failure: still queue the message as followUp so it
 		// lands at the next-turn boundary regardless.
-		if (isHigh && midTurn) {
+		//
+		// Self-nudges (from === to) are engine-generated guidance about a failure the model will see
+		// in the same turn (e.g. failing toolResult). Interrupting destroys the continuation that would
+		// act on it (incident 2026-10-13). Self-nudges therefore NEVER take the interrupt path.
+		if (isHigh && midTurn && !isSelfNudge) {
 			const WINDOW_MS = Number(process.env.PI_SWARM_HIGH_INTERRUPT_WINDOW_MS ?? 30_000);
 			const me = currentAgentId();
 			let allowed = true;
@@ -225,7 +231,61 @@ export function registerShutdownInputHooks(pi: ExtensionAPI) {
 			}
 			if (interruptEffective) {
 				await trace(p, "message.interrupt_effective", { id: msg.id, from: msg.from, to: msg.to, agentId: me }).catch(() => {});
+				// FIX B1: Stamp lastInterruptAt on the agent record under withLock (read state, mutate agents[me], writeState)
+				try {
+					await withLock(p, async () => {
+						const st2 = await readState(p, ctx.cwd);
+						const self2 = me === "root" ? undefined : st2.agents[me];
+						if (self2) {
+							self2.lastInterruptAt = now();
+							self2.updatedAt = now();
+							await writeState(p, st2);
+						}
+					});
+				} catch (stampErr) {
+					await logSwarmError(p, "shutdown-input", "last_interrupt_stamp_failed", stampErr, {
+						agentId: me,
+						msgId: msg.id,
+					});
+				}
 			}
+
+			// FIX C: after effective abort, await idle then steer (triggerTurn) so the message
+			// does not get stranded in followUp dead air. Degrade to followUp if waitForIdle
+			// is absent, throws, or times out (10s bounded race).
+			let deliveryMode: "steer" | "followUp" = "followUp";
+			if (interruptEffective) {
+				if (typeof ctx.waitForIdle === "function") {
+					let timeoutId: NodeJS.Timeout | undefined;
+					try {
+						const waitPromise = ctx.waitForIdle();
+						const timeoutPromise = new Promise<never>((_, reject) => {
+							timeoutId = setTimeout(() => {
+								reject(new Error("waitForIdle timeout after 10000ms"));
+							}, 10_000);
+						});
+						await Promise.race([waitPromise, timeoutPromise]);
+						deliveryMode = "steer";
+					} catch (err) {
+						const isTimeout = String((err as Error)?.message || err).includes("timeout");
+						await logSwarmError(
+							p,
+							"shutdown-input",
+							isTimeout ? "wait_for_idle_timeout" : "wait_for_idle_failed",
+							err,
+							{ id: msg.id, to: msg.to },
+						);
+						deliveryMode = "followUp";
+					} finally {
+						if (timeoutId) clearTimeout(timeoutId);
+					}
+				} else {
+					// Documented expected guard: older pi runtimes or test harnesses lack ctx.waitForIdle
+					expected("ctx.waitForIdle not available on this runtime");
+					deliveryMode = "followUp";
+				}
+			}
+
 			pi.sendMessage(
 				{
 					customType: "swarm-message",
@@ -233,7 +293,7 @@ export function registerShutdownInputHooks(pi: ExtensionAPI) {
 					display: true,
 					details: msg,
 				},
-				{ triggerTurn: true, deliverAs: "followUp" },
+				{ triggerTurn: true, deliverAs: deliveryMode },
 			);
 			return { action: "handled" };
 		}

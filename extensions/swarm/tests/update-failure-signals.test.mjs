@@ -70,6 +70,14 @@ ok("status blocked -> closure", classifyUpdateFailure({ status: "blocked" }, "RE
 ok("status cancelled -> closure", classifyUpdateFailure({ status: "cancelled" }, "INVALID_TRANSITION", []) === "closure");
 ok("cancelTask -> closure regardless of status", classifyUpdateFailure({ cancelTask: true }, "CANCEL_FORBIDDEN", []) === "closure");
 ok("TASK_NOT_FOUND + no held tasks -> orphan", classifyUpdateFailure({}, "TASK_NOT_FOUND", []) === "orphan");
+ok(
+	"TASK_NOT_FOUND + no held tasks + terminal status -> orphan (incident shape)",
+	classifyUpdateFailure({ status: "failed" }, "TASK_NOT_FOUND", []) === "orphan",
+);
+ok(
+	"TASK_NOT_FOUND + held tasks + terminal status -> closure",
+	classifyUpdateFailure({ status: "done" }, "TASK_NOT_FOUND", ["t1"]) === "closure",
+);
 ok("TASK_NOT_FOUND + held tasks -> work", classifyUpdateFailure({}, "TASK_NOT_FOUND", ["t1"]) === "work");
 ok("INVALID_TRANSITION -> work", classifyUpdateFailure({ status: "in_progress" }, "INVALID_TRANSITION", ["t1"]) === "work");
 ok(

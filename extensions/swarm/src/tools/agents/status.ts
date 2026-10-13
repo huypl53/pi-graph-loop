@@ -68,6 +68,12 @@ function slimStatusRow(row: any): Record<string, unknown> {
 	if (row.lastHeartbeatAgeSec === undefined) delete slim.heartbeatAge;
 	const settledAgeSec = row.lastAgentSettledAt ? Math.round((Date.now() - new Date(row.lastAgentSettledAt).getTime()) / 1000) : undefined;
 	if (settledAgeSec !== undefined) slim.settledAge = settledAgeSec;
+	if (row.lastInterruptAt) {
+		const interruptMs = Date.now() - new Date(row.lastInterruptAt).getTime();
+		if (interruptMs >= 0 && interruptMs < 10 * 60_000) {
+			slim.interruptedAgo = humanAge(row.lastInterruptAt);
+		}
+	}
 	// debt counters only when non-zero; `why` mirrors the attention-row sentence
 	if (row.pendingMessages > 0) slim.pendingMessages = row.pendingMessages;
 	if (row.deadLetters > 0) slim.deadLetters = row.deadLetters;
@@ -98,6 +104,13 @@ function whyOfRow(row: any): string {
 	if (row.paused) return "paused";
 	if (row.taskProgressState === "stalled") return "stalled (active task, no recent tool activity)";
 	if (row.taskProgressState === "completed_unverified") return "artifact fresh but result unverified";
+	// Post-abort visibility: headline why explains aborted turn within 60s when idle
+	if (row.runtimeStatus === "idle" && row.lastInterruptAt) {
+		const interruptSec = Math.round((Date.now() - new Date(row.lastInterruptAt).getTime()) / 1000);
+		if (interruptSec >= 0 && interruptSec < 60) {
+			return `turn aborted ${interruptSec}s ago`;
+		}
+	}
 	// task-202610040400: pane-alive evidence outranks heartbeat staleness, so an idle agent with
 	// a stale heartbeat no longer lands in dead. Keep the stale-hb observation visible (truthfully
 	// scoped) instead of dropping it on the deferred shapes — slim/targeted rows only; the census
@@ -191,6 +204,7 @@ export function registerAgentStatusTools(pi: ExtensionAPI): void {
 							lastAgentSettledAt: agent.lastAgentSettledAt,
 							lastToolAt: agent.lastToolAt,
 							lastShutdownAt: agent.lastShutdownAt,
+							lastInterruptAt: agent.lastInterruptAt,
 							pendingMessages,
 							mailboxDelivered,
 							unackedMessages,

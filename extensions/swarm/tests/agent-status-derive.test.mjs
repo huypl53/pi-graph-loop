@@ -238,6 +238,62 @@ console.log("\n--- Case 5: active (recent tool activity) ---");
 	const out = typeof deriveTaskProgressState === "function" ? deriveTaskProgressState(agent, st, ctx) : "MISSING_HELPER";
 	ok("Case 5b: active when fresh artifact + activeTask + verified result (between 60s and 10min)", out === "active", `got=${out}`);
 }
+{
+	// Incident test: interrupt 5s ago + lastToolAt 10s ago + idle -> awaiting_input (NOT active)
+	const now = Date.now();
+	const agent = makeAgent({
+		activeTaskIds: [],
+		lastToolAt: new Date(now - 10_000).toISOString(),
+		lastInterruptAt: new Date(now - 5_000).toISOString(),
+		runtimeStatus: "idle",
+	});
+	const st = makeState(agent);
+	const ctx = { nowMs: now };
+	const out = typeof deriveTaskProgressState === "function" ? deriveTaskProgressState(agent, st, ctx) : "MISSING_HELPER";
+	ok("Case 5c: awaiting_input when interrupt was after lastToolAt within window", out === "awaiting_input", `got=${out}`);
+}
+{
+	// Post-abort new turn ran tools: interrupt 30s ago + lastToolAt 10s ago (20s AFTER interrupt) -> active
+	const now = Date.now();
+	const agent = makeAgent({
+		activeTaskIds: [],
+		lastToolAt: new Date(now - 10_000).toISOString(),
+		lastInterruptAt: new Date(now - 30_000).toISOString(),
+		runtimeStatus: "idle",
+	});
+	const st = makeState(agent);
+	const ctx = { nowMs: now };
+	const out = typeof deriveTaskProgressState === "function" ? deriveTaskProgressState(agent, st, ctx) : "MISSING_HELPER";
+	ok("Case 5d: active when new tool executed AFTER interrupt within window", out === "active", `got=${out}`);
+}
+{
+	// Interrupt > 60s ago -> normal derive (active if lastToolAt < 60s)
+	const now = Date.now();
+	const agent = makeAgent({
+		activeTaskIds: [],
+		lastToolAt: new Date(now - 10_000).toISOString(),
+		lastInterruptAt: new Date(now - 70_000).toISOString(),
+		runtimeStatus: "idle",
+	});
+	const st = makeState(agent);
+	const ctx = { nowMs: now };
+	const out = typeof deriveTaskProgressState === "function" ? deriveTaskProgressState(agent, st, ctx) : "MISSING_HELPER";
+	ok("Case 5e: active when interrupt > 60s ago but lastToolAt < 60s", out === "active", `got=${out}`);
+}
+{
+	// Busy + post-interrupt tool -> active
+	const now = Date.now();
+	const agent = makeAgent({
+		activeTaskIds: [],
+		lastToolAt: new Date(now - 10_000).toISOString(),
+		lastInterruptAt: new Date(now - 20_000).toISOString(),
+		runtimeStatus: "busy",
+	});
+	const st = makeState(agent);
+	const ctx = { nowMs: now };
+	const out = typeof deriveTaskProgressState === "function" ? deriveTaskProgressState(agent, st, ctx) : "MISSING_HELPER";
+	ok("Case 5f: active when busy with post-interrupt tool", out === "active", `got=${out}`);
+}
 
 // ----- CASE 6: awaiting_input -----
 console.log("\n--- Case 6: awaiting_input (default idle state) ---");

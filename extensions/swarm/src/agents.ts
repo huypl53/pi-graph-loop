@@ -1077,6 +1077,13 @@ export function deriveTaskProgressState(agent: SwarmAgent, st: SwarmState, ctx: 
 	}
 
 	// 5) active: lastToolAt < 60s ago OR (artifact mtime < 5 min AND activeTaskIds.length > 0 AND not yet settled)
+	// A tool executed BEFORE an effective interrupt cannot evidence a healthy active worker (incident 2026-10-13:
+	// swarm_update_task failed and was aborted, but stamped lastToolAt, falsely masking the worker as "active").
+	const interruptMs = agent.lastInterruptAt ? new Date(agent.lastInterruptAt).getTime() : 0;
+	const interruptedAfterLastTool =
+		interruptMs > 0 && nowMs - interruptMs <= ACTIVE_LAST_TOOL_MS && (!lastToolMs || interruptMs >= lastToolMs);
+	if (interruptedAfterLastTool) return "awaiting_input";
+
 	if (lastToolMs && nowMs - lastToolMs <= ACTIVE_LAST_TOOL_MS) return "active";
 	if (typeof artifactMs === "number" && nowMs - artifactMs <= ARTIFACT_FRESH_MS && activeTaskCount > 0) return "active";
 

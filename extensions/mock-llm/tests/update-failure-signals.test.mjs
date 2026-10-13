@@ -110,8 +110,8 @@ ok("lane: real update_task throws TASK_NOT_FOUND", err?.errorCode === "TASK_NOT_
 const st1 = JSON.parse(await readFile(join(scratch, ".pi/swarm/swarm-state.json"), "utf8"));
 ok("lane: streak stamped =1 (immediate, no streak gate)", st1.agents["worker-stuck"].updateFailureStreak === 1);
 ok(
-	"lane: class stamped closure (terminal intent wins per classify order)",
-	st1.agents["worker-stuck"].lastUpdateFailureClass === "closure",
+	"lane: class stamped orphan (TASK_NOT_FOUND on taskless worker wins per Fix A2)",
+	st1.agents["worker-stuck"].lastUpdateFailureClass === "orphan",
 	st1.agents["worker-stuck"].lastUpdateFailureClass,
 );
 ok("lane: errorCode stamped", st1.agents["worker-stuck"].lastUpdateFailureCode === "TASK_NOT_FOUND");
@@ -153,7 +153,7 @@ ok(
 	rootRows.length === 1 &&
 		rootRows[0].body.includes("worker-stuck") &&
 		rootRows[0].body.includes("TASK_NOT_FOUND") &&
-		rootRows[0].body.includes("closure"),
+		rootRows[0].body.includes("orphan"),
 );
 ok("lane: R10-1 zero pi.sendMessage (pane-less world, mailbox-only delivery)", sends.length === 0, String(sends.length));
 

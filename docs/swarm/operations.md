@@ -2895,3 +2895,12 @@ implemented.
   `uat-goal-nudge`, `idle-nudge`, `r19-goal-graph-deadlock`, `r29-spawn-boot-grace-false-escalation`,
   `goal-max-nudges`, `task-liveness`, `heartbeat-gc`.
 - Pi runtime contract §10 F24 row with L1-L4 accounting + counters C-F24-1/2/3.
+
+## Operator: self-nudge abort harm & post-abort status masking (incident 2026-10-13)
+**Symptom.** Worker called `swarm_update_task` with closure intent, which failed with `TASK_NOT_FOUND`. An engine self-nudge (`from === to === worker`) with `priority: high` was injected mid-turn, triggering `ctx.abort()`, beheading the worker's report turn. The agent settled idle, but followUp re-queue lost the wake (13 minutes dead air). Concurrently, `swarm_agent_status` evaluated `taskProgressState: active` off the failing tool's `lastToolAt` timestamp, masking the idle/aborted state from the root.
+1. `shutdown-input.ts` Issue-86 interrupt path did not distinguish self-nudges from external directives (`root` / peer STOP). Self-nudges are advisory guidance on errors the model already observes in the current turn; aborting destroys the turn needed to act on that guidance.
+3. `deriveTaskProgressState` in `agents.ts` evaluated `lastToolAt < 60s` before considering whether an interrupt had terminated the turn that executed the tool.
+1. **Self-nudge bypass (`shutdown-input.ts`):** `isSelfNudge = msg.from === msg.to` added to `if (isHigh && midTurn && !isSelfNudge)`. Self-nudges mid-turn fall through to `deliverAs: "followUp"`; idle self-nudges deliver as `steer`.
+2. **Post-abort wake-loss protection:** After an effective interrupt, `shutdown-input.ts` awaits `ctx.waitForIdle()` (bounded by 10s timeout, gracefully degrading to `followUp` on error/timeout) and delivers with `steer` to ensure a turn triggers.
+3. **Interrupt fact & status surfacing:** `lastInterruptAt` stamped on `SwarmAgent` after successful `ctx.abort()`. `deriveTaskProgressState` checks timestamp ordering (`interruptMs >= lastToolMs` → `awaiting_input`). `swarm_agent_status` renders `interruptedAgo` and headline why `"turn aborted <N>s ago"`.
+4. **Classification reorder (`update-failure.ts`):** `TASK_NOT_FOUND` on a worker holding no active tasks classifies as `orphan` before terminal-intent checking.

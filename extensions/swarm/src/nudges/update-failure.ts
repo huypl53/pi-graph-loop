@@ -37,9 +37,11 @@ const TERMINAL_INTENT_STATUSES = new Set(["done", "failed", "blocked", "cancelle
 
 // Pure classification (plan §1.2). params is the raw swarm_update_task params object;
 // myActiveTaskIds is the CALLER's activeTaskIds snapshot taken before any mutation.
+// Prioritize orphan classification: TASK_NOT_FOUND with empty myActiveTaskIds means no net
+// is tracking the worker regardless of whether the call carried terminal intent.
 export function classifyUpdateFailure(params: any, errorCode: string | undefined, myActiveTaskIds: string[]): UpdateFailureClass {
-	if (params?.cancelTask === true || TERMINAL_INTENT_STATUSES.has(String(params?.status ?? ""))) return "closure";
 	if (errorCode === "TASK_NOT_FOUND" && myActiveTaskIds.length === 0) return "orphan";
+	if (params?.cancelTask === true || TERMINAL_INTENT_STATUSES.has(String(params?.status ?? ""))) return "closure";
 	return "work";
 }
 

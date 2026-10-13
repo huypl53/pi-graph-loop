@@ -43,7 +43,11 @@ export type SwarmAgent = {
 	// agent is exempt. A second high-priority inject within PI_SWARM_HIGH_INTERRUPT_WINDOW_MS
 	// (default 30000) does NOT re-abort (suppressed via `message.interrupt_suppressed` trace).
 	// Cleared on respawn via ensureAgentDefaults (existing pattern); no extra logic needed.
+	// NOTE: lastHighInterruptAt = rate-limit ledger attempt time (stamped before ctx.abort(), may precede a failed abort).
 	lastHighInterruptAt?: string;
+	// Stamped only after ctx.abort() resolved successfully (effective interrupt).
+	// Status/derive consumers read ONLY lastInterruptAt to avoid false "active" masking.
+	lastInterruptAt?: string;
 	// === Issue 25 Phase 2: worker dry-run reconcile rate-limit ledger (proposal §K.1) ===
 	// Last worker dry-run reconcile timestamp. Persisted so a worker that calls swarm_reconcile
 	// more often than PI_SWARM_RECONCILE_DRYRUN_WORKER_RATE_MS gets RECONCILE_RATE_LIMITED without

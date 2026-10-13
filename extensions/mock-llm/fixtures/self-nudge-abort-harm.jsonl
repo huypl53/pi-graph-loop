@@ -1,0 +1,10 @@
+# self-nudge-abort-harm: verify self-nudge does NOT abort in-flight turn and report proceeds
+# (plan: docs/swarm/plans/2026-10-13-self-nudge-abort-harm.md §4).
+# Pattern 2 (seeded world + single actor): worker self-nudge-lane seeded running/busy with NO task graph.
+#   turn 0: failing swarm_update_task (status failed on ghost task) -> engine classifies orphan ->
+#           emits self-nudge -> intercept takes tail delivery (followUp mid-turn) -> NO ctx.abort()
+#   turn 1: scripted response to the surfaced guidance: swarm_send_message(to:"root")
+#   turn 2: wrap up and stop cleanly
+{"name":"failing swarm_update_task without abort","events":[{"type":"text","delayMs":10,"text":"Attempting task closure."},{"type":"toolcall","delayMs":10,"name":"swarm_update_task","id":"call-1","arguments":{"taskId":"ghost","nodeId":"deploy","status":"failed","outcome":"unreachable"}}]}
+{"name":"reporting to root following guidance","events":[{"type":"text","delayMs":10,"text":"Update failed; reporting directly to root via swarm_send_message."},{"type":"toolcall","delayMs":10,"name":"swarm_send_message","id":"call-2","arguments":{"to":"root","subject":"Deploy failed report","body":"Deploy node failed and task not found. Reporting to root."}}]}
+{"name":"wrap up","events":[{"type":"text","delayMs":10,"text":"Report sent. Stopping cleanly."}]}
