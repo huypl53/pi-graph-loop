@@ -80,12 +80,11 @@ While an issue run is `running`/`paused`, the extension renders one compact advi
 Pi footer status area under the `swarm-issues` key:
 
 ```
-issues: <issueId> <done>/<total> <state>[ (<modes>)] — <hint>
+📋 <issueId> <done>/<total> <state-icon>[ (<modes>)]
 ```
 
-- `<state>`: `running` | `manual-wait` | `paused` | `blocked`
+- `<state-icon>`: `▶` (running) | `⏳` (manual-wait) | `⏸` (paused) | `⚠` (blocked)
 - `<modes>` (only when non-default): `manual` (advancement), `single` (workflow)
-- hints: `manual-wait — /swarm issues resume`, `paused/blocked — /swarm issues status`
 
 The line is **advisory only** (L3 visible surface — no delivery/freshness guarantee): it is
 rendered from durable run state on tick and command paths and restored from durable state on

@@ -87,13 +87,13 @@ await t("T1 record: running+active render truthful via real command path (red pr
 	const ctx = recorderCtx(cwd);
 	await handleIssuesCommand("issues", ["start"], ctx, p, {});
 	const line = lastFooter(ctx);
-	assert.ok(line?.startsWith("issues: fix-one 0/2 running"), `got: ${line}`);
+	assert.ok(line?.startsWith("📋 fix-one 0/2 ▶"), `got: ${line}`);
 	rmSync(cwd, { recursive: true, force: true });
 });
 console.log("issues-footer: RED phase done");
 
 // === GREEN legs (real command/tick/hook paths through the guarded setter) ===
-await t("T1 GREEN: running+active → issues: fix-one 0/2 running", async () => {
+await t("T1 GREEN: running+active → 📋 fix-one 0/2 ▶", async () => {
 	const cwd = seedWorld();
 	const p = paths(cwd);
 	await ensureDirs(p);
@@ -101,13 +101,14 @@ await t("T1 GREEN: running+active → issues: fix-one 0/2 running", async () => 
 	await handleIssuesCommand("issues", ["start"], ctx, p, {});
 	const line = lastFooter(ctx);
 	assert.ok(line, "footer set");
-	assert.ok(line.startsWith("issues: fix-one 0/2 running"), `got: ${line}`);
+	assert.ok(line.startsWith("📋 fix-one 0/2 ▶"), `got: ${line}`);
+	assert.ok(!line.includes("/swarm issues"), "no command hints");
 	assert.ok(line.length <= 80, "bounded");
 	assert.ok(!line.includes("One") && !line.includes("do one"), "no title/content leakage");
 	rmSync(cwd, { recursive: true, force: true });
 });
 
-await t("T2 manual waiting → manual-wait — /swarm issues resume", async () => {
+await t("T2 manual waiting → 📋 fix-one 1/2 ⏳ (manual)", async () => {
 	process.env.PI_SWARM_ISSUES_ADVANCEMENT = "manual";
 	const cwd = seedWorld();
 	const p = paths(cwd);
@@ -125,12 +126,12 @@ await t("T2 manual waiting → manual-wait — /swarm issues resume", async () =
 	delete process.env.PI_SWARM_ISSUES_ADVANCEMENT;
 	await runPumpMaintenancePhasesLocked({}, ctx, p, st, Date.now(), "footer-t2b");
 	const line = lastFooter(ctx);
-	assert.ok(line?.includes("manual-wait") && line?.includes("/swarm issues resume"), `got: ${line}`);
+	assert.ok(line?.includes("⏳") && !line?.includes("/swarm issues resume"), `got: ${line}`);
 	assert.ok(line?.includes("(manual)"), `mode suffix shown — got: ${line}`);
 	rmSync(cwd, { recursive: true, force: true });
 });
 
-await t("T3 paused with cancelled entry → paused — /swarm issues status", async () => {
+await t("T3 paused with cancelled entry → ⏸ without command hint", async () => {
 	const cwd = seedWorld();
 	const p = paths(cwd);
 	await ensureDirs(p);
@@ -143,7 +144,7 @@ await t("T3 paused with cancelled entry → paused — /swarm issues status", as
 	await writeState(p, st);
 	st = await readState(p, cwd);
 	const line = lastFooter(ctx);
-	assert.ok(line?.includes("paused — /swarm issues status"), `got: ${line}`);
+	assert.ok(line?.includes("⏸") && !line?.includes("/swarm issues status"), `got: ${line}`);
 	rmSync(cwd, { recursive: true, force: true });
 });
 
@@ -214,12 +215,12 @@ await t("T6 legacy state without mode fields renders; malformed queue degrades s
 	await writeState(p, st);
 	const { renderIssueFooterLine } = await import(join(src, "issues", "footer.ts"));
 	const legacy = renderIssueFooterLine(getIssueRun(await readState(p, cwd)));
-	assert.ok(legacy?.startsWith("issues: fix-one"), `legacy renders: ${legacy}`);
+	assert.ok(legacy?.startsWith("📋 fix-one"), `legacy renders: ${legacy}`);
 	assert.ok(!legacy?.includes("(manual") && !legacy?.includes("(single"), "no mode suffix on legacy");
 	// malformed: garbage queue shapes must not throw and must not fabricate a misleading line
 	assert.doesNotThrow(() => renderIssueFooterLine({ status: "running", queue: [null, 42, {}, { issueId: 7 }] }));
 	const m = renderIssueFooterLine({ status: "running", queue: [null, 42] });
-	assert.ok(m === undefined || m.startsWith("issues: "), "malformed → undefined or safe prefix");
+	assert.ok(m === undefined || m.startsWith("📋 "), "malformed → undefined or safe prefix");
 	assert.equal(renderIssueFooterLine(null), undefined);
 	assert.equal(renderIssueFooterLine("garbage"), undefined);
 	assert.equal(renderIssueFooterLine({ status: "running" }), undefined, "no queue → undefined (no fabricated line)");
@@ -247,13 +248,26 @@ await t("T8 session_start restore: real hook renders from durable state (restart
 	// setIssueFooter is what session_start calls; drive it directly with the fresh recorder
 	const { setIssueFooter } = await import(join(src, "issues", "footer.ts"));
 	await setIssueFooter(undefined, ctx2, st, p);
-	assert.ok(lastFooter(ctx2)?.startsWith("issues: fix-one"), `restored: ${lastFooter(ctx2)}`);
+	assert.ok(lastFooter(ctx2)?.startsWith("📋 fix-one"), `restored: ${lastFooter(ctx2)}`);
 	// hasUI false → no-op (print/JSON mode)
 	const ctx3 = recorderCtx(cwd);
 	ctx3.hasUI = false;
 	await setIssueFooter(undefined, ctx3, st, p);
 	assert.equal(footerCalls(ctx3).length, 0, "no UI → no write");
 	rmSync(cwd, { recursive: true, force: true });
+});
+
+await t("T9 blocked/exhausted run format: 📋 fix-cron-store-locking 10/10 ⚠ without command", async () => {
+	const { renderIssueFooterLine } = await import(join(src, "issues", "footer.ts"));
+	const line = renderIssueFooterLine({
+		status: "running",
+		queue: Array(10).fill(null).map((_, i) => ({
+			issueId: i === 9 ? "fix-cron-store-locking" : `fix-${i}`,
+			status: i === 9 ? "blocked" : "done",
+		})),
+	});
+	assert.equal(line, "📋 fix-cron-store-locking 10/10 ⚠");
+	assert.ok(!line?.includes("/swarm issues"), "no command hints");
 });
 
 console.log(`\nissues-footer: ${passed} passed, ${process.exitCode ? "FAILURES" : "all green"}`);

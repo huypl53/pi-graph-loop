@@ -42,21 +42,21 @@ export function renderIssueFooterLine(run: any): string | undefined {
 	const blocked = queue.find((e) => e && BLOCKED_STATUSES.includes(e.status));
 	const focus = active ?? blocked ?? queue[total - 1];
 	const focusId = typeof focus?.issueId === "string" ? focus.issueId : "issue";
-	parts.push(`issues: ${focusId}`);
+	parts.push(`📋 ${focusId}`);
 	parts.push(`${done}/${total}`);
 	const modes: string[] = [];
 	if (run.advancementMode === "manual") modes.push("manual");
 	if (run.workflowMode === "single") modes.push("single");
 	const modeSuffix = modes.length > 0 ? ` (${modes.join(",")})` : "";
 	if (status === "paused") {
-		parts.push(`paused${modeSuffix} — /swarm issues status`);
+		parts.push(`⏸${modeSuffix}`);
 	} else if (run.advancement === "waiting-manual") {
-		parts.push(`manual-wait${modeSuffix} — /swarm issues resume`);
+		parts.push(`⏳${modeSuffix}`);
 	} else if (active) {
-		parts.push(`running${modeSuffix}`);
+		parts.push(`▶${modeSuffix}`);
 	} else {
 		// running with nothing active = resting orphan (exhausted-blocked shape)
-		parts.push(blocked ? `blocked${modeSuffix} — /swarm issues status` : `running${modeSuffix}`);
+		parts.push(blocked ? `⚠${modeSuffix}` : `▶${modeSuffix}`);
 	}
 	return truncate(parts.join(" "));
 }
