@@ -24,8 +24,9 @@
 //       the next slot's error).
 //   F6: swap-chain cap still applies to single-strike swaps (2 swaps max in 5 minutes).
 //   F7: guest sessions never rotate even on single-strike quota errors.
-//   F8: the exact proxy buffer-limit failure is not silently classified unknown; rotate away.
-//   F9: the auth_unavailable wrapper emitted by the same proxy incident also rotates away.
+//   F8: the exact proxy buffer-limit failure rotates on its first request-limit strike.
+//   F9: the auth_unavailable wrapper carrying nested request-buffer text honors its existing
+//       request_limit classification and rotates on the one-strike policy.
 //
 // Run: node extensions/swarm/tests/pool-single-strike-nonretryable.test.mjs
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
@@ -237,30 +238,37 @@ ok("proxy auth_unavailable wrapper classifies as auth", classifyProviderError("a
 }
 
 // =============================================================
-// F8: exact live upstream buffer-limit failure rotates after retries exhaust
+// F8: exact live upstream buffer-limit failure bypasses the retry gate on its first strike
 // =============================================================
 {
 	await freshSession("worker-buffer-limit");
 	await errOnce(fakeModelGlm, "exceeded request buffer limit while retrying upstream");
-	await errOnce(fakeModelGlm, "exceeded request buffer limit while retrying upstream");
 	ok(
-		"F8: exact proxy buffer-limit failure rotates after retries exhaust",
+		"F8: exact proxy buffer-limit failure rotates on its first strike",
 		setModelCalls.length === 1 && setModelCalls[0] !== "zai-coding-cn/glm-5.1",
 		`calls=${JSON.stringify(setModelCalls)}`,
 	);
+	ok("F8: terminal request-limit path crosses pi.sendMessage boundary exactly twice", sentMessages.length === 2, `calls=${sentMessages.length}`);
+	ok(
+		"F8: boundary sends contain swap notice and continuation",
+		sentMessages.map(({ m }) => m.customType).sort().join(",") === "swarm-message,swarm-pool-event",
+		JSON.stringify(sentMessages.map(({ m }) => m.customType)),
+	);
+	ok("F8: no retry-gate trace for request_limit", (await countTraceEvents("pool.swap_gated_by_engine_retry")) === 0);
+	ok("F8: first strike records retry exhaustion", (await countTraceEvents("pool.engine_retry_exhausted")) === 1);
 }
 
 // =============================================================
-// F9: the proxy's wrapped no-auth error rotates after retries exhaust
+// F9: the proxy's wrapped error keeps its request_limit classification — one-strike rotation
 // =============================================================
 {
 	await freshSession("worker-auth-unavailable");
 	const msg =
 		"auth_unavailable: no auth available (providers=codex, model=gpt-6-luna; last upstream error: exceeded request buffer limit while retrying upstream)";
-	await errOnce(fakeModelGlm, msg);
+	ok("F9: nested buffer-limit wrapper classifies as request_limit", classifyProviderError(msg) === "request_limit");
 	await errOnce(fakeModelGlm, msg);
 	ok(
-		"F9: proxy auth_unavailable wrapper rotates after retries exhaust",
+		"F9: nested request-limit error rotates on its first strike",
 		setModelCalls.length === 1 && setModelCalls[0] !== "zai-coding-cn/glm-5.1",
 		`calls=${JSON.stringify(setModelCalls)}`,
 	);
