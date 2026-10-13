@@ -209,23 +209,8 @@ export function registerMessagesTools(pi: ExtensionAPI) {
 						mailboxPath,
 						requiresResponse: Boolean(params.requiresResponse),
 					};
-					// Mailbox-only is NORMAL for the root (by design it has no swarm tmux pane; its
-					// pump surfaces mailbox messages within one 5s tick). Reporting it as a bare "no tmux
-					// pane" warning made senders misread delivery as failed. Only non-root recipients
-					// without a live pane get the genuine-warning phrasing.
-					const mailboxOnlyNote = mailboxOnly
-						? msg.to === "root"
-							? // R15 P0 (2026-09-01): the pump defers while the root is busy and busy-suppression
-								// may drop the message from the surface plan entirely. Be honest but compact: the
-								// message is durably in the mailbox; no time-bound surface is promised; the
-								// surface fires when the root's own agent_settled fires or its next idle watchdog
-								// tick processes the mailbox (R10-1 counter at the real pi.sendMessage boundary).
-								// Full narrative lives in docs/swarm/operations.md (root mailbox-only note).
-								" (root: mailbox-only — replies arrive in root's mailbox via the pump; root uses swarm_check_mailbox to read; do not read root's mailbox file directly)"
-							: " (mailbox-only delivery; recipient has no live tmux pane — will surface via reconcile/pump once it restarts)"
-						: "";
 					return textResult(
-						`Sent ${msg.id} to ${msg.to}. Delivery status: ${deliveryStatus}.${mailboxOnlyNote}`,
+						`Sent ${msg.id} to ${msg.to}.`,
 						{ message: msg, delivery, receipt },
 					);
 				});

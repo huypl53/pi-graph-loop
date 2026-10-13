@@ -114,14 +114,14 @@ for (const key of ["model", "provider"]) {
 const sendRes = await run("swarm_send_message", { to: "worker-1", body: "hi", subject: "s1" });
 const sendText = textOf(sendRes);
 ok("Site 1: send receipt has no Mailbox: <path>", !/Mailbox: \S*\.jsonl/.test(sendText), sendText);
-ok("Site 1: send receipt text has no .pi/swarm path", !sendText.includes(".pi/swarm"), sendText);
+ok("Site 1: send receipt text is concise", /^Sent msg-\S+ to worker-1\.$/.test(sendText), sendText);
 // negative control: details.receipt.mailboxPath STAYS
 ok("Site 1 NC: details.receipt.mailboxPath retained", typeof sendRes?.details?.receipt?.mailboxPath === "string" && sendRes.details.receipt.mailboxPath.endsWith("worker-1.jsonl"));
 
 const sendRootRes = await run("swarm_send_message", { to: "root", body: "hi root", subject: "s8" });
 const rootText = textOf(sendRootRes);
-ok("Site 8: root mailbox-only note drops 'durable in mailbox'", !rootText.includes("durable in mailbox"), rootText);
-ok("Site 8: root note states the behavioral contract", rootText.includes("swarm_check_mailbox"), rootText);
+ok("Site 8: root send receipt drops chatty notes and stays concise", /^Sent msg-\S+ to root\.$/.test(rootText), rootText);
+ok("Site 8: root send receipt drops internal mailbox/pump mentions", !rootText.includes("mailbox") && !rootText.includes("pump"), rootText);
 
 // ---------- Site 2: fullBody truncation hint ----------
 const bigBody = "x".repeat(25000);

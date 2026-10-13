@@ -104,7 +104,8 @@ ok(
 	"receipt.mailboxPath points to worker-1.jsonl",
 	typeof receipt?.mailboxPath === "string" && receipt.mailboxPath.endsWith("worker-1.jsonl"),
 );
-ok("text content includes Delivery status", result?.content?.[0]?.text?.includes("Delivery status:"));
+ok("text content is concise (Sent <id> to <to>.)", /^Sent msg-\S+ to worker-1\.$/.test(result?.content?.[0]?.text));
+ok("text content drops internal Delivery status", !result?.content?.[0]?.text?.includes("Delivery status:"));
 
 rmSync(scratch, { recursive: true, force: true });
 console.log(`\nDELIVERY-RECEIPT ${fail ? "FAIL" : "PASS"} (${pass} passed, ${fail} failed)`);

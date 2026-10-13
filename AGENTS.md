@@ -14,6 +14,12 @@ pi --model glm-5.1 --provider zai-coding-cn   # ONLY if zai-coding-cn has a key 
 pi --model gpt-5.4-mini --provider openai
 ```
 
+## tool output design: minimal & bounded (user mandate 2026-10-13)
+- Tool text outputs returned to agents must be minimal, concise, and state only the core outcome (e.g. `Sent <id> to <recipient>.`). No chatty explanations or internal plumbing details.
+- NEVER include internal transport details (tmux pane status, pump mechanics, mailbox paths) or defensive warnings ("do not read X file directly", "recipient uses Y to read") in model-visible text.
+- Negative instructions ("do not touch X") trigger the "pink elephant" effect, prompting LLMs to probe or hallucinate loops on forbidden resources.
+- Diagnostic metadata (delivery status, paths, receipts) belongs strictly in the tool's `details` object for programmatic inspection, never in model context.
+
 ## bug fixing: reproduce first (user mandate 2026-08-31)
 - the FIRST step of every bug fix is a reproducing artifact: a failing test or mock-llm lane that exhibits the actual bug symptom — written and observed red BEFORE any source fix is authored
 - trace forensics (events.jsonl, pane captures) is diagnosis, not reproduction: it tells you where to look; only the reproducing artifact proves you found the real cause
