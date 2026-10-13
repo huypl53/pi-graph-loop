@@ -72,8 +72,26 @@ function sanitizeMessagePreview(message: Message): string | undefined {
 }
 
 function summarizeContext(context: Context): MockLLMTranscript["request"] {
+	// pi ≥0.83 folds the system prompt into a leading transcript system message before the
+	// provider sees the context (normalizeContext / TranscriptContext), so context.systemPrompt
+	// is undefined for real sessions. Capture BOTH: the shorthand field (direct streamSimple
+	// callers, e.g. in-process test drivers) and the leading system message text (real lanes) —
+	// whichever is present. This transcript is the project's L4 evidence pipeline
+	// (docs/swarm conventions); losing the provider-visible prompt here blinds L4 audits.
+	const leadingSystem = context.messages.find((m) => (m as { role?: string }).role === "system") as
+		| { role: "system"; content?: unknown; sections?: Record<string, string | null> }
+		| undefined;
+	const leadingSystemText = (() => {
+		const content = leadingSystem?.content;
+		if (typeof content === "string" && content.length > 0) return content;
+		if (Array.isArray(content))
+			return content
+				.map((p) => (p as { text?: string }).text ?? "")
+				.join("\n");
+		return undefined;
+	})();
 	return {
-		systemPrompt: context.systemPrompt,
+		systemPrompt: context.systemPrompt ?? leadingSystemText,
 		messageCount: context.messages.length,
 		toolNames: context.tools?.map((tool) => tool.name) ?? [],
 		messages: context.messages.map((message) => ({
