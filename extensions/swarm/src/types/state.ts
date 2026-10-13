@@ -59,6 +59,18 @@ export type SwarmTaskStallState = {
 	nextStallNudgeAt?: string; // ISO; earliest ts the next stall nudge/backoff decrement may fire (interval spacing)
 };
 
+// Per-agent idle-GC nudge state (idle-agent-gc plan, 2026-10-13). One entry per agent the
+// evaluator has nudged about; the `_lastScanAt` key (underscore — never an agentId: ids are
+// safeId lowercase alnum+-+_) throttles the WHOLE scan. Nudges are capped per agent; at cap the
+// evaluator stops and emits agent.idle_gc.cap once. The root is only ever NUDGED — reclamation
+// is the root's decision via the swarm_stop_agent tool; there is no auto-kill path.
+export type SwarmIdleGcNudgeState = {
+	nudges: number; // emitted count for this agent (0..maxNudges)
+	nudgeSeq: number; // monotonic idempotency-key component (NEVER reset)
+	lastNudgeAt?: string; // ISO; set on every successful emission (cooldown anchor)
+	capTraced?: boolean; // set when the one-shot agent.idle_gc.cap trace fired
+};
+
 // Per-(taskId, nodeId) monotonic seq store for the graph-advance safety net (Issue F2,
 // task-202608310422). Mirrors the per-task shape of SwarmTaskStallState but at node granularity so a
 // single task with multiple ready-but-unassigned nodes keeps independent counters. The seq is the
@@ -339,6 +351,12 @@ export type SwarmState = {
 	// task graph doesn't spam the root's mailbox. Reset on first reassignment of the
 	// actionable node OR on the task leaving `in_progress` state.
 	taskStallState?: Record<string, SwarmTaskStallState>;
+	// Idle-agent GC nudge state (idle-agent-gc plan, 2026-10-13). Keyed by agentId plus the
+	// `_lastScanAt` whole-scan throttle key (an ISO string value — agent keys hold
+	// SwarmIdleGcNudgeState objects, the throttle key holds a string; agent ids are safeId
+	// lowercase alnum+-+_ so a leading-underscore key can never collide with an agent).
+	// Optional; absent on pre-policy swarms.
+	idleGcNudgeState?: Record<string, SwarmIdleGcNudgeState | string>;
 	// Issue F2 (task-202608310422): per-(taskId, nodeId) monotonic nudgeSeq store for the graph-advance
 	// safety net. The seq is the `{seq}` slot in NOTIFY_KEY_GRAPH_ADVANCE so each successful emit gets a
 	// fresh dedupe slot. NEVER reset (survives acks + node-leaves/re-enters ready); the durable map is

@@ -255,6 +255,40 @@ cleared (clean-slate re-notify). The notify text is:
 See [operations.md § Model pool auto-scaffold](./operations.md#model-pool-auto-scaffold-on-first-root-session-issue-20)
 for the durable-flag contract, skip paths, and trace event reference.
 
+### Agent GC config (`agentGc:`) — idle-agent GC nudge + stopped-record purge
+
+The optional `agentGc:` section (recognized key, same layered precedence as every other
+section: project yml > global yml > defaults; sub-keys merge per-key across layers) has
+two halves:
+
+```yaml
+agentGc:
+  auto: false                  # purge stopped RECORDS older than stoppedOlderThanMs in the root pump (default OFF)
+  stoppedOlderThanMs: 86400000 # 24h
+  idleNudge:
+    enabled: true              # idle-worker nudges to the root PM (set false to silence)
+    afterMs: 1200000           # 20m idle (2× the heartbeat stale window) before nudging
+    cooldownMs: 1800000        # 30m between nudges for the same worker
+    maxNudges: 3               # per-worker cap; at cap one agent.idle_gc.cap trace fires and nudging stops
+    intervalMs: 60000          # whole-scan throttle (the scan itself is O(agents), zero subprocesses)
+```
+
+**Idle-agent GC nudge** (`src/nudges/idle-agent-gc.ts`, wired as a root pump maintenance
+phase in `surface/pump-phases.ts`, right after the heartbeat GC): a worker that is
+`status:"running"` + `runtimeStatus:"idle"` with a heartbeat older than `afterMs`, NO
+active tasks, NO valid `reuse`/`park` lease, and NOT paused and NOT referenced by any
+non-terminal task-graph node is eligible. The evaluator sends the ROOT one durable
+mailbox nudge naming the worker and the `swarm_stop_agent` tool. **The root always
+decides — there is no auto-kill path.** Slash commands are user-run-only and never
+appear in a nudge body. Env overrides: `PI_SWARM_IDLE_GC_AFTER_MS`,
+`PI_SWARM_IDLE_GC_COOLDOWN_MS`, `PI_SWARM_IDLE_GC_MAX_NUDGES`,
+`PI_SWARM_IDLE_GC_INTERVAL_MS`, `PI_SWARM_IDLE_GC_NUDGE_OFF=1`. Traces:
+`agent.idle_gc.nudge_emitted`, `agent.idle_gc.cap`, `agent.idle_gc.disabled`,
+`agent.idle_gc.error`. Per-agent state: `SwarmState.idleGcNudgeState`.
+
+The scaffold templates (project + global) document this block as a commented example
+(comments-only invariant preserved — scaffolds never activate anything).
+
 ## Identity, visibility, and authority
 
 ### Tool visibility
@@ -531,7 +565,10 @@ wrapper (`src/tools/gc.ts` — the only content of that file) was removed in the
 retired-surface cleanup with no remaining importers. Retention/GC
 BEHAVIOR remains live and shared: `src/gc.ts` (`pruneState` — terminal-only pruning beyond
 the recency window), `src/agent-gc.ts` (stopped-record purge predicates), `src/agent-gc-io.ts`,
-the auto-GC config gate (`agent-gc-auto.ts`), and the root `/swarm deregister --purge-stopped`
+the auto-GC config gate (`agent-gc-auto.ts`), the idle-agent GC nudge
+(`src/nudges/idle-agent-gc.ts` — nudges the ROOT about running-but-idle workers so the
+root can reclaim them via `swarm_stop_agent` itself; see § Agent GC config), and the root
+`/swarm deregister --purge-stopped`
 command all keep the same bounded, dry-run-default semantics. Direct module import of the
 helpers is the supported test lane (`extensions/mock-llm/tests/agent-stopped-gc.test.mjs`).
 

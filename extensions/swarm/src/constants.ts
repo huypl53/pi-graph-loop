@@ -129,6 +129,24 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 #   autoContinue: false          # Opt-in cross-run continuation after successful completion.
 #   autoContinueCap: 3           # Consecutive automatic starts (1..20).
 
+# --- Agent GC (optional; defaults shown) --------------------------------------
+# Reclaims resources from agents that are done working.
+# idleNudge: when a worker has been running-but-idle past afterMs (no active task,
+# no valid lease), the root PM is nudged once per cooldownMs (capped at maxNudges)
+# to stop it via the swarm_stop_agent tool. The root always decides — nothing is
+# ever stopped automatically. auto: purge stopped RECORDS older than
+# stoppedOlderThanMs during the root pump (records only — mailboxes, traces, and
+# task history are never deleted).
+# agentGc:
+#   auto: false                  # purge aged stopped records (default OFF)
+#   stoppedOlderThanMs: 86400000 # 24h
+#   idleNudge:
+#     enabled: true              # set false to silence idle-worker nudges
+#     afterMs: 1200000           # 20m idle before the root is nudged
+#     cooldownMs: 1800000        # 30m between nudges for the same worker
+#     maxNudges: 3               # then suppress (one cap notice in the trace)
+#     intervalMs: 60000          # scan throttle
+
 # --- Global opt-out (optional) -----------------------------------------------
 # inheritGlobal: false           # ignore ~/.pi/agent/swarm.yml for this project
 `;
@@ -165,11 +183,24 @@ export const POOL_SCAFFOLD_GLOBAL_YML_PLACEHOLDER = `# ~/.pi/agent/swarm.yml —
 # Options: tmux | herdr
 # terminalManager: tmux
 
+# --- Agent GC (optional; defaults shown) --------------------------------------
+# Same contract as the project-level block (see docs/swarm/tools.md). A project
+# .pi/swarm.yml that sets any agentGc.idleNudge key overrides this global layer
+# per-key.
+# agentGc:
+#   auto: false
+#   stoppedOlderThanMs: 86400000
+#   idleNudge:
+#     enabled: true
+#     afterMs: 1200000
+#     cooldownMs: 1800000
+#     maxNudges: 3
+#     intervalMs: 60000
+
 # --- Singleton default (optional) ---------------------------------------------
 # defaultModel: glm-5.1
 # defaultProvider: zai-coding-cn
 `;
-
 // One-shot notify text surfaced to the root TUI on first scaffold into swarm.yaml / swarm.yml.
 export const POOL_SCAFFOLD_YML_NOTIFY_TEXT =
 	"Created swarm.modelPool placeholder in .pi/swarm.yml — fill in your model/provider. See docs/swarm/tools.md.";
@@ -200,7 +231,7 @@ export const ROLE_PLAYBOOK_KINDS = ["planner", "implementer", "fixer", "tester",
 export const ROLE_CHARTER_DEFAULT =
 	"Correctness first: không sai > đẹp — not-wrong beats beautiful. " +
 	"Minimal diff inside your node's scope. Every claim you make must carry evidence: " +
-		"the command you ran and the path you read. Missing evidence counts as failure. " +
+	"the command you ran and the path you read. Missing evidence counts as failure. " +
 	"Ask (blocked) instead of guessing outside scope.";
 
 // === Issue 17: engine-retry gate constants (extracted to constants.ts in Issue 19) ===
@@ -823,6 +854,39 @@ export const UPDATE_FAILURE_ROOT_COOLDOWN_MS =
 // streak; the count itself is not reset to avoid re-flooding across rework cycles).
 export const UPDATE_FAILURE_ROOT_NOTICE_CAP = 2;
 
+// === Idle-agent GC nudge (plan: docs/swarm/plans/2026-10-13-idle-agent-gc-nudge.md) ===
+// The root is nudged (NEVER auto-killed) about workers that are running + idle past the
+// eligibility window with no active tasks / valid lease / open graph assignment. The root
+// decides and calls the swarm_stop_agent TOOL itself. Slash commands are user-run-only and
+// must never appear in a nudge body. Env-overridable, read at call time so lanes/tests apply.
+export const IDLE_GC_NUDGE_AFTER_MS = 20 * 60_000; // 2× the heartbeat stale window
+export const IDLE_GC_NUDGE_COOLDOWN_MS = 30 * 60_000; // per-agent cooldown between nudges
+export const IDLE_GC_NUDGE_MAX_NUDGES = 3; // per-agent cap, then suppress + one cap trace
+export const IDLE_GC_NUDGE_INTERVAL_MS = 60_000; // whole-scan throttle
+
+function idleGcEnvNumber(envVar: string, fallback: number): number {
+	const raw = Number(process.env[envVar]);
+	return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+
+export function idleGcNudgeConfigFromEnv() {
+	return {
+		afterMs: idleGcEnvNumber("PI_SWARM_IDLE_GC_AFTER_MS", IDLE_GC_NUDGE_AFTER_MS),
+		cooldownMs: idleGcEnvNumber("PI_SWARM_IDLE_GC_COOLDOWN_MS", IDLE_GC_NUDGE_COOLDOWN_MS),
+		maxNudges: idleGcEnvNumber("PI_SWARM_IDLE_GC_MAX_NUDGES", IDLE_GC_NUDGE_MAX_NUDGES),
+		intervalMs: idleGcEnvNumber("PI_SWARM_IDLE_GC_INTERVAL_MS", IDLE_GC_NUDGE_INTERVAL_MS),
+	};
+}
+
+// Semantic dedupe key for the idle-agent GC nudge. One slot per (agent, seq) so re-nudges
+// after cooldown get a fresh key while staying idempotent within a tick.
+export const NOTIFY_KEY_IDLE_GC_NUDGE = "agent:{agentId}:nudge:idle-gc:{seq}";
+
+// Traces.
+export const TRACE_AGENT_IDLE_GC_NUDGE = "agent.idle_gc.nudge_emitted";
+export const TRACE_AGENT_IDLE_GC_CAP = "agent.idle_gc.cap";
+export const TRACE_AGENT_IDLE_GC_DISABLED = "agent.idle_gc.disabled";
+export const TRACE_AGENT_IDLE_GC_ERROR = "agent.idle_gc.error";
 
 // Format a NOTIFY_KEY_* template with validated (safe-id) substitutions.
 export function formatNotifyKey(template: string, params: Record<string, string>): string {

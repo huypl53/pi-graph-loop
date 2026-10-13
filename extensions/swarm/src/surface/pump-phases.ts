@@ -18,6 +18,7 @@ import { logSwarmError, expected } from "../errorlog.ts";
 import {
 	agentHeartbeatGCLocked,
 	evaluateArtifactProgressNudgeLocked,
+	evaluateIdleAgentGcNudgeLocked,
 	evaluateSlotRecoveryLocked,
 	evaluateTaskGraphStallNudgeLocked,
 	reconcileGraphAdvanceLocked,
@@ -47,6 +48,35 @@ export async function runPumpMaintenancePhasesLocked(
 		await agentHeartbeatGCLocked(pi, ctx.cwd, p, st, nowMs);
 	} catch (err: any) {
 		await trace(p, "agent.heartbeat_gc.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {});
+	}
+	// === Idle-agent GC nudge (idle-agent-gc plan, 2026-10-13) [restart-required pump phase] ===
+	// Runs AFTER heartbeat GC: freshly-flipped stopped records are excluded by status; only
+	// still-running idle workers are nudged about. The root is NUDGED — it decides and calls
+	// swarm_stop_agent itself; there is no auto-kill path. Cooldown/cap/throttle are enforced
+	// inside the evaluator; task-graph reference gating uses the same closure the stopped purge
+	// uses (isTaskReferenced). Task-graph reads: bounded to the same loadTaskGraphsForGc scan the
+	// auto-GC uses — but only when the scan actually runs (interval-gated inside the evaluator),
+	// so the common tick pays zero extra file IO: the eligibility pre-scan below skips the load
+	// when no candidate exists.
+	try {
+		const hasRunningIdleCandidate = Object.values(st.agents).some(
+			(a) =>
+				a.id !== "root" &&
+				a.status === "running" &&
+				a.runtimeStatus === "idle" &&
+				!a.paused &&
+				(a.activeTaskIds || []).length === 0,
+		);
+		if (hasRunningIdleCandidate) {
+			const { loadTaskGraphsForGc } = await import("../agent-gc-io.ts");
+			const taskGraphs = await loadTaskGraphsForGc(p);
+			await evaluateIdleAgentGcNudgeLocked(pi, ctx.cwd, p, st, nowMs, taskGraphs);
+		} else {
+			// Still advance the scan throttle so the next real scan is interval-spaced from now.
+			await evaluateIdleAgentGcNudgeLocked(pi, ctx.cwd, p, st, nowMs, []);
+		}
+	} catch (err: any) {
+		await trace(p, "agent.idle_gc.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {});
 	}
 	// === Issue 83a — stale-open assignment scan [R10-3 restart-required pump phase] ===
 	// Pump phase: `staleOpenAssignmentScanLocked` (called from `pumpRootMailbox`).
@@ -162,8 +192,7 @@ export async function runPumpMaintenancePhasesLocked(
 		// Route that shape into observeLinkedTaskLocked's existing post-hold replay branch —
 		// it re-checks computeSafeIdle internally (held runs stay untouched) and advancing
 		// removes the done-entry precondition, so the replay is exactly-once.
-		const postHoldOrphan =
-			run?.status === "running" && !run.activeIssueId && (run.queue ?? []).some((q: any) => q.status === "done");
+		const postHoldOrphan = run?.status === "running" && !run.activeIssueId && (run.queue ?? []).some((q: any) => q.status === "done");
 		if (postHoldOrphan) {
 			const doneEntry = (run.queue ?? []).find((q: any) => q.status === "done");
 			if (doneEntry?.taskId) {
@@ -216,7 +245,8 @@ export async function runPumpMaintenancePhasesLocked(
 	}
 	// Opt-in cross-run continuation is evaluated inside the same pump lock after issue observation.
 	try {
-		if ((st as any).issueRun?.status === "complete" && (st as any).issueRun?.runId) await autoContinueCompletedRunLocked(p, { cwd: ctx.cwd }, st, { pi });
+		if ((st as any).issueRun?.status === "complete" && (st as any).issueRun?.runId)
+			await autoContinueCompletedRunLocked(p, { cwd: ctx.cwd }, st, { pi });
 	} catch (err: unknown) {
 		await logSwarmError(p, "surface", "issues.auto_continue_failed", err, { reason });
 	}

@@ -1,0 +1,9 @@
+# idle-agent-gc-nudge: root is nudged about an idle-but-running worker and reclaims it
+# via the swarm_stop_agent TOOL (plan: docs/swarm/plans/2026-10-13-idle-agent-gc-nudge.md).
+# Pattern 2 (seeded world + single actor): the lane test seeds scratch state with
+#   worker-idle   — running/idle, heartbeat 30' old, no tasks, no lease  → ELIGIBLE (nudged)
+#   worker-busy   — running/busy, activeTaskIds non-empty                → skipped
+#   worker-leased — valid reuse lease                                    → skipped
+# The pump evaluator (real code) emits the durable root nudge; the scripted root turn then
+# surfaces its mailbox and calls the REAL swarm_stop_agent on exactly worker-idle.
+{"name":"surface mailbox then stop the idle worker","events":[{"type":"text","delayMs":10,"text":"Checking the swarm for idle workers."},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"call-1","arguments":{}},{"type":"toolcall","delayMs":10,"name":"swarm_stop_agent","id":"call-2","arguments":{"agentId":"worker-idle"}},{"type":"text","delayMs":10,"text":"Stopped the idle worker."}]}
