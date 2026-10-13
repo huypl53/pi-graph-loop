@@ -181,18 +181,17 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 
 			// Active Swarm Retry: Trigger a retry turn on the CURRENT slot using exponential backoff.
 			// This preserves the prompt cache and handles cases where the engine didn't auto-continue.
-			const delayMs = 2000 * 2 ** (incidentCount - 1); // 2s -> 4s
+			const delayMs = process.env.PI_SWARM_TEST_FAST ? 0 : 2000 * 2 ** (incidentCount - 1); // 2s -> 4s
 			if (delayMs > 0) {
 				await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, 5000)));
 			}
-			pi.sendMessage(
-				{
-					customType: "swarm-pool-retry",
-					content: `⚠ Pool: ${kind} error on ${providerKey} — retrying attempt ${incidentCount}/${ENGINE_MAX_RETRIES} on current slot to preserve cache.`,
-					display: true,
-				},
-				{ deliverAs: "followUp" },
-			);
+			// User-facing notification in TUI / status bar — not leaked into LLM context
+			if (ctx.hasUI && ctx.ui?.notify) {
+				ctx.ui.notify(
+					`Pool: ${kind} error on ${providerKey} — retrying attempt ${incidentCount}/${ENGINE_MAX_RETRIES} on current slot.`,
+					"warning",
+				);
+			}
 			pi.sendMessage(
 				{
 					customType: "swarm-message",
