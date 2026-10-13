@@ -1,0 +1,6 @@
+# worker-identity-hints: a spawned worker closes its assignment via swarm_update_task with a
+# validation-command note (evidence), and reports a blocked follow-up to the root via
+# swarm_send_message instead of sitting silent. Asserted end-to-end in
+# extensions/mock-llm/tests/worker-identity-hints.test.mjs
+# (system prompt injection + real tool execution against a scratch swarm tree).
+{"name": "worker closes assignment, then reports blocker", "stopReason": "stop", "events": [{"type": "toolcall", "delayMs": 10, "name": "swarm_update_task", "id": "upd-1", "arguments": {"taskId": "task-uathints", "nodeId": "n1", "attemptId": "attempt-active-uat", "status": "done", "note": "evidence: node extensions/swarm/tests/root-delegation-guard.test.mjs — ALL PASS (summary green); closing with evidence"}}, {"type": "text", "delayMs": 10, "text": "Assignment complete. Closing the node via swarm_update_task with the validation command and its result as evidence.", "chunks": ["Assignment complete. ", "Closing the node via swarm_update_task with the validation command and its result as evidence."]}, {"type": "toolcall", "delayMs": 10, "name": "swarm_send_message", "id": "msg-1", "arguments": {"to": "root", "body": "Blocked: the follow-up step needs a decision outside my scope. Requesting guidance."}}, {"type": "stop", "delayMs": 5, "reason": "stop"}]}

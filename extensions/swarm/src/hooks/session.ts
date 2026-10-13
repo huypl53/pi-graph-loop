@@ -253,7 +253,7 @@ export function registerSessionHooks(
 		if (!agent) return;
 		const identityRel = relative(ctx.cwd, identityPath(p, agentId));
 		return {
-			systemPrompt: `${event.systemPrompt}\n\nPi Swarm identity: you are agent \`${agentId}\` (${agent.role}). Your durable role card is \`${identityRel}\`. Follow it as your agent-specific AGENT.md. Use swarm tools for peer coordination.`,
+			systemPrompt: `${event.systemPrompt}\n\nPi Swarm identity: you are agent \`${agentId}\` (${agent.role}). Your durable role card is \`${identityRel}\`. Follow it as your agent-specific AGENT.md. Use swarm tools for peer coordination. When your work completes, close it via \`swarm_update_task\` with evidence. If blocked, or when your work touches another agent's scope, message them via \`swarm_send_message\` (or the root) — do not sit silent waiting.`,
 		};
 	});
 

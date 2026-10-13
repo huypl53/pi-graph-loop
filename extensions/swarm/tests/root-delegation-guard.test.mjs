@@ -170,6 +170,67 @@ console.log("\n[C2] tool_result: Root edit streak tracking & gentle advisory");
 	ok("Edit 4 after swarm action does NOT contain advisory notice (streak was reset)", !text4.includes("[Root Orchestrator Advisory]"));
 }
 
+console.log("\n[C3] before_agent_start: Worker identity injection carries update-task + peer-messaging hints");
+{
+	// Worker session: seeded agent record in swarm state, no root claim.
+	delete process.env.PI_SWARM_IS_ROOT;
+	process.env.PI_SWARM_AGENT_ID = "hint-worker-1";
+
+	// Seed a durable agent record so the worker branch resolves identity + role text.
+	const { paths, readState, writeState } = await import(join(here, "..", "src", "state.ts"));
+	const p = paths(scratch);
+	const st = await readState(p, scratch);
+	st.agents["hint-worker-1"] = {
+		id: "hint-worker-1",
+		role: "implementer",
+		status: "running",
+		roleKind: "implementer",
+		capabilities: [],
+		activeTaskIds: [],
+		maxConcurrentTasks: 1,
+		runtimeStatus: "idle",
+		health: "healthy",
+		lastSessionStartAt: new Date().toISOString(),
+		lastAgentStartAt: new Date().toISOString(),
+		pid: process.pid,
+		tmuxSession: "",
+		tmuxWindow: "hint-worker-1",
+		tmuxTarget: "unknown",
+		model: "m",
+		provider: "p",
+		cwd: scratch,
+		mailbox: "hint-worker-1.jsonl",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+	};
+	await writeState(p, st);
+
+	const initialEvent = {
+		systemPrompt: "You are a coding assistant with tool access.",
+	};
+
+	let result;
+	for (const h of hookHandlers.before_agent_start || []) {
+		const res = await h(initialEvent, ctx);
+		if (res) result = res;
+	}
+
+	ok("result is returned for worker (not undefined/skipped)", result !== undefined && result?.systemPrompt !== undefined);
+	const prompt = result?.systemPrompt || "";
+	ok("worker identity line present", prompt.includes("Pi Swarm identity: you are agent `hint-worker-1`"));
+	ok("identity card path present", prompt.includes(".pi/swarm/agents/hint-worker-1.md"));
+	ok(
+		"update-task hint present",
+		prompt.includes("swarm_update_task") && /evidence/i.test(prompt),
+		"expected `swarm_update_task` + evidence wording in the injected prompt",
+	);
+	ok(
+		"peer-messaging hint present",
+		prompt.includes("swarm_send_message") && /do not sit silent/i.test(prompt),
+		"expected `swarm_send_message` + do-not-sit-silent wording in the injected prompt",
+	);
+}
+
 rmSync(scratch, { recursive: true, force: true });
 
 console.log(`\nTest summary: ${fail === 0 ? "ALL PASS" : `${fail} FAILED`}`);
