@@ -298,6 +298,51 @@ console.log("\n[4] work-class streak: self@3, root@6, silent beyond, reset-on-su
 }
 
 // =============================================================
+console.log("\n[4b] late-result refusal (__lateResultRefused) counts as FAILURE, not success");
+{
+	ensureWorker("worker-l1", "implementer");
+	ensureWorker("worker-l2", "implementer");
+	const taskId = await seedTask("task-uf-late", "implement");
+	// worker-l1 claims (mints attempt-1), root force-assigns to worker-l2 (supersedes attempt-1),
+	// then force-assigns BACK to worker-l1 (mints attempt-3; assignee is worker-l1 again so the
+	// ownership check passes) — worker-l1's ORIGINAL token is now stale → late-result refusal.
+	await as("worker-l1", () => call("swarm_update_task", { taskId, nodeId: "implement", note: "claim", cwd: scratch }));
+	const tpLate = join(scratch, ".pi/swarm/tasks", taskId, "task.json");
+	const staleAttemptId = JSON.parse(readFileSync(tpLate, "utf8")).nodes.implement.activeAttemptId;
+	await as("root", () => call("swarm_assign_task", { taskId, nodeId: "implement", agentId: "worker-l2", force: true, cwd: scratch }));
+	await as("root", () => call("swarm_assign_task", { taskId, nodeId: "implement", agentId: "worker-l1", force: true, cwd: scratch }));
+	// worker-l1 replays its STALE token -> __lateResultRefused (no throw, marker result)
+	const res = await as("worker-l1", () =>
+		call("swarm_update_task", {
+			taskId,
+			nodeId: "implement",
+			status: "done",
+			outcome: "implemented",
+			attemptId: staleAttemptId,
+			cwd: scratch,
+		}),
+	);
+	const resText = res?.content?.[0]?.text ?? "";
+	ok("late-result refusal returns refusal envelope", /Refused: late result/.test(resText), resText.slice(0, 120));
+	const stLate = readSt();
+	ok(
+		"late-result refusal stamps streak >=1 (NOT reset to 0)",
+		(stLate.agents["worker-l1"].updateFailureStreak ?? 0) >= 1,
+		String(stLate.agents["worker-l1"].updateFailureStreak),
+	);
+	ok(
+		"late-result refusal stamps a class",
+		Boolean(stLate.agents["worker-l1"].lastUpdateFailureClass),
+		String(stLate.agents["worker-l1"].lastUpdateFailureClass),
+	);
+	ok(
+		"late-result refusal notified root (work-class streak1? no: closure intent -> immediate)",
+		mailboxRows("root", "worker-l1:update-failure:root").length >= 1,
+		JSON.stringify(mailboxRows("root", "worker-l1:update-failure:root").map((m) => m.idempotencyKey)),
+	);
+}
+
+// =============================================================
 console.log("\n[5] root failures never recorded");
 {
 	ensureWorker("root", "root");

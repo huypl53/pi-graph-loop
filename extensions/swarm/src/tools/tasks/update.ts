@@ -201,14 +201,26 @@ export function registerUpdateTaskTool(pi: ExtensionAPI): void {
 							);
 							if (!isOrch) {
 								const stOk = await readState(p, ctx.cwd);
-								const { recordUpdateOutcomeLocked } = await import("../../nudges/update-failure.ts");
+								const { classifyUpdateFailure, recordUpdateOutcomeLocked } = await import("../../nudges/update-failure.ts");
+								// Review fix (task-closure-gaps r1): a late-result refusal returns a MARKER
+								// result (no throw) — it is a REJECTION, not a success. Recording it as
+								// ok:true reset the failure streak and masked repeated stale-token retries.
+								const lateRefused = Boolean((core as any)?.__lateResultRefused);
 								await recordUpdateOutcomeLocked({
 									pi,
 									cwd: ctx.cwd,
 									p,
 									st: stOk,
 									agentId: me,
-									ok: true,
+									ok: !lateRefused,
+									errorCode: lateRefused ? "LATE_RESULT_REFUSED" : undefined,
+									classification: lateRefused
+										? classifyUpdateFailure(
+												params,
+												"LATE_RESULT_REFUSED",
+												Array.isArray(stOk.agents?.[me]?.activeTaskIds) ? stOk.agents[me].activeTaskIds : [],
+											)
+										: undefined,
 									taskId: safeId(String(params.taskId ?? "")) || undefined,
 									nodeId: params.nodeId,
 								});

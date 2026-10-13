@@ -121,10 +121,25 @@ export function applyStoppedGc(
 		if (!dryRun) {
 			delete (st.agents as Record<string, unknown>)[c.agentId];
 			delete st.delivered[c.agentId];
+			// Review fix (task-closure-gaps r3): per-agent nudge ledgers must die WITH the agent
+			// record — otherwise stopped-GC purges st.agents[id] but leaves taskless/idle-gc nudge
+			// state growing swarm-state.json unboundedly across agent churn.
+			purgeAgentLedgers(st, c.agentId);
 		}
+		// purged lists ELIGIBLE candidates in both modes (dry-run = would-purge; original contract
+		// the agent-stopped-gc fixture lane asserts).
 		purged.push(c.agentId);
 	}
 	return { purged, blocked, dryRun };
+}
+
+// Prune per-agent nudge ledgers for a purged agent. Tolerates absent ledgers (optional fields);
+// the underscore _lastScanAt global-throttle keys are NOT per-agent and are left alone.
+export function purgeAgentLedgers(st: SwarmState, agentId: string): void {
+	for (const ledger of ["tasklessNudgeState", "idleGcNudgeState"] as const) {
+		const map = st[ledger] as Record<string, unknown> | undefined;
+		if (map && typeof map === "object") delete map[agentId];
+	}
 }
 
 export interface FilterAgentRowsOptions {

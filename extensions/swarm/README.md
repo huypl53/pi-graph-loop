@@ -29,6 +29,8 @@ src/agents.ts        spawn/reuse/reload
 src/nudges/goal-epoch.ts       swarm-level idle epoch + goal-floor emission
 src/nudges/graph-advance.ts    graph-advance / stall / artifact / heartbeat GC nudges
 src/nudges/idle-agent-gc.ts    idle-agent GC nudge — nudges the root PM about running-but-idle workers (root decides, calls swarm_stop_agent itself; no auto-kill)
+src/nudges/update-failure.ts   class-based swarm_update_task failure signals (task-closure-gaps Stage B): closure/orphan failures notify IMMEDIATELY (self-nudge + root notice), mid-work failures use the 3/6 streak; recorded inside the update tool's lock
+src/nudges/taskless-worker.ts  taskless-worker detector pump phase (task-closure-gaps Stage D): running agents with no task-graph assignment past a 15' grace get one self-nudge + up to 2 root notices offering swarm_assign_task (env kill-switch PI_SWARM_TASKLESS_NUDGE_OFF=1)
 src/nudges/loop-detect.ts      read-streak guard v1.1 + loop-repeat guard v1.2 — classify/count READ streaks, identical-fingerprint repeat rings, milestone gates, mid-run self-nudge + one-per-streak root escalation (tasks loop-read-streak-guard, loop-repeat-guard)
 src/nudges/status-predicates.ts pure predicates over TaskState["status"]
 src/surface.ts                 facade — root-facing message surface machinery (canonical logic in src/surface/)
@@ -177,7 +179,7 @@ Useful tools (live registrations — the retired agent/message wrappers `swarm_r
 - `swarm_send_message` (reply lifecycle is engine-derived — reply + task close; no ack tool)
 - `swarm_check_mailbox`
 - `swarm_reconcile` (mail + task sweep; `mark=true` repairs task status drift; `offset` skips already-seen result actions and returns `nextOffset`)
-Task-graph tools:
+  Task-graph tools:
 
 - `swarm_create_task`, `swarm_assign_task`, `swarm_update_task` (the retired wrappers `swarm_confirm_qualification` / `swarm_task_message` / `swarm_validate_graph` / `swarm_print_graph` / `swarm_next_nodes` were removed in the 2026-10 retired-surface cleanup; graph inspection runs through `swarm_task_status(detail:"graph")`)
 - Package skill: `qualification-skills/qualification-gate/SKILL.md` ships inside `extensions/swarm/` and is surfaced only in generated root/reviewer/auditor identities. It guides the short task-creation qualification gate (`auto` or `human-discuss`).
