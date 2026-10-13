@@ -71,6 +71,13 @@ export type SwarmIdleGcNudgeState = {
 	capTraced?: boolean; // set when the one-shot agent.idle_gc.cap trace fired
 };
 
+// Stage D — taskless-worker detector nudge state (plan: docs/swarm/plans/2026-10-13-worker-task-closure-gaps.md)
+export type SwarmTasklessNudgeState = {
+	selfNudges: number;
+	rootNotices: number;
+	lastRootNoticeAt?: string;
+};
+
 // Per-(taskId, nodeId) monotonic seq store for the graph-advance safety net (Issue F2,
 // task-202608310422). Mirrors the per-task shape of SwarmTaskStallState but at node granularity so a
 // single task with multiple ready-but-unassigned nodes keeps independent counters. The seq is the
@@ -357,6 +364,9 @@ export type SwarmState = {
 	// lowercase alnum+-+_ so a leading-underscore key can never collide with an agent).
 	// Optional; absent on pre-policy swarms.
 	idleGcNudgeState?: Record<string, SwarmIdleGcNudgeState | string>;
+	// Taskless-worker detector nudge state (Stage D, 2026-10-13). Keyed by agentId plus the
+	// `_lastScanAt` whole-scan throttle key.
+	tasklessNudgeState?: Record<string, SwarmTasklessNudgeState | string>;
 	// Issue F2 (task-202608310422): per-(taskId, nodeId) monotonic nudgeSeq store for the graph-advance
 	// safety net. The seq is the `{seq}` slot in NOTIFY_KEY_GRAPH_ADVANCE so each successful emit gets a
 	// fresh dedupe slot. NEVER reset (survives acks + node-leaves/re-enters ready); the durable map is

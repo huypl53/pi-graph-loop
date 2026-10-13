@@ -1,0 +1,11 @@
+# taskless-worker-detect: root is noticed about a running worker that has no task-graph
+# assignment past the grace window, then assigns it via swarm_assign_task (plan: docs/swarm/plans/2026-10-13-worker-task-closure-gaps.md §1.4 Stage D & §3).
+# Pattern 2 (seeded world + single actor): the lane test seeds scratch state with:
+#   worker-fresh       — running/idle, age 5' < grace 15'                  → untouched
+#   worker-taskless    — running/idle, age 20' > grace, no open tasks      → self-nudged + root-noticed
+#   worker-contractual — running/idle, age 20', unresolved requiresResponse → untouched
+#   worker-with-task   — running/idle, activeTaskIds non-empty             → untouched
+# The pump evaluator (real code) emits the durable root notice and worker self-nudge;
+# the scripted root turn then surfaces its mailbox via swarm_check_mailbox and calls
+# the REAL swarm_assign_task on worker-taskless.
+{"name":"surface mailbox then assign the taskless worker","events":[{"type":"text","delayMs":10,"text":"Checking mailbox for taskless worker notices."},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"call-1","arguments":{}},{"type":"toolcall","delayMs":10,"name":"swarm_assign_task","id":"call-2","arguments":{"taskId":"task-lane-detect","nodeId":"n1","agentId":"worker-taskless"}},{"type":"text","delayMs":10,"text":"Assigned worker-taskless to node n1."}]}

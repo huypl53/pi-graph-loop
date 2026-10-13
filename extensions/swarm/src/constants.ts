@@ -147,6 +147,14 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 #     maxNudges: 3               # then suppress (one cap notice in the trace)
 #     intervalMs: 60000          # scan throttle
 
+# --- Taskless worker nudge (optional; defaults shown) -------------------------
+# Detects workers running without any task-graph assignment. ON by default;
+# disable via PI_SWARM_TASKLESS_NUDGE_OFF=1.
+# tasklessNudge:
+#   enabled: true
+#   afterMs: 900000              # 15m grace window
+#   rootCooldownMs: 1800000      # 30m between root notices
+
 # --- Global opt-out (optional) -----------------------------------------------
 # inheritGlobal: false           # ignore ~/.pi/agent/swarm.yml for this project
 `;
@@ -196,6 +204,12 @@ export const POOL_SCAFFOLD_GLOBAL_YML_PLACEHOLDER = `# ~/.pi/agent/swarm.yml —
 #     cooldownMs: 1800000
 #     maxNudges: 3
 #     intervalMs: 60000
+
+# --- Taskless worker nudge (optional; defaults shown) -------------------------
+# tasklessNudge:
+#   enabled: true
+#   afterMs: 900000
+#   rootCooldownMs: 1800000
 
 # --- Singleton default (optional) ---------------------------------------------
 # defaultModel: glm-5.1
@@ -887,6 +901,27 @@ export const TRACE_AGENT_IDLE_GC_NUDGE = "agent.idle_gc.nudge_emitted";
 export const TRACE_AGENT_IDLE_GC_CAP = "agent.idle_gc.cap";
 export const TRACE_AGENT_IDLE_GC_DISABLED = "agent.idle_gc.disabled";
 export const TRACE_AGENT_IDLE_GC_ERROR = "agent.idle_gc.error";
+
+// === Stage D — taskless-worker detector (plan: docs/swarm/plans/2026-10-13-worker-task-closure-gaps.md) ===
+export const TASKLESS_GRACE_MS =
+	Number(process.env.PI_SWARM_TASKLESS_GRACE_MS) > 0 ? Math.floor(Number(process.env.PI_SWARM_TASKLESS_GRACE_MS)) : 15 * 60_000; // 15' grace window before taskless nudge
+export const TASKLESS_ROOT_COOLDOWN_MS =
+	Number(process.env.PI_SWARM_TASKLESS_ROOT_COOLDOWN_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_TASKLESS_ROOT_COOLDOWN_MS))
+		: 30 * 60_000; // 30' between root notices for the same agent
+export const TASKLESS_SCAN_INTERVAL_MS =
+	Number(process.env.PI_SWARM_TASKLESS_SCAN_INTERVAL_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_TASKLESS_SCAN_INTERVAL_MS))
+		: 60_000; // whole-scan throttle
+export const TASKLESS_ROOT_NOTICE_CAP = 2;
+
+export const NOTIFY_KEY_TASKLESS_SELF = "agent:{agentId}:nudge:taskless-self";
+export const NOTIFY_KEY_TASKLESS_ROOT = "agent:{agentId}:nudge:taskless-root:{seq}";
+
+export const TRACE_AGENT_TASKLESS_SELF_NUDGE = "agent.taskless.self_nudge";
+export const TRACE_AGENT_TASKLESS_ROOT_NOTICE = "agent.taskless.root_notice";
+export const TRACE_AGENT_TASKLESS_DISABLED = "agent.taskless.disabled";
+export const TRACE_AGENT_TASKLESS_ERROR = "agent.taskless.error";
 
 // Format a NOTIFY_KEY_* template with validated (safe-id) substitutions.
 export function formatNotifyKey(template: string, params: Record<string, string>): string {

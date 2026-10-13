@@ -21,6 +21,7 @@ import {
 	evaluateIdleAgentGcNudgeLocked,
 	evaluateSlotRecoveryLocked,
 	evaluateTaskGraphStallNudgeLocked,
+	evaluateTasklessWorkerNudgeLocked,
 	reconcileGraphAdvanceLocked,
 	reconcileInitialReadyLocked,
 } from "../nudges/graph-advance.ts";
@@ -77,6 +78,23 @@ export async function runPumpMaintenancePhasesLocked(
 		}
 	} catch (err: any) {
 		await trace(p, "agent.idle_gc.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {});
+	}
+	// === Stage D — taskless-worker detector [restart-required pump phase] ===
+	// Runs AFTER idle-agent GC: detects running workers with no task-graph assignment past grace.
+	try {
+		const hasRunningTasklessCandidate = Object.values(st.agents).some(
+			(a) => a.id !== "root" && a.status === "running" && !a.paused && (a.activeTaskIds || []).length === 0,
+		);
+		if (hasRunningTasklessCandidate) {
+			const { loadTaskGraphsForGc } = await import("../agent-gc-io.ts");
+			const taskGraphs = await loadTaskGraphsForGc(p);
+			await evaluateTasklessWorkerNudgeLocked(pi, ctx.cwd, p, st, nowMs, taskGraphs);
+		} else {
+			await evaluateTasklessWorkerNudgeLocked(pi, ctx.cwd, p, st, nowMs, []);
+		}
+	} catch (err: any) {
+		await logSwarmError(p, "surface", "taskless_worker.scan_failed", err, { reason });
+		await trace(p, "agent.taskless.error", { reason, error: String((err as Error)?.message || err) }).catch(() => {});
 	}
 	// === Issue 83a — stale-open assignment scan [R10-3 restart-required pump phase] ===
 	// Pump phase: `staleOpenAssignmentScanLocked` (called from `pumpRootMailbox`).

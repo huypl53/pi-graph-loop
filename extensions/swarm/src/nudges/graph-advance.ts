@@ -24,5 +24,6 @@ export { evaluateArtifactProgressNudgeLocked } from "./artifact-progress.ts";
 
 export { agentHeartbeatGCLocked } from "./heartbeat-gc.ts";
 export { evaluateIdleAgentGcNudgeLocked } from "./idle-agent-gc.ts";
+export { evaluateTasklessWorkerNudgeLocked } from "./taskless-worker.ts";
 
 export { evaluateSlotRecoveryLocked } from "./slot-recovery.ts";
