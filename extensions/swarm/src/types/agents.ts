@@ -27,6 +27,16 @@ export type SwarmAgent = {
 	lastAgentSettledAt?: string;
 	lastSettleNotifyAt?: string; // persisted cooldown for agent_settled->root idle/open-work notify
 	lastAckDebtNotifyAt?: string; // R25: persisted cooldown for agent_settled/stopAgent→root ack-debt notify
+	// === Update-failure signals (plan 2026-10-13-worker-task-closure-gaps §1.2) ===
+	// Consecutive swarm_update_task failures for this agent (non-root). Reset to 0 on any
+	// successful update; stamped with the last failure's code + classification so nudges and
+	// root notices can name them. The root-notice ledger cools/immediates retries.
+	updateFailureStreak?: number;
+	lastUpdateFailureAt?: string;
+	lastUpdateFailureCode?: string;
+	lastUpdateFailureClass?: "closure" | "orphan" | "work";
+	lastUpdateFailureRootNoticeAt?: string;
+	updateFailureRootNoticeCount?: number;
 	// === Issue 86: priority-high interrupt-on-delivery (recipient-side rate-limit ledger) ===
 	// Last timestamp a `ctx.abort()` was invoked by the recipient's input hook in response to a
 	// priority:"high" swarm message. Persisted on the recipient agent record; root pseudo-

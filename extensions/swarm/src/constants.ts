@@ -806,6 +806,24 @@ export const NOTIFY_KEY_TASK_GRAPH_STALL = "task:{taskId}:nudge:graph-stall:{seq
 // SAFE_ID_RE inside formatNotifyKey; the `goalId` substitution must satisfy /^[a-z0-9_-]+$/.
 export const NOTIFY_KEY_GOAL_IDLE_NUDGE = "goal:{goalId}:nudge:idle-streak:{seq}";
 
+// === Update-failure signals (plan: docs/swarm/plans/2026-10-13-worker-task-closure-gaps.md §1.2) ===
+// Class-based notifications when a NON-ROOT worker's swarm_update_task call fails:
+// closure-intent / orphan-context failures notify IMMEDIATELY (the incident worker failed once
+// and stopped — a pure streak gate never fires there); mid-work failures use the 3/6 streak.
+// Idempotency keys are per (agent, task, node, class); params must satisfy SAFE_ID_RE (the
+// recorder compacts arbitrary caller-supplied ids via its safeKeyPart helper).
+export const NOTIFY_KEY_UPDATE_FAILURE_SELF = "agent:{agentId}:update-failure:self:{taskId}:{nodeId}:{classification}";
+export const NOTIFY_KEY_UPDATE_FAILURE_ROOT = "agent:{agentId}:update-failure:root:{taskId}:{nodeId}:{classification}";
+// Root-notice cooldown for immediate-class failures (work-class fires at streak 6 exactly once).
+export const UPDATE_FAILURE_ROOT_COOLDOWN_MS =
+	Number(process.env.PI_SWARM_UPDATE_FAILURE_ROOT_COOLDOWN_MS) > 0
+		? Math.floor(Number(process.env.PI_SWARM_UPDATE_FAILURE_ROOT_COOLDOWN_MS))
+		: 600_000;
+// Max root notices per agent per failure era (reset only by a successful update clearing the
+// streak; the count itself is not reset to avoid re-flooding across rework cycles).
+export const UPDATE_FAILURE_ROOT_NOTICE_CAP = 2;
+
+
 // Format a NOTIFY_KEY_* template with validated (safe-id) substitutions.
 export function formatNotifyKey(template: string, params: Record<string, string>): string {
 	let out = template;

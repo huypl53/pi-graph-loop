@@ -3,11 +3,7 @@
 
 import { Type } from "typebox";
 import { PI_SWARM_MINIMAL_PROTOCOL } from "../../constants.ts";
-import {
-	defineTool,
-	formatSize,
-	type ExtensionAPI,
-} from "@earendil-works/pi-coding-agent";
+import { defineTool, formatSize, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -42,6 +38,7 @@ import {
 	readState,
 	readTaskByRef,
 	readTaskState,
+	taskNotFoundDetails,
 	taskPaths,
 	trace,
 	traceTask,
@@ -65,7 +62,7 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 			description:
 				"Assign a task graph node to an agent: reuse an idle role-matching agent by default, optionally spawn, update node assignment state + activeTaskIds, and send a structured assignment message carrying taskId/nodeId/replyTarget. The task-graph state file is the source of truth. Root-level tool.",
 			promptGuidelines: [
-				"Use `swarm_assign_task` to assign a ready node; it reuses an idle role-matching agent unless autoSpawn/spawnIsolated is set. If it returns NODE_NOT_READY, check the graph first with swarm_task_status (detail:\"graph\") to see which nodes are still blocking. If NO_AVAILABLE_AGENT, enable autoSpawn or pass an explicit agentId.",
+				'Use `swarm_assign_task` to assign a ready node; it reuses an idle role-matching agent unless autoSpawn/spawnIsolated is set. If it returns NODE_NOT_READY, check the graph first with swarm_task_status (detail:"graph") to see which nodes are still blocking. If NO_AVAILABLE_AGENT, enable autoSpawn or pass an explicit agentId.',
 			],
 			parameters: Type.Object({
 				taskId: Type.String({ description: "Task id." }),
@@ -125,7 +122,21 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 					const result = await withLock(p, async () => {
 						const st = await readState(p, ctx.cwd);
 						heartbeatRootLeader(st, Date.now(), process.pid, "assign_task");
-						const { task, tp } = await readTaskByRef(p, { taskId: params.taskId });
+						// Task-closure-gaps Stage A: structured TASK_NOT_FOUND payload (same contract as
+						// updateTaskCore — see primitives/task-core.ts). failTaskTool throws; no mutation yet.
+						let task: TaskState, tp: ReturnType<typeof taskPaths>;
+						try {
+							({ task, tp } = await readTaskByRef(p, { taskId: params.taskId }));
+						} catch (err) {
+							if ((err as any)?.errorCode) throw err;
+							await failTaskTool(
+								null,
+								p,
+								"TASK_NOT_FOUND",
+								`Task not found: ${params.taskId}`,
+								await taskNotFoundDetails(p, st, currentAgentId(), String(params.taskId ?? "")),
+							);
+						}
 						const taskId = task.taskId;
 						const node = task.nodes[params.nodeId];
 						if (!node)
@@ -489,7 +500,12 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 							const streakKey = `${assignee.id}\u0000${oldActiveTaskId}`;
 							if (st.readStreaks?.[streakKey]) {
 								delete st.readStreaks[streakKey];
-								void trace(p, "loop_streak.reset", { reason: "task_change", agentId: assignee.id, taskId: task.taskId, prevTaskId: oldActiveTaskId }).catch(() => {});
+								void trace(p, "loop_streak.reset", {
+									reason: "task_change",
+									agentId: assignee.id,
+									taskId: task.taskId,
+									prevTaskId: oldActiveTaskId,
+								}).catch(() => {});
 							}
 						}
 						// === Issue 82: stamp lease on the assignee at assignment time (optional) ===
@@ -527,25 +543,25 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 
 						const replyTarget = params.replyTarget || me;
 						const conversationId = `task:${task.taskId}:${params.nodeId}`;
-					// Ergonomics Fix 2 (task-202610031216): pre-mint the assignment message id so the
-					// body can name it literally (replyTo contract) and deliverMessageLocked adopts it
-					// via idOverride — body, state record, and mailbox line carry the identical id.
-					const assignmentMsgId = mintMessageId();
-					const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note, attemptId, assignmentMsgId);
-					// F4 follow-up (task-fu-assign-clamp) — defensive clamp of the COMPOSED assignment body
-					// (site 2). params.note is not the only body input: task title/goal/acceptanceCriteria,
-					// artifact lists, and the playbook ref are folded in by buildAssignmentBody, so the note
-					// clamp alone does not bound the persisted line. At this point NO writeTaskState/
-					// writeState has run (both happen after delivery), so a throw here persists NOTHING —
-					// task.json, swarm-state.json, mailboxes, and the in-memory fencing/supersession counters
-					// (lock released unwritten) all stay untouched. deliverMessageLocked stays unclamped —
-					// engine-internal senders must not fail closed at delivery.
-					const bodyBytes = Buffer.byteLength(body, "utf8");
-					if (bodyBytes > PI_SWARM_MESSAGE_BODY_MAX_BYTES) {
-						throw new Error(
-							`MESSAGE_BODY_TOO_LARGE: body is ${formatSize(bodyBytes)} (cap ${formatSize(PI_SWARM_MESSAGE_BODY_MAX_BYTES)} — PI_SWARM_MESSAGE_BODY_MAX_BYTES). Trim the body or reference an artifact path instead.`,
-						);
-					}
+						// Ergonomics Fix 2 (task-202610031216): pre-mint the assignment message id so the
+						// body can name it literally (replyTo contract) and deliverMessageLocked adopts it
+						// via idOverride — body, state record, and mailbox line carry the identical id.
+						const assignmentMsgId = mintMessageId();
+						const body = buildAssignmentBody(task, params.nodeId, replyTarget, params.note, attemptId, assignmentMsgId);
+						// F4 follow-up (task-fu-assign-clamp) — defensive clamp of the COMPOSED assignment body
+						// (site 2). params.note is not the only body input: task title/goal/acceptanceCriteria,
+						// artifact lists, and the playbook ref are folded in by buildAssignmentBody, so the note
+						// clamp alone does not bound the persisted line. At this point NO writeTaskState/
+						// writeState has run (both happen after delivery), so a throw here persists NOTHING —
+						// task.json, swarm-state.json, mailboxes, and the in-memory fencing/supersession counters
+						// (lock released unwritten) all stay untouched. deliverMessageLocked stays unclamped —
+						// engine-internal senders must not fail closed at delivery.
+						const bodyBytes = Buffer.byteLength(body, "utf8");
+						if (bodyBytes > PI_SWARM_MESSAGE_BODY_MAX_BYTES) {
+							throw new Error(
+								`MESSAGE_BODY_TOO_LARGE: body is ${formatSize(bodyBytes)} (cap ${formatSize(PI_SWARM_MESSAGE_BODY_MAX_BYTES)} — PI_SWARM_MESSAGE_BODY_MAX_BYTES). Trim the body or reference an artifact path instead.`,
+							);
+						}
 						// Deterministic idempotency key: same task/node/assignee/attempt -> same message (no duplicate on retry).
 						const idempotencyKey = `assign:${task.taskId}:${params.nodeId}:${assignee.id}:${node.attempts}`;
 						// Lifecycle-fencing (issue 9, site 8, defense-in-depth): per-node staleness check right
@@ -648,7 +664,10 @@ export function registerAssignTaskTool(pi: ExtensionAPI): void {
 								});
 							}
 						} catch (hintErr) {
-							await logSwarmError(ctx.cwd, "issues-assign", "attempt_hint_failed", hintErr, { taskId: task.taskId, nodeId: params.nodeId });
+							await logSwarmError(ctx.cwd, "issues-assign", "attempt_hint_failed", hintErr, {
+								taskId: task.taskId,
+								nodeId: params.nodeId,
+							});
 						}
 						// Update attempt record with the actual message ID
 						const activeAttempt = node.attemptHistory?.find((a: any) => a.attemptId === attemptId);

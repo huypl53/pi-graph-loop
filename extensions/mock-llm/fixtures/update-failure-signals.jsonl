@@ -1,0 +1,12 @@
+# update-failure-signals: class-based swarm_update_task failure notifications
+# (plan: docs/swarm/plans/2026-10-13-worker-task-closure-gaps.md §1.2 — Stage B).
+# Pattern 2 (seeded world + single actor): worker-stuck is seeded running/idle with NO task
+# graph (the incident shape). Turned fixture, one toolcall per turn:
+#   turn 0: closure-intent failing update (status done on a nonexistent task) → IMMEDIATE
+#           self-nudge + root notice (no streak gate) — the motivating scenario (worker fails
+#           ONCE and stops)
+#   turn 1: per the guidance, report to root via swarm_send_message
+#   turn 2: wrap up
+{"name":"closure-intent failure on a guessed taskId","events":[{"type":"text","delayMs":10,"text":"Work is finished; recording the node."},{"type":"toolcall","delayMs":10,"name":"swarm_update_task","id":"call-1","arguments":{"taskId":"ghost-closure-task","nodeId":"plan","status":"done","outcome":"implemented"}}]}
+{"name":"reporting to root per the immediate-failure guidance","events":[{"type":"text","delayMs":10,"text":"The update failed and I was nudged — reporting to root instead."},{"type":"toolcall","delayMs":10,"name":"swarm_send_message","id":"call-2","arguments":{"to":"root","subject":"Status report after update failure","body":"My swarm_update_task failed (TASK_NOT_FOUND, closure class). Work is complete on disk; reporting here per the guidance."}}]}
+{"name":"wrap up","events":[{"type":"text","delayMs":10,"text":"Reported to root."}]}

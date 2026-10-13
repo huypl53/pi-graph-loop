@@ -1,0 +1,13 @@
+# update-task-not-found: a finishing worker calls swarm_update_task with a guessed taskId
+# and receives a STRUCTURED TASK_NOT_FOUND payload (plan: docs/swarm/plans/2026-10-13-worker-task-closure-gaps.md §1.1,
+# incident: worker p9-prompt-assembly-fix 2026-10-13 got a bare `Task not found` with zero guidance).
+# Pattern 2 (seeded world + single actor): the lane test seeds scratch state with
+#   worker-lost   — running/idle, activeTaskIds EMPTY (the incident shape) → hint = message-only path
+#   tasks seeded: task-alpha-fixture (real dir+task.json)                → validTaskIds lists it
+# Turned fixture: one toolcall per turn (pi continues the loop after tool results):
+#   turn 0: the failing swarm_update_task on a guessed taskId (real handler throws TASK_NOT_FOUND)
+#   turn 1: guided by the structured hint, report completion via the REAL swarm_send_message
+#   turn 2: closing text (turn consumer must stop)
+{"name":"worker fails update on a guessed taskId","events":[{"type":"text","delayMs":10,"text":"Work is done; recording the node."},{"type":"toolcall","delayMs":10,"name":"swarm_update_task","id":"call-1","arguments":{"taskId":"p9-prompt-assembly-fix","nodeId":"plan","status":"done","outcome":"implemented"}}]}
+{"name":"reporting to root per the TASK_NOT_FOUND guidance","events":[{"type":"text","delayMs":10,"text":"No task graph is tracking this work — reporting to root instead."},{"type":"toolcall","delayMs":10,"name":"swarm_send_message","id":"call-2","arguments":{"to":"root","subject":"Work complete: p9-prompt-assembly-fix","body":"Commit landed on master. No task graph exists for my assignment; reporting completion here per the TASK_NOT_FOUND guidance."}}]}
+{"name":"wrap up","events":[{"type":"text","delayMs":10,"text":"Reported to root."}]}

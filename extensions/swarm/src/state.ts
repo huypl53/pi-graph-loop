@@ -322,6 +322,46 @@ export async function readTaskByRef(
 	return { task, tp, taskId: task.taskId };
 }
 
+// Task-closure-gaps Stage A (plan 2026-10-13 §1.1): structured TASK_NOT_FOUND details for
+// agent-facing tool call sites. The bare readTaskByRef throw stays (state-layer, no tool
+// semantics); callers convert it via failTaskTool using this payload builder:
+//   - expected.validTaskIds: sorted task ids that DO exist (dirs with a task.json), capped
+//     at 20 with a "+N more" marker string appended.
+//   - expected.myActiveTaskIds: the CALLER's activeTaskIds (empty array when unregistered).
+//   - actionableHint: when the caller holds no tasks, the guidance is "you may not need this
+//     tool at all" (message-only reporting); otherwise "pick a valid id / run swarm_task_status".
+//   - suggestedNextCall: names swarm_task_status only when valid tasks exist.
+// De-path rule: the payload contains ids only, never filesystem paths.
+export const TASK_NOT_FOUND_VALID_IDS_CAP = 20;
+export async function taskNotFoundDetails(p: Paths, st: SwarmState | undefined, callerAgentId: string, requestedTaskId: string) {
+	let validTaskIds: string[] = [];
+	try {
+		const entries = await readdir(p.tasksDir);
+		validTaskIds = entries.filter((e) => existsSync(join(p.tasksDir, e, "task.json"))).sort();
+	} catch (err: any) {
+		if (err?.code !== "ENOENT") {
+			// Expected-flavor compaction: an unreadable tasks dir still yields an empty list; the
+			// failure itself is durable per the no-silent-swallow mandate.
+			await logSwarmError(p, "state", "task_not_found.valid_ids_scan_failed", err, { requestedTaskId });
+		}
+	}
+	const capped = validTaskIds.slice(0, TASK_NOT_FOUND_VALID_IDS_CAP);
+	if (validTaskIds.length > TASK_NOT_FOUND_VALID_IDS_CAP) capped.push(`(+${validTaskIds.length - TASK_NOT_FOUND_VALID_IDS_CAP} more)`);
+	const myActiveTaskIds = Array.isArray(st?.agents?.[callerAgentId]?.activeTaskIds) ? st.agents[callerAgentId].activeTaskIds.slice() : [];
+	const actionableHint =
+		myActiveTaskIds.length === 0
+			? `No task graph is tracking your work (your activeTaskIds is empty). If the work is done or blocked, report it with swarm_send_message(to="root") — swarm_update_task is not required without an assigned node. If you expected an assignment, ask root to assign one (swarm_assign_task).`
+			: `Task "${requestedTaskId}" does not exist. Your active tasks: ${myActiveTaskIds.join(", ")}. Run swarm_task_status on one of them, or pick a valid id from expected.validTaskIds.`;
+	const details: Record<string, unknown> = {
+		taskId: requestedTaskId,
+		expected: { validTaskIds: capped, myActiveTaskIds },
+		received: { taskId: requestedTaskId },
+		actionableHint,
+	};
+	if (validTaskIds.length > 0) details.suggestedNextCall = { tool: "swarm_task_status" };
+	return details;
+}
+
 export async function trace(p: Paths, event: string, data: Record<string, unknown> = {}) {
 	try {
 		await appendJsonl(p.events, { ts: now(), event, ...data });

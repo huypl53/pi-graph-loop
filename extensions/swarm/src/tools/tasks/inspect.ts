@@ -5,9 +5,10 @@ import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, graphJsonSummary } from "../../taskgraph.ts";
-import { paths, readState, readTaskByRef, taskPaths, traceTask } from "../../state.ts";
+import { collectDeclaredArtifacts, computeReadyNodes, computeTaskClosure, failTaskTool, graphJsonSummary } from "../../taskgraph.ts";
+import { paths, readState, readTaskByRef, taskNotFoundDetails, taskPaths, traceTask } from "../../state.ts";
 import { now, textResult } from "../../utils.ts";
+import { currentAgentId } from "../../session.ts";
 import { runtimeTaskWarnings } from "../../reconcile.ts";
 import { wrapSwarmToolInvocation } from "../wrapper.ts";
 
@@ -68,7 +69,22 @@ export function registerTaskStatusTool(pi: ExtensionAPI): void {
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				return wrapSwarmToolInvocation(pi, ctx.cwd, "swarm_task_status", async () => {
 					const p = paths(ctx.cwd);
-					const { task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId });
+					// Task-closure-gaps Stage A: structured TASK_NOT_FOUND payload for status probes on
+					// nonexistent ids (same contract as updateTaskCore). failTaskTool throws; read-only.
+					let task: import("../../types/index.ts").TaskState, tp: ReturnType<typeof taskPaths>, taskId: string;
+					try {
+						({ task, tp, taskId } = await readTaskByRef(p, { taskId: params.taskId }));
+					} catch (err) {
+						if ((err as any)?.errorCode) throw err;
+						const st = await readState(p, ctx.cwd);
+						await failTaskTool(
+							null,
+							p,
+							"TASK_NOT_FOUND",
+							`Task not found: ${params.taskId}`,
+							await taskNotFoundDetails(p, st, currentAgentId(), String(params.taskId ?? "")),
+						);
+					}
 					const { ready, current } = computeReadyNodes(task);
 					const summary = graphJsonSummary(task, ready, current);
 					let artifacts: Array<{ path: string; exists: boolean }> | undefined;

@@ -155,11 +155,19 @@ export function registerUpdateTaskTool(pi: ExtensionAPI): void {
 						const linkedEntry =
 							preRun?.activeIssueId && preRun.status === "running"
 								? (preRun.queue ?? []).find(
-									(q) => q.issueId === preRun.activeIssueId && q.status === "active" && q.taskId === safeId(String(params.taskId)),
-								  )
+										(q) =>
+											q.issueId === preRun.activeIssueId &&
+											q.status === "active" &&
+											q.taskId === safeId(String(params.taskId)),
+									)
 								: undefined;
 						if (linkedEntry) {
-							await trace(p, "task.cancel.linked_guard_refused", { taskId: params.taskId, runId: preRun.runId, issueId: linkedEntry.issueId, by: me });
+							await trace(p, "task.cancel.linked_guard_refused", {
+								taskId: params.taskId,
+								runId: preRun.runId,
+								issueId: linkedEntry.issueId,
+								by: me,
+							});
 							throw new Error(
 								`LINKED_TASK_CANCEL_REFUSED: task ${params.taskId} is the ACTIVE linked task of running issue run ${preRun.runId} (issue "${linkedEntry.issueId}"). Cancelling instead of completing silently freezes the run. Complete the work: mark the terminal node done via swarm_update_task (status=done). If the run must end now, use /swarm issues stop (run-level stop; the child task is never cancelled). Note: this refusal also holds with force:true — a linked task of a running run is never cancellable; complete it or stop the run.`,
 							);
@@ -172,14 +180,77 @@ export function registerUpdateTaskTool(pi: ExtensionAPI): void {
 						);
 					}
 					const result = await withLock(p, async () => {
-						return updateTaskCore(p, {
-							readState,
-							writeState,
-							trace,
-							deliverMessageLocked,
-							pi,
-							cwd: ctx.cwd,
-						}, params, me, isOrch);
+						// Stage B (plan 2026-10-13-worker-task-closure-gaps §1.2): classify + record the
+						// outcome INSIDE the same lock. On failure this emits the class-based signals
+						// (immediate for closure/orphan, streak 3/6 for work) BEFORE the error rethrows;
+						// on success it resets the streak. Root callers are never recorded.
+						try {
+							const core = await updateTaskCore(
+								p,
+								{
+									readState,
+									writeState,
+									trace,
+									deliverMessageLocked,
+									pi,
+									cwd: ctx.cwd,
+								},
+								params,
+								me,
+								isOrch,
+							);
+							if (!isOrch) {
+								const stOk = await readState(p, ctx.cwd);
+								const { recordUpdateOutcomeLocked } = await import("../../nudges/update-failure.ts");
+								await recordUpdateOutcomeLocked({
+									pi,
+									cwd: ctx.cwd,
+									p,
+									st: stOk,
+									agentId: me,
+									ok: true,
+									taskId: safeId(String(params.taskId ?? "")) || undefined,
+									nodeId: params.nodeId,
+								});
+								await writeState(p, stOk);
+							}
+							return core;
+						} catch (err: any) {
+							if (!isOrch) {
+								try {
+									const stErr = await readState(p, ctx.cwd);
+									const { classifyUpdateFailure, recordUpdateOutcomeLocked } =
+										await import("../../nudges/update-failure.ts");
+									const classification = classifyUpdateFailure(
+										params,
+										err?.errorCode,
+										Array.isArray(stErr.agents?.[me]?.activeTaskIds) ? stErr.agents[me].activeTaskIds : [],
+									);
+									await recordUpdateOutcomeLocked({
+										pi,
+										cwd: ctx.cwd,
+										p,
+										st: stErr,
+										agentId: me,
+										ok: false,
+										errorCode: err?.errorCode,
+										classification,
+										taskId: safeId(String(params.taskId ?? "")) || undefined,
+										nodeId: params.nodeId,
+									});
+									await writeState(p, stErr);
+								} catch (recordErr) {
+									// Never mask the tool error; the recording failure itself is durable via
+									// logSwarmError inside the recorder + here (no-silent-swallow mandate).
+									const { logSwarmError } = await import("../../errorlog.ts");
+									await logSwarmError(p, "update-failure", "record_failure_path_failed", recordErr, {
+										agentId: me,
+										errorCode: err?.errorCode,
+									});
+								}
+							}
+							throw err;
+						}
 					});
 					// Handle late-result refusal: convert the marker result to a refusal textResult (NO mutation).
 					if ((result as any)?.__lateResultRefused) {
