@@ -56,7 +56,7 @@ src/hooks.ts         facade — event hooks + root pump lifecycle (canonical log
   src/hooks/pump-manager.ts      stopRootPump / armRootPumpWatchdog / surfaceAgentPending
   src/hooks/pool-swap.ts         turn_end model-pool auto-swap (engine-retry gate + chain cap)
   src/hooks/turns.ts             SWARM_RESOLVE_TOOLS + turn_start / turn_end goal-resolve
-  src/hooks/session.ts           session_start / before_agent_start / agent_start
+  src/hooks/session.ts           session_start / before_agent_start / agent_start (static root/worker identity prompt injection incl. worker core-duty hints: close via swarm_update_task with evidence, message on blockers — never sit silent)
   src/hooks/settled.ts           agent_settled (transient suppression, response-missing, ack-debt)
   src/hooks/tools.ts             tool_execution_start/end + tool_result delegation guard
   src/hooks/shutdown-input.ts    session_shutdown + input (steering intercept / Issue 86 interrupt)

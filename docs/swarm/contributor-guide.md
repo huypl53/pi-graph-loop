@@ -306,6 +306,7 @@ Required examples in this issue family:
 | Change | Primary module(s) |
 | --- | --- |
 | spawn/restart/register/pause/role changes | `src/agents.ts`, `src/identity.ts`, `src/hooks/session.ts` (registration), `src/hooks/settled.ts` (settled-path spawns) |
+| identity prompt injection (root/worker static text at `before_agent_start`) | `src/hooks/session.ts` (worker identity line + core-duty hints: close via `swarm_update_task` with evidence, message on blockers — never sit silent) |
 | model pool, rotation, preflight, config discoverability | `src/pool.ts` |
 | task cancellation / supersession / late-update fencing | `src/tools/tasks.ts`, `src/taskgraph.ts`, `src/mailbox.ts`, `src/types.ts` |
 | lifecycle-notification fencing (stall + closure predicates) | `src/taskgraph.ts` (predicates), `src/hooks/turns.ts` (turn_end resolve), `src/hooks/settled.ts` (settled emit), `src/reconcile.ts`, `src/command.ts`, `src/tools/tasks.ts` (emitter sites) |
