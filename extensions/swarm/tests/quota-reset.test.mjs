@@ -188,9 +188,15 @@ async function seedAgent(agentId, opts = {}) {
 	// Allowance: 86_398_000ms (1-second slack per B-4). Upper bound: 86_400_000 + wall-clock jitter
 	// (the 3-ms jitter seen on the first run is from `Date.now() + ms` evaluation happening a few
 	// ms after the before snapshot).
+	// D4 (plan 2026-10-14) AMENDED EXPECTATION: the bench ceiling (rotation.benchMaxMs, default 1h)
+	// clamps EVERY bench, quotaResetMs included — the user mandate ("tối đa 1h sau thì kiểu gì cũng
+	// phải reset và gọi LLM thử lại") supersedes the Issue 21 per-slot floor as the FINAL duration.
+	// quotaResetMs still matters below the ceiling (a 30m reset on a 15m cooldownMs yields 30m) and
+	// remains the base before exponential backoff. effectiveBenchMs (asserted above) still returns
+	// the raw floor — the clamp happens in benchMsForStreak.
 	ok(
-		"case A: 1 quota error benches for ~24h (86_398_000..86_400_500ms per B-4)",
-		benchMs >= 86_398_000 && benchMs <= 86_400_500,
+		"case A (D4-amended): 1 quota error benches for the ceiling (1h), clamped from the 24h floor",
+		benchMs >= 3_598_000 && benchMs <= 3_600_500,
 		`benchMs=${benchMs}`,
 	);
 	ok("case A: lastBenchReason stamped as 'quota'", glmHealth.lastBenchReason === "quota", `lastBenchReason=${glmHealth.lastBenchReason}`);

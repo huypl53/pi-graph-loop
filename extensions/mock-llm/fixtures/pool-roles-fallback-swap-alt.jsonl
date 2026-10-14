@@ -1,0 +1,6 @@
+# pool-roles-fallback-swap-alt: healthy untagged slot — the D2 roles-bypass swap target.
+# Companion to pool-roles-fallback-swap.jsonl: after the bypass rotation lands here, this fixture
+# serves the completion turns (mailbox check + settle) on the alternate model.
+{"name":"post-bypass completion on the untagged slot","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"Recovered after the roles-fallback rotation; continuing the task on the healthy untagged slot."},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"markDelivered":true,"limit":20}},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"post-bypass follow-up completion","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Still healthy on the alternate model; nothing further to do."},{"type":"stop","delayMs":1,"reason":"stop"}]}
+{"name":"post-bypass follow-up completion 2","stopReason":"stop","events":[{"type":"text","delayMs":10,"text":"Alternate model remains available after recovery."},{"type":"stop","delayMs":1,"reason":"stop"}]}

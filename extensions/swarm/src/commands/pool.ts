@@ -77,7 +77,8 @@ export async function handlePoolCommand(cmd: "pool", rest: string[], ctx: any, p
 		];
 		const anyRoles = status.slots.some((s) => Array.isArray(s.roles) && s.roles.length > 0);
 		for (const s of status.slots) {
-			const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m` : "ok";
+			const streakSuffix = s.inCooldown && (s.health?.benchStreak ?? 0) > 1 ? ` (streak ${s.health?.benchStreak})` : "";
+			const state = s.inCooldown ? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m${streakSuffix}` : "ok";
 			const err = s.health?.lastError ? ` lastError=${s.health.lastError.slice(0, 60)}` : "";
 			const rolesCol = anyRoles ? ` roles=[${(s.roles || []).join(",") || "(all)"}]` : "";
 			lines.push(
@@ -133,8 +134,9 @@ export async function handlePoolCommand(cmd: "pool", rest: string[], ctx: any, p
 				`Model pool: configured (${status.slots.length} slot${status.slots.length === 1 ? "" : "s"}, source=${shapeSource})`,
 			);
 			for (const s of status.slots) {
+				const streakSuffix = s.inCooldown && (s.health?.benchStreak ?? 0) > 1 ? ` (streak ${s.health?.benchStreak})` : "";
 				const state = s.inCooldown
-					? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m`
+					? `BENCHED ${Math.ceil(s.cooldownRemainingMs / 60000)}m${streakSuffix}`
 					: s.weight === 0
 						? "ok (fallback-only)"
 						: "ok";

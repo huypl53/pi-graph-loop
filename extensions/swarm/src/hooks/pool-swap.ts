@@ -14,7 +14,7 @@ import type { ModelSlot } from "../types.ts";
 import { classifyProviderError, scrubErrorIdentity } from "../types.ts";
 import { ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, SWARM_GUEST_ID } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
-import { pickSlot, recordProviderError, recordSlotSuccess, slotKey } from "../pool.ts";
+import { pickSlot, recordProviderError, recordSlotSuccess, slotKey, effectiveConfig } from "../pool.ts";
 import { paths, readState, trace, withLock } from "../state.ts";
 import { logSwarmError } from "../errorlog.ts";
 import {
@@ -24,6 +24,8 @@ import {
 	MAX_SWAP_CHAIN,
 	noteTurnStart,
 	peekSwapChain,
+	shouldNotifyNoCandidate,
+	noteNoCandidateNotified,
 	SWAP_CHAIN_RESET_MS,
 } from "./streaks.ts";
 
@@ -215,13 +217,42 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 			const st = await readState(p, ctx.cwd);
 			return st.agents[agentId]?.roleKind;
 		}).catch(() => undefined);
-		const picked = await pickSlot(p, {
+		let picked = await pickSlot(p, {
 			stickyKey: agentId,
 			avoidKey: slotKey(currentSlot),
 			roleKind,
 		}).catch(() => undefined);
+		// === D2 (plan 2026-10-14): roles-bypass swap fallback ===
+		// Strict roles (Issue 22) means a roleKind with ANY tagged slot is served ONLY by tagged
+		// slots — correct for fresh picks, but as a SWAP policy it stranded agents on dead slots
+		// while healthy untagged slots sat idle (live incident 2026-10-13: root stuck on quota-dead
+		// terra, 225x swap_no_candidate, glm-4.7/luna/fable untouched). When the role-filtered pick
+		// finds nothing, retry ONCE with bypassRolesFilter (the same escape hatch /swarm pool rotate
+		// now uses). Loud by design: the swap trace carries rolesIgnored and the operator event says
+		// "(roles fallback)" — untagged slots are never a SILENT fallback.
+		let rolesBypassed = false;
+		if (!picked && roleKind !== undefined && effectiveConfig().rotation.roleFallbackOnSwap) {
+			picked = await pickSlot(p, {
+				stickyKey: agentId,
+				avoidKey: slotKey(currentSlot),
+				bypassRolesFilter: true,
+			}).catch((err) => {
+				logSwarmError(p, "hooks", "pick_slot_bypass_failed", err);
+				return undefined;
+			});
+			rolesBypassed = !!picked;
+		}
 		if (!picked) {
 			await trace(p, "pool.swap_no_candidate", { agentId, from: slotKey(currentSlot), kind }).catch(() => {});
+			// Operator nudge (TUI-only, never LLM context, zero pi.sendMessage): a dead pool is an
+			// operator decision, but one warning per 5min window is enough — one per error turn is noise.
+			if (ctx.hasUI && ctx.ui?.notify && shouldNotifyNoCandidate(agentId, Date.now())) {
+				noteNoCandidateNotified(agentId, Date.now());
+				ctx.ui.notify(
+					`Pool: no healthy slot to rotate to — all slots benched. /swarm pool list to inspect, /swarm pool clear <provider/model> to unbench.`,
+					"error",
+				);
+			}
 			return;
 		}
 		// Resolve the picked slot to a registered Model object and switch in-process. Require the
@@ -255,20 +286,25 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 			reason: picked.reason,
 			target: `${target.provider}/${target.id}`,
 			roleKind: roleKind ?? null,
+			rolesIgnored: rolesBypassed || undefined,
 			rolesFilterMatched:
-				picked.slot.roles === undefined ||
-				picked.slot.roles.length === 0 ||
-				(typeof roleKind === "string" && picked.slot.roles.includes(roleKind)),
+				!rolesBypassed &&
+				(picked.slot.roles === undefined ||
+					picked.slot.roles.length === 0 ||
+					(typeof roleKind === "string" && picked.slot.roles.includes(roleKind))),
 		};
 		await trace(p, okSwap ? "pool.swap" : "pool.swap_failed", swapTrace).catch(() => {});
 		if (okSwap) {
 			// User-facing pool event notice (operator sees it in TUI; NOT the LLM's trigger turn).
 			// Carries the old/new slot + error kind so the operator can monitor rotation without
 			// digging into traces. deliverAs:"followUp" so it doesn't consume a turn.
+			// D2: bypass swaps are marked "(roles fallback)" so the operator sees the constraint was relaxed.
 			pi.sendMessage(
 				{
 					customType: "swarm-pool-event",
-					content: `⚠ Pool: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)}.`,
+					content: rolesBypassed
+						? `⚠ Pool: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)} (roles fallback).`
+						: `⚠ Pool: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)}.`,
 					display: true,
 				},
 				{ deliverAs: "followUp" },

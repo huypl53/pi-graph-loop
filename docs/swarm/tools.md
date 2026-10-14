@@ -150,6 +150,9 @@ rotation:
     strategy: weighted # weighted | round-robin | sticky
     cooldownMs: 900000
     maxRetries: 2
+    benchMaxMs: 3600000 # 1h ceiling for exponential backoff (all kinds)
+    benchStreakDecayMs: 21600000 # 6h healthy serving window resets streak to 0
+    roleFallbackOnSwap: true # rotate to healthy untagged slot if role slots benched
 # terminalManager: tmux      # multiplexer: tmux (default) | herdr
 # defaultModel: glm-5.1      # implicit-singleton fallback config
 # defaultProvider: zai-coding-cn
@@ -170,6 +173,29 @@ is no longer read; the warning is self-extinguishing when the block is removed.
 **Unknown keys**: `/swarm pool validate` emits an `unknown_top_level_key` warning listing
 any unrecognized top-level keys in either yml file. No Levenshtein suggestions — just the
 plain list with the source file.
+
+### Model pool rotation policy and benching (`rotation:`)
+
+The `rotation:` block in `.pi/swarm.yml` (or `~/.pi/agent/swarm.yml`) controls slot rotation, error benching, backoff, and fallback:
+
+```yaml
+# .pi/swarm.yml
+rotation:
+    strategy: weighted           # "weighted" (default) | "round-robin" | "sticky"
+    cooldownMs: 900000           # initial bench duration after consecutive failures reach maxRetries (default: 15m)
+    maxRetries: 2                # consecutive failures before benching (default: 2)
+    benchMaxMs: 3600000          # bench ceiling for exponential backoff (default: 1h; all kinds incl. auth)
+    benchStreakDecayMs: 21600000 # healthy serving window resets benchStreak to 0 (default: 6h; 0 = off)
+    roleFallbackOnSwap: true     # auto-swap fallback to healthy untagged slot if role slots benched (default: true)
+```
+
+- **Immediate vs streak benching**: Quota (`quota`), auth (`auth`), and deterministic request limit (`request_limit`) errors bench the slot immediately on first strike (retrying will not fix a depleted quota or invalid key). Transient and rate-limit errors tolerate failures up to `maxRetries` before benching.
+- **Bench duration & ceiling (`benchMaxMs`)**: A fresh bench starts at base `max(rotation.cooldownMs, slot.quotaResetMs)` and scales exponentially with repeat benches (`base * 2^(benchStreak - 1)`), clamped at `rotation.benchMaxMs` (default `3_600_000` ms = 1h). The 1h ceiling replaces the historical 24h cap across all kinds (including auth) so that benched slots are guaranteed to be re-probed within 1h, ensuring an N-slot pool continues to cycle. Env override: `PI_SWARM_BENCH_MAX_MS`.
+- **Per-slot `quotaReset` floor**: Optional per-slot duration (`"30m"`, `"2h"`, `"1d"` or ms) acting as a floor before exponential backoff and final ceiling are applied (e.g., a 24h `quotaReset` is clamped to the 1h `benchMaxMs` ceiling).
+- **No rolling re-bench while benched**: If a benched slot must continue serving (e.g. no healthy candidate available), subsequent error turns do not roll the bench forward or inflate `benchStreak` within the same outage, unless a strictly longer severity escalation occurs (e.g. `rate_limit` 15m escalated to `auth` / `quota` 1h).
+- **Bench streak decay (`benchStreakDecayMs`)**: When a slot remains continuously healthy and serves turns for longer than `benchStreakDecayMs` (default `21_600_000` ms = 6h) since its last bench (`lastBenchAt`), its `benchStreak` resets to 0 on the next successful turn. Stale outages from hours or days earlier stop compounding future backoff. `0` disables decay. Env override: `PI_SWARM_BENCH_STREAK_DECAY_MS`.
+- **Auto-swap role fallback (`roleFallbackOnSwap`)**: When all slots tagged for an agent's role (e.g. `roles: [root]`) are benched, auto-swap retries `pickSlot` with `bypassRolesFilter: true`. If a healthy untagged slot exists, the turn rotates to it (traced loudly with `rolesIgnored: true`). Env off-switch: `PI_SWARM_ROLE_FALLBACK_OFF=1`.
+- **Observability in `/swarm pool list`**: Shows `BENCHED <m>m (streak <N>)` when a slot is in cooldown and its `benchStreak > 1`.
 
 ### Role playbooks (`roles:`)
 
@@ -443,7 +469,7 @@ needs structured parameters or machine-readable results.
   The reminder is threaded back to the original assignment (`replyTo=<original assignment message id>`)
   and preserves the assignment `conversationId`, so a reply sent from the reminder thread still
   credits the original record.
-- `/swarm pool list` — slot health + rotation status
+- `/swarm pool list` — slot health, cooldown status, bench streak (> 1), and roles
 - `/swarm pool show` — full config view (pool OR implicit singleton fallback); never edits `.pi/settings.json`
 - `/swarm protocol migrate [--dry-run]` — operator path for upgrading durable v1 message
   envelopes to v2 evidence fields (Issue 25 Phase 1). Back-fills `mailboxDeliveredAt` from

@@ -16,7 +16,7 @@ import type {
 	RotationStrategy,
 	SwarmSettings,
 } from "./types/index.ts";
-import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES } from "./constants.ts";
+import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES, POOL_BENCH_MAX_MS, POOL_BENCH_STREAK_DECAY_MS } from "./constants.ts";
 import { currentModel, currentProvider } from "./session.ts";
 import {
 	parseQuotaResetMs,
@@ -142,9 +142,11 @@ function readQuotaResetMsFor(cwd: string, key: string): number {
 // Pure helper: effective bench duration for a quota bench on the given slot. Returns
 // max(rotation.cooldownMs, slot.quotaResetMs ?? QUOTA_RESET_DEFAULT_MS). Note the env default only
 // applies when the per-slot value is undefined or 0 — if the slot explicitly sets quotaResetMs=0
-// we want the same behavior as before (no env floor either). The 24h exponential backoff cap is
-// applied at the caller, NOT here. The auth branch uses a separate, longer floor (6h) that is
-// independent of quotaResetMs (auth benches do not self-heal on a known reset window).
+// we want the same behavior as before (no env floor either). The D4 bench ceiling
+// (rotation.benchMaxMs, default 1h) is applied by the caller (benchMsForStreak) — it applies to
+// ALL kinds including auth (see plan §1.3 amendment: the historical "auth 6h floor" existed only
+// in a comment; the Issue 21 refactor dropped it from code and two regression suites pin
+// auth == cooldownMs).
 export function effectiveBenchMs(
 	slot: Pick<ModelSlot, "model" | "provider">,
 	rotation: Required<RotationConfig>,
@@ -155,6 +157,28 @@ export function effectiveBenchMs(
 	// Per-slot value wins when > 0; otherwise fall back to env default.
 	const floor = typeof slotVal === "number" && slotVal > 0 ? slotVal : readQuotaResetMsFor(cwd, key) || QUOTA_RESET_DEFAULT_MS;
 	return Math.max(rotation.cooldownMs, floor);
+}
+
+// D4 (plan 2026-10-14): the bench duration for a (slot, rotation) triple, BEFORE the exponential
+// streak multiplier — clamped to the D4 ceiling so a slot is never benched longer than benchMaxMs.
+// NOTE: every kind shares this path (auth included). The historical "auth 6h floor" existed only
+// in a comment — the Issue 21 refactor dropped it from code, and pool-single-strike F2 +
+// pool-retry-preserve-cache-no-6h pin auth == cooldownMs; the D4 ceiling supersedes backoff growth
+// for ALL kinds (1h worst-case re-probe). See plan §1.3 amendment (2026-10-14, auth exemption removed).
+function benchBaseMs(slot: Pick<ModelSlot, "model" | "provider">, rotation: Required<RotationConfig>, cwd: string = process.cwd()): number {
+	return Math.min(effectiveBenchMs(slot, rotation, cwd), rotation.benchMaxMs);
+}
+
+// D4 (plan 2026-10-14): final bench ms for a fresh bench event on a slot with the given streak:
+// base × 2^(streak-1), clamped to the D4 ceiling.
+function benchMsForStreak(
+	slot: Pick<ModelSlot, "model" | "provider">,
+	kind: ProviderErrorKind,
+	streak: number,
+	rotation: Required<RotationConfig>,
+	cwd: string = process.cwd(),
+): number {
+	return Math.min(benchBaseMs(slot, rotation, cwd) * Math.pow(2, streak - 1), rotation.benchMaxMs);
 }
 
 // Test-only helper: clear the quotaResetMs per-cwd cache. Exposed so tests that re-seed settings
@@ -238,6 +262,16 @@ export function effectiveConfig(): { slots: ModelSlot[]; rotation: Required<Rota
 			strategy: (r.strategy || "weighted") as RotationStrategy,
 			cooldownMs: r.cooldownMs ?? POOL_COOLDOWN_MS,
 			maxRetries: r.maxRetries ?? POOL_MAX_RETRIES,
+			// D4/D3/D2 (plan 2026-10-14): env > yaml > default, same precedence shape as the other keys.
+			benchMaxMs:
+				Number(process.env.PI_SWARM_BENCH_MAX_MS) > 0
+					? Math.floor(Number(process.env.PI_SWARM_BENCH_MAX_MS))
+					: (r.benchMaxMs && r.benchMaxMs > 0 ? r.benchMaxMs : POOL_BENCH_MAX_MS),
+			benchStreakDecayMs:
+				Number(process.env.PI_SWARM_BENCH_STREAK_DECAY_MS) >= 0
+					? Math.floor(Number(process.env.PI_SWARM_BENCH_STREAK_DECAY_MS))
+					: (r.benchStreakDecayMs !== undefined && r.benchStreakDecayMs >= 0 ? r.benchStreakDecayMs : POOL_BENCH_STREAK_DECAY_MS),
+			roleFallbackOnSwap: process.env.PI_SWARM_ROLE_FALLBACK_OFF === "1" ? false : (r.roleFallbackOnSwap ?? true),
 		},
 	};
 }
@@ -555,7 +589,7 @@ export function validateSwarmSettings(
 				errors.push({
 					kind: "slot_bad_quota_reset",
 					field: `modelPool[${idx}].${fname}`,
-					message: `Slot #${idx + 1} ${fname} must be a duration ("30m", "2h", "1h30m", "1d") or a non-negative number of milliseconds (floor for quota benches; 24h cap still applies)`,
+					message: `Slot #${idx + 1} ${fname} must be a duration ("30m", "2h", "1h30m", "1d") or a non-negative number of milliseconds (floor for quota benches; 1h benchMaxMs ceiling still applies)`,
 					source: poolSource,
 				});
 			}
@@ -628,6 +662,39 @@ export function validateSwarmSettings(
 				kind: "rotation_bad_maxretries",
 				field: "rotation.maxRetries",
 				message: `rotation.maxRetries must be a positive integer (>= 1)`,
+				source: rotationSource,
+			});
+		}
+		// D4 (plan 2026-10-14): bench ceiling must be a positive duration (0 would mean "never re-probe").
+		if (
+			rotation.benchMaxMs !== undefined &&
+			(typeof rotation.benchMaxMs !== "number" || !Number.isFinite(rotation.benchMaxMs) || rotation.benchMaxMs <= 0)
+		) {
+			errors.push({
+				kind: "rotation_bad_bench_max",
+				field: "rotation.benchMaxMs",
+				message: `rotation.benchMaxMs must be a positive number of milliseconds (bench ceiling for all kinds)`,
+				source: rotationSource,
+			});
+		}
+		// D3 (plan 2026-10-14): streak decay window — non-negative (0 = off).
+		if (
+			rotation.benchStreakDecayMs !== undefined &&
+			(typeof rotation.benchStreakDecayMs !== "number" || !Number.isFinite(rotation.benchStreakDecayMs) || rotation.benchStreakDecayMs < 0)
+		) {
+			errors.push({
+				kind: "rotation_bad_bench_decay",
+				field: "rotation.benchStreakDecayMs",
+				message: `rotation.benchStreakDecayMs must be a non-negative number of milliseconds (0 = decay off)`,
+				source: rotationSource,
+			});
+		}
+		// D2 (plan 2026-10-14): roles-bypass escape hatch must be boolean.
+		if (rotation.roleFallbackOnSwap !== undefined && typeof rotation.roleFallbackOnSwap !== "boolean") {
+			errors.push({
+				kind: "rotation_bad_role_fallback",
+				field: "rotation.roleFallbackOnSwap",
+				message: `rotation.roleFallbackOnSwap must be true or false (roles-bypass swap fallback on empty role-filtered pick)`,
 				source: rotationSource,
 			});
 		}
@@ -790,39 +857,89 @@ export async function pickSlot(
 // and reset the counter (so post-cooldown it gets a fresh chance). Returns the new health.
 // Record a provider/turn error for a slot (the in-process turn_end hook path). Error KIND drives
 // the bench policy: quota/auth bench IMMEDIATELY (retrying will not fix an exhausted quota or a
-// bad key); auth benches extra-long (6h floor) because keys do not self-heal; rate_limit/transient
-// follow the maxRetries streak before a normal cooldown. Quota benches honor slot.quotaResetMs
-// (effective = max(rotation.cooldownMs, slot.quotaResetMs)) and stamp lastBenchReason so the
-// root pump's recovery scan can detect quota benches specifically.
+// bad key); rate_limit/transient follow the maxRetries streak before a normal cooldown.
+// All bench durations are capped at rotation.benchMaxMs (default 1h). Quota benches honor slot.quotaResetMs
+// as a base floor (effective = max(rotation.cooldownMs, slot.quotaResetMs)) before the ceiling, and stamp
+// lastBenchReason so the root pump's recovery scan can detect quota benches specifically.
 export async function recordProviderError(p: Paths, slot: ModelSlot, kind: ProviderErrorKind, error: string): Promise<PoolSlotHealth> {
 	const { rotation } = effectiveConfig();
 	return withPoolLock(p, async () => {
 		const h = await readPoolHealth(p);
 		const key = slotKey(slot);
 		const prev = h.slots[key] || { failures: 0 };
+		const nowMs = Date.now();
 		// Deduplicate pi-internal retries of the SAME incident: pi can emit several error turns for one
 		// underlying failure (stream retry, overflow-recovery re-run). An identical error on the same
 		// slot within 30s counts once toward the streak, so maxRetries means real distinct failures.
 		const sameIncident =
 			prev.lastError === `${kind}: ${error}`.slice(0, 200) &&
 			prev.lastErrorAt &&
-			Date.now() - new Date(prev.lastErrorAt).getTime() < 30_000;
+			nowMs - new Date(prev.lastErrorAt).getTime() < 30_000;
 		const failures = sameIncident ? prev.failures || 0 : (prev.failures || 0) + 1;
 		const next: PoolSlotHealth = {
 			failures,
 			lastError: `${kind}: ${error}`.slice(0, 200),
-			lastErrorAt: new Date().toISOString(),
+			lastErrorAt: new Date(nowMs).toISOString(),
 			deduped: sameIncident || undefined,
 		};
 		const immediate = kind === "quota" || kind === "auth" || kind === "request_limit";
+		// === D1 (plan 2026-10-14): no rolling re-bench while already benched ===
+		// A slot benched-but-still-serving (no swap candidate existed) re-enters here on every error
+		// turn. Re-benching would roll cooldownUntil forward forever and inflate benchStreak within a
+		// single outage (live incident: 225 iterations, streak 315→540 in 4 minutes). While benched,
+		// repeat errors carry no new information: record the error, keep the bench — EXCEPT when the
+		// new bench would be strictly more severe (severity escalation, R3), e.g. rate_limit 15m → auth/quota 1h.
+		// NOTE: the carry-over check runs for EVERY error while benched (not only bench-eligible
+		// ones) because failures are forced to 0 in the carry-over path — a non-immediate kind can
+		// never reach maxRetries on a benched slot, so gating on (failures >= maxRetries || immediate)
+		// would let its errors silently accumulate nothing while the bench keeps rolling on the next
+		// immediate kind. Carry-over is the correct outcome for every sub-severe error while benched.
+		const prevCooldownEnd = prev.cooldownUntil ? new Date(prev.cooldownUntil).getTime() : 0;
+		const alreadyBenched = prevCooldownEnd > nowMs;
+		let benchedAlready = false;
+		if (alreadyBenched) {
+			// What would the new bench look like? (next bench streak, D4-capped duration)
+			const escalStreak = (prev.benchStreak || 0) + 1;
+			const benchMsCandidate = benchMsForStreak(slot, kind, escalStreak, rotation, p.cwd);
+			const newEnd = nowMs + benchMsCandidate;
+			if (newEnd > prevCooldownEnd) {
+				// Severity escalation: apply the new (longer) bench as a REAL bench event — upgrade
+				// lastBenchReason so the recovery scan's quota gate sees the true kind (R3). Falls
+				// through to the normal bench branch below (which recomputes the same ms).
+			} else {
+				// Plain carry-over: keep the existing bench entirely; do not accumulate failures
+				// (probe-failure info only counts post-cooldown — R2) and do not touch the streak.
+				benchedAlready = true;
+				next.failures = 0;
+				next.cooldownUntil = prev.cooldownUntil;
+				next.benchStreak = prev.benchStreak;
+				next.lastBenchReason = prev.lastBenchReason;
+				next.lastBenchMs = prev.lastBenchMs;
+				next.lastBenchAt = prev.lastBenchAt;
+				next.lastRecoveredAt = prev.lastRecoveredAt;
+				h.slots[key] = next;
+				await writePoolHealth(p, h);
+				await trace(p, "pool.slot_failure", {
+					slot: key,
+					failures: next.failures,
+					kind,
+					error: error.slice(0, 200),
+					cooldownUntil: next.cooldownUntil,
+					benchReason: next.lastBenchReason,
+					benchedAlready: true,
+				}).catch(() => {});
+				return next;
+			}
+		}
 		if (failures >= rotation.maxRetries || immediate) {
 			// Exponential backoff for repeated benching: a slot that keeps failing right after each
-			// cooldown doubles its bench time (capped at 24h), so a long outage (monthly quota reset)
-			// costs at most one probe attempt per doubling instead of one per cooldownMs.
+			// cooldown re-benches longer (D4: clamped to rotation.benchMaxMs, default 1h — replacing
+			// the historical 24h cap which starved pools because it exceeded every real provider recovery window;
+			// a benched slot must come back for a fresh probe within benchMaxMs so an N-slot pool always cycles).
+			// Note: applies to all kinds including auth (no special auth exemption or 6h floor).
 			const benchStreak = (prev.benchStreak || 0) + 1;
-			const base = effectiveBenchMs(slot, rotation);
-			const ms = Math.min(base * Math.pow(2, benchStreak - 1), 24 * 60 * 60_000);
-			next.cooldownUntil = new Date(Date.now() + ms).toISOString();
+			const ms = benchMsForStreak(slot, kind, benchStreak, rotation, p.cwd);
+			next.cooldownUntil = new Date(nowMs + ms).toISOString();
 			next.failures = 0; // fresh chance after cooldown
 			next.benchStreak = benchStreak;
 			// Issue 21: stamp the reason on every bench so the recovery scan can filter on "quota".
@@ -830,6 +947,8 @@ export async function recordProviderError(p: Paths, slot: ModelSlot, kind: Provi
 			next.lastBenchReason = kind;
 			// Stamp the original bench duration for the recovery trace's benchMs payload.
 			next.lastBenchMs = ms;
+			// D3 (plan 2026-10-14): stamp bench-start for recordSlotSuccess's streak decay.
+			next.lastBenchAt = new Date(nowMs).toISOString();
 			// A new bench also invalidates the prior recovery dedupe stamp — if the slot was recovered
 			// and is being benched again, the NEXT recovery after THIS bench must fire (not be deduped
 			// by the stale lastRecoveredAt from the previous cycle).
@@ -844,6 +963,7 @@ export async function recordProviderError(p: Paths, slot: ModelSlot, kind: Provi
 			error: error.slice(0, 200),
 			cooldownUntil: next.cooldownUntil,
 			benchReason: next.lastBenchReason,
+			benchedAlready: benchedAlready || undefined,
 		}).catch(() => {});
 		return next;
 	});
@@ -861,14 +981,28 @@ export async function recordSlotSuccess(p: Paths, slot: ModelSlot): Promise<void
 		const h = await readPoolHealth(p);
 		const key = slotKey(slot);
 		const prev = h.slots[key];
-		if (!prev || (!prev.failures && !prev.cooldownUntil && !prev.lastError)) return;
+		// === D3 (plan 2026-10-14): bench-streak decay ===
+		// A slot healthy for >= benchStreakDecayMs since its last bench has outlived the world that
+		// caused the streak; reset it so the next failure starts at the short base bench, not 2^n.
+		// R1 (red-team): the original early-return fired on the SECOND+ healthy turn (the first
+		// success cleared failures/cooldownUntil/lastError), so decay must be part of the guard
+		// itself, and lastBenchAt must be preserved below (it was previously wiped by the rebuild).
+		const { rotation } = effectiveConfig();
+		const decayMs = rotation.benchStreakDecayMs ?? 0;
+		const lastBenchAtMs = prev?.lastBenchAt ? new Date(prev.lastBenchAt).getTime() : 0;
+		const decayFire = !!(prev?.benchStreak && prev.benchStreak > 0 && lastBenchAtMs && decayMs > 0 && Date.now() - lastBenchAtMs >= decayMs);
+		if (!prev || (!prev.failures && !prev.cooldownUntil && !prev.lastError && !decayFire)) return;
 		h.slots[key] = {
 			failures: 0,
 			lastBenchReason: prev.lastBenchReason,
 			lastBenchMs: prev.lastBenchMs,
-			benchStreak: prev.benchStreak,
+			benchStreak: decayFire ? 0 : prev.benchStreak, // D3 decay
+			lastBenchAt: prev.lastBenchAt, // R1: preserved, never wiped by success
 			lastRecoveredAt: prev.lastRecoveredAt,
 		};
+		if (decayFire) {
+			await trace(p, "pool.slot_streak_decayed", { slot: key, was: prev.benchStreak, afterMs: decayMs }).catch(() => {});
+		}
 		await writePoolHealth(p, h);
 		await trace(p, "pool.slot_success", { slot: key }).catch(() => {});
 	});
@@ -892,8 +1026,14 @@ export async function setSlotCooldown(p: Paths, key: string, ms: number | null):
 			delete h.slots[key].lastBenchReason;
 			delete h.slots[key].lastBenchMs;
 			delete h.slots[key].lastRecoveredAt;
+			// D3: fresh-start — a cleared slot has no bench age, so decay starts counting from the
+			// next bench (R5: without this delete, a stale lastBenchAt could decay a future streak early).
+			delete h.slots[key].lastBenchAt;
 		} else {
 			h.slots[key].cooldownUntil = new Date(Date.now() + ms).toISOString();
+			// D3: manual benches stamp bench-start too (R5) — otherwise decay would key off a stale
+			// stamp from days earlier or never fire.
+			h.slots[key].lastBenchAt = new Date().toISOString();
 			// Manual bench leaves lastBenchReason undefined so the recovery scan ignores it (only
 			// error-driven quota benches trigger slot_recovered).
 		}

@@ -48,6 +48,23 @@ const swapChain = new Map<string, { count: number; at: number }>();
 export const MAX_SWAP_CHAIN = 2;
 export const SWAP_CHAIN_RESET_MS = 5 * 60_000;
 
+// D2 (plan 2026-10-14): no-candidate operator-notify throttle. A fully-benched pool fires
+// swap_no_candidate on EVERY error turn; the TUI notify must fire at most once per
+// SWAP_CHAIN_RESET_MS window per agent or a dead-pool evening drowns the operator in warnings.
+// Same test-reset pattern as _resetSwapChainForTests (R6).
+const noCandidateNotify = new Map<string, number>();
+export function shouldNotifyNoCandidate(agentId: string, nowMs: number): boolean {
+	const last = noCandidateNotify.get(agentId);
+	return last === undefined || nowMs - last > SWAP_CHAIN_RESET_MS;
+}
+export function noteNoCandidateNotified(agentId: string, nowMs: number): void {
+	noCandidateNotify.set(agentId, nowMs);
+}
+export function _resetNoCandidateNotifyForTests(agentId?: string): void {
+	if (agentId) noCandidateNotify.delete(agentId);
+	else noCandidateNotify.clear();
+}
+
 // Exposed for /swarm pool rotate now — manual override is operator-accountable for the same
 // chain cap as the auto-swap path. Called by command.ts after a successful manual setModel so
 // the next auto-swap on the new slot can still hit the cap if the new slot is also dead.

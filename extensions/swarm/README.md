@@ -134,7 +134,8 @@ A nested `extensions.swarm` object is also accepted for backward compatibility,
 but top-level `swarm` is the safer recommendation because pi itself may use
 top-level `extensions` for extension discovery/config.
 
-For multi-provider rotation, configure `modelPool` + `rotation` instead. The
+For multi-provider rotation, configure `modelPool` + `rotation` instead (supporting
+configurable `benchMaxMs` 1h ceiling, `benchStreakDecayMs`, and `roleFallbackOnSwap`). The
 canonical format is discoverable in-pi via `/swarm pool help`; read-only
 `/swarm pool show`, `/swarm pool validate`, and `/swarm pool preview-preflight`
 let you inspect the effective pool (or implicit singleton fallback), catch
@@ -161,7 +162,7 @@ Inside pi:
 /swarm stop reviewer                                               # refuse if active tasks; --force to override
 /swarm deregister here                                             # exit THIS pane's role (pane stays alive; self-service)
 /swarm status
-/swarm pool list                                            # weighted/rr/sticky slot health + rotation
+/swarm pool list                                            # slot health, bench streak (> 1), and roles
 /swarm pool show                                           # full config view (pool OR implicit singleton)
 /swarm pool validate                                       # structural check (read-only)
 /swarm pool help                                           # canonical format reference (read-only)

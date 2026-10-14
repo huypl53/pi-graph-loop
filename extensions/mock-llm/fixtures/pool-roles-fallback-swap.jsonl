@@ -1,0 +1,11 @@
+# pool-roles-fallback-swap: D2 fixture (plan 2026-10-14-pool-dead-slot-stuck-and-streak-runaway).
+# Scenario shaped like live incident 2026-10-13 (session 01a1241f): a role-root agent runs on a
+# role-tagged slot that hits a terminal quota error; the OTHER role-tagged slot is pre-benched
+# (seeded pool-state.json in the lane test), so the role-filtered pickSlot finds nothing. The D2
+# roles-bypass fallback must rotate onto THIS untagged healthy slot and the task completes.
+# Lane test: extensions/mock-llm/tests/pool-roles-fallback-swap.test.mjs seeds pool-state +
+# swarm-state and runs real pi with this model as the failing root slot.
+{"name":"quota strike on role-tagged root slot","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"error persists if retried on same slot","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"late error turn (D1 carry-over observable)","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"post-bypass completion on the untagged slot","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"Recovered after the roles-fallback rotation; continuing the task on the healthy untagged slot."},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"markDelivered":true,"limit":20}},{"type":"stop","delayMs":5,"reason":"stop"}]}

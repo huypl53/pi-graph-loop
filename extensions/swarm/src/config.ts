@@ -320,8 +320,26 @@ export function parseRotationConfig(raw: unknown): RotationConfig | undefined {
 		typeof r.cooldownMs === "number" && Number.isFinite(r.cooldownMs) && r.cooldownMs >= 0 ? Math.floor(r.cooldownMs) : undefined;
 	const maxRetries =
 		typeof r.maxRetries === "number" && Number.isFinite(r.maxRetries) && r.maxRetries >= 1 ? Math.floor(r.maxRetries) : undefined;
-	if (!strategy && cooldownMs === undefined && maxRetries === undefined) return undefined;
-	return { strategy, cooldownMs, maxRetries };
+	// D4/D3/D2 (plan 2026-10-14): new rotation sub-keys. Only forwarded when present in the raw
+	// config so defaults stay owned by effectiveConfig(); malformed values are rejected later by
+	// validateSwarmSettings (which sees the RAW rotation object, not this parsed one).
+	const benchMaxMs =
+		typeof r.benchMaxMs === "number" && Number.isFinite(r.benchMaxMs) && r.benchMaxMs > 0 ? Math.floor(r.benchMaxMs) : r.benchMaxMs;
+	const benchStreakDecayMs =
+		typeof r.benchStreakDecayMs === "number" && Number.isFinite(r.benchStreakDecayMs) && r.benchStreakDecayMs >= 0
+			? Math.floor(r.benchStreakDecayMs)
+			: r.benchStreakDecayMs;
+	const roleFallbackOnSwap = typeof r.roleFallbackOnSwap === "boolean" ? r.roleFallbackOnSwap : undefined;
+	if (
+		!strategy &&
+		cooldownMs === undefined &&
+		maxRetries === undefined &&
+		benchMaxMs === undefined &&
+		benchStreakDecayMs === undefined &&
+		roleFallbackOnSwap === undefined
+	)
+		return undefined;
+	return { strategy, cooldownMs, maxRetries, benchMaxMs, benchStreakDecayMs, roleFallbackOnSwap };
 }
 
 export function readSwarmSettings(cwd = process.cwd()): SwarmSettings {

@@ -5,7 +5,8 @@ export type ModelSlot = {
 	label?: string;
 	// Issue 21 quota-reset-interval: optional per-slot floor for quota benches. When a quota error
 	// benches this slot, the effective bench = max(rotation.cooldownMs, quotaResetMs ?? env-default).
-	// The 24h exponential cap still applies — quotaResetMs is a floor only, not a ceiling. Absent or
+	// QuotaResetMs is a base floor before the final ceiling (rotation.benchMaxMs, default 1h)
+	// and exponential backoff are applied; a 24h quotaReset is clamped to the 1h ceiling. Absent or
 	// 0 falls back to rotation.cooldownMs (unchanged behavior).
 	// NOTE: this is the INTERNAL field — always parsed milliseconds. In CONFIG, the canonical key
 	// is `quotaReset` (duration-friendly: "30m", "2h"); `quotaResetMs` is a legacy alias that
@@ -27,6 +28,15 @@ export type RotationConfig = {
 	strategy?: RotationStrategy; // default weighted
 	cooldownMs?: number; // default 15min: a failing slot is benched this long after maxRetries
 	maxRetries?: number; // default 2 consecutive failures before cooldown
+	// D4 (plan 2026-10-14): ceiling for all benches (including auth). Backoff stops growing past this so a
+	// benched slot is always re-probed within benchMaxMs — the pool keeps rotating. Default 1h.
+	benchMaxMs?: number;
+	// D3 (plan 2026-10-14): a slot that stays healthy for this long after its last bench has its
+	// benchStreak reset to 0 on the next recordSlotSuccess (stale outages stop compounding). 0 = off.
+	benchStreakDecayMs?: number;
+	// D2 (plan 2026-10-14): when a role-filtered pickSlot finds no candidate (all tagged slots
+	// benched), retry once with bypassRolesFilter so a healthy untagged slot can serve the turn.
+	roleFallbackOnSwap?: boolean;
 };
 
 // Preflight classification — used by `preflightSpawn` and surfaced verbatim by spawn/restart
@@ -59,7 +69,7 @@ export type PoolSlotHealth = {
 	// the recovery gate stays accurate even if a successful turn is followed by a re-bench.
 	lastBenchReason?: ProviderErrorKind;
 	// Issue 21 quota-reset-interval: original bench duration in ms (the cap-adjusted value before
-	// the 24h cap and exponential backoff were applied — actually the FINAL value written to
+	// the rotation.benchMaxMs ceiling and exponential backoff were applied — actually the FINAL value written to
 	// cooldownUntil). Stamped at bench time so the recovery trace can report how long the slot
 	// was actually benched. Preserved across recordSlotSuccess for the same reason as lastBenchReason.
 	lastBenchMs?: number;
@@ -67,6 +77,11 @@ export type PoolSlotHealth = {
 	// this slot. Used as the idempotent dedupe gate (same contract as goal.idle_nudge's notify key).
 	// Pre-policy slots simply lack the field, which the recovery scan treats as "never recovered".
 	lastRecoveredAt?: string;
+	// D3 (plan 2026-10-14): when the current bench was applied. Drives recordSlotSuccess's streak
+	// decay (healthy for >= benchStreakDecayMs since the last bench → benchStreak resets to 0).
+	// Stamped by every bench: recordProviderError (incl. severity escalations) and setSlotCooldown
+	// manual benches; deleted by manual clear (fresh-start semantics).
+	lastBenchAt?: string;
 };
 
 export type PoolHealthState = {

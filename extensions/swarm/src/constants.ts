@@ -55,6 +55,16 @@ export const POOL_COOLDOWN_MS = 15 * 60 * 1000; // bench a failing slot for 15 m
 
 export const POOL_MAX_RETRIES = 2; // consecutive failures before cooldown
 
+// D4 (plan 2026-10-14): ceiling for all benches (including auth). Default 1h: worst case, 1h after
+// the last bench the slot gets a fresh probe so a pool of N slots always cycles.
+// Env override: PI_SWARM_BENCH_MAX_MS.
+export const POOL_BENCH_MAX_MS = 60 * 60 * 1000;
+
+// D3 (plan 2026-10-14): a slot healthy for this long after its last bench gets benchStreak reset
+// to 0 on the next recordSlotSuccess. Default 6h (~ ChatGPT quota window + margin). 0 = off.
+// Env override: PI_SWARM_BENCH_STREAK_DECAY_MS.
+export const POOL_BENCH_STREAK_DECAY_MS = 6 * 60 * 60 * 1000;
+
 // === Issue 20: pool-scaffold on root session_start ===
 // Placeholder written into `.pi/settings.json` when `swarm.modelPool` (or
 // `extensions.swarm.modelPool` — runtime precedence) is absent. Deliberately
@@ -93,6 +103,9 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 #   strategy: weighted           # weighted | round-robin | sticky
 #   cooldownMs: 900000           # park a slot after an error, ms
 #   maxRetries: 2                # hand-offs to other slots before failing
+#   benchMaxMs: 3600000          # 1h cap for exponential backoff (all kinds)
+#   benchStreakDecayMs: 21600000 # 6h healthy serving window resets streak to 0
+#   roleFallbackOnSwap: true     # rotate to healthy untagged slot if role slots benched
 
 # --- Terminal manager (optional; default: tmux) -------------------------------
 # Selects the multiplexer used to spawn and manage agent panes.
@@ -185,6 +198,9 @@ export const POOL_SCAFFOLD_GLOBAL_YML_PLACEHOLDER = `# ~/.pi/agent/swarm.yml —
 #   strategy: weighted
 #   cooldownMs: 900000
 #   maxRetries: 2
+#   benchMaxMs: 3600000
+#   benchStreakDecayMs: 21600000
+#   roleFallbackOnSwap: true
 
 # --- Terminal manager (optional; default: tmux) -------------------------------
 # Selects the multiplexer used to spawn and manage agent panes.
