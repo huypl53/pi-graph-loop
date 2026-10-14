@@ -3,7 +3,7 @@
  * Real pi + mock-LLM deterministic proxy for the /reload hook-pipeline regression.
  * Pi's /reload command cannot be invoked as a model scripted toolcall; the unit tests
  * directly exercise stale-context dispatch and pump re-arm, while this lane proves
- * the freshly loaded pool hook still observes a provider error and rotates models.
+ * the fresh pool hook observes a quota error and reaches gated-retry recovery.
  */
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,15 +89,17 @@ const events = existsSync(eventsFile)
 const transcriptsExist = existsSync(join(transcripts, "pool-reload-hook-death"));
 const files = transcriptsExist ? readdirSync(join(transcripts, "pool-reload-hook-death")) : [];
 ok("real pi lane exits successfully", run.status === 0, `status=${run.status} stderr=${(run.stderr || "").slice(-500)}`);
+const gatedIndex = events.findIndex((event) => event.event === "pool.swap_gated_by_engine_retry" && event.kind === "quota");
+const recoveredIndex = events.findIndex((event) => event.event === "pool.engine_retry_recovered");
 ok(
-	"fresh pool hook records the terminal request-limit slot failure",
-	events.some((event) => event.event === "pool.slot_failure" && event.benchReason === "request_limit"),
+	"fresh pool hook gates the quota error for engine retry",
+	gatedIndex >= 0,
 	JSON.stringify(events.filter((event) => event.event?.startsWith("pool."))),
 );
 ok(
-	"fresh pool hook rotates to a healthy model",
-	events.some((event) => event.event === "pool.swap" && event.to === "mock-llm/pool-upstream-buffer-limit-alt"),
-	JSON.stringify(events.filter((event) => event.event === "pool.swap")),
+	"fresh pool hook records retry recovery after the quota gate",
+	recoveredIndex > gatedIndex,
+	JSON.stringify(events.filter((event) => event.event?.startsWith("pool."))),
 );
 ok("provider transcript was captured", files.some((file) => file.endsWith(".json")), JSON.stringify(files));
 console.log(`scratch: ${scratch}`);

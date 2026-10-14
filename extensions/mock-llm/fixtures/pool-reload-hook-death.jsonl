@@ -1,3 +1,3 @@
-# Deterministic proxy for the post-reload hook path. The mock model cannot invoke Pi's /reload boundary from a model turn, so unit tests cover stale-ctx dispatch/re-arm directly; this real Pi lane verifies that the freshly registered pool hook observes a terminal provider error and rotates.
-{"name":"fresh-runner terminal provider error reaches pool hook","events":[{"type":"error","delayMs":10,"kind":"torn_json","message":"exceeded request buffer limit while retrying upstream"}]}
-
+# Real Pi cannot invoke /reload as a scripted model toolcall. Unit tests cover stale-ctx dispatch/re-arm; this fresh-runner lane proves the pool hook receives a quota error and reaches its current gated-retry/recovery path.
+{"name":"fresh-runner quota error reaches pool hook","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"fresh-runner retry recovers","events":[{"type":"text","delayMs":10,"text":"The pool hook observed the quota error, gated it for engine retry, and recovered on the next attempt."}]}
