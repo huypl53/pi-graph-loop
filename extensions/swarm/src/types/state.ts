@@ -312,6 +312,7 @@ export type SwarmState = {
 	// root-context session (the long-lived PM, a validation `pi -p` run, another PM lane) tracks
 	// the ids IT has surfaced, so one session cannot mark a notification consumed and starve a different
 	// PM session. Separate from `delivered` (the check_mailbox/ack ledger).
+	rootPumpStop?: { reason: "stale_ctx"; at: string };
 	rootPumpSessions?: Record<
 		string,
 		{ ids: string[]; triggeredAt?: Record<string, string>; retriggerCount?: Record<string, number>; lastAt: string }

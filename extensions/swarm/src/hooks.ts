@@ -20,6 +20,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { currentAgentId } from "./session.ts";
 import { paths, readState, trace, withLock, writeState } from "./state.ts";
 import { heartbeatRootLeader } from "./identity.ts";
+import { expected, logSwarmError } from "./errorlog.ts";
 import { pumpRootMailbox } from "./surface.ts";
 import {
 	getSwarmPi,
@@ -35,6 +36,7 @@ import {
 import {
 	ROOT_PUMP_INTERVAL_MS,
 	armRootPumpWatchdog,
+	recordRootPumpStop,
 	isRootMailboxPumpRunning,
 	setRootMailboxPumpRunning,
 	stopRootPump,
@@ -122,6 +124,17 @@ export async function startRootPump(ctx: any, reason = "session_start") {
 			const isLeaderDenied = msg.startsWith("ROOT_LEADER_DENIED");
 			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) || /EACCES|ENOSPC|EROFS/.test(msg);
 			if (isStaleCtx) {
+				try {
+					await recordRootPumpStop(ctx);
+				} catch (stampErr: any) {
+					try {
+						await recordRootPumpStop(process.cwd());
+					} catch (err2: any) {
+						await logSwarmError(process.cwd(), "pump-manager", "root_pump_stop_stamp_failed", err2, {
+							original: String(stampErr?.message || stampErr),
+						});
+					}
+				}
 				// SAME ctx caused the throw; re-arming would busy-loop. The ONLY correct recovery is the
 				// next session_start (which fires per hooks.ts) with a fresh ctx. Stop and wait.
 				stopRootPump();
@@ -156,8 +169,29 @@ function setPumpRunInFlight(v: boolean): void {
 	setRootMailboxPumpRunning(v);
 }
 
+let staleHookErrorCompacted = false;
+
 export function registerSwarmHooks(pi: ExtensionAPI) {
 	setSwarmPi(pi);
+	const register = pi.on.bind(pi);
+	(pi as any).on = (event: string, handler: (...args: any[]) => any) =>
+		register(event as any, async (...args: any[]) => {
+			try {
+				return await handler(...args);
+			} catch (err: any) {
+				const stale = /stale after session/i.test(String(err?.message || err));
+				if (!stale || !staleHookErrorCompacted) {
+					if (stale) {
+						expected("stale_ctx_hook_error_compacted_per_epoch");
+						staleHookErrorCompacted = true;
+					}
+					let cwd = process.cwd();
+					try { cwd = args[1]?.cwd || cwd; } catch { expected("stale_ctx_cwd_unavailable"); }
+					await logSwarmError(cwd, "hooks", "hook_dispatch_error", err, { event, ...(stale ? { compacted: true } : {}) });
+				}
+				throw err;
+			}
+		});
 	// Registration ORDER is load-bearing (Pi Runtime Contract §8 — per-event handlers run in
 	// registration order):
 	//   - turn_end #1 (pool auto-swap) BEFORE turn_end #2 (goal resolve) — binding C-2: the

@@ -81,6 +81,25 @@ export function setRootPumpCtx(ctx: any): void {
 	rootPumpCtx = ctx;
 }
 
+export async function recordRootPumpStop(cwdOrAny: string) {
+	// cwdOrAny may be a DEAD captured ctx (a Proxy whose property access throws stale-ctx) —
+	// the watchdog stale branch calls this from inside its own catch, so a throwing .cwd must
+	// fall back to process.cwd() here rather than escape and kill the tick.
+	let cwd: string;
+	try {
+		cwd = typeof cwdOrAny === "string" ? cwdOrAny : String(cwdOrAny?.cwd ?? "");
+	} catch {
+		cwd = process.cwd();
+	}
+	if (!cwd) cwd = process.cwd();
+	const p = paths(cwd);
+	await withLock(p, async () => {
+		const st = await readState(p, cwd);
+		st.rootPumpStop = { reason: "stale_ctx", at: new Date().toISOString() };
+		await writeState(p, st);
+	});
+}
+
 export function stopRootPump() {
 	if (rootMailboxTimer) clearTimeout(rootMailboxTimer);
 	rootMailboxTimer = undefined;
@@ -139,6 +158,13 @@ export function armRootPumpWatchdog(ctx: any) {
 			const isLeaderDenied = msg.startsWith("ROOT_LEADER_DENIED");
 			const isIoTransient = /EACCES|ENOSPC|EROFS|EAGAIN|EBUSY|ENFILE|EMFILE/.test(code) || /EACCES|ENOSPC|EROFS/.test(msg);
 			if (isStaleCtx) {
+				// Durable stop stamp; recordRootPumpStop self-guards a dead ctx (fallback cwd) and any
+				// residual failure routes to the error census — the stamp must never kill the catch.
+				try {
+					await recordRootPumpStop(myCtx);
+				} catch (stampErr: any) {
+					await logSwarmError(process.cwd(), "pump-manager", "root_pump_stop_stamp_failed", stampErr, {});
+				}
 				stopRootPump();
 				trace(myCtx.cwd ? paths(myCtx.cwd) : null, "mailbox.root_pump_stale_stopped", { reason: "watchdog", error: msg }).catch(
 					() => {},

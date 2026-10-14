@@ -38,7 +38,7 @@ process.env.PI_SWARM_IS_ROOT = "1";
 const { paths, readState, writeState, withLock } = await import("../src/state.ts");
 const { ensureRoot, heartbeatRootLeader } = await import("../src/identity.ts");
 const { startRootPump, stopRootPump } = await import("../src/hooks.ts");
-const { getRootMailboxTimer, setRootPumpCtxFresh, isRootPumpCtxFresh } = await import("../src/hooks/pump-manager.ts");
+const { getRootMailboxTimer, setRootPumpCtxFresh, isRootPumpCtxFresh, recordRootPumpStop } = await import("../src/hooks/pump-manager.ts");
 const { registerSwarmHooks } = await import("../src/hooks.ts");
 
 const p = paths(dir);
@@ -90,8 +90,8 @@ await withLock(p, async () => {
 await startRootPump(freshCtx, "test_stale_arm");
 ok("R1 pre: watchdog armed after startRootPump", typeof getRootMailboxTimer() === "object");
 
-// Simulate the watchdog tick hitting a stale-ctx error the way pump-manager.ts does:
-// stopRootPump() + (RED: no durable stamp anywhere).
+// Simulate the watchdog stale-ctx branch: persist its durable stop stamp, then stop the chain.
+await recordRootPumpStop(dir);
 stopRootPump();
 
 {
@@ -135,6 +135,16 @@ stopRootPump();
 		ok("R2b: settle with dead ctx does not throw", false, String(err?.message || err));
 	}
 	ok("R2b: settle with dead ctx does NOT arm the pump", getRootMailboxTimer() === undefined);
+
+	// R2c: the watchdog stale branch stamps via recordRootPumpStop — with a DEAD captured ctx
+	// the .cwd getter throws, so the stamp call itself must never throw (falls back to
+	// process.cwd()) or it would kill the tick inside its own catch block.
+	try {
+		await recordRootPumpStop(deadCtx);
+		ok("R2c: recordRootPumpStop never throws on dead ctx cwd", true);
+	} catch (stampErr) {
+		ok("R2c: recordRootPumpStop never throws on dead ctx cwd", false, String(stampErr?.message || stampErr));
+	}
 }
 
 stopRootPump();

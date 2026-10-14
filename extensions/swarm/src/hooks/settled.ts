@@ -45,14 +45,30 @@ export function registerSettledHook(pi: ExtensionAPI) {
 			}
 		}
 		if (agentId === "root") {
-			const p = paths(ctx.cwd);
+			let cwd: string;
+			let mode: string;
+			try {
+				cwd = ctx.cwd;
+				mode = ctx.mode;
+			} catch (err) {
+				await logSwarmError(process.cwd(), "hooks", "settle_stale_ctx", err, { agentId });
+				return;
+			}
+			const p = paths(cwd);
 			await pumpRootMailbox(pi, ctx, p, "agent_settled");
 			// === Issue 11 (rework) watchdog self-heal ===
 			// If the watchdog tick has been lost (timer GC'd, single-tick throw that called stop, etc.),
 			// re-install it from this hook so the chain stays alive without requiring session_start.
 			// Guard: only re-arm when ctx.mode is TUI (print/rpc/json sessions don't need the watchdog).
-			if (ctx.mode === "tui" && !getRootMailboxTimer() && isRootPumpCtxFresh()) {
-				armRootPumpWatchdog(ctx);
+			if (mode === "tui") {
+				const st = await readState(p, cwd);
+				if (!getRootMailboxTimer() && (isRootPumpCtxFresh() || st.rootPumpStop?.reason === "stale_ctx")) {
+					armRootPumpWatchdog(ctx);
+					if (st.rootPumpStop?.reason === "stale_ctx") {
+						st.rootPumpStop = undefined;
+						await writeState(p, st);
+					}
+				}
 			}
 			return;
 		}
