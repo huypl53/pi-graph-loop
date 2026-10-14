@@ -163,12 +163,22 @@ async function benchSlot(key, untilMs) {
 	ok("S1 swapped to the untagged healthy slot", setModelCalls.at(-1) === "cp/glm47", JSON.stringify(setModelCalls));
 	ok("S1 trace carries rolesIgnored:true", swap?.rolesIgnored === true, JSON.stringify(swap));
 	ok("S1 rolesFilterMatched false on bypass (R8)", swap?.rolesFilterMatched === false, JSON.stringify(swap));
-	// R10-1: bypass uses the SAME setModel call site + the same two follow-up sendMessages.
-	// (A first-strike gated retry-note may precede exhaustion — Issue 17 behavior — so count the
-	// swap-path slice: exactly one swarm-pool-event + one trailing continue-note.)
+	// R10-1 (F30, 2026-10-14): the operator swap warning is L3-only (ctx.ui.notify, never LLM
+	// context) — the session-message boundary carries ONLY the continue-note. (A first-strike
+	// gated retry-note may precede exhaustion — Issue 17 behavior — so count the swap-path slice:
+	// zero swarm-pool-event customs ever + one trailing continue note.)
 	const poolEvents = sentMessages.filter((s) => s.m?.customType === "swarm-pool-event");
 	ok("S1 R10-1 setModel === 1", setModelCalls.length === 1, JSON.stringify(setModelCalls));
-	ok("S1 R10-1 exactly 1 swarm-pool-event + trailing continue note", poolEvents.length === 1 && sentMessages.at(-1)?.m?.customType === "swarm-message", JSON.stringify(sentMessages.map((s) => s.m?.customType)));
+	ok(
+		"S1 R10-1 zero swarm-pool-event customs + trailing continue note",
+		poolEvents.length === 0 && sentMessages.at(-1)?.m?.customType === "swarm-message",
+		JSON.stringify(sentMessages.map((s) => s.m?.customType)),
+	);
+	ok(
+		"S1 R10-1 operator sees the swap warning via ctx.ui.notify",
+		notifications.some((n) => n.text.includes("⚠ Pool:") && n.text.includes("roles fallback")),
+		JSON.stringify(notifications),
+	);
 	const noCand = evs.filter((e) => e.event === "pool.swap_no_candidate");
 	ok("S1 no swap_no_candidate (bypass succeeded)", noCand.length === 0);
 }

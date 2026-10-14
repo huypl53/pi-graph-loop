@@ -1,0 +1,15 @@
+# pool-swap-notice-surface: task pool-event-context-leak (2026-10-14) — the operator swap
+# notice must surface via ctx.ui.notify (L3) and NEVER as a pi.sendMessage custom message.
+# Pre-fix behavior (contract §10 F30 false claim): every successful pool auto-swap sent a
+# customType:"swarm-pool-event" custom message (display:true, deliverAs:"followUp"); pi
+# persists and LLM-converts EVERY custom message (role:custom → role:user), so each swap
+# leaked a "⚠ Pool: …" line into the agent's context permanently. Post-fix: the agent
+# consumes ONLY the continue-note (customType:"swarm-message"), the operator sees the swap
+# warning as a TUI notification, and the session carries no pool-event line at all.
+#
+# Pattern 2 (seeded world): the lane's swarm.yml defines a 2-slot pool. Slot A is the fixture
+# model (pool-swap-notice-surface, quota-strike burst); slot B (pool-swap-notice-b fixture) is
+# HEALTHY so the gate exhausts into a NORMAL (non-probe) swap A→B, whose recovery turn runs on
+# the B fixture and completes.
+{"name":"usage-limit strike (engine-gated burst, strike 1)","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"usage-limit strike 2 (engine exhausted → swap A→B)","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}

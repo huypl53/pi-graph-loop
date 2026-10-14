@@ -1,0 +1,8 @@
+# pool-swap-notice-b: slot B of task pool-event-context-leak (2026-10-14) — the HEALTHY
+# post-swap slot. No bench is seeded, so slot A's quota strike burst performs a NORMAL
+# (non-probe) swap A→B, and this fixture serves the recovery turn + settle. The contract
+# under test: the swap notice must reach the operator via ctx.ui.notify only — the model
+# request list here must contain the continue-note (swarm-message) and NEVER a
+# "swarm-pool-event" custom message or "⚠ Pool:" operator wording (contract §10 F30).
+{"name":"post-swap turn on B (LLM must see continue-note, no pool-event line)","events":[{"type":"text","delayMs":15,"text":"Recovered on the swapped slot; the swap notice never appeared as a chat message.","chunks":["Recovered on the swapped slot; ","the swap notice never appeared as a chat message."]},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"markDelivered":true,"limit":20}},{"type":"toolcall","delayMs":10,"name":"swarm_ack_message","id":"ack-1","arguments":{"messageId":"assignment-msg-pool-notice","status":"seen"}},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"post-recovery settle","events":[{"type":"text","delayMs":10,"text":"Task complete on the healthy slot.","chunks":["Task complete on the healthy slot."]},{"type":"stop","delayMs":5,"reason":"stop"}]}

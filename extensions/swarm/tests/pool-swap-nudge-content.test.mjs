@@ -1,16 +1,23 @@
 #!/usr/bin/env node
 /**
- * Reproducing test: pool swap nudge content after 429 should NOT include error body text.
+ * Reproducing test (2 bugs, one lane):
  *
- * Bug: After a successful model pool swap (quota 429 → switch provider), the nudge message
- * sent to the agent embeds the raw errorText (up to 160 chars of the 429 body). This causes
- * the agent to read the lengthy error reasoning instead of simply continuing its current task.
+ * Bug 1 (original): pool swap nudge embeds raw error body text in the agent trigger message.
+ *   Expected: nudge says "Continue your current task." — NO error text.
  *
- * Expected (CORRECT): nudge says "switched to <new-slot>, continue your task" — NO error text.
- * Actual (BUGGY):     nudge says "...failed with a quota error from X (You exceeded your current
- *                     quota, please check your plan and billing details). That slot was benched..."
+ * Bug 2 (2026-10-14, task pool-event-context-leak): the operator-facing swap notice is sent as a
+ *   session custom message (customType "swarm-pool-event", display:true, deliverAs:"followUp").
+ *   The in-code comment claims it never reaches the LLM — FALSE per pi-runtime-contract.md §2:
+ *   every pi.sendMessage custom message participates in LLM context (display is TUI-render-only,
+ *   deliverAs is timing-only). Each swap therefore leaks one "⚠ Pool: …" line into the agent's
+ *   context window, permanently (it is persisted to the session).
  *
- * Red criterion: sentMessages[0].m.content CONTAINS errorText substring → BUG.
+ * Expected (CORRECT, post-fix):
+ *   - LLM sees exactly ONE message per swap: "Continue your current task." (swarm-message, triggerTurn).
+ *   - The operator sees the swap warning ONLY via ctx.ui.notify (L3, zero LLM consumption).
+ *   - Headless (ctx.hasUI === false): no notify, no throw, still exactly the one trigger message.
+ *
+ * Red criterion (bug 2): sentMessages contains a customType "swarm-pool-event" → CONTEXT LEAK → BUG.
  */
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { stringify } from "yaml";
@@ -24,6 +31,7 @@ const { ensureRoot } = await import(join(here, "..", "src", "identity.ts"));
 const { registerSwarmHooks } = await import(join(here, "..", "src", "hooks.ts"));
 const { ENGINE_MAX_RETRIES } = await import(join(here, "..", "src", "constants.ts"));
 
+const uiNotifications = [];
 const dir = await mkdtemp(join(tmpdir(), "pool-swap-nudge-content-"));
 await mkdir(join(dir, ".pi"), { recursive: true });
 await writeFile(
@@ -66,6 +74,12 @@ const pi = {
 const ctx = {
 	cwd: dir,
 	mode: "tui",
+	hasUI: true,
+	ui: {
+		notify: (text, level) => {
+			uiNotifications.push({ text: String(text), level });
+		},
+	},
 	isIdle: () => true,
 	model: fakeModelGlm,
 	modelRegistry: {
@@ -143,14 +157,23 @@ console.log("\n[Reproducing bug] 429 quota swap nudge should NOT contain raw err
 	ok("setModel was called (swap happened)", setModelCalls.length >= 1, `setModel calls: ${JSON.stringify(setModelCalls)}`);
 	ok("a nudge message was sent to the agent", sentMessages.length >= 1, `sentMessages.length=${sentMessages.length}`);
 
-	// === New behavior: two separate messages ===
-	// 1. user-facing pool event warning (display: true, no triggerTurn)
-	// 2. minimal agent nudge ("Continue your current task.", triggerTurn: true)
+	// === Post-fix contract (bug 2 + bug 1) ===
+	// Exactly ONE session message crosses the pi.sendMessage boundary per swap — the continue-only
+	// trigger. The operator warning moves to ctx.ui.notify (L3-only, never LLM context).
+	const poolEventMsgs = sentMessages.filter((s) => s.m?.customType === "swarm-pool-event");
 	const triggerMsg = sentMessages.find((s) => s.o?.triggerTurn === true);
-	const displayMsg = sentMessages.find((s) => s.m?.display === true && !s.o?.triggerTurn);
 
 	console.log("\n  [all sent messages]:");
 	sentMessages.forEach((s, i) => console.log(`  [${i}] opts=${JSON.stringify(s.o)} content=${String(s.m.content).slice(0, 150)}`));
+	console.log("  [ui notifications]:", JSON.stringify(uiNotifications));
+
+	// THE REPRODUCTION: no swarm-pool-event custom message may exist — it lands in LLM context.
+	ok(
+		"no swarm-pool-event custom message sent (context-leak repro)",
+		poolEventMsgs.length === 0,
+		`leaked: ${JSON.stringify(poolEventMsgs.map((s) => String(s.m.content).slice(0, 120)))}`,
+	);
+	ok("exactly one session message per swap (continue-note only)", sentMessages.length === 2 && sentMessages[0].m.content.includes("(retrying)"), `sentMessages.length=${sentMessages.length} (strike-1 gated retry note + swap trigger expected)`);
 
 	// The trigger message (what the LLM reads) must be just "continue"
 	ok("a triggerTurn message was sent", !!triggerMsg, `sentMessages opts: ${JSON.stringify(sentMessages.map((s) => s.o))}`);
@@ -171,20 +194,66 @@ console.log("\n[Reproducing bug] 429 quota swap nudge should NOT contain raw err
 		);
 	}
 
-	// The display-only message (what the user sees) should carry pool event info
-	ok(
-		"a user-facing display-only warning was sent (no triggerTurn)",
-		!!displayMsg,
-		`sentMessages: ${JSON.stringify(sentMessages.map((s) => s.o))}`,
-	);
-	if (displayMsg) {
-		const warnContent = String(displayMsg.m.content);
-		const hasPoolInfo = warnContent.includes("gpt-5.4-mini") || warnContent.includes("openai") || warnContent.includes("quota");
-		ok("user warning contains pool event info (new slot or error kind)", hasPoolInfo, `warn content: ${warnContent.slice(0, 200)}`);
+	// The operator warning surfaces via ctx.ui.notify (L3) carrying pool event info
+	const notifyMsg = uiNotifications.find((n) => n.text.includes("⚠ Pool:"));
+	ok("operator swap warning surfaced via ctx.ui.notify", !!notifyMsg, JSON.stringify(uiNotifications));
+	if (notifyMsg) {
+		const hasPoolInfo = notifyMsg.text.includes("gpt-5.4-mini") || notifyMsg.text.includes("openai") || notifyMsg.text.includes("quota");
+		ok("operator notify contains pool event info (new slot or error kind)", hasPoolInfo, `notify text: ${notifyMsg.text.slice(0, 200)}`);
 	}
 }
 
+// --- Headless control (R4): ctx.hasUI === false → no notify, no throw, still one trigger send ---
+{
+	uiNotifications.length = 0;
+	sentMessages.length = 0;
+	setModelCalls.length = 0;
+	process.env.PI_SWARM_AGENT_ID = "worker-headless";
+	delete process.env.PI_SWARM_IS_ROOT;
+
+	await withLock(p, async () => {
+		const st = await readState(p, dir);
+		ensureRoot(st, dir, p);
+		st.agents["worker-headless"] = {
+			id: "worker-headless",
+			role: "implementer",
+			roleKind: "implementer",
+			status: "running",
+			runtimeStatus: "busy",
+			health: "healthy",
+			tmuxAlive: true,
+			lastHeartbeatAt: new Date().toISOString(),
+			activeTaskIds: [],
+			model: "glm-5.1",
+			provider: "zai-coding-cn",
+		};
+		await writeState(p, st);
+	});
+
+	const headlessCtx = { ...ctx, hasUI: false };
+	delete headlessCtx.ui;
+	const headlessErr = `429: {"error":{"message":"quota again","type":"insufficient_quota","code":"insufficient_quota"}}`;
+	for (let i = 0; i < ENGINE_MAX_RETRIES; i++) {
+		await handlers["turn_end"][0](
+			{
+				type: "turn_end",
+				turnIndex: i + 1,
+				message: { role: "assistant", model: fakeModelGlm.id, provider: fakeModelGlm.provider, stopReason: "error", errorMessage: headlessErr },
+				toolResults: [],
+			},
+			{ ...headlessCtx, model: fakeModelGlm },
+		);
+	}
+
+	ok("headless: swap still fired (rotation must not depend on UI)", setModelCalls.length >= 1, JSON.stringify(setModelCalls));
+	ok("headless: zero ctx.ui.notify calls", uiNotifications.length === 0, JSON.stringify(uiNotifications));
+	ok(
+		"headless: zero swarm-pool-event customs; every send is a swarm-message continue-note",
+		sentMessages.length >= 1 && sentMessages.every((s) => s.m?.customType === "swarm-message"),
+		JSON.stringify(sentMessages.map((s) => s.m?.customType)),
+	);
+}
+
 console.log(`\nResults: ${pass} passed, ${fail} failed\n`);
-// Exit non-zero when tests PASS (pre-fix = bug is reproduced = test should be RED)
-// This test is written to be RED before fix and GREEN after fix.
+// RED before fix (context leak present), GREEN after fix.
 if (fail > 0) process.exit(1);

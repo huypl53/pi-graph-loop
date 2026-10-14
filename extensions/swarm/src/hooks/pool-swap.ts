@@ -7,8 +7,9 @@
 // the CURRENT slot in shared pool health, then pi.setModel() to a healthy slot IN-PROCESS.
 // Gated by the Issue 17/70 engine-retry incident tracker and the swap-chain cap.
 //
-// R30/Pi-runtime: the swap notice is a single fire-and-forget pi.sendMessage (followUp);
-// the agent trigger is a second sendMessage with triggerTurn (idle) or followUp+triggerTurn.
+// R30/Pi-runtime: the operator swap notice surfaces via ctx.ui.notify (L3-only, never LLM
+// context — contract §10 F30); the agent trigger is a single pi.sendMessage with triggerTurn
+// (idle) or followUp+triggerTurn.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ModelSlot } from "../types.ts";
 import { classifyProviderError, scrubErrorIdentity } from "../types.ts";
@@ -356,24 +357,27 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 		};
 		await trace(p, okSwap ? "pool.swap" : "pool.swap_failed", swapTrace).catch(() => {});
 		if (okSwap) {
-			// User-facing pool event notice (operator sees it in TUI; NOT the LLM's trigger turn).
-			// Carries the old/new slot + error kind so the operator can monitor rotation without
-			// digging into traces. deliverAs:"followUp" so it doesn't consume a turn.
+			// Operator swap notice (L3-only: ctx.ui.notify — NEVER LLM context, zero pi.sendMessage).
+			// The old delivery was pi.sendMessage({customType:"swarm-pool-event", display:true},
+			// {deliverAs:"followUp"}) — a false Pi-runtime claim (contract §10 F30): display only
+			// controls TUI rendering and followUp only controls timing; EVERY pi.sendMessage custom
+			// message is persisted and consumed by the LLM (role:custom → role:user in convertToLlm),
+			// so each swap leaked a "⚠ Pool: …" line into the agent's context. Swap details remain
+			// durable in trace(p, "pool.swap", …) (from/to/kind/reason/rolesIgnored above).
 			// D2: bypass swaps are marked "(roles fallback)"; D5 probe swaps say "probe N/M".
-			pi.sendMessage(
-				{
-					customType: "swarm-pool-event",
-					content: probeRoundSwap
+			if (ctx.hasUI && ctx.ui?.notify) {
+				ctx.ui.notify(
+					probeRoundSwap
 						? `Pool probe ${Math.max(1, (probeRound?.triedSlots.length ?? 2) - 1)}/${new Set(effectiveConfig().slots.map((s) => slotKey(s))).size}: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)} (cooldown/roles override).`
 						: rolesBypassed
 							? `⚠ Pool: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)} (roles fallback).`
 							: `⚠ Pool: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)}.`,
-					display: true,
-				},
-				{ deliverAs: "followUp" },
-			);
-			// Minimal agent trigger: the LLM only needs to know to continue.
-			// No model name, no error body, no slot details — those add noise that wastes a turn.
+					"warning",
+				);
+			}
+			// Minimal agent trigger: the LLM only needs to know to continue. This is the ONLY
+			// session message a swap may produce — no model name, no error body, no slot details
+			// (operator monitoring text belongs at L3 notify / L1 traces, never in LLM context).
 			pi.sendMessage(
 				{
 					customType: "swarm-message",

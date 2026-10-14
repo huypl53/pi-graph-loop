@@ -71,6 +71,7 @@ const p = paths(dir);
 // --- fake pi capturing setModel + sendMessage ---
 const setModelCalls = [];
 const sentMessages = [];
+const notifications = [];
 const handlers = {};
 const fakePi = {
 	on: (ev, fn) => {
@@ -93,6 +94,8 @@ const fakeModelClaude = { id: "claude-sonnet-4", provider: "anthropic" };
 const ctx = {
 	cwd: dir,
 	mode: "tui",
+	hasUI: true,
+	ui: { notify: (text, level) => notifications.push({ text: String(text), level }) },
 	isIdle: () => true,
 	model: fakeModelGlm,
 	modelRegistry: {
@@ -212,8 +215,13 @@ ok("proxy auth_unavailable wrapper classifies as auth", classifyProviderError("a
 	const swaps = await countTraceEvents("pool.swap");
 	ok("F1: pool.swap trace fired", swaps === 1, `swaps=${swaps}`);
 	ok(
-		"F1: swap note sent to the agent",
-		sentMessages.some((s) => /Pool:/.test(s.m.content) && /quota/.test(s.m.content)),
+		"F1: swap notify sent to the operator (L3, never LLM context)",
+		notifications.some((n) => n.text.includes("Pool:") && n.text.includes("quota")),
+		JSON.stringify({ notifications, sends: sentMessages.map((s) => s.m.content?.slice(0, 60)) }),
+	);
+	ok(
+		"F1: agent trigger stays continue-only (no pool wording in LLM context)",
+		sentMessages.every((s) => !/⚠ Pool:/.test(s.m.content) && /Continue your current task/.test(s.m.content)),
 		JSON.stringify(sentMessages.map((s) => s.m.content?.slice(0, 60))),
 	);
 }
@@ -249,11 +257,16 @@ ok("proxy auth_unavailable wrapper classifies as auth", classifyProviderError("a
 		setModelCalls.length === 1 && setModelCalls[0] !== "zai-coding-cn/glm-5.1",
 		`calls=${JSON.stringify(setModelCalls)}`,
 	);
-	ok("F8: terminal request-limit path crosses pi.sendMessage boundary exactly twice", sentMessages.length === 2, `calls=${sentMessages.length}`);
+	ok("F8: terminal request-limit path crosses pi.sendMessage boundary exactly once (continue-note)", sentMessages.length === 1, `calls=${sentMessages.length}`);
 	ok(
-		"F8: boundary sends contain swap notice and continuation",
-		sentMessages.map(({ m }) => m.customType).sort().join(",") === "swarm-message,swarm-pool-event",
-		JSON.stringify(sentMessages.map(({ m }) => m.customType)),
+		"F8: boundary send is the continue-only trigger",
+		sentMessages.length === 1 && sentMessages[0].m.customType === "swarm-message" && sentMessages[0].m.content.includes("Continue"),
+		JSON.stringify(sentMessages.map(({ m }) => ({ customType: m.customType, content: String(m.content).slice(0, 60) }))),
+	);
+	ok(
+		"F8: operator sees the swap warning via ctx.ui.notify",
+		notifications.some((n) => n.text.includes("⚠ Pool:")),
+		JSON.stringify(notifications),
 	);
 	ok("F8: no retry-gate trace for request_limit", (await countTraceEvents("pool.swap_gated_by_engine_retry")) === 0);
 	ok("F8: first strike records retry exhaustion", (await countTraceEvents("pool.engine_retry_exhausted")) === 1);

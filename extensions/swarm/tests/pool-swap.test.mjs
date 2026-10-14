@@ -92,6 +92,7 @@ await writeState(p, st);
 // --- fake pi capturing setModel + sendMessage ---
 const setModelCalls = [];
 const sentMessages = [];
+const notifications = [];
 const handlers = {};
 const fakePi = {
 	on: (ev, fn) => {
@@ -114,6 +115,8 @@ const fakeModelClaude = { id: "claude-sonnet-4", provider: "anthropic" };
 const ctx = {
 	cwd: dir,
 	mode: "tui",
+	hasUI: true,
+	ui: { notify: (text, level) => notifications.push({ text: String(text), level }) },
 	isIdle: () => true,
 	model: fakeModelGlm,
 	modelRegistry: {
@@ -170,8 +173,14 @@ let ps = await poolStatus(p);
 const glm = ps.slots.find((s) => s.model === "glm-5.1");
 ok("quota benched glm", glm.inCooldown && /quota/.test(glm.health.lastError));
 ok(
-	"swap note sent to the agent",
-	sentMessages.some((s) => /Pool:/.test(s.m.content) && /quota/.test(s.m.content)),
+	"swap notify sent to the operator (L3, never LLM context)",
+	notifications.some((n) => /Pool:/.test(n.text) && /quota/.test(n.text)),
+	JSON.stringify(notifications),
+);
+ok(
+	"no pool wording leaks into session messages",
+	sentMessages.every((s) => !/⚠ Pool:.*switched/.test(s.m.content)),
+	JSON.stringify(sentMessages.map((s) => s.m.content?.slice(0, 60))),
 );
 // Issue 17: positive assertion that pool.swap_gated_by_engine_retry fired for the gated strike.
 {

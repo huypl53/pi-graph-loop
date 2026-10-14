@@ -76,6 +76,7 @@ await writeState(p, st);
 // --- fake pi capturing setModel + sendMessage ---
 const setModelCalls = [];
 const sentMessages = [];
+const notifications = [];
 const handlers = {};
 const fakePi = {
 	on: (ev, fn) => {
@@ -98,6 +99,8 @@ const fakeModelClaude = { id: "claude-sonnet-4", provider: "anthropic" };
 const ctx = {
 	cwd: dir,
 	mode: "tui",
+	hasUI: true,
+	ui: { notify: (text, level) => notifications.push({ text: String(text), level }), setStatus: () => {} },
 	isIdle: () => true,
 	model: fakeModelGlm,
 	modelRegistry: {
@@ -205,8 +208,14 @@ const turnEnd = handlers["turn_end"][0];
 	const glm = ps.slots.find((s) => s.model === "glm-5.1");
 	ok("fixture 2: glm failure streak bumped (1x)", (glm.health?.failures ?? 0) === 1, `failures=${glm.health?.failures}`);
 	ok(
-		"fixture 2: swap note sent to the agent",
-		sentMessages.some((s) => /Pool:/.test(s.m.content) && /transient/.test(s.m.content)),
+		"fixture 2: swap notify sent to the operator (L3, never LLM context)",
+		notifications.some((n) => /Pool:/.test(n.text) && /transient/.test(n.text)),
+		JSON.stringify(notifications),
+	);
+	ok(
+		"fixture 2: no pool wording leaks into session messages",
+		sentMessages.every((s) => !/⚠ Pool:.*switched/.test(s.m.content)),
+		JSON.stringify(sentMessages.map((s) => s.m.content?.slice(0, 60))),
 	);
 	const gated = await countTraceEvents("pool.swap_gated_by_engine_retry");
 	ok("fixture 2: pool.swap_gated_by_engine_retry fired for strike 1", gated === 1, `gated=${gated}`);

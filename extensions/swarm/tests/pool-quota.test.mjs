@@ -85,6 +85,7 @@ await writeState(p, st);
 // --- fake pi capturing setModel + sendMessage ---
 const setModelCalls = [];
 const sentMessages = [];
+const notifications = [];
 const handlers = {};
 const fakePi = {
 	on: (ev, fn) => {
@@ -107,6 +108,8 @@ const fakeModelClaude = { id: "claude-sonnet-4", provider: "anthropic" };
 const ctx = {
 	cwd: dir,
 	mode: "tui",
+	hasUI: true,
+	ui: { notify: (text, level) => notifications.push({ text: String(text), level }), setStatus: () => {} },
 	isIdle: () => true,
 	model: fakeModelGlm,
 	modelRegistry: {
@@ -237,8 +240,13 @@ registerSwarmHooks(fakePi);
 	ok("F1: quota slot benched (in cooldown)", Boolean(glm.inCooldown), JSON.stringify(glm.health));
 	ok("F1: benched with lastBenchReason=quota", glm.health?.lastBenchReason === "quota", `reason=${glm.health?.lastBenchReason}`);
 	ok(
-		"F1: pool quota swap notify sent",
-		sentMessages.some((s) => /Pool:.*quota/.test(s.m.content) && /switched/.test(s.m.content)),
+		"F1: pool quota swap notify sent (L3 operator surface, never LLM context)",
+		notifications.some((n) => /Pool:.*quota/.test(n.text) && /switched/.test(n.text)),
+		JSON.stringify({ notifications, sends: sentMessages.map((s) => s.m.content?.slice(0, 60)) }),
+	);
+	ok(
+		"F1: no pool wording leaks into session messages",
+		sentMessages.every((s) => !/⚠ Pool:.*switched/.test(s.m.content)),
 		JSON.stringify(sentMessages.map((s) => s.m.content?.slice(0, 60))),
 	);
 }
