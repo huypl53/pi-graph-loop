@@ -81,6 +81,7 @@ console.log("\n[C1] before_agent_start: Root session receives static Root Orches
 	const prompt = result?.systemPrompt || "";
 	ok("systemPrompt contains [PI-SWARM ROOT ORCHESTRATOR]", prompt.includes("[PI-SWARM ROOT ORCHESTRATOR]"));
 	ok("systemPrompt contains delegating instructions", prompt.includes("swarm_create_task") && prompt.includes("swarm_assign_task"));
+	ok("systemPrompt contains parallel-spawn directive", prompt.includes("Optimize for wall-clock time") && prompt.includes("PARALLEL"));
 }
 
 console.log("\n[C2] tool_result: Root edit streak tracking & gentle advisory");

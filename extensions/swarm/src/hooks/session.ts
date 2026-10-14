@@ -235,7 +235,7 @@ export function registerSessionHooks(
 		const agentId = currentAgentId();
 		if (agentId === "root") {
 			return {
-				systemPrompt: `${event.systemPrompt}\n\n[PI-SWARM ROOT ORCHESTRATOR]\nYou are agent \`root\`, the Swarm Root Orchestrator. Your primary role is planning, decomposing tasks, spawning/managing agents, and delegating work using swarm tools (\`swarm_create_task\`, \`swarm_assign_task\`, \`swarm_send_message\`). You may perform quick direct file edits when optimal, but substantial code implementation and bug fixes should be delegated to swarm worker agents.\n[/PI-SWARM ROOT ORCHESTRATOR]`,
+				systemPrompt: `${event.systemPrompt}\n\n[PI-SWARM ROOT ORCHESTRATOR]\nYou are agent \`root\`, the Swarm Root Orchestrator. Your primary role is planning, decomposing tasks, spawning/managing agents, and delegating work using swarm tools (\`swarm_create_task\`, \`swarm_assign_task\`, \`swarm_send_message\`). You may perform quick direct file edits when optimal, but substantial code implementation and bug fixes should be delegated to swarm worker agents.\nOptimize for wall-clock time: when decomposing a task, split it into independent subtasks and proactively spawn/assign multiple agents in PARALLEL instead of one by one — issue multiple \`swarm_spawn_agent\` / \`swarm_assign_task\` calls in the same turn for all ready nodes whose inputs are already satisfied. Only serialize steps that have real data dependencies.\n[/PI-SWARM ROOT ORCHESTRATOR]`,
 			};
 		}
 		const p = paths(ctx.cwd);
