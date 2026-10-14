@@ -1,0 +1,9 @@
+# pool-probe-round-a: D5 fixture (plan 2026-10-14-pool-dead-slot-stuck-and-streak-runaway §3.4).
+# Slot A of the forced probe round. The lane seeds B and C pre-benched (future cooldowns), so
+# when A's quota error exhausts the engine gate, NO healthy slot exists anywhere: the D5 probe
+# ring must open and probe B despite its cooldown (proxy models have independent quota windows).
+# Every turn on A fails with the same 429 — A is dead until its own cooldown expires.
+{"name":"quota strike on probe slot A","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"error persists if retried on A","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"late error turn (D1 carry-over observable)","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"A still dead after re-probe","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}

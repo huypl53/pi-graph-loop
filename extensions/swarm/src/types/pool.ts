@@ -37,6 +37,12 @@ export type RotationConfig = {
 	// D2 (plan 2026-10-14): when a role-filtered pickSlot finds no candidate (all tagged slots
 	// benched), retry once with bypassRolesFilter so a healthy untagged slot can serve the turn.
 	roleFallbackOnSwap?: boolean;
+	// D5 (plan 2026-10-14 §1.4): forced model probe round. When a slot's error path is exhausted,
+	// round-robin every distinct configured provider/model ONCE — bypassing cooldown AND roles —
+	// before waiting for the earliest cooldown (≤ benchMaxMs). A proxy provider (cliproxyapi) is
+	// transport only; each model under it has an independent quota window. Env off-switch:
+	// PI_SWARM_FORCE_PROBE_ROUND_OFF=1.
+	forceProbeRound?: boolean;
 };
 
 // Preflight classification — used by `preflightSpawn` and surfaced verbatim by spawn/restart
@@ -54,6 +60,25 @@ export type PreflightResult =
 	{ ok: true; resolved: { model: string; provider: string; fromPool: boolean } } | { ok: false; error: PreflightError };
 
 // Persisted per-slot health, keyed by `${provider}/${model}`. Stored in .pi/swarm/pool-state.json.
+// D5 (plan 2026-10-14 §1.4): durable per-agent forced probe-round state. A round opens when a
+// slot's error path is exhausted and swarm must probe every distinct configured provider/model
+// once (cooldown + roles BYPASSED — a proxy provider is transport only; each model has its own
+// quota window). Survives /reload and crash so a restarted session never re-probes a slot the
+// round already burned. Cleared on a successful stop turn or /swarm pool clear.
+export type PoolProbeRound = {
+	roundId: string;
+	startedAt: string;
+	// provider/model keys, de-duplicated: a slot can receive at most one forced probe per round.
+	triedSlots: string[];
+	// Canonical modelPool order position immediately after the last selected slot.
+	cursor: number;
+	// Set when every configured slot has been tried and failed: the round is exhausted and no
+	// further probe may fire before nextProbeAt (earliest cooldown, capped by benchMaxMs — D4).
+	exhaustedAt?: string;
+	nextProbeAt?: string;
+	wakeSentAt?: string;
+};
+
 export type PoolSlotHealth = {
 	failures: number;
 	lastError?: string;

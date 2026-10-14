@@ -14,7 +14,7 @@ import type { ModelSlot } from "../types.ts";
 import { classifyProviderError, scrubErrorIdentity } from "../types.ts";
 import { ENGINE_MAX_RETRIES, ENGINE_RETRY_WINDOW_MS, SWARM_GUEST_ID } from "../constants.ts";
 import { currentAgentId } from "../session.ts";
-import { pickSlot, recordProviderError, recordSlotSuccess, slotKey, effectiveConfig } from "../pool.ts";
+import { pickSlot, recordProviderError, recordSlotSuccess, slotKey, effectiveConfig, advanceProbeRound, clearProbeRound } from "../pool.ts";
 import { paths, readState, trace, withLock } from "../state.ts";
 import { logSwarmError } from "../errorlog.ts";
 import {
@@ -67,6 +67,9 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 				provider: String(msg.provider || ctx.model?.provider || "") || undefined,
 			};
 			if (okSlot.model) await recordSlotSuccess(p, okSlot).catch((err) => logSwarmError(p, "hooks", "recordSlotSuccess.failed", err));
+			// D5 (§1.4): a successful turn proves SOME slot serves — the probe round is done. Clear
+			// the durable round so normal pickSlot semantics (roles + cooldown) resume.
+			await clearProbeRound(p, ctx.cwd, agentId).catch((err) => logSwarmError(p, "hooks", "clear_probe_round.failed", err));
 			// Issue 17: a successful turn after a burst of engine retries means the engine RECOVERED.
 			// Clear any open incident for this agent so the next failure starts a fresh observation.
 			// Without this, a stale incident would survive and the next error turn_end would miscount
@@ -98,10 +101,6 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 		const chain = peekSwapChain(agentId) || { count: 0, at: 0 };
 		// A quiet gap (no swap for 5 minutes) starts a fresh chain.
 		if (nowMs - chain.at > SWAP_CHAIN_RESET_MS) chain.count = 0;
-		if (chain.count >= MAX_SWAP_CHAIN) {
-			await trace(p, "pool.swap_chain_capped", { agentId, count: chain.count, kind, error: errorText.slice(0, 120) }).catch(() => {});
-			return;
-		}
 		const currentSlot: ModelSlot = {
 			model: String(msg.model || ctx.model?.id || ""),
 			provider: String(msg.provider || ctx.model?.provider || "") || undefined,
@@ -231,6 +230,8 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 		// now uses). Loud by design: the swap trace carries rolesIgnored and the operator event says
 		// "(roles fallback)" — untagged slots are never a SILENT fallback.
 		let rolesBypassed = false;
+		let probeRound: import("../types/index.ts").PoolProbeRound | undefined;
+		let probeRoundSwap = false;
 		if (!picked && roleKind !== undefined && effectiveConfig().rotation.roleFallbackOnSwap) {
 			picked = await pickSlot(p, {
 				stickyKey: agentId,
@@ -242,14 +243,74 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 			});
 			rolesBypassed = !!picked;
 		}
+		// === D5 (plan 2026-10-14 §1.4): forced model probe round ===
+		// A proxy provider is transport only — each model under it has an independent quota window,
+		// so a cooldown on one model is a HINT about that model, not a wall for the pool. When BOTH
+		// the role-filtered pick and the D2 bypass find nothing healthy (every visible slot is
+		// benched), advance the durable probe round: walk canonical modelPool order, bypass cooldown
+		// AND roles, each slot at most once per round (state survives reload). Serving a healthy
+		// slot stays strictly ahead of probing (D2 first); the ring exists to RE-DISCOVER recovered
+		// models when nothing serves at all.
 		if (!picked) {
-			await trace(p, "pool.swap_no_candidate", { agentId, from: slotKey(currentSlot), kind }).catch(() => {});
+			// Resolver predicate: a slot whose provider/model cannot be resolved in THIS session's
+			// registry is durably skipped by the round (traced) without burning a setModel on it.
+			const probe = await advanceProbeRound(p, ctx.cwd, agentId, currentSlot, (slot) =>
+				Boolean(slot.provider && ctx.modelRegistry?.find?.(slot.provider, slot.model)),
+			).catch((err) => {
+				logSwarmError(p, "hooks", "advance_probe_round.failed", err);
+				return undefined;
+			});
+			if (probe?.slot) {
+				picked = { slot: probe.slot, index: -1, fromPool: true, reason: `probe-round(${probe.round.roundId})` };
+				probeRound = probe.round;
+				probeRoundSwap = true;
+				await trace(p, "pool.probe_round_swap", {
+					agentId,
+					roundId: probe.round.roundId,
+					from: slotKey(currentSlot),
+					to: slotKey(probe.slot),
+					attempt: probe.round.triedSlots.length - 1,
+					total: new Set(effectiveConfig().slots.map((s) => slotKey(s))).size,
+					ignoredCooldown: true,
+					ignoredRoles: true,
+				}).catch(() => {});
+			} else if (probe && !probe.slot && probe.round.exhaustedAt) {
+				// Round exhausted: every configured slot failed. Durable nextProbeAt fences further
+				// probes until due (≤ benchMaxMs — D4). Loud once per round.
+				await trace(p, "pool.probe_round_exhausted", {
+					agentId,
+					roundId: probe.round.roundId,
+					triedSlots: probe.round.triedSlots,
+					nextProbeAt: probe.round.nextProbeAt,
+				}).catch(() => {});
+			}
+		}
+		// Swap-chain cap (moved post-pick): a failing prompt can cascade (fail -> swap -> retry ->
+		// fail -> swap ...), burning a turn per dead slot. Cap consecutive swaps per agent — EXCEPT
+		// probe-round swaps: D5's round is itself bounded (≤ unique slots − 1; advanceProbeRound
+		// refuses repeats durably), so MAX_SWAP_CHAIN must not truncate it mid-ring (plan §1.4).
+		if (picked && !probeRoundSwap && chain.count >= MAX_SWAP_CHAIN) {
+			await trace(p, "pool.swap_chain_capped", { agentId, count: chain.count, kind, error: errorText.slice(0, 120) }).catch(() => {});
+			return;
+		}
+		if (!picked) {
+			const exhaustedRound = probeRound && !probeRoundSwap && probeRound.exhaustedAt ? probeRound : undefined;
+			await trace(p, "pool.swap_no_candidate", {
+				agentId,
+				from: slotKey(currentSlot),
+				kind,
+				probeRoundId: exhaustedRound?.roundId,
+				nextProbeAt: exhaustedRound?.nextProbeAt,
+			}).catch(() => {});
 			// Operator nudge (TUI-only, never LLM context, zero pi.sendMessage): a dead pool is an
 			// operator decision, but one warning per 5min window is enough — one per error turn is noise.
+			// D5: when a probe round just exhausted, say WHEN the next round opens instead.
 			if (ctx.hasUI && ctx.ui?.notify && shouldNotifyNoCandidate(agentId, Date.now())) {
 				noteNoCandidateNotified(agentId, Date.now());
 				ctx.ui.notify(
-					`Pool: no healthy slot to rotate to — all slots benched. /swarm pool list to inspect, /swarm pool clear <provider/model> to unbench.`,
+					exhaustedRound
+						? `Pool probe round exhausted (${exhaustedRound.triedSlots.length} slots tried) — next round ${exhaustedRound.nextProbeAt}. /swarm pool list to inspect.`
+						: `Pool: no healthy slot to rotate to — all slots benched. /swarm pool list to inspect, /swarm pool clear <provider/model> to unbench.`,
 					"error",
 				);
 			}
@@ -298,13 +359,15 @@ export function registerPoolSwapHook(pi: ExtensionAPI) {
 			// User-facing pool event notice (operator sees it in TUI; NOT the LLM's trigger turn).
 			// Carries the old/new slot + error kind so the operator can monitor rotation without
 			// digging into traces. deliverAs:"followUp" so it doesn't consume a turn.
-			// D2: bypass swaps are marked "(roles fallback)" so the operator sees the constraint was relaxed.
+			// D2: bypass swaps are marked "(roles fallback)"; D5 probe swaps say "probe N/M".
 			pi.sendMessage(
 				{
 					customType: "swarm-pool-event",
-					content: rolesBypassed
-						? `⚠ Pool: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)} (roles fallback).`
-						: `⚠ Pool: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)}.`,
+					content: probeRoundSwap
+						? `Pool probe ${Math.max(1, (probeRound?.triedSlots.length ?? 2) - 1)}/${new Set(effectiveConfig().slots.map((s) => slotKey(s))).size}: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)} (cooldown/roles override).`
+						: rolesBypassed
+							? `⚠ Pool: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)} (roles fallback).`
+							: `⚠ Pool: ${kind} error on ${slotKey(currentSlot)} — switched to ${slotKey(picked.slot)}.`,
 					display: true,
 				},
 				{ deliverAs: "followUp" },

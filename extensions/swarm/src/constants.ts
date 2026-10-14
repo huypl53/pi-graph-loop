@@ -65,6 +65,11 @@ export const POOL_BENCH_MAX_MS = 60 * 60 * 1000;
 // Env override: PI_SWARM_BENCH_STREAK_DECAY_MS.
 export const POOL_BENCH_STREAK_DECAY_MS = 6 * 60 * 60 * 1000;
 
+// D5 (plan 2026-10-14 §1.4): forced model probe round — default ON. When a slot's error path is
+// exhausted, probe every distinct configured provider/model once (cooldown+roles bypassed).
+// Env off-switch: PI_SWARM_FORCE_PROBE_ROUND_OFF=1.
+export const POOL_FORCE_PROBE_ROUND = true;
+
 // === Issue 20: pool-scaffold on root session_start ===
 // Placeholder written into `.pi/settings.json` when `swarm.modelPool` (or
 // `extensions.swarm.modelPool` — runtime precedence) is absent. Deliberately
@@ -105,6 +110,7 @@ export const POOL_SCAFFOLD_YML_PLACEHOLDER = `# .pi/swarm.yml — swarm model po
 #   maxRetries: 2                # hand-offs to other slots before failing
 #   benchMaxMs: 3600000          # 1h cap for exponential backoff (all kinds)
 #   benchStreakDecayMs: 21600000 # 6h healthy serving window resets streak to 0
+#   forceProbeRound: true         # probe each distinct model once when all slots benched
 #   roleFallbackOnSwap: true     # rotate to healthy untagged slot if role slots benched
 
 # --- Terminal manager (optional; default: tmux) -------------------------------
@@ -200,6 +206,7 @@ export const POOL_SCAFFOLD_GLOBAL_YML_PLACEHOLDER = `# ~/.pi/agent/swarm.yml —
 #   maxRetries: 2
 #   benchMaxMs: 3600000
 #   benchStreakDecayMs: 21600000
+#   forceProbeRound: true
 #   roleFallbackOnSwap: true
 
 # --- Terminal manager (optional; default: tmux) -------------------------------

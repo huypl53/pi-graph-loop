@@ -194,6 +194,20 @@ export async function runPumpMaintenancePhasesLocked(
 	} catch (err: any) {
 		await trace(p, "pool.slot_recovered.error", { error: String((err as Error)?.message || err) }).catch(() => {});
 	}
+	// === D5 (plan 2026-10-14 §1.4): probe-round due wake ===
+	// When an agent's probe round exhausted (every configured slot failed once), the durable
+	// nextProbeAt fences further probes until due (earliest cooldown, ≤ benchMaxMs — D4). At
+	// due time, wake the agent ONCE with the existing minimal continuation shape so the next
+	// turn's failure re-opens a FRESH round (advanceProbeRound sees due passed) instead of the
+	// pool sitting dark until an operator pokes it. Exactly-one across ticks AND reloads via
+	// wakeSentAt stamped durably BEFORE the L2 send (R10: same pattern as the goal nudge).
+	// R10-1: this is a NEW pi.sendMessage call site by design — it IS the designated root-pump
+	// wake owner for D5; the static grep guard in the lane test pins it to exactly this site.
+	try {
+		await evaluateProbeRoundWakeLocked(pi, ctx, p, st, nowMs);
+	} catch (err: any) {
+		await trace(p, "pool.probe_round_wake.error", { error: String((err as Error)?.message || err) }).catch(() => {});
+	}
 	// === swarm-issues Phase 3b (fix P0-A): single idempotent issue-run tick ===
 	// The plan's reconcileIssueRunTick design, piggybacked on this existing in-lock phase
 	// runner (NO new timers/intervals). Reads the active linked task's durable task.json once
@@ -276,4 +290,63 @@ export async function runPumpMaintenancePhasesLocked(
 	} catch (err: any) {
 		await logSwarmError(p, "surface", "issues.footer_failed", err, { reason });
 	}
+}
+
+// === D5 (§1.4): probe-round due wake evaluator (runs INSIDE the pump's withLock — Locked suffix) ===
+// For each agent with an exhausted probe round whose nextProbeAt has come due and no wake was
+// sent yet: stamp wakeSentAt durably, then send exactly ONE hidden continuation
+// (customType "swarm-message", triggerTurn) so the agent retries and re-opens a fresh round.
+// Bounded: one wake per exhausted round (wakeSentAt fence survives reload); the fresh round's
+// exhaustion re-arms it. Non-root agents get the same wake via their own pump-less path — the
+// root pump sends to the AGENT's pane through pi only when the agent IS this session; for
+// workers in other panes the wake rides the mailbox continuation below (no-op here).
+export async function evaluateProbeRoundWakeLocked(pi: ExtensionAPI, ctx: any, p: Paths, st: SwarmState, nowMs: number) {
+	const rounds = st.poolProbeRounds ?? {};
+	let dirty = false;
+	// Persist happens once at the end (writeState) — the pump already holds the state lock here
+	// (Locked suffix contract), and the in-memory st is the caller's shared object, so the
+	// stamp survives even if the write fails only via the next tick's re-read-and-retry.
+	for (const [agentId, round] of Object.entries(rounds)) {
+		if (!round?.exhaustedAt || !round.nextProbeAt || round.wakeSentAt) continue;
+		const dueMs = new Date(round.nextProbeAt).getTime();
+		if (!Number.isFinite(dueMs) || nowMs < dueMs) continue;
+		// Stamp durably FIRST (crash after stamp but before send sacrifices one wake — never
+		// duplicates it; the same trade advanceProbeRound makes for triedSlots).
+		round.wakeSentAt = new Date(nowMs).toISOString();
+		dirty = true;
+		await trace(p, "pool.probe_round_wake", {
+			agentId,
+			roundId: round.roundId,
+			nextProbeAt: round.nextProbeAt,
+			lateMs: Math.max(0, nowMs - dueMs),
+		}).catch(() => {});
+		// L2 wake: exactly one per exhausted round. The root session sends to ITSELF
+		// (idle-gated triggerTurn); the D5 contract row (pi-runtime-contract §10, R-D5) pins
+		// this as the single wake boundary.
+		if (agentId === "root") {
+			pi.sendMessage(
+				{ customType: "swarm-message", content: "Continue your current task.", display: false },
+				ctx?.isIdle && typeof ctx.isIdle === "function" && ctx.isIdle()
+					? { triggerTurn: true }
+					: { deliverAs: "followUp", triggerTurn: true },
+			);
+		} else {
+			// Workers: deliver through the durable mailbox (L1) so the worker's own pump-less
+			// session surfaces it on its next turn boundary; no direct pane injection from root.
+			const { deliverMessageLocked } = await import("../mailbox.ts");
+			await deliverMessageLocked(pi, ctx?.cwd ?? st.cwd, p, st, {
+				to: agentId,
+				subject: "Pool probe round due — retry now",
+				body: `Your model-pool probe round (id ${round.roundId}) exhausted earlier; the next-probe deadline (${round.nextProbeAt}) has passed. Retry your current task now so the pool can open a fresh probe round and find a serving model.`,
+				idempotencyKey: `probe-wake-${round.roundId}`,
+			}).catch((err: any) => {
+				logSwarmError(p, "surface", "probe_round_wake_delivery_failed", err, { agentId });
+			});
+		}
+	}
+	if (dirty) {
+		const { writeState } = await import("../state.ts");
+		await writeState(p, st).catch((err: any) => logSwarmError(p, "surface", "probe_round_wake_write_failed", err));
+	}
+	return dirty;
 }

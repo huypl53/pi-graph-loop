@@ -8,6 +8,7 @@ import type {
 	ModelSlot,
 	Paths,
 	PoolHealthState,
+	PoolProbeRound,
 	PoolSlotHealth,
 	PreflightError,
 	PreflightResult,
@@ -16,7 +17,7 @@ import type {
 	RotationStrategy,
 	SwarmSettings,
 } from "./types/index.ts";
-import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES, POOL_BENCH_MAX_MS, POOL_BENCH_STREAK_DECAY_MS } from "./constants.ts";
+import { POOL_COOLDOWN_MS, POOL_MAX_RETRIES, POOL_BENCH_MAX_MS, POOL_BENCH_STREAK_DECAY_MS, POOL_FORCE_PROBE_ROUND } from "./constants.ts";
 import { currentModel, currentProvider } from "./session.ts";
 import {
 	parseQuotaResetMs,
@@ -272,6 +273,8 @@ export function effectiveConfig(): { slots: ModelSlot[]; rotation: Required<Rota
 					? Math.floor(Number(process.env.PI_SWARM_BENCH_STREAK_DECAY_MS))
 					: (r.benchStreakDecayMs !== undefined && r.benchStreakDecayMs >= 0 ? r.benchStreakDecayMs : POOL_BENCH_STREAK_DECAY_MS),
 			roleFallbackOnSwap: process.env.PI_SWARM_ROLE_FALLBACK_OFF === "1" ? false : (r.roleFallbackOnSwap ?? true),
+			// D5 (§1.4): env off-switch wins, then yaml, then default ON.
+			forceProbeRound: process.env.PI_SWARM_FORCE_PROBE_ROUND_OFF === "1" ? false : (r.forceProbeRound ?? POOL_FORCE_PROBE_ROUND),
 		},
 	};
 }
@@ -698,6 +701,15 @@ export function validateSwarmSettings(
 				source: rotationSource,
 			});
 		}
+		// D5 (plan 2026-10-14 §1.4): forced probe round must be boolean.
+		if (rotation.forceProbeRound !== undefined && typeof rotation.forceProbeRound !== "boolean") {
+			errors.push({
+				kind: "rotation_bad_force_probe",
+				field: "rotation.forceProbeRound",
+				message: `rotation.forceProbeRound must be true or false (probe each distinct model once when all slots benched)`,
+				source: rotationSource,
+			});
+		}
 	}
 	const hasSingleton = typeof cfg.defaultModel === "string" || typeof cfg.defaultProvider === "string";
 	const slotsCount = slots ? slots.length : 0;
@@ -850,6 +862,139 @@ export async function pickSlot(
 		// returning undefined (instead of the failed slot) makes pool-swap record swap_no_candidate
 		// and keep the current model — an honest no-swap beats a same-slot "swap".
 		return undefined;
+	});
+}
+
+// === D5 (plan 2026-10-14 §1.4): forced model probe round ===
+// A proxy provider (cliproxyapi) is TRANSPORT only: cliproxyapi/glm-5.3, …/terra, …/fable each
+// have an INDEPENDENT quota window. A cooldown on one model says nothing about the next — yet
+// pickSlot treated every cooldown as a wall, so two cooling root slots produced 225x
+// swap_no_candidate while the other models were never even tried (live incident 2026-10-13).
+//
+// advanceProbeRound is the D5 selection core. Called by the swap hook ONLY after the engine
+// retry gate exhausted (light blips still get pi retry + gated swarm retry first). It walks the
+// CANONICAL modelPool order from `cursor`, ignores cooldown AND roles entirely (this is a
+// bounded diagnostic ring, not normal scheduling), and de-duplicates: a slot gets at most ONE
+// forced probe per round, ever, across reloads (state is durable on swarm-state.json).
+//
+// Contract (returns):
+//   { slot, round }   — next untried slot in canonical order; triedSlots + cursor already
+//                        persisted BEFORE the caller burns pi.setModel on it (crash after pick
+//                        may sacrifice one probe, but can never duplicate it after reload)
+//   { slot: undefined, round } — round exhausted: every configured slot is in triedSlots.
+//                        round.exhaustedAt + nextProbeAt are stamped (earliest cooldown among
+//                        tried slots, clamped to ≤ benchMaxMs from now — D4); NO probe fires
+//                        before nextProbeAt. The caller records swap_no_candidate / exhausted.
+//   undefined          — D5 disabled (config/env) or no pool: caller falls back to D2 behavior.
+//
+// NO pool-lock here: the mutation target is swarm-state.json (withLock), not pool-state.json.
+// Must be called OUTSIDE withLock (the swap hook's own lock usage wraps state reads separately).
+export async function advanceProbeRound(
+	p: Paths,
+	cwd: string,
+	agentId: string,
+	failedSlot: ModelSlot,
+	resolvable?: (slot: ModelSlot) => boolean,
+): Promise<{ slot?: ModelSlot; round: PoolProbeRound } | undefined> {
+	const { slots, rotation } = effectiveConfig();
+	if (!rotation.forceProbeRound || !slots.length) return undefined;
+	// Canonical ordered unique slot keys (dedupe identical provider/model entries).
+	const canonical = slots.map((s) => ({ slot: s, key: slotKey(s) }));
+	const uniqueKeys = [...new Set(canonical.map((c) => c.key))];
+	const failedKey = slotKey(failedSlot);
+	// Read-modify-write the durable round under the state lock (same lock the swap hook uses for
+	// its roleKind read — sequential with the hook's own state access).
+	const { readState, writeState, withLock } = await import("./state.ts");
+	return withLock(p, async () => {
+		const st = await readState(p, cwd);
+		const rounds = st.poolProbeRounds ?? {};
+		let round = rounds[agentId];
+		const nowMs = Date.now();
+		// A round that already recorded its exhaustion stays fenced until nextProbeAt: errors on
+		// the current slot BEFORE due must not re-open or extend the round (S3's "no 4th probe").
+		if (round?.exhaustedAt && round.nextProbeAt) {
+			const dueMs = new Date(round.nextProbeAt).getTime();
+			if (Number.isFinite(dueMs) && nowMs < dueMs) {
+				return { slot: undefined, round };
+			}
+			// Due (or overdue — e.g. bench ceiling elapsed while the session was down): open a FRESH
+			// round seeded with only the current failed slot. triedSlots from the old round are
+			// eligible again: their cooldowns expired or the operator cleared them.
+			round = { roundId: `probe-${nowMs}`, startedAt: new Date(nowMs).toISOString(), triedSlots: [], cursor: 0 };
+		}
+		if (!round) {
+			round = { roundId: `probe-${nowMs}`, startedAt: new Date(nowMs).toISOString(), triedSlots: [], cursor: 0 };
+		}
+		// The failing CURRENT slot counts as tried — the probe ring starts AFTER it.
+		if (!round.triedSlots.includes(failedKey)) round.triedSlots.push(failedKey);
+		// Walk canonical order from the cursor for the first untried unique slot.
+		const startIdx = Math.min(Math.max(0, round.cursor || 0), Math.max(0, canonical.length - 1));
+		let pickedIdx = -1;
+		const skippedUnresolvable: string[] = [];
+		for (let off = 0; off < canonical.length; off++) {
+			const idx = (startIdx + off) % canonical.length;
+			const key = canonical[idx].key;
+			if (round.triedSlots.includes(key)) continue;
+			// Deduplicate identical keys: only the FIRST canonical occurrence may be probed.
+			if (canonical.findIndex((c) => c.key === key) !== idx) continue;
+			// D5 S6: a slot the caller cannot resolve to a live model (registry miss) is durably
+			// skipped WITHOUT burning a probe on it — recorded in triedSlots so it is never
+			// revisited this round, and traced once here (the trace fires under the state lock
+			// but is append-only IO; acceptable — same shape as writePoolHealth inside withPoolLock).
+			if (resolvable && !resolvable(canonical[idx].slot)) {
+				round.triedSlots.push(key);
+				skippedUnresolvable.push(key);
+				continue;
+			}
+			pickedIdx = idx;
+			break;
+		}
+		if (skippedUnresolvable.length) {
+			await trace(p, "pool.probe_round_slot_unresolvable", { agentId, roundId: round.roundId, slots: skippedUnresolvable }).catch(() => {});
+		}
+		if (pickedIdx === -1) {
+			// Round exhausted: stamp durable fence + earliest cooldown (clamped to benchMaxMs — D4).
+			const h = await readPoolHealth(p);
+			let earliest = Number.POSITIVE_INFINITY;
+			for (const key of round.triedSlots) {
+				const cd = h.slots[key]?.cooldownUntil ? new Date(h.slots[key].cooldownUntil as string).getTime() : NaN;
+				if (Number.isFinite(cd)) earliest = Math.min(earliest, cd);
+			}
+			// No cooldown recorded (all expired/cleared) → probe again after the ceiling; else the
+			// earliest deadline, never past now + benchMaxMs (D4 operator invariant).
+			const base = Number.isFinite(earliest) ? earliest : nowMs;
+			const due = Math.min(Math.max(base, nowMs), nowMs + rotation.benchMaxMs);
+			round.exhaustedAt = new Date(nowMs).toISOString();
+			round.nextProbeAt = new Date(due).toISOString();
+			round.cursor = 0;
+			rounds[agentId] = round;
+			st.poolProbeRounds = rounds;
+			await writeState(p, st);
+			return { slot: undefined, round };
+		}
+		const picked = canonical[pickedIdx];
+		round.triedSlots.push(picked.key);
+		round.cursor = (pickedIdx + 1) % canonical.length;
+		delete round.exhaustedAt;
+		delete round.nextProbeAt;
+		delete round.wakeSentAt;
+		rounds[agentId] = round;
+		st.poolProbeRounds = rounds;
+		await writeState(p, st);
+		return { slot: picked.slot, round };
+	});
+}
+
+// Clear an agent's open probe round (success path, /swarm pool clear, or manual un-bench).
+// Returns true when a round existed and was removed.
+export async function clearProbeRound(p: Paths, cwd: string, agentId: string): Promise<boolean> {
+	const { readState, writeState, withLock } = await import("./state.ts");
+	return withLock(p, async () => {
+		const st = await readState(p, cwd);
+		if (!st.poolProbeRounds?.[agentId]) return false;
+		delete st.poolProbeRounds[agentId];
+		await writeState(p, st);
+		return true;
 	});
 }
 

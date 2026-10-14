@@ -179,18 +179,28 @@ async function benchSlot(key, untilMs) {
 	await benchSlot("cp/glm53", 2 * 3600_000);
 	await benchSlot("cp/glm47", 2 * 3600_000); // even the untagged slot is benched
 	const ctx = mkCtx();
-	await fireQuotaErrorTurn(ctx); // strike 1+2 -> exhausted -> swap path -> no candidate anywhere
-	await fireQuotaErrorTurn(ctx, 2); // a second full error cycle within 5min — notify must throttle
+	await fireQuotaErrorTurn(ctx); // strike 1+2 -> exhausted -> no healthy candidate -> D5 probe ring opens
+	// Burn the ring: each probed slot fails its own 2-strike burst, advancing the ring, until
+	// every slot is tried and the round records durable exhaustion (swap_no_candidate + notify).
+	for (let i = 0; i < 4; i++) {
+		const serving = setModelCalls.at(-1)?.split("/")[1];
+		if (!serving) break; // ring never opened a probe (unexpected) — bail to fail loudly below
+		const before = setModelCalls.length;
+		await fireQuotaErrorTurn(ctx, 2, serving);
+		if (setModelCalls.length === before) break; // no further probe -> round exhausted
+	}
 	const evs = await traceEvents();
-	ok("S2 no setModel on true no-candidate", setModelCalls.length === 0, JSON.stringify(setModelCalls));
-	// R10-1: the no-candidate path itself crosses ZERO L2 boundaries. (The observed swarm-message
-	// sends are the pre-existing Issue-17 engine-retry CONTINUE notes from the gated branch — one
-	// per strike-1, fired before exhaustion — not products of the no-candidate branch.)
-	const poolEventMsgs = sentMessages.filter((s) => s.m?.customType === "swarm-pool-event");
-	ok("S2 zero swarm-pool-event sendMessage on true no-candidate (R10-1)", poolEventMsgs.length === 0, JSON.stringify(sentMessages.map((s) => s.m?.customType)));
+	// D5 (2026-10-14 §1.4) semantics: an all-benched pool OPENS a probe round — terra probes the
+	// benched glm53 (cooldown bypass), then glm47. The OLD "stand still + no setModel" behavior
+	// is gone by design; the ring IS the no-candidate answer, bounded to one probe per slot.
+	ok("S2 probe ring opened on all-benched pool", setModelCalls.length >= 1, JSON.stringify(setModelCalls));
+	const probeSwaps = evs.filter((e) => e.event === "pool.probe_round_swap");
+	ok("S2 probe_round_swap traced with ignoredCooldown", probeSwaps.length >= 1 && probeSwaps[0].ignoredCooldown === true, JSON.stringify(probeSwaps));
+	// After the whole ring burns (2-slot pool: glm53 + glm47 + terra tried), the round exhausts:
+	// swap_no_candidate traced with the durable fence, notify says when the next round opens.
 	const noCand = evs.filter((e) => e.event === "pool.swap_no_candidate");
-	ok("S2 swap_no_candidate traced", noCand.length >= 1, JSON.stringify(evs.filter((e) => e.event?.startsWith("pool."))));
-	const errNotifies = notifications.filter((n) => n.level === "error" && /no healthy slot/i.test(n.text));
+	ok("S2 swap_no_candidate traced once the ring exhausts", noCand.length >= 1, JSON.stringify(evs.filter((e) => e.event?.startsWith("pool.")).map((e) => e.event)));
+	const errNotifies = notifications.filter((n) => n.level === "error" && /(no healthy slot|probe round exhausted)/i.test(n.text));
 	ok("S2 operator notify fired exactly once (5min throttle)", errNotifies.length === 1, JSON.stringify(notifications));
 
 	// headless shape: ctx.hasUI false must not throw (R4)

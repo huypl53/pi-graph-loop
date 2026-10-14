@@ -1,0 +1,9 @@
+# pool-probe-round-c: D5 fixture (plan 2026-10-14 §3.4). Slot C — pre-benched in the seed but
+# its quota actually RECOVERED (the stale cooldown was the false signal D5 exists to correct).
+# When the ring reaches C, the probe succeeds, the task completes, and the durable round is
+# cleared (recordSlotSuccess + clearProbeRound on the stop turn).
+{"name":"probe succeeds on recovered slot C","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"Recovered after the probe round; continuing the task on this slot."},{"type":"toolcall","delayMs":10,"name":"swarm_check_mailbox","id":"mb-1","arguments":{"pendingOnly":true,"markDelivered":true,"limit":20}},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"steady serving on C","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"Task continuing normally on the recovered slot."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"completion turn on C","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"Done: the probe round found a serving model and completed the task."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"extra settle turn on C","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"Final report: done."},{"type":"stop","delayMs":5,"reason":"stop"}]}
+{"name":"spare turn on C","stopReason":"stop","events":[{"type":"text","delayMs":15,"text":"Idle."},{"type":"stop","delayMs":5,"reason":"stop"}]}

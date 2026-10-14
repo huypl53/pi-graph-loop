@@ -1,0 +1,9 @@
+# pool-probe-round-b: D5 fixture (plan 2026-10-14 §3.4). Slot B of the probe round —
+# PRE-BENCHED in the lane seed (old cooldown from an earlier incident), which is exactly the
+# point: a proxy provider is transport only, so B's stale cooldown says nothing about its live
+# quota. The ring probes it anyway (ignoredCooldown). B is ALSO out of quota right now — its
+# turns fail — so the ring advances to C.
+{"name":"probe strike on B fails too","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"B retry still failing","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"late error turn on B (carry-over)","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}
+{"name":"B still dead after re-probe","events":[{"type":"error","delayMs":10,"kind":"429","status":429,"message":"You have hit your ChatGPT usage limit.","body":{"error":{"message":"You have hit your ChatGPT usage limit.","type":"usage_limit_reached","code":"usage_limit_reached"}}}]}

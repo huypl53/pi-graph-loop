@@ -151,6 +151,7 @@ rotation:
     cooldownMs: 900000
     maxRetries: 2
     benchMaxMs: 3600000 # 1h ceiling for exponential backoff (all kinds)
+    forceProbeRound: true # probe every distinct model once when all slots benched
     benchStreakDecayMs: 21600000 # 6h healthy serving window resets streak to 0
     roleFallbackOnSwap: true # rotate to healthy untagged slot if role slots benched
 # terminalManager: tmux      # multiplexer: tmux (default) | herdr
@@ -185,6 +186,7 @@ rotation:
     cooldownMs: 900000           # initial bench duration after consecutive failures reach maxRetries (default: 15m)
     maxRetries: 2                # consecutive failures before benching (default: 2)
     benchMaxMs: 3600000          # bench ceiling for exponential backoff (default: 1h; all kinds incl. auth)
+    forceProbeRound: true        # when EVERY slot is benched, round-robin each distinct model once (default: true)
     benchStreakDecayMs: 21600000 # healthy serving window resets benchStreak to 0 (default: 6h; 0 = off)
     roleFallbackOnSwap: true     # auto-swap fallback to healthy untagged slot if role slots benched (default: true)
 ```
@@ -194,6 +196,7 @@ rotation:
 - **Per-slot `quotaReset` floor**: Optional per-slot duration (`"30m"`, `"2h"`, `"1d"` or ms) acting as a floor before exponential backoff and final ceiling are applied (e.g., a 24h `quotaReset` is clamped to the 1h `benchMaxMs` ceiling).
 - **No rolling re-bench while benched**: If a benched slot must continue serving (e.g. no healthy candidate available), subsequent error turns do not roll the bench forward or inflate `benchStreak` within the same outage, unless a strictly longer severity escalation occurs (e.g. `rate_limit` 15m escalated to `auth` / `quota` 1h).
 - **Bench streak decay (`benchStreakDecayMs`)**: When a slot remains continuously healthy and serves turns for longer than `benchStreakDecayMs` (default `21_600_000` ms = 6h) since its last bench (`lastBenchAt`), its `benchStreak` resets to 0 on the next successful turn. Stale outages from hours or days earlier stop compounding future backoff. `0` disables decay. Env override: `PI_SWARM_BENCH_STREAK_DECAY_MS`.
+- **Forced model probe round (`forceProbeRound`)**: When the engine-retry gate exhausts a slot's error path AND no healthy slot exists anywhere (role-filtered pick and the `roleFallbackOnSwap` bypass both come up empty), the pool opens a durable probe **round**: it walks the canonical `modelPool` order and probes every distinct `provider/model` **once** — deliberately bypassing cooldown AND roles. This exists because a proxy provider (e.g. `cliproxyapi`) is transport only: `cliproxyapi/glm-5.3`, `…/gpt-5.6-terra`, `…/claude-fable-5` each have an independent quota window, so a stale cooldown on one model is a hint about that model, not a wall for the pool. A slot is never probed twice in one round (state survives `/reload` and crashes); a successful turn clears the round. When the entire round fails, `nextProbeAt` (earliest cooldown, clamped to ≤ `benchMaxMs`) fences further probes, and the root pump sends exactly one wake at due time to re-open a fresh round — the pool never sits dark longer than `benchMaxMs`. Probe swaps are traced `pool.probe_round_swap {ignoredCooldown, ignoredRoles}` and are exempt from `MAX_SWAP_CHAIN` (the round is its own bound). Env off-switch: `PI_SWARM_FORCE_PROBE_ROUND_OFF=1`.
 - **Auto-swap role fallback (`roleFallbackOnSwap`)**: When all slots tagged for an agent's role (e.g. `roles: [root]`) are benched, auto-swap retries `pickSlot` with `bypassRolesFilter: true`. If a healthy untagged slot exists, the turn rotates to it (traced loudly with `rolesIgnored: true`). Env off-switch: `PI_SWARM_ROLE_FALLBACK_OFF=1`.
 - **Observability in `/swarm pool list`**: Shows `BENCHED <m>m (streak <N>)` when a slot is in cooldown and its `benchStreak > 1`.
 

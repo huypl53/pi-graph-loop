@@ -1,6 +1,6 @@
 import type { RecentSpawn, SwarmAgent } from "./agents.ts";
 import type { MessageRecord, RootReceiptEntry } from "./messages.ts";
-import type { ModelSlot, RotationConfig } from "./pool.ts";
+import type { ModelSlot, PoolProbeRound, RotationConfig } from "./pool.ts";
 import type { TaskState } from "./tasks.ts";
 import type { IssueRun } from "../issues/state.ts";
 
@@ -416,6 +416,12 @@ export type SwarmState = {
 	// Loop-repeat guard v1.2 (task loop-repeat-guard). State keyed `${agentId}\u0000${activeTaskId}`.
 	// Deleted on task change; survives restarts so a re-spawned agent resumes its rings.
 	loopRepeats?: Record<string, LoopRepeatState>;
+	// D5 (plan 2026-10-14 §1.4): per-agent durable forced probe-round state. Written by the swap
+	// hook when an exhausted error path starts/advances a probe round; cleared on a successful
+	// stop turn, by /swarm pool clear, or when a new round opens after nextProbeAt. Durable so
+	// /reload or crash never restarts a full round and re-burns the same models. NOT back-filled
+	// by readState — absent === no open round (mirrors `goal`).
+	poolProbeRounds?: Record<string, PoolProbeRound>;
 	messages: Record<string, MessageRecord>;
 	createdAt: string;
 	updatedAt: string;

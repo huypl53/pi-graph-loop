@@ -22,7 +22,8 @@
 //   F4: transient stays gated (single ECONNREFUSED strike — no swap, no bench).
 //   F5: success-turn reset still works after a single-strike quota swap (fresh incident on
 //       the next slot's error).
-//   F6: swap-chain cap still applies to single-strike swaps (2 swaps max in 5 minutes).
+//   F6 (D5 semantics 2026-10-14): probe swaps are exempt from MAX_SWAP_CHAIN — the ring
+//       itself bounds the cascade; post-exhaustion errors are fenced by nextProbeAt.
 //   F7: guest sessions never rotate even on single-strike quota errors.
 //   F8: the exact proxy buffer-limit failure rotates on its first request-limit strike.
 //   F9: the auth_unavailable wrapper carrying nested request-buffer text honors its existing
@@ -329,17 +330,31 @@ ok("proxy auth_unavailable wrapper classifies as auth", classifyProviderError("a
 // =============================================================
 {
 	await freshSession("worker-chain");
-	// glm quota -> swap #1; gpt quota -> swap #2; claude quota -> capped (MAX_SWAP_CHAIN=2)
+	// D5 (plan 2026-10-14 §1.4) semantics: probe-round swaps are EXEMPT from MAX_SWAP_CHAIN —
+	// the ring is its own bound (each slot at most once per round). The real failing chain:
+	// glm x2 -> normal swap to gpt; gpt x2 -> normal swap to claude (fallback-only); claude x2
+	// -> all benched -> probe ring opens -> glm (probe, past the old cap); glm x2 -> probe gpt;
+	// gpt x2 -> round exhausted, durable nextProbeAt fences everything after.
 	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
 	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
 	await errOnce(fakeModelGpt, CHATGPT_USAGE_LIMIT);
 	await errOnce(fakeModelGpt, CHATGPT_USAGE_LIMIT);
 	const two = setModelCalls.length;
-	ok("F6: chain allows first 2 swaps", two === 2, `calls=${two}`);
+	ok("F6: first 2 normal swaps allowed", two === 2, `calls=${two}`);
 	await errOnce(fakeModelClaude, CHATGPT_USAGE_LIMIT);
-	ok("F6: chain caps the 3rd swap", setModelCalls.length === 2, `calls=${setModelCalls.length}`);
-	const capped = await countTraceEvents("pool.swap_chain_capped");
-	ok("F6: swap_chain_capped trace fired", capped === 1, `capped=${capped}`);
+	await errOnce(fakeModelClaude, CHATGPT_USAGE_LIMIT);
+	ok("F6: probe ring not truncated by MAX_SWAP_CHAIN — 3rd swap fires", setModelCalls.length === 3, `calls=${setModelCalls.length}`);
+	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
+	await errOnce(fakeModelGlm, CHATGPT_USAGE_LIMIT);
+	ok("F6: ring continues — 4th slot probed", setModelCalls.length === 4, `calls=${setModelCalls.length}`);
+	await errOnce(fakeModelGpt, CHATGPT_USAGE_LIMIT);
+	await errOnce(fakeModelGpt, CHATGPT_USAGE_LIMIT); // every slot tried -> exhausted
+	ok("F6: exhausted ring fences further probes", setModelCalls.length === 4, `calls=${setModelCalls.length}`);
+	await errOnce(fakeModelGpt, CHATGPT_USAGE_LIMIT);
+	await errOnce(fakeModelGpt, CHATGPT_USAGE_LIMIT); // post-exhaustion burst still fenced (nextProbeAt)
+	ok("F6: post-exhaustion burst fenced by nextProbeAt", setModelCalls.length === 4, `calls=${setModelCalls.length}`);
+	const exhausted = await countTraceEvents("pool.probe_round_exhausted");
+	ok("F6: probe_round_exhausted traced", exhausted >= 1, `exhausted=${exhausted}`);
 }
 
 // =============================================================
