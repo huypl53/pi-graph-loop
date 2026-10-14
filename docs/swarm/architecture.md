@@ -90,6 +90,19 @@ Primary code:
   assignment**, **non-mutating config discoverability via
   `classifySwarmSettings` / `validateSwarmSettings` / `implicitSingletonPool`**)
 
+#### Hook failure census and root-pump recovery
+
+The hook registration facade wraps swarm `pi.on(...)` handlers so failures are
+re-thrown to Pi's normal error handling while also being recorded in
+`.pi/swarm/traces/errors.jsonl` as `hook_dispatch_error`. Stale-context errors
+are compacted once per extension epoch; other handler errors are logged for
+each occurrence. When the root-pump watchdog stops on a stale context, it stamps
+`rootPumpStop: { reason: "stale_ctx", at }` in `swarm-state.json`. A later root
+`agent_settled` with a fresh TUI context can consume the stamp and re-arm one
+watchdog timer. This is bounded recovery and durable diagnosis, not a promise
+that Pi will dispatch every hook after `/reload`; details and layer accounting
+are in [Pi runtime contract §10, F29](./pi-runtime-contract.md#10-r12r15-false--unproven-claims-register).
+
 ### 2. Messaging lifecycle
 Handles mailbox append, tmux injection, interception, acknowledgements, retries,
 dead letters, and idempotency. A delivery that initially failed tmux injection but is later surfaced/intercepted or ACKed `processing` remains response-tracked until the worker produces a verified result and ACKs `done` with a `resultMessageId`.
