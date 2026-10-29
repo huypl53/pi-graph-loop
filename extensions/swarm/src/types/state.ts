@@ -170,6 +170,13 @@ export type SwarmIdleNudgeState = {
 	// closer than the check interval do NOT advance the streak.
 	goalIdleCheckCount?: number;
 	goalIdleLastCheckAt?: string;
+	// === task: vacuous-user-goal-nudge (2026-10-29): solo-route check-streak state ===
+	// Same debounce rules as goalIdleCheckCount/goalIdleLastCheckAt but owned by the
+	// empty-pool user-goal route (emitSoloVacuousGoalNudgeLocked). Separate fields because
+	// the shared ones are wiped every vacuous tick by resetIdleEpochState — the solo route
+	// must accumulate across vacuous ticks; a busy root turn resets its streak.
+	soloGoalIdleCheckCount?: number;
+	soloGoalIdleLastCheckAt?: string;
 	lastLongRunningToolNudges?: Record<string, string>;
 	// === task-r-deadpane-goal-classifier (2026-10-03): per-agent pane-probe cooldown ledger ===
 	// goalDiagProbeLedger[agentId] = ISO timestamp of the last dead-pane probe issued by the

@@ -1,0 +1,13 @@
+# vacuous-user-goal-nudge: solo-goal nudge on an empty pool (2026-10-29).
+# Live incident (vtht-agents swarm, session 01a1868d): a user-origin goal whose text
+# forbids spawning workers ran with ALL workers stopped; the vacuous branch held the
+# goal nudge forever (only goal.nudge.held_no_live_workers + the pool-empty escalation
+# fired, whose hints tell the root to SPAWN WORKERS — the exact action the goal forbids).
+# The user had to type "tiếp đi" manually to keep the goal moving.
+# Post-fix: the user-origin goal on a vacuous pool ALSO emits the standard idle-streak
+# nudge (goal.idle_nudge with route=solo_vacuous) through the same check-streak debounce
+# + cap + backoff as the worker-pool floor. Seeded world: root + one long-stopped worker
+# (genuinely vacuous) + user-origin goal set 30min ago.
+{"name": "solo turn 0 acknowledge-seed", "events": [{"type": "text", "delayMs": 15, "text": "solo turn 0: session_start detected the seeded shape — user-origin goal goal-solo-lane set 30min ago, worker-stopped stopped >30min ago (genuinely vacuous pool). The pump's goal floor will accumulate the solo check streak; the 3rd spaced check emits goal.idle_nudge with route=solo_vacuous. Standing by."}]}
+{"name": "solo turn 1 verify-nudge", "events": [{"type": "text", "delayMs": 2500, "text": "solo turn 1: goal.idle_nudge has fired with route=solo_vacuous — the root mailbox holds the Idle streak nudge (subject: Idle streak: goal ...) whose body says the swarm has ZERO live workers and suggests continuing the goal solo or marking it done (NOT spawning workers). The pool-empty escalation also fired once (bounded complement). Streak survived the per-tick vacuous wipe."}]}
+{"name": "solo turn 2 final-stop", "stopReason": "stop", "events": [{"type": "text", "delayMs": 10, "text": "solo lane complete. After this stop the solo check-streak state and the nudge record persist durably."}, {"type": "stop", "delayMs": 5, "reason": "stop"}]}

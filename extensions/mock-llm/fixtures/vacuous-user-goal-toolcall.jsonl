@@ -1,0 +1,11 @@
+# vacuous-user-goal-toolcall: seeded world (root + long-stopped worker, NO goal). Turn 0
+# is the user-prompt turn and performs a REAL swarm_set_goal tool call with origin=user —
+# the production path a live user-request goal actually takes (the live incident goal
+# carried origin=user, setByScope=user-request). Subsequent pump ticks accumulate the solo
+# check streak and emit goal.idle_nudge route=solo_vacuous into the root mailbox. Note:
+# turns after 0 only fire when something re-triggers the session (a surfaced message or
+# queued turn) — the -p lane gets exactly turn 0 deterministically, which is the path
+# under test.
+{"name": "solo tool turn 0 set-user-goal", "stopReason": "toolUse", "events": [{"type": "text", "delayMs": 10, "text": "Recording the user's goal now via the real tool with origin=user."}, {"type": "toolcall", "delayMs": 5, "name": "swarm_set_goal", "arguments": {"text": "Tiếp tục tối ưu skill knowledge-graph. Không spawn swarm agents.", "origin": "user", "setByScope": "user-request"}}]}
+{"name": "solo tool turn 1 verify", "events": [{"type": "text", "delayMs": 2500, "text": "toolcall turn 1: goal.set fired via the real tool with origin=user; the solo route's check streak is accumulating; goal.idle_nudge (route=solo_vacuous) lands in the root mailbox once the streak completes."}]}
+{"name": "solo tool turn 2 final-stop", "stopReason": "stop", "events": [{"type": "text", "delayMs": 10, "text": "toolcall lane complete."}, {"type": "stop", "delayMs": 5, "reason": "stop"}]}

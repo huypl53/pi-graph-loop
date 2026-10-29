@@ -1986,6 +1986,26 @@ Three coupled fixes (live `reconcile.ts`):
     - the goal clears/cancels (`swarm_mark_goal_done`),
     - the pool becomes non-vacuous (`vacuous: false` for ≥30s — soft reset),
     - the existing escalation message is `acked` with `status: "done"`.
+- **vacuous-user-goal-nudge (2026-10-29) — solo-goal route on an empty pool**.
+  For a **user-origin** goal (`goal.origin === "user"` — e.g.
+  `swarm_set_goal({ origin: "user", setByScope: "user-request" })`, the live
+  user-request path), the vacuous hold is NOT final: zero live workers + an
+  idle root IS "no swarm agent is working", the goal floor's exact trigger.
+  After the same R27 check-streak debounce (own counter fields
+  `soloGoalIdleCheckCount`/`soloGoalIdleLastCheckAt` — the shared counter is
+  wiped every vacuous tick by `resetIdleEpochState`), the evaluator emits the
+  STANDARD `goal.idle_nudge` (seq-keyed `NOTIFY_KEY_GOAL_IDLE_NUDGE` family,
+  cap + back-off identical) with a solo-aware body ("ZERO live workers…
+  Continue working the goal yourself… or mark it done" — it does NOT suggest
+  spawning, which the live incident goal explicitly forbade). A busy root
+  holds the route (`root_busy`) and resets the solo streak. The pool-empty
+  escalation above still fires unchanged as the bounded complement. Live
+  incident 2026-10-29 (vtht-agents swarm): user goal "Không spawn swarm
+  agents" starved for hours — zero `goal.idle_nudge`, only ~1/hour spawn-hint
+  escalations — until the user manually typed "tiếp đi". Trace marker:
+  `goal.idle_nudge { route: "solo_vacuous", idleAgents: 0 }`. Tests:
+  `extensions/swarm/tests/vacuous-user-goal-nudge.test.mjs` (red-first) +
+  mock-llm lanes `vacuous-user-goal-nudge` / `vacuous-user-goal-toolcall`.
 
 ### Six R10-1 boundary counters
 

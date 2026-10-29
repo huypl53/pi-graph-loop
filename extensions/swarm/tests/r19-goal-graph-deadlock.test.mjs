@@ -493,7 +493,13 @@ console.log("\n=== R19-S4: vacuous pool (no regression) ===");
 		heldCount >= 1 || escalationCount >= 1,
 		`held=${heldCount} escalation=${escalationCount}`,
 	);
-	ok("R19-S4: goal.idle_nudge === 0 (vacuous blocks)", idleNudgeCount === 0);
+	// task: vacuous-user-goal-nudge (2026-10-29) — design flip: a USER-origin goal on a
+	// vacuous pool is no longer silently held. The standard idle-streak nudge fires on
+	// the completed check streak (3 ticks @500ms = 3 samples = 1 streak → 1 nudge);
+	// pre-flip this asserted idleNudgeCount === 0, which pinned the starved-solo-goal bug
+	// (live incident 2026-10-29: zero nudges for hours on a user goal, manual "tiếp đi"
+	// needed to keep it moving).
+	ok("R19-S4: goal.idle_nudge === 1 (user-origin solo goal nudged through the standard floor)", idleNudgeCount === 1);
 	await rm(dir, { recursive: true, force: true });
 }
 

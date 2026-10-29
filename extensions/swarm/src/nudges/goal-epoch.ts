@@ -571,7 +571,9 @@ async function emitPoolEmptyEscalationLocked(
 		);
 	}
 	if (hints.length === 0) {
-		hints.push(`No live workers but no clear ghost classification. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` or ask the user for direction.`);
+		hints.push(
+			`No live workers but no clear ghost classification. Run \`swarm_spawn_agent(role=..., roleKind=worker)\` or ask the user for direction.`,
+		);
 	}
 	hints.push(`Or scope a step: \`swarm_create_task(title=..., goal=..., workflow=feature-dev)\` and assign to a fresh worker.`);
 	hints.push(`Or clear the goal if it is no longer relevant: \`swarm_mark_goal_done(goalId="${goal.id}")\`.`);
@@ -594,6 +596,167 @@ async function emitPoolEmptyEscalationLocked(
 		conversationId: `goal:${goal.id}:escalation:pool-empty:cooldown:${NOTIFY_DEFAULT_COOLDOWN_MS}`,
 		idempotencyKey: `goal:${goal.id}:escalation:pool-empty:${new Date(nowMs).toISOString().slice(0, 13)}`,
 	});
+}
+
+// === task: vacuous-user-goal-nudge (2026-10-29) — solo-goal user predicate ===
+// Live incident 2026-10-29 (vtht-agents swarm, session 01a1868d): a user-origin goal whose
+// text forbids spawning workers ("Không spawn swarm agents") ran with a genuinely empty
+// pool; the vacuous branch held the goal nudge FOREVER (goal.nudge.held_no_live_workers,
+// zero goal.idle_nudge over hours) while only the pool-empty escalation fired — whose
+// hints tell the root to spawn workers, the exact action the goal forbids. The user had
+// to type "tiếp đi" manually to keep the goal moving. Per the goal-floor intent (R27
+// user direction: "sau 3 lần mà thấy trạng thái vẫn là ko có swarm agents nào làm việc thì
+// mới nudge"), zero workers + idle root IS "no swarm agent is working": a user-origin
+// goal must nudge the root through the SAME standard floor (debounce + cap + backoff),
+// not be starved by the Issue-85 anti-spam carve-out (which encodes the OLD assumption
+// that every goal needs workers — false for solo goals where the root itself is the
+// executor, the shape this predicate routes). The carve-out remains in force for the
+// other origins (root/system/batch goals are worker-oriented by construction — the
+// escalation alone is their correct surface). Exported for direct unit testing.
+export function goalNudgesOnVacuousPool(goal: { origin?: GoalOrigin } | undefined): boolean {
+	return goal?.origin === "user";
+}
+
+// === task: vacuous-user-goal-nudge (2026-10-29) — solo nudge emission (vacuous pool) ===
+// The standard goal-nudge emission, re-instantiated for the solo (zero-worker) route:
+// the R27 check-streak debounce → backoff → R23 cap branch → seq-keyed idempotent
+// emission are the SAME rules as the tail of evaluateIdleGoalNudgeLocked, with a
+// solo-aware body (the root is the executor; spawning is NOT suggested). Read-only on
+// agent state. Caller holds the pump's withLock(p) and persists state on return.
+// Returns the evaluator result verbatim.
+async function emitSoloVacuousGoalNudgeLocked(
+	pi: ExtensionAPI,
+	cwd: string,
+	p: Paths,
+	st: SwarmState,
+	goal: NonNullable<SwarmState["goal"]>,
+	idleState: SwarmIdleNudgeState,
+	nowMs: number,
+): Promise<{ emitted: boolean; reason: string }> {
+	// Set-grace (identical rule to the worker-pool path).
+	const sinceSetMs = nowMs - new Date(goal.setAt).getTime();
+	if (GOAL_INITIAL_SET_GRACE_MS > 0 && sinceSetMs < GOAL_INITIAL_SET_GRACE_MS) {
+		return { emitted: false, reason: "within_goal_grace" };
+	}
+	// R27 check-streak debounce — SAME rules, SEPARATE counter fields
+	// (soloGoalIdleCheckCount/soloGoalIdleLastCheckAt). The shared fields
+	// (goalIdleCheckCount/goalIdleLastCheckAt) are wiped EVERY vacuous tick by
+	// updateIdleEpochLocked's !allIdle branch (resetIdleEpochState), so reusing them here
+	// would never accumulate a streak — the solo route carries its own, reset on rootBusy
+	// (the evaluator's solo route) and on emission, mirroring "any busy sample resets the
+	// streak".
+	const checkIntervalMs = resolveGoalIdleCheckIntervalMs();
+	const checksRequired = resolveGoalIdleChecksRequired();
+	const lastCheckMs = idleState.soloGoalIdleLastCheckAt ? new Date(idleState.soloGoalIdleLastCheckAt).getTime() : 0;
+	const isFreshSample = nowMs - lastCheckMs >= checkIntervalMs;
+	if (!isFreshSample) {
+		return { emitted: false, reason: "idle_interval_pending" };
+	}
+	idleState.soloGoalIdleLastCheckAt = new Date(nowMs).toISOString();
+	idleState.soloGoalIdleCheckCount = (idleState.soloGoalIdleCheckCount ?? 0) + 1;
+	await traceLogged(p, "goal.idle_check", {
+		goalId: goal.id,
+		count: idleState.soloGoalIdleCheckCount,
+		required: checksRequired,
+		checkIntervalMs,
+		route: "solo_vacuous",
+	});
+	if (idleState.soloGoalIdleCheckCount < checksRequired) {
+		return { emitted: false, reason: "idle_interval_pending" };
+	}
+	idleState.soloGoalIdleCheckCount = 0;
+
+	const effectiveMaxNudges = resolveGoalMaxNudges(goal.maxNudges);
+	const isInfinite = effectiveMaxNudges === -1;
+
+	// Back-off accounting: round-based, identical rules.
+	if (goal.backoffTicksRemaining && goal.backoffTicksRemaining > 0) {
+		if (isInfinite) {
+			delete goal.backoffTicksRemaining;
+			delete idleState.goalBackoffTicksRemaining;
+		} else {
+			goal.backoffTicksRemaining -= 1;
+			idleState.goalBackoffTicksRemaining = goal.backoffTicksRemaining;
+			if (goal.backoffTicksRemaining === 0) {
+				await traceLogged(p, "goal.nudge.backoff.exhausted", { goalId: goal.id, by: 1 });
+				return { emitted: false, reason: "backoff_just_exhausted" };
+			}
+			await traceLogged(p, "goal.nudge.backoff.skip", { goalId: goal.id, remaining: goal.backoffTicksRemaining });
+			return { emitted: false, reason: "backoff" };
+		}
+	}
+
+	// Cap branch: at max without a resolve → arm backoff and hold (identical rules). The
+	// R23 fresh-epoch reset cannot apply on the solo route (no worker busy edge can mint a
+	// fresh anchor while the pool is empty — root turn churn stamps ["root"] provenance
+	// and the R23B breaker rejects it), so the cap arms backoff directly.
+	if (!isInfinite && goal.consecutiveNoResolveNudges >= effectiveMaxNudges) {
+		if (!goal.backoffTicksRemaining) {
+			goal.backoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
+			idleState.goalBackoffTicksRemaining = GOAL_NUDGE_BACKOFF_TICKS;
+			await traceLogged(p, "goal.nudge.backoff", {
+				goalId: goal.id,
+				nudges: goal.consecutiveNoResolveNudges,
+				max: effectiveMaxNudges,
+				backoffTicks: GOAL_NUDGE_BACKOFF_TICKS,
+				route: "solo_vacuous",
+			});
+		}
+		return { emitted: false, reason: "max_nudges" };
+	}
+
+	// Idempotency: seq-keyed, the SAME family as the worker-pool nudge (the surface-side
+	// R28 monotonic-seq guard + staleSurfaceReason goal-key branch apply unchanged).
+	const nudgeSeq = (goal.nudgeSeq ?? 0) + 1;
+	const key = formatNotifyKey(NOTIFY_KEY_GOAL_IDLE_NUDGE, { goalId: goal.id, seq: String(nudgeSeq) });
+	if (findIdempotentMessage(st, "root", "root", key)) {
+		return { emitted: false, reason: "duplicate_suppressed" };
+	}
+
+	const subjectText = goal.text.slice(0, 60);
+	const bodyText = goal.text.slice(0, 240);
+	const sinceSec = Math.max(0, Math.round(sinceSetMs / 1000));
+	const nudgeNumber = goal.consecutiveNoResolveNudges + 1;
+	const subject = `Idle streak: goal "${subjectText}" has no active work`;
+	const maxText = isInfinite ? "∞ (infinite, stops only when marked done)" : `${effectiveMaxNudges} before back-off`;
+	const body =
+		`Goal ${goal.id} was set ${sinceSec}s ago: "${bodyText}".\n\n` +
+		`The swarm has ZERO live workers and the root has been idle for ${checksRequired} consecutive checks (${Math.round(checkIntervalMs / 1000)}s apart) — no swarm agent (worker or root) is advancing this goal.\n\n` +
+		`This is nudge ${nudgeNumber} of ${maxText}.\n\n` +
+		`Action:\n` +
+		`- Continue working the goal yourself (solo execution), or spawn/assign work if the goal allows it.\n` +
+		`- Or mark it done: swarm_mark_goal_done(goalId="${goal.id}")\n\n` +
+		`(Any reply you produce — including a plain /swarm status, a tool call, or an explanation — is treated as a "resolve": the consecutive counter resets and the back-off clears. Only a silent ignore keeps the counter climbing.)`;
+	await deliverMessageLocked(pi, cwd, p, st, {
+		to: "root",
+		subject,
+		body,
+		requiresAck: PI_SWARM_MINIMAL_PROTOCOL === 1 ? false : true,
+		idempotencyKey: key,
+		priority: "normal",
+	});
+
+	goal.consecutiveNoResolveNudges += 1;
+	goal.nudgeSeq = nudgeSeq;
+	goal.lastNudgeAt = new Date(nowMs).toISOString();
+	idleState.lastGoalNudgeAt = goal.lastNudgeAt;
+	idleState.goalConsecutiveNoResolveNudges = goal.consecutiveNoResolveNudges;
+	idleState.goalBackoffTicksRemaining = goal.backoffTicksRemaining;
+	await trace(p, "goal.idle_nudge", {
+		goalId: goal.id,
+		text: bodyText,
+		setAt: goal.setAt,
+		consecutiveCount: goal.consecutiveNoResolveNudges,
+		max: effectiveMaxNudges,
+		sinceSetMs,
+		idleAgents: 0,
+		route: "solo_vacuous",
+		customType: "goal.idle_nudge",
+		key,
+		checkIntervalMs,
+		checksRequired,
+	});
+	return { emitted: true, reason: "emitted_solo_vacuous" };
 }
 
 // MUST be called under the same withLock(p) the pump already holds; never acquire the lock
@@ -685,6 +848,21 @@ export async function evaluateIdleGoalNudgeLocked(
 		// pre-R14-+-no-tail shape meant a re-entering pump saw lastWasVacuous=undefined
 		// and re-fired the held trace every tick.
 		await writeState(p, st);
+		// === task: vacuous-user-goal-nudge (2026-10-29) — solo-goal route (empty pool) ===
+		// Everything above (held trace + bounded pool-empty escalation) is UNCHANGED. A
+		// USER-origin goal additionally falls through to the standard nudge machinery:
+		// zero workers + idle root IS "no swarm agent is working" (the goal floor's exact
+		// trigger — the live incident goal text even forbade spawning workers, so the
+		// escalation's spawn hints were the wrong action entirely). rootBusy returns first:
+		// a solo executor mid-turn must not be nudged on its own goal, and its busy sample
+		// resets the solo route's check streak (R27 semantics).
+		if (rootBusy) {
+			delete idleState.soloGoalIdleCheckCount;
+			return { emitted: false, reason: "root_busy" };
+		}
+		if (goalNudgesOnVacuousPool(goal)) {
+			return await emitSoloVacuousGoalNudgeLocked(pi, cwd, p, st, goal, idleState, nowMs);
+		}
 		return { emitted: false, reason: "no_live_workers" };
 	}
 	if (!allIdle) {

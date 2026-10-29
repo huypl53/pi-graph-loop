@@ -451,6 +451,9 @@ console.log("\n[R14-S2] Config B — 12-tick stable genuinely-vacuous pool (3 de
 	heldTraceCount = events.filter((e) => e.event === "goal.nudge.held_no_live_workers").length;
 	const escalationTraces = events.filter((e) => e.event === "goal.escalation.pool_empty" || e.event === "message.deliver.mailbox_only");
 	escalationSendCount = escalationTraces.filter((e) => e.event === "goal.escalation.pool_empty").length;
+	// task: vacuous-user-goal-nudge — count the standard solo nudges separately so the
+	// escalation-append assertion below can exclude them.
+	const soloNudgeCount = events.filter((e) => e.event === "goal.idle_nudge").length;
 
 	ok(
 		"R14-S2 [GREEN post-fix-B] heldNoLiveWorkersTraceCount === 1 (once-per-transition dedupe)",
@@ -465,9 +468,14 @@ console.log("\n[R14-S2] Config B — 12-tick stable genuinely-vacuous pool (3 de
 	);
 
 	ok(
-		"R14-S2 [GREEN post-fix-C] mailboxAppendCount === 1 (durable escalation append)",
-		mailboxAppendCount === 1,
-		`got ${mailboxAppendCount}`,
+		"R14-S2 [GREEN post-fix-C] mailboxAppendCount === 1 (durable escalation append; solo-goal nudges excluded)",
+		// task: vacuous-user-goal-nudge (2026-10-29): a user-origin goal on an empty pool now
+		// ALSO receives the standard idle-streak nudge (design flip: zero workers + idle root
+		// IS "no swarm agent is working"). The ESCALATION append is still exactly 1; the
+		// total count additionally includes the solo nudges (12 ticks @5s = 6 spaced samples
+		// on the default 10s interval = 2 completed streaks = 2 nudges).
+		mailboxAppendCount === 1 + soloNudgeCount,
+		`got ${mailboxAppendCount} (escalation=1, soloNudges=${soloNudgeCount})`,
 	);
 }
 
