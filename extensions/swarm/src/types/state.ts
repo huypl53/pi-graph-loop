@@ -177,6 +177,12 @@ export type SwarmIdleNudgeState = {
 	// must accumulate across vacuous ticks; a busy root turn resets its streak.
 	soloGoalIdleCheckCount?: number;
 	soloGoalIdleLastCheckAt?: string;
+	// === task guest-goal (2026-10-30): guest-session goal check-streak state ===
+	// Same debounce rules (streak + spacing) but owned by the GUEST settle/watchdog surface
+	// (evalGuestGoalNudgeLocked). Separate fields for the same reason as the solo route:
+	// the shared ones are owned by the root pump's idle-epoch machinery.
+	guestGoalIdleCheckCount?: number;
+	guestGoalIdleLastCheckAt?: string;
 	lastLongRunningToolNudges?: Record<string, string>;
 	// === task-r-deadpane-goal-classifier (2026-10-03): per-agent pane-probe cooldown ledger ===
 	// goalDiagProbeLedger[agentId] = ISO timestamp of the last dead-pane probe issued by the
@@ -358,6 +364,13 @@ export type SwarmState = {
 	// MUST NOT add `st.goal ||= {}` here, since that would replace undefined with an empty object
 	// and crash `goal.id` access in the pump.
 	goal?: SwarmGoal;
+	// guest-goal v1 (task guest-goal, 2026-10-30): standing goal for an ANONYMOUS guest session
+	// (no PI_SWARM_AGENT_ID / no root opt-in — the plain `pi` case). A SEPARATE slot from goal:
+	// the root slot is root-authority-owned and evaluated by the root pump; the guest slot is
+	// human-driven (/swarm guest-goal) and evaluated by the guest's own settle/watchdog surface.
+	// Single slot per project — two concurrent guest sessions share it (documented limitation;
+	// parity with the root's single st.goal slot).
+	guestGoal?: SwarmGoal;
 	// Row 68 idle-epoch bookkeeping (swarm-level, not goal-level): tracks when the effective-live
 	// non-root set last became all-idle and the interval anchor for the goal fallback
 	// backoff loop.

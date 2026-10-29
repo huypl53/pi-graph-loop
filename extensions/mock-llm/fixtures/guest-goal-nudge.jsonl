@@ -1,0 +1,17 @@
+# guest-goal-nudge: guest-session standing-goal nudge (2026-10-30).
+# Parity gap: the ROOT gained a standing-goal floor for solo work (vacuous-user-goal-nudge,
+# 2026-10-29) but a plain `pi` session (anonymous swarm-guest — no PI_SWARM_AGENT_ID, no
+# PI_SWARM_IS_ROOT) has NO goal surface at all: /swarm goal is root-only, the swarm_* tool
+# surface is gated away from guests, and nothing evaluates a guest's goal.
+# This fixture drives the GUEST lane: a seeded guest goal (st.guestGoal, origin=user) +
+# CHECKS_REQUIRED=1 so the -p lane's settle surfaces (session_start has no guest evaluator;
+# agent_settled after turn 0 IS the surface) fire the nudge within the scripted turns.
+# Turn 0: acknowledges the seeded guest goal (settles → first idle check).
+# Turn 1: verifies the nudge arrived in the model's own context (L4 consumption — the
+#         mock provider sees the swarm-message custom message in the request) and that the
+#         durable trace recorded route=guest_solo.
+# Turn 2: terminal stop — the turn_end {stop} resolve resets the counter (pinned by the
+#         offline suite; this lane proves the wiring end-to-end).
+{"name": "guest turn 0 acknowledge-seed", "events": [{"type": "text", "delayMs": 15, "text": "guest turn 0: I am a plain pi session (anonymous swarm-guest). The seeded world has a guest goal goal-guest-lane (origin=user). After this turn settles, the guest check-streak evaluator samples its first idle check."}]}
+{"name": "guest turn 1 verify-nudge", "events": [{"type": "text", "delayMs": 2500, "text": "guest turn 1: the standing-goal nudge has fired — goal.idle_nudge route=guest_solo, and the swarm-message custom (Standing goal) reached my own context. The nudge names the goal text and the /swarm guest-goal done exit."}]}
+{"name": "guest turn 2 final-stop", "stopReason": "stop", "events": [{"type": "text", "delayMs": 10, "text": "guest lane complete. This stop resolves the standing goal (counter reset) and the guest check-streak state persists durably."}, {"type": "stop"}]}

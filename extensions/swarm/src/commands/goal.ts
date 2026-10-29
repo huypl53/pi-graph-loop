@@ -9,6 +9,134 @@ import type { Paths } from "../types.ts";
 import { now, safeId } from "../utils.ts";
 import { parseFlags, parseGoalMaxNudges, parseGoalSetInterval } from "./parser.ts";
 import { isFencedLinkedGoal } from "../issues/controller.ts";
+import { SWARM_GUEST_ID } from "../constants.ts";
+import { armGuestGoalWatchdog } from "../nudges/guest-goal.ts";
+
+// === /swarm guest-goal — guest-goal v1 (task guest-goal, 2026-10-30) ===
+// The guest's standing-goal surface. Human-driven only (the guest model has NO swarm tool
+// surface — gating.ts keeps it that way; a guest model cannot set its own goal). Mirrors
+// /swarm goal's set/show/done lifecycle on the SEPARATE st.guestGoal slot with origin "user"
+// (the human typed it — the same provenance the vacuous-user-goal-nudge route keys on).
+// Root is refused: root already owns /swarm goal; a root using guest-goal would write a slot
+// its own pump never evaluates.
+export async function handleGuestGoalCommand(cmd: "guest-goal", rest: string[], ctx: any, p: Paths, _pi: ExtensionAPI): Promise<void> {
+	if (currentAgentId() !== SWARM_GUEST_ID) {
+		ctx.ui.notify(
+			"guest-goal is guest-only: run it in a plain pi session (no PI_SWARM_AGENT_ID / PI_SWARM_IS_ROOT). The root uses /swarm goal.",
+			"warning",
+		);
+		return;
+	}
+	const sub = rest.shift();
+	if (sub === "show" || !sub) {
+		const s = await readState(p, ctx.cwd);
+		const g = s.guestGoal;
+		if (!g) {
+			ctx.ui.notify("No active guest goal. Set one with /swarm guest-goal set <text>", "info");
+			return;
+		}
+		const age = Math.round((Date.now() - Date.parse(g.setAt)) / 60000);
+		const backoff = g.backoffTicksRemaining ? `, backoff ${g.backoffTicksRemaining} tick(s)` : "";
+		const lastNudge = g.lastNudgeAt ? `, last nudge ${g.lastNudgeAt}` : "";
+		const maxDisplay = g.maxNudges === -1 ? "∞ (infinite)" : `${resolveGoalMaxNudges(g.maxNudges)}`;
+		ctx.ui.notify(
+			`Guest goal ${g.id}
+  text: ${g.text}
+  set: ${g.setAt} by ${g.setBy} (${age} min ago)
+  idle-streak nudges: ${g.consecutiveNoResolveNudges}/${maxDisplay}${lastNudge}${backoff}`,
+			"info",
+		);
+		return;
+	}
+	if (sub === "set" || sub === "update") {
+		const isUpdate = sub === "update";
+		const flags = parseFlags(rest.filter((t) => t.startsWith("--")));
+		const text = rest
+			.filter((t) => !t.startsWith("--"))
+			.join(" ")
+			.trim();
+		if (!text) {
+			ctx.ui.notify(
+				isUpdate
+					? "Usage: /swarm guest-goal update <text>"
+					: "Usage: /swarm guest-goal set <text> (this session's standing goal; nudges you when idle)",
+				"warning",
+			);
+			return;
+		}
+		const st = await withLock(p, async () => {
+			const s = await readState(p, ctx.cwd);
+			if (isUpdate) {
+				if (!s.guestGoal) return { noop: true };
+				s.guestGoal.text = text;
+				await trace(p, "guest_goal.updated", { goalId: s.guestGoal.id, via: "command" });
+				await writeState(p, s);
+				return { updated: s.guestGoal };
+			}
+			const ts = now();
+			const goalId = `goal-${Date.now()}-${randomUUID().slice(0, 6)}`;
+			const previousId = s.guestGoal?.id;
+			s.guestGoal = {
+				id: goalId,
+				text,
+				setAt: ts,
+				setBy: SWARM_GUEST_ID,
+				// The human typed this goal — user-origin provenance, same as the production
+				// user-request path for /swarm goal (vacuous-user-goal-nudge, 2026-10-29).
+				origin: "user",
+				setByScope: "guest-command",
+				consecutiveNoResolveNudges: 0,
+				nudgeSeq: 0,
+			};
+			// Fresh goal → fresh streak (guard against a stale counter from the previous goal).
+			const idle = (s.idleNudgeState ||= {});
+			idle.guestGoalIdleCheckCount = 0;
+			delete idle.guestGoalIdleLastCheckAt;
+			await trace(p, "guest_goal.set", {
+				goalId,
+				previousId,
+				via: "command",
+				length: text.length,
+				origin: "user",
+				setByScope: "guest-command",
+			});
+			await writeState(p, s);
+			return { set: s.guestGoal, goalId, previousId };
+		});
+		if (st.noop) {
+			ctx.ui.notify("No active guest goal to update. Use /swarm guest-goal set <text>.", "info");
+			return;
+		}
+		const g = st.updated ?? st.set;
+		ctx.ui.notify(
+			`${st.updated ? "Guest goal updated" : "Guest goal set"}: ${g.id} — "${g.text.slice(0, 80)}${g.text.length > 80 ? "…" : ""}" — you will be nudged after ${resolveGoalMaxNudges(undefined)} idle checks while it stands. Clear with /swarm guest-goal done.`,
+			"info",
+		);
+		// Arm the watchdog so a goal set while already-idle still fires (the settle surface only
+		// re-evaluates on the NEXT settle; the human may not send another message for hours).
+		if ((ctx?.mode ?? "tui") === "tui") armGuestGoalWatchdog(_pi, ctx);
+		return;
+	}
+	if (sub === "done") {
+		const st = await withLock(p, async () => {
+			const s = await readState(p, ctx.cwd);
+			if (!s.guestGoal) return { cleared: true, noop: true };
+			const clearedId = s.guestGoal.id;
+			const nudges = s.guestGoal.consecutiveNoResolveNudges;
+			delete s.guestGoal;
+			// Fresh clear → fresh streak for the next goal.
+			const idle = (s.idleNudgeState ||= {});
+			idle.guestGoalIdleCheckCount = 0;
+			delete idle.guestGoalIdleLastCheckAt;
+			await trace(p, "guest_goal.cleared", { goalId: clearedId, nudges, via: "command" });
+			await writeState(p, s);
+			return { cleared: true, clearedId, nudges };
+		});
+		ctx.ui.notify(st.noop ? "No active guest goal to clear." : `Guest goal ${st.clearedId} cleared.`, "info");
+		return;
+	}
+	ctx.ui.notify("Usage: /swarm guest-goal show | set <text> | update <text> | done", "warning");
+}
 
 export async function handleGoalCommand(cmd: "goal", rest: string[], ctx: any, p: Paths, _pi: ExtensionAPI): Promise<void> {
 	if (currentAgentId() !== "root") {

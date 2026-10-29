@@ -214,6 +214,34 @@ export function registerTurnHooks(pi: ExtensionAPI) {
 	// The action detector is exported at module scope (SWARM_RESOLVE_TOOLS + turnEndIsResolveAction)
 	// so r16-idle-goal-regression.test.mjs can drive the PRODUCTION detector end-to-end. The
 	// turn_end handler below calls `turnEndIsResolveAction(event)` to gate the counter reset.
+	// Guest-goal v1 (task guest-goal, 2026-10-30): the guest's own turn_end {stop} resolves its
+	// standing goal — mirrors the root's pre-R16 semantic (ending a turn IS the resolve; the R16
+	// swarm-tool detector cannot apply — a guest has no swarm tool surface to call). Registered
+	// BEFORE the root handler below so both slots can coexist on the same event without sharing
+	// state (separate slots: st.guestGoal vs st.goal).
+	pi.on("turn_end", async (event, ctx) => {
+		const msg: any = (event as any)?.message;
+		if (!msg || msg.role !== "assistant" || msg.stopReason !== "stop") return;
+		if (currentAgentId() !== "swarm-guest") return;
+		const p = paths(ctx.cwd);
+		try {
+			await withLock(p, async () => {
+				const st = await readState(p, ctx.cwd);
+				const goal = st.guestGoal;
+				if (!goal) return;
+				const nudges = goal.consecutiveNoResolveNudges;
+				const hadBackoff = Boolean(goal.backoffTicksRemaining && goal.backoffTicksRemaining > 0);
+				if (nudges === 0 && !hadBackoff) return; // nothing to resolve
+				goal.consecutiveNoResolveNudges = 0;
+				delete goal.backoffTicksRemaining;
+				goal.lastResolvedAt = new Date().toISOString();
+				await trace(p, "guest_goal.nudge.resolved", { goalId: goal.id, nudges, hadBackoff, by: "turn_end" });
+				await writeState(p, st);
+			});
+		} catch (err: any) {
+			await trace(p, "guest_goal.resolve_error", { error: String((err as Error)?.message || err) }).catch(() => {});
+		}
+	});
 	pi.on("turn_end", async (event, ctx) => {
 		const msg: any = (event as any)?.message;
 		if (!msg || msg.role !== "assistant" || msg.stopReason !== "stop") return;

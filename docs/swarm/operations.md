@@ -2007,6 +2007,51 @@ Three coupled fixes (live `reconcile.ts`):
   `extensions/swarm/tests/vacuous-user-goal-nudge.test.mjs` (red-first) +
   mock-llm lanes `vacuous-user-goal-nudge` / `vacuous-user-goal-toolcall`.
 
+### Guest-goal v1 — standing goal for a plain pi session (2026-10-30)
+
+> **Parity gap.** The vacuous-user-goal-nudge fix gave the ROOT a standing-goal floor for
+> solo work, but a plain `pi` session (no `PI_SWARM_AGENT_ID`, no `PI_SWARM_IS_ROOT` — the
+> anonymous `swarm-guest`) had NO goal surface at all: `/swarm goal` is root-only, the
+> `swarm_*` tool surface is gated away from guests, and nothing evaluates a guest's goal.
+
+- **Surface**: `/swarm guest-goal show | set <text> | update <text> | done` — guest-only
+  (root is refused with a pointer to `/swarm goal`). Human-driven by design: the guest model
+  keeps its no-swarm-tools gating, so it cannot set or clear its own goal.
+- **Storage**: `swarm-state.json.guestGoal` (full `SwarmGoal` shape, `origin: "user"`,
+  `setBy: "swarm-guest"`, `setByScope: "guest-command"`) — a SEPARATE slot from `st.goal`;
+  the root pump never touches it. Single slot per project (two concurrent guest sessions
+  share it — documented limitation, parity with the root's single slot).
+- **Evaluator** (`nudges/guest-goal.ts`): the R27 check-streak debounce on its OWN counter
+  fields (`idleNudgeState.guestGoalIdleCheckCount/guestGoalIdleLastCheckAt` — the shared
+  fields belong to the root pump's idle-epoch machinery), standard cap
+  (`MAX_CONSECUTIVE_NUDGES_DEFAULT`, per-goal `maxNudges` honored via the shared resolver) and
+  backoff (`GOAL_NUDGE_BACKOFF_TICKS`). A busy guest resets the streak.
+- **Surfaces**: one-shot evaluation on `agent_settled` in ALL modes (the surface a `pi -p`
+  lane observes) + a self-rescheduling 5s watchdog in TUI mode (Issue-11 setTimeout-chain
+  pattern: survives single-tick failures, stops on stale ctx, re-arms on the next settle or
+  `/swarm guest-goal set`).
+- **Emission**: direct `pi.sendMessage` (`customType: "swarm-message"`, `display: true`,
+  `triggerTurn: true` — the nudge must START a turn, not just render) with a solo-aware body
+  (continue the goal yourself or `/swarm guest-goal done`; no swarm hints). NO mailbox
+  write: the nudge is session-local (a guest has no swarm peers; a durable mailbox record
+  would accumulate unacked rows nobody consumes).
+- **Resolve**: the guest's own `turn_end {stop}` resets `consecutiveNoResolveNudges`
+  (pre-R16 semantic — ending a turn IS the resolve; the R16 swarm-tool detector cannot
+  apply because guests have no swarm tools). Trace: `guest_goal.nudge.resolved`.
+- **Trace events**: `guest_goal.set` / `guest_goal.updated` / `guest_goal.cleared` (command
+  lifecycle) + `goal.idle_nudge { route: "guest_solo", guest: true, triggerTurn: true }`.
+- **Tests**: `extensions/swarm/tests/guest-goal-nudge.test.mjs` (red-first, 7 sections:
+  command lifecycle, root-refusal, L2 emission with triggerTurn opts at the real mock-pi
+  boundary, cap, turn_end resolve, busy gate, trace census) + mock-llm lane
+  `extensions/mock-llm/tests/guest-goal-nudge.test.mjs` (`RUN_GUEST_GOAL_LANE=1`; seeded
+  world → real `pi` lane: trace fired, route, counter advanced, no mailbox record,
+  triggerTurn provenance — a `-p` lane exits before the triggered turn runs, so the durable
+  trace is the L2→L4 delivery evidence in that mode, same scope as the solo-goal lane).
+- **Live validation** (tmux `guest-goal-validate`, 2026-10-29): bare `pi` resolved to
+  `swarm-guest`; `/swarm guest-goal set` → 2 checks → nudge #1 → triggerTurn fired a REAL
+  turn (the model read the goal from its own context and self-verified the event census) →
+  `{stop}` reset → nudge #2 on a fresh streak (no spam) → `/swarm guest-goal done` cleared.
+
 ### Six R10-1 boundary counters
 
 | counter                           | boundary                                       | expected                                                                |

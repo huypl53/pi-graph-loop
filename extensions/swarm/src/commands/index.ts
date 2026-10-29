@@ -3,7 +3,7 @@ import { registerCwdTracking, swarmArgumentCompletions, swarmScopedArgumentCompl
 import { ensureDirs, paths, trace } from "../state.ts";
 import { handleAgentsCommand } from "./agents.ts";
 import { handleAttentionCommand } from "./attention.ts";
-import { handleGoalCommand } from "./goal.ts";
+import { handleGoalCommand, handleGuestGoalCommand } from "./goal.ts";
 import { handleMarkersCommand } from "./markers.ts";
 import { handleMessagingCommand } from "./messaging.ts";
 import { handleObservabilityCommand } from "./observability.ts";
@@ -99,6 +99,10 @@ export function registerSwarmCommand(pi: ExtensionAPI) {
 			}
 			if (cmd === "goal") {
 				await handleGoalCommand(cmd, rest, ctx, p, pi);
+				return;
+			}
+			if (cmd === "guest-goal") {
+				await handleGuestGoalCommand(cmd, rest, ctx, p, pi);
 				return;
 			}
 			if (cmd === "issues") {

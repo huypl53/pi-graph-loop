@@ -8,6 +8,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import type { MessageResponseStatus } from "../types.ts";
 import {
+	SWARM_GUEST_ID,
 	ENGINE_RETRY_WINDOW_MS,
 	NOTIFY_KEY_SETTLE_STALE,
 	PI_SWARM_MINIMAL_PROTOCOL,
@@ -25,6 +26,7 @@ import { maybeAutoFocusBusyAgent } from "../focus.ts";
 import { engineRetryIncidentsMap, isAgentInPoolSwapHandoff } from "./streaks.ts";
 import { pauseAtSettled } from "../nudges/loop-detect.ts";
 import { armRootPumpWatchdog, getRootMailboxTimer, isRootPumpCtxFresh, surfaceAgentPending } from "./pump-manager.ts";
+import { evaluateGuestGoalOnSettle } from "../nudges/guest-goal.ts";
 
 export function registerSettledHook(pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_event, ctx) => {
@@ -73,6 +75,20 @@ export function registerSettledHook(pi: ExtensionAPI) {
 			return;
 		}
 		// Catch-up surface for workers: anything unacked that arrived (or failed injection) while busy.
+		// Guest-goal v1 (task guest-goal, 2026-10-30): the ANONYMOUS guest has no agent record and
+		// no mailbox, but it DOES have the standing-goal surface — evaluate its check-streak here
+		// (ALL modes: the settle surface is what a `pi -p` lane observes) and arm the TUI watchdog.
+		// Runs BEFORE the worker branch (the guest has no st.agents record — that branch no-ops).
+		if (agentId === SWARM_GUEST_ID) {
+			try {
+				await evaluateGuestGoalOnSettle(pi, ctx);
+			} catch (err) {
+				// The evaluator itself already routes failures to logSwarmError; this net guards the
+				// module boundary (a guest-goal failure must never break the settle flow for anyone).
+				await logSwarmError(ctx?.cwd, "hooks", "settle.guest_goal_failed", err, { agentId });
+			}
+			return;
+		}
 		try {
 			await surfaceAgentPending(pi, ctx, paths(ctx.cwd), agentId, "agent_settled");
 		} catch (err) {
