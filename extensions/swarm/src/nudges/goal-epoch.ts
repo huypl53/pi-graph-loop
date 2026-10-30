@@ -974,7 +974,11 @@ export async function evaluateIdleGoalNudgeLocked(
 					`2. Tool execution is stuck, frozen, or deadlocked.\n\n` +
 					`Suggested Action for Root:\n` +
 					`- Check pane progress: capture the agent's pane via the terminal driver (tmux: \`tmux capture-pane -t ${targetText} -p | tail -25\`; herdr: \`herdr pane read ${targetText}\`)\n` +
-					`- If progress is normal: continue waiting (e.g. run a synchronous wait like \`bash sleep 30\` or \`sleep 60\` to stay in sync).\n` +
+					// no-sleep-wait-nudge (2026-10-30): DO NOT suggest synchronous sleep/waits — the live
+					// incident showed root LLMs turning that hint into hallucinated `bash sleep` polling
+					// loops that burn turns without progress. The root should either keep working its own
+					// turn (its pump re-checks on settle) or intervene on the worker — never idle-sleep.
+					`- If progress is normal: keep working your current turn; the health check re-runs on its cooldown and will re-nudge if the worker still looks stale.\n` +
 					`- If stuck/frozen: terminate the agent's pane via the terminal manager or restart the worker (\`/swarm restart ${staleBusyWorker.id}\`, root command).`;
 
 				const key = formatNotifyKey("goal:worker:long_running_tool", {
@@ -1193,7 +1197,11 @@ export async function evaluateIdleGoalNudgeLocked(
 		`This is nudge ${nudgeNumber} of ${maxText}.\n\n` +
 		`Action:\n` +
 		`- Either spawn / assign work to advance the goal.\n` +
-		`- If waiting for background tasks or ongoing processes, run a synchronous wait (e.g. \`bash sleep 30\` or \`sleep 60\`) to stay actively working instead of settling idle.\n` +
+		// no-sleep-wait-nudge (2026-10-30): DO NOT suggest synchronous sleep/waits — the live incident
+		// showed root LLMs turning the hint into hallucinated `bash sleep` polling loops. If there is
+		// background work to watch, name it concretely (check its actual artifact/output) instead of
+		// sleeping; otherwise act on the goal or close it.
+		`- If you are waiting on background work, check its concrete output (e.g. re-read the file/log/pane it produces) and act on the result — do not idle-wait.\n` +
 		`- Or mark it done: swarm_mark_goal_done(goalId="${goal.id}")\n\n` +
 		`(Any reply you produce — including a plain /swarm status, a tool call, or an explanation — is treated as a "resolve": the consecutive counter resets and the back-off clears. Only a silent ignore keeps the counter climbing.)`;
 	await deliverMessageLocked(pi, cwd, p, st, {

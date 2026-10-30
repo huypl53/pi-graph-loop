@@ -1,0 +1,12 @@
+# no-sleep-wait-nudge: nudge bodies must not teach the root to sleep (2026-10-30).
+# Live incident class: the idle-goal nudge and the long-running-tool health-check nudge
+# both suggested "run a synchronous wait (e.g. `bash sleep 30` or `sleep 60`)" — root LLMs
+# turned that hint into hallucinated sleep-polling loops (burning turns on sleep instead of
+# advancing the goal). The fix rewrote both bodies to name CONCRETE actions only.
+# This lane drives the PRODUCTION path: seeded world (2 idle workers + a user goal past
+# grace + a stale busy worker without heartbeat) → real root pump tick → both nudges land
+# in the root mailbox → assert neither body mentions sleep / synchronous wait, and the
+# idle nudge still names the concrete alternatives (assign work, mark done).
+{"name": "nosleep turn 0 acknowledge-seed", "events": [{"type": "text", "delayMs": 15, "text": "nosleep turn 0: seeded world has goal goal-waitfree-lane (user origin, set 30min ago), two idle workers (vacuous-free pool) and worker-long stuck in tool_running without heartbeat >10m. The pump tick on this settle evaluates BOTH the idle-streak goal nudge and the long-running-tool health check."}]}
+{"name": "nosleep turn 1 verify-bodies", "events": [{"type": "text", "delayMs": 2500, "text": "nosleep turn 1: both nudges arrived. The idle-goal nudge names assign-work / check-concrete-output / mark-done — and NO sleep or synchronous-wait suggestion anywhere. The health-check nudge names capture-pane / keep-working / restart — also sleep-free. The hallucinated sleep-polling hint is gone."}]}
+{"name": "nosleep turn 2 final-stop", "stopReason": "stop", "events": [{"type": "text", "delayMs": 10, "text": "nosleep lane complete. The bodies persist in the root mailbox as the durable evidence."}, {"type": "stop", "delayMs": 5, "reason": "stop"}]}
